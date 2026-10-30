@@ -1438,12 +1438,10 @@ impl Shell {
                             }
                             let opened = shell
                                 .update(cx, |this, cx| {
-                                    this.chat_menu.open(super::ChatMenuState {
-                                        tab: None,
-                                        chat_id: chat.clone(),
-                                        position: event.start_position,
-                                        page: super::ChatMenuPage::Root,
-                                    });
+                                    this.chat_menu.open(super::ChatMenuState::for_row(
+                                        chat.clone(),
+                                        event.start_position,
+                                    ));
                                     cx.notify();
                                 })
                                 .is_ok();
@@ -1864,8 +1862,7 @@ mod tests {
         };
         let ours = [
             "Hide sidebar",
-            "Back",
-            "Forward",
+            "Command palette",
             "New session",
             "Sidebar view options",
             "Show chat details",
@@ -1882,8 +1879,12 @@ mod tests {
         assert!(small.is_empty(), "under a finger's 44 pt: {small:?}");
         FORCE_COMPACT.with(|force| force.set(false));
         let mac = buttons(cx);
-        let back = mac.iter().find(|(label, _, _)| label == "Back").expect("Back on a Mac");
-        assert!((back.1 - 24.0).abs() < 0.5 && (back.2 - 24.0).abs() < 0.5, "as drawn on a Mac: {back:?}");
+        let palette =
+            mac.iter().find(|(label, _, _)| label == "Command palette").expect("the palette on a Mac");
+        assert!(
+            (palette.1 - 24.0).abs() < 0.5 && (palette.2 - 24.0).abs() < 0.5,
+            "as drawn on a Mac: {palette:?}"
+        );
     }
 
     #[test]

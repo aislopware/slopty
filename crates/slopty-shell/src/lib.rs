@@ -241,19 +241,6 @@ pub fn start(
             }
         })
         .detach();
-        // Banner clicks land on the notified chat. The AppKit delegate fires
-        // mid-event, so hop through a channel rather than updating inline.
-        let (click_tx, mut click_rx) = futures::channel::mpsc::unbounded::<String>();
-        notify::on_click(move |chat_id| {
-            let _ = click_tx.unbounded_send(chat_id);
-        });
-        let click_state = state.clone();
-        cx.spawn(async move |cx| {
-            while let Some(target) = click_rx.next().await {
-                let _ = cx.update(|cx| open_notification_target(target, &click_state, cx));
-            }
-        })
-        .detach();
         cx.set_global(state::EngineService(config.service.clone())); // slopty
         state::AppState::bootstrap(state.clone(), config.boot(), cx);
         invariants::watch(&state, cx); // slopty

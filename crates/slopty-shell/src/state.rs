@@ -413,10 +413,6 @@ pub struct AppState {
     session_presence_presentation: Vec<(Indicator, u32)>,
     /// Live edge posture (WatchConnectivity): drives the connection pill.
     pub connectivity: slopty_view_proto::Connectivity,
-    /// Whether this runtime's connectivity watch has delivered its first
-    /// frame. The default `Disabled` value is only a placeholder and must not
-    /// seed notification decisions before the watch is authoritative.
-    pub(crate) connectivity_observed: bool,
     /// Sorted (see [`sort_spaces`]).
     pub spaces: Vec<Space>,
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
@@ -552,7 +548,6 @@ impl AppState {
             device_presentation: None,
             session_presence_presentation: Vec::new(),
             connectivity: slopty_view_proto::Connectivity::default(),
-            connectivity_observed: false,
             spaces: Vec::new(),
             chats: Vec::new(),
             sessions: Vec::new(),
@@ -862,12 +857,10 @@ impl AppState {
             })
     }
 
-    /// Returns whether the posture changed. The first frame after attach always
-    /// counts: it ends the bootstrap gap the shell's alert baseline waits on.
+    /// Returns whether the posture changed.
     pub fn apply_connectivity(&mut self, connectivity: slopty_view_proto::Connectivity) -> bool {
-        let changed = !self.connectivity_observed || self.connectivity != connectivity;
+        let changed = self.connectivity != connectivity;
         self.connectivity = connectivity;
-        self.connectivity_observed = true;
         changed
     }
 
@@ -1693,10 +1686,6 @@ impl AppState {
     /// Methods the engine doesn't serve yet (chats/devices/auth land with the
     /// workspace doc in M4) fail their subscribe and are skipped gracefully.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
-        // The attachment notification precedes the first connectivity frame.
-        // Make that bootstrap gap explicit so the shell resets its alert
-        // baseline instead of comparing the new runtime with the old one.
-        self.connectivity_observed = false;
         let engine_info = handle.engine_info();
         self.workspace_scope = Some(engine_info.workspace_scope);
         self.local_device_id = Some(engine_info.device_id.clone());
@@ -3654,9 +3643,6 @@ mod tests {
     fn identical_connectivity_frames_report_no_change() {
         use slopty_view_proto::{Connectivity, ConnectivityState};
         let mut state = AppState::new();
-        // The first frame ends the bootstrap gap even when it equals the default.
-        assert!(state.apply_connectivity(Connectivity::default()));
-        assert!(state.connectivity_observed);
         assert!(!state.apply_connectivity(Connectivity::default()));
         let reconnecting = Connectivity {
             state: ConnectivityState::Reconnecting,
@@ -3669,9 +3655,6 @@ mod tests {
             retry_at_ms: 9_000,
             ..reconnecting
         }));
-        // Re-attach reopens the gap: the next frame counts again.
-        state.connectivity_observed = false;
-        assert!(state.apply_connectivity(state.connectivity.clone()));
     }
 
     #[test]

@@ -13,7 +13,9 @@
 //!
 //! A path ⌘-clicked in a shell opens where a transcript's file link opens: in the Files pane of
 //! the chat the shell was opened for ([`WorkspaceEvent::OpenFile`]), made absolute against the
-//! shell's directory.
+//! shell's directory. A web link chosen in a shell by quick select opens where a transcript's
+//! web link opens ([`WorkspaceEvent::OpenLink`]), and a commit hash is copied until Changes
+//! shows one commit.
 //!
 //! An agent's ask of the window (`slopty ui`) is read here into the shell's own words
 //! (`slopty_shell::shell::agent_ui`): who asks (its chat's title), its chat (the thread seated
@@ -285,6 +287,25 @@ impl WorkspaceView {
             let name = self.workers.get(&key).map(|w| w.name.clone()).unwrap_or_default();
             Self::show_notice(format!("Nothing forwards {name}'s port{port} here yet"), cx);
         }
+    }
+
+    /// A web link the person chose in shell `session` by quick select: it opens where the chat
+    /// the shell was opened for opens a transcript's web link, or in the person's browser for a
+    /// shell opened for none.
+    pub(super) fn browse(&self, session: SessionId, url: &str, cx: &mut Context<Self>) {
+        match self.chat_of(session) {
+            Some(chat) => cx.emit(WorkspaceEvent::OpenLink { chat, url: url.to_owned() }),
+            None => self.open_page(url, cx),
+        }
+    }
+
+    /// A commit hash the person chose in shell `session` by quick select. Changes shows the
+    /// working tree and the branch, not one commit yet, so the hash is copied and a notice says
+    /// so, rather than nothing happening.
+    pub(super) fn view_commit(hash: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(hash.to_owned()));
+        let short = hash.get(..7).unwrap_or(hash);
+        Self::show_notice(format!("Copied {short}: Changes shows no single commit yet"), cx);
     }
 
     /// A path the person ⌘-clicked in shell `session`, at `line`: it opens in the Files pane of

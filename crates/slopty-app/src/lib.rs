@@ -256,6 +256,16 @@ impl Workspace {
                     }
                 });
             }
+            WorkspaceEvent::OpenLink { chat, url } => {
+                let (chat, url) = (chat.clone(), url.clone());
+                // As a file: once the keys that chose it have been dispatched. With no window
+                // up to take it, the person's browser does.
+                cx.defer(move |cx| {
+                    if !slopty_shell::live::open_link(&chat, &url, cx) {
+                        cx.open_url(&url);
+                    }
+                });
+            }
             WorkspaceEvent::Withdrawn { worker, id } => {
                 if let Some(toast) = offered.remove(&(*worker, *id)) {
                     slopty_shell::toast::withdraw(cx, toast);
@@ -1714,7 +1724,8 @@ mod tests {
     }
 
     /// A worker the server calls away is not dialled on every backoff, only after the hold;
-    /// but a resume (or any wake) dials it at once, once, rather than starting the hold over.
+    /// but a wake (a resume, or the server listing it online again) dials it at once, once,
+    /// rather than starting the hold over.
     #[gpui::test]
     fn a_wake_dials_a_held_worker_once_rather_than_holding_again(cx: &mut TestAppContext) {
         use slopty_proto::server::WorkerInfo;
@@ -1756,6 +1767,11 @@ mod tests {
         cx.executor().advance_clock(server::HOLD_RETRY);
         cx.run_until_parked();
         assert_eq!(dials.get(), 2, "and tried again after the hold");
+        cx.executor().advance_clock(slopty_net::redial::MAX);
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 2, "held again");
+        list(&ws, cx, id, "box");
+        assert_eq!(dials.get(), 3, "dialled at once when the server lists it online");
         ws.update(cx, |ws, cx| ws.drop_slot(id, cx));
         cx.run_until_parked();
     }

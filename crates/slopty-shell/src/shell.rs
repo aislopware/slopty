@@ -84,9 +84,10 @@ mod retention_tests; // slopty: the whole shell under retention; the tests' shel
 mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
+mod inbox; // slopty: the inbox behind the titlebar's eye
 pub(crate) mod marks; // the five states, their mark and hues, on every surface
 mod sidebar; // the sidebar column, its list, rows and the server foot
-mod sidebar_status; // slopty: the list's groups, its rows' times and the hover card's facts
+mod sidebar_status; // slopty: the list's groups, its rows' hints and the hover card's facts
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
@@ -266,6 +267,13 @@ struct ChatMenuState {
     page: ChatMenuPage,
 }
 
+impl ChatMenuState {
+    /// The menu of chat `chat_id`'s row, opened at `position` on its first page.
+    pub(super) fn for_row(chat_id: impl Into<String>, position: Point<Pixels>) -> Self {
+        Self { chat_id: chat_id.into(), tab: None, position, page: ChatMenuPage::Root }
+    }
+}
+
 pub(super) use crate::motion::DisclosureMotion as SidebarDisclosureMotion;
 
 /// Vertical pane resize hitboxes yield the global titlebar. Keeping this in
@@ -323,14 +331,6 @@ fn is_host_absolute_path(path: &str) -> bool {
 /// slopty: how long a started session's main column says "Starting…" while no terminal shows.
 const STARTS_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
-fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
-    if matches!(route, Route::Chat) && has_selected_chat { // slopty: no pull-request pages.
-        1.0
-    } else {
-        0.0
-    }
-}
-
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
 #[derive(Clone, PartialEq, Action)]
@@ -349,32 +349,18 @@ pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
     if fullscreen { 12.0 } else { 88.0 }
 }
 
-/// Width of the spacer ahead of the control cluster for a strip that already
-/// carries `container_pad` px of its own left padding. macOS only — on
-/// Linux/Windows there are no traffic lights and the cluster hugs the edge.
-pub fn titlebar_spacer_width(is_macos: bool, fullscreen: bool, container_pad: f32) -> f32 {
-    if !is_macos {
-        return 0.0;
-    }
-    (titlebar_cluster_start(fullscreen) - container_pad).max(0.0)
-}
-
-/// Within-group rhythm for Back/Forward.
+/// Within-group rhythm for the row's trailing actions.
 pub const TITLEBAR_CONTROL_GAP: f32 = 2.0;
-/// Structural separation between titlebar groups: sidebar, navigation,
-/// transcript identity, and trailing actions.
+/// Structural separation between titlebar groups: the sidebar's, the session's identity and
+/// the trailing actions.
 pub const TITLEBAR_GROUP_GAP: f32 = Theme::SPACE_SM;
-/// Breathing room between the navigation cluster and transcript identity.
+/// Breathing room between the sidebar toggle and the session's identity.
 pub const TITLEBAR_IDENTITY_GAP: f32 = Theme::SPACE_MD;
 /// A 28px action centered in the 38px titlebar with its 2px downward optical
 /// shift lands 6px from the top; use the same inset at the trailing edge.
 pub const TITLEBAR_ACTION_EDGE_INSET: f32 = 6.0;
-/// Width of the persistent top-left button cluster itself: a 24px sidebar
-/// trigger, an 8px group gap, then two 24px history buttons on a 2px rhythm.
-pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0 * 3.0 + TITLEBAR_GROUP_GAP + TITLEBAR_CONTROL_GAP;
-/// Extra width consumed when the collapsed-sidebar New Session action joins
-/// the left controls as its own group.
-pub const TITLEBAR_ACTION_SLOT_WIDTH: f32 = TITLEBAR_GROUP_GAP + 24.0;
+/// Width of the persistent top-left button cluster itself: the 24px sidebar toggle.
+pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0;
 /// Horizontal inset owned by the titlebar control row itself. Keep this value
 /// paired with [`Self::titlebar_spacer`]: using a different number for the
 /// spacer shifts every control while leaving the declared cluster geometry
@@ -402,19 +388,6 @@ pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool, linux_left_captio
     } else {
         10.0
     }
-}
-
-/// Left clearance a full-bleed header (collapsed sidebar) needs so its content
-/// starts past the overlay cluster, given the header's own `container_pad`.
-pub fn cluster_clearance(
-    is_macos: bool,
-    fullscreen: bool,
-    linux_left_captions: usize,
-    container_pad: f32,
-) -> f32 {
-    (cluster_buttons_start(is_macos, fullscreen, linux_left_captions) + CLUSTER_BUTTONS_WIDTH + 8.0
-        - container_pad)
-        .max(0.0)
 }
 
 /// (Re-)apply the whole app keymap: clears every binding, restores the text fields'
@@ -543,16 +516,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     cx.bind_keys(jumps);
     // slopty: Slopty's views' own keys, last, so they hold in their contexts.
     crate::live::bind_keys(cx);
-    // slopty: in an agent's session ⌘K opens the palette over its terminal's own Clear: the
-    // keyboard lives in that terminal, and an agent's TUI has no use for a cleared screen
-    // (`docs/decisions/ui.md`, "⌘K in an agent's session"). After the terminal's keys, so it
-    // holds over them there alone.
-    cx.bind_keys([crate::keys::binding(
-        &platform_combo("mod-k"),
-        ToggleCommandPalette,
-        Some("AgentSession > Terminal"),
-        cx,
-    )]);
     localize_key_bindings(cx, &equivalents);
     crate::settings::set_bound_key_equivalents(equivalents);
 }
@@ -1192,14 +1155,6 @@ impl WidthTween {
     }
 }
 
-fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
-    // Match the padded flex row's center, not the raw titlebar center.
-    // Keep the native 24px controls untouched and give them 4px of air.
-    let height = 28.0 + 4.0 * progress.clamp(0.0, 1.0);
-    let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
-    (center - height * 0.5, height)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SplashPhase {
     Visible,
@@ -1387,6 +1342,8 @@ pub struct Shell {
     open_in: popover::Popup<open_in::OpenInMenu>,
     // slopty: Claude Code's past sessions (`past_sessions`).
     past_sessions: past_sessions::PastSessions,
+    // slopty: the inbox (`inbox`).
+    inbox: inbox::Inbox,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
     /// Diff surfaces by id — each tab its own [`Changes`] viewer with its own
@@ -1500,7 +1457,8 @@ pub struct Shell {
     /// moves and on [`Self::sidebar_clock_tick`], never as a row is built, so a sidebar built
     /// again (from scratch, or for a hover) says what the one shown says.
     sidebar_clock: chrono::DateTime<Utc>,
-    /// slopty: when the soonest of the shown rows' times next reads differently.
+    /// slopty: when the list next reads differently of time alone (a row folding into Inactive,
+    /// a session going quiet).
     sidebar_clock_next: std::cell::Cell<Option<chrono::DateTime<Utc>>>,
     /// slopty: the clock's next tick, at that time.
     sidebar_clock_tick: Option<(chrono::DateTime<Utc>, Task<()>)>,
@@ -1515,14 +1473,6 @@ pub struct Shell {
     sidebar_scroll: gpui::ScrollHandle,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
-    /// Last seen session status per chat — the chime trigger compares against
-    /// it (a row's FIRST appearance never chimes, so boot stays silent).
-    sound_prev: std::collections::HashMap<String, crate::sound::SessionNotificationState>,
-    /// Startup-aware durable connectivity notification baseline.
-    connectivity_notifications: crate::sound::ConnectivityNotificationState,
-    /// Persistent across AppState observer callbacks so simultaneous session
-    /// failures and connectivity degradation produce one attention sound.
-    attention_sound_gate: crate::sound::AttentionSoundGate,
     // slopty: no agent-update island; agents update themselves on their machines.
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
@@ -1626,7 +1576,6 @@ pub struct Shell {
     fullscreen: Option<bool>,
     /// 200ms ease-out tween of the cluster start on fullscreen toggles.
     titlebar_tween: Option<WidthTween>,
-    titlebar_island: Option<WidthTween>,
     /// Armed by mouse-down on a titlebar strip; the next mouse-move hands the
     /// drag to the compositor (zed's platform-titlebar pattern).
     titlebar_should_move: bool,
@@ -1673,6 +1622,8 @@ pub struct Shell {
     executor: gpui::BackgroundExecutor,
     _state_observation: Subscription,
     _inspector_events: Subscription,
+    /// Hears the session terminal's ground change, which the titlebar row wears.
+    _session_terminal_events: Subscription,
     /// The primary transcript's spawn-chip events (subagent tabs).
     _transcript_events: Subscription,
     _transcript_invalidation: Subscription,
@@ -1682,7 +1633,7 @@ impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         motion::run_on(cx.background_executor().clone()); // slopty: hover flips on the dispatcher's clock
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
-            this.sidebar_clock = crate::clock::utc(cx); // slopty: the rows' times move with the state
+            this.sidebar_clock = crate::clock::utc(cx); // slopty: the list's clock moves with the state
             this.on_state_changed(&state, cx);
             // slopty: a result arriving in the chat being looked at is seen as it arrives, here
             // where every view watching the state hears it, before the frame that shows it.
@@ -1712,6 +1663,11 @@ impl Shell {
         });
         // slopty: the session's terminal in the main column, its inspector in the right pane.
         let session_terminal = cx.new(|cx| TerminalPanel::new_session(state.clone(), cx));
+        // The titlebar row and the column wear the shown terminal's ground.
+        let session_terminal_events =
+            cx.subscribe(&session_terminal, |_, _, _: &crate::terminal::panel::ShownChanged, cx| {
+                cx.notify();
+            });
         let inspector = cx.new(|cx| crate::inspector::Inspector::new(state.clone(), transcript.clone(), cx));
         let inspector_events = cx.subscribe(&inspector, Self::on_inspector_event);
         // Spawn chips open their subagent's transcript as a right-pane tab.
@@ -1802,6 +1758,7 @@ impl Shell {
             last_archive: None,            // slopty
             open_in: popover::Popup::default(), // slopty
             past_sessions: past_sessions::PastSessions::default(), // slopty
+            inbox: inbox::Inbox::default(), // slopty
             project_actions: crate::project_actions::ProjectActionsController::default(),
             diffs: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
@@ -1879,9 +1836,6 @@ impl Shell {
             session_hover_card: Default::default(),
             sidebar_scroll: gpui::ScrollHandle::new(),
             space_boot_applied: false,
-            sound_prev: std::collections::HashMap::new(),
-            connectivity_notifications: Default::default(),
-            attention_sound_gate: Default::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
             // slopty: no self-updater.
@@ -1931,7 +1885,6 @@ impl Shell {
             terminal_geometry: Default::default(),
             fullscreen: None,
             titlebar_tween: None,
-            titlebar_island: None,
             titlebar_should_move: false,
             linux_captions: None,
             button_layout_sub: None,
@@ -1951,6 +1904,7 @@ impl Shell {
             executor: cx.background_executor().clone(),
             _state_observation: observation,
             _inspector_events: inspector_events,
+            _session_terminal_events: session_terminal_events,
             session_terminal,
             inspector,
             followed_terminal: None,
@@ -2021,83 +1975,6 @@ impl Shell {
                 self.open_rename_chat(first, cx);
             }
         }
-        // Banners and chimes share one session detector. Completion markers survive
-        // queue handoffs and never advance for interrupts or stale activity.
-        // A row's first appearance seeds the baseline silently (boot/replay).
-        // Pending sends consume completion changes silently, while questions
-        // still ring immediately. Output settings do not affect the baseline.
-        {
-            let now = crate::clock::utc(cx);
-            type Ping = (String, crate::sound::SessionNotificationState, Option<String>, bool);
-            let (sessions, connectivity, connectivity_observed) = {
-                let state = state.read(cx);
-                let sessions: Vec<Ping> = state
-                    .sessions
-                    .iter()
-                    .map(|s| {
-                        let status = crate::sound::SessionNotificationState::new(s, now);
-                        let chat = state.chats.iter().find(|c| c.id == s.chat_id);
-                        let title = chat.and_then(|c| c.title.clone());
-                        let notify = chat.is_some_and(|c| c.is_top_level());
-                        (s.chat_id.clone(), status, title, notify)
-                    })
-                    .collect();
-                (
-                    sessions,
-                    state.connectivity.state,
-                    state.connectivity_observed,
-                )
-            };
-            // Background-only banners: `active_window()` is app-level (any
-            // Slopty window being key), so a ping for a *background chat* in a
-            // focused app still stays a chime — you're already looking at
-            // Slopty; the sidebar dot carries the rest.
-            let app_focused = cx.active_window().is_some();
-            // slopty: the title went with the banner.
-            for (chat_id, status, _title, notify) in sessions {
-                let prev = self.sound_prev.insert(chat_id, status.clone());
-                // Keep side-chat baselines current, but never emit their
-                // completion, input-request, or failure sounds/banners.
-                if notify
-                    && let Some(prev) = prev
-                    && let Some(sound) = status.sound_since(&prev)
-                {
-                    if self.settings.session_sound_enabled(sound) {
-                        let should_play = sound != crate::sound::Sound::Attention
-                            || self
-                                .attention_sound_gate
-                                .should_play(crate::clock::now(cx));
-                        if should_play {
-                            crate::sound::play(sound);
-                        }
-                    }
-                    // slopty: no banner here; Slopty's own notes say a session's moments
-                    // (`slopty_ui::workspace::attention`), with their answers and their taps.
-                }
-            }
-            if let Some(sound) = self.connectivity_notifications.update(
-                connectivity,
-                connectivity_observed,
-                crate::clock::now(cx),
-            ) {
-                if self.settings.session_sound_enabled(sound)
-                    && self
-                        .attention_sound_gate
-                        .should_play(crate::clock::now(cx))
-                {
-                    crate::sound::play(sound);
-                }
-                if self.settings.notifications_enabled
-                    && !(self.settings.notifications_background_only && app_focused)
-                {
-                    let body = match connectivity {
-                        slopty_view_proto::ConnectivityState::Offline => "Your device is offline",
-                        _ => "Slopty is trying to reconnect",
-                    };
-                    crate::notify::post("Connection unavailable", body, None);
-                }
-            }
-        }
         // An explicit projectless canvas must be visible in the sidebar:
         // retaining a project filter would hide the session on its first send.
         if state.read(cx).no_project
@@ -2153,6 +2030,16 @@ impl Shell {
             && spaces::every_device_reached(state.read(cx), crate::clock::utc(cx))
         {
             self.settings.space_filter = None;
+            self.schedule_save(cx);
+        }
+        // slopty: heal a machine filter naming a machine no longer known (removed, possibly
+        // elsewhere): every machine again, rather than an empty list. A machine out of reach is
+        // still known, so its filter stands (`spaces::Shell::sidebar_filter`).
+        if !state.read(cx).devices.is_empty()
+            && let Some(machine) = self.settings.machine_filter.clone()
+            && !state.read(cx).devices.iter().any(|device| device.id == machine)
+        {
+            self.settings.machine_filter = None;
             self.schedule_save(cx);
         }
         // Chat switch: restore THAT chat's panel state (per-session open flags;
@@ -2240,8 +2127,12 @@ impl Shell {
 
     fn sidebar_target(&self) -> f32 {
         let fit = self.horizontal_fit();
-        if self.settings.sidebar_collapsed || !fit.sidebar {
+        if !fit.sidebar {
             0.0
+        } else if self.settings.sidebar_collapsed {
+            // slopty: put away, the sidebar leaves its rail of one mark per project
+            // (`sidebar::Shell::render_sidebar_rail`).
+            sidebar::SIDEBAR_RAIL_WIDTH
         } else {
             fit.sidebar_limit
         }
@@ -4676,6 +4567,7 @@ impl Shell {
             // slopty: voice removed.
             || self.add_space.is_some()
             || self.past_sessions.picker_open() // slopty: Resume a Claude Code session…
+            || self.inbox.is_open() // slopty: the inbox
             || self.new_session.is_some() // slopty: New session…
     }
 
@@ -4928,11 +4820,6 @@ impl Shell {
         cluster + CLUSTER_BUTTONS_WIDTH + TITLEBAR_IDENTITY_GAP
     }
 
-    /// The session titlebar. // slopty: no pull-request pages.
-    fn render_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        self.render_session_title_bar(cx)
-    }
-
     /// Make a titlebar strip drag the window — zed's platform-titlebar
     /// pattern (slopty's `.drag` region): mark it a [`WindowControlArea::Drag`]
     /// (macOS app-owned titlebar), hand the drag to the compositor once the
@@ -4985,46 +4872,19 @@ impl Shell {
             })
     }
 
-    /// The ONE top-left window-control cluster (sidebar toggle + back/forward —
-    /// slopty window-controls.tsx): rendered once, in a paint-only overlay layer
-    /// pinned at the window's top-left, ABOVE the sidebar and headers. The
-    /// sidebar width animates *beneath* it, so the buttons keep their element
-    /// identity and never move or remount on collapse/expand; only the
-    /// fullscreen traffic-light inset tweens (the animated spacer). The
-    /// container has no id/listeners — everything between the buttons falls
-    /// through to the titlebar drag strips below.
+    /// The top-left window-control cluster: past the traffic lights, the sidebar's toggle, alone
+    /// (`docs/decisions/layout.md`, "One row of chrome"). Rendered once, in a paint-only overlay
+    /// layer pinned at the window's top-left, ABOVE the sidebar and the titlebar row, so the
+    /// sidebar's width animates beneath it and the toggle never moves or remounts; only the
+    /// fullscreen traffic-light inset tweens (the animated spacer). The container has no
+    /// listeners: everything around the toggle falls through to the titlebar drag strip below.
+    /// Over the sidebar it wears the window's ink; with the sidebar put away it stands on the
+    /// session's ground and is inked for it, as the row is.
     fn render_titlebar_cluster(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        let can_back = self.nav.can_back();
-        let can_forward = self.nav.can_forward();
-        // The titlebar is the single owner of the new-session action in both
-        // sidebar states. Hide it on the new-session canvas: opening another
-        // blank canvas from an already blank canvas has no effect and used to
-        // leave two competing + placements across the responsive variants.
-        let plus_alpha = self.titlebar_plus_alpha(cx);
-        let show_plus = plus_alpha > 0.01;
-        let over_artwork = false; // slopty: no artwork behind a new session
-        let island_target = if matches!(self.route, Route::Chat)
-            && self.state.read(cx).selected_chat.is_none() // slopty: voice removed.
-            && self.settings.sidebar_collapsed
-            && over_artwork
-        {
-            1.0
-        } else {
-            0.0
-        };
-        // Persistent manual tween: reversals start from the painted value,
-        // initial presentation is settled, and reduced motion snaps.
-        match self.titlebar_island {
-            None => self.titlebar_island = Some(WidthTween::new(island_target, island_target, self.now())),
-            Some(previous) if previous.to != island_target => {
-                let from = self.eval_tween(Some(previous), previous.to);
-                self.titlebar_island = Some(WidthTween::new(from, island_target, self.now()));
-            }
-            _ => {}
-        }
-        let island = self.eval_tween(self.titlebar_island, island_target);
-        let (island_top, island_height) = titlebar_island_vertical_geometry(island);
+        let over_ground = self.sidebar_now() < self.title_bar_content_start()
+            && self.state.read(cx).selected_chat_row().is_some();
+        let ink = if over_ground { tabs::ink_for(self.shown_ground(cx), &theme) } else { theme };
         div()
             .absolute()
             .top_0()
@@ -5035,26 +4895,6 @@ impl Shell {
             .items_center()
             .pt(px(titlebar_top_pad())) // slopty: a finger's presses inside the window
             .px(px(TITLEBAR_CLUSTER_PAD))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(6.0))
-                    .right_0()
-                    .top(px(island_top))
-                    .h(px(island_height))
-                    .opacity(island)
-                    .children((island > 0.001).then(|| {
-                        crate::frost::frosted(
-                            12.0,
-                            20.0,
-                            div()
-                                .size_full()
-                                .rounded(px(12.0))
-                                .bg(theme.glass_overlay())
-                                .shadow_sm(),
-                        )
-                    })),
-            )
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
             // root-level caption overlay owns the buttons; the cluster row
@@ -5077,9 +4917,9 @@ impl Shell {
                     ),
                     false,
                     14.0, // slopty: a 24 control holds a 14 glyph
-                    theme.text_muted,
+                    ink.text_muted,
                 ),
-                &theme,
+                &ink,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             )
             // slopty: what it does now, and its key.
@@ -5088,58 +4928,7 @@ impl Shell {
                 Keys::Action(Box::new(ToggleSidebar)),
                 cx,
             ))
-            .child({
-                let back = cx.listener(|this, _, _, cx| this.navigate_back(cx));
-                let forward = cx.listener(|this, _, _, cx| this.navigate_forward(cx));
-                div()
-                    .ml(px(TITLEBAR_GROUP_GAP))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(TITLEBAR_CONTROL_GAP))
-                    .child(nav_history_button(
-                        "nav-back",
-                        icons::ARROW_LEFT,
-                        "Back",
-                        Keys::Action(Box::new(chrome_keys::NavigateBack)),
-                        can_back,
-                        &theme,
-                        back,
-                        cx,
-                    ))
-                    .child(nav_history_button(
-                        "nav-forward",
-                        icons::ARROW_RIGHT,
-                        "Forward",
-                        Keys::Action(Box::new(chrome_keys::NavigateForward)),
-                        can_forward,
-                        &theme,
-                        forward,
-                        cx,
-                    ))
-            })
-            .children(show_plus.then(|| {
-                div()
-                    .flex_none()
-                    .ml(px(TITLEBAR_GROUP_GAP))
-                    .opacity(plus_alpha)
-                    .child(
-                        window_control_button(
-                            "titlebar-new-session",
-                            icons::PLUS,
-                            &theme,
-                            cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
-                        )
-                        .action_hint("New session", Keys::Action(Box::new(NewSession)), cx),
-                    )
-            }))
             .into_any_element()
-    }
-
-    /// The titlebar owns new-session creation regardless of sidebar state. It
-    /// remains available on PR screens, even without a selected session.
-    pub(super) fn titlebar_plus_alpha(&self, cx: &App) -> f32 {
-        titlebar_new_session_alpha(&self.route, self.state.read(cx).selected_chat.is_some())
     }
 
     /// Native Windows caption controls integrated into Slopty's unified
@@ -6326,8 +6115,9 @@ impl Shell {
             .h_full()
             .flex()
             .flex_col()
-            // slopty: a session's column stands on its terminal's ground, its title strip too.
-            .when(has_terminal, |column| column.bg(theme.session_ground()))
+            // A session's column stands on its terminal's own ground, the titlebar row over it
+            // too (`docs/decisions/layout.md`, "One row of chrome").
+            .when(has_terminal, |column| column.bg(self.shown_ground(cx)))
             .pt(px(Theme::TITLEBAR_HEIGHT))
             .child(div().flex_1().min_h_0().flex().flex_col().child(outlet))
             .child(self.render_terminal_container(terminal_geometry, window, cx))
@@ -6940,7 +6730,8 @@ impl Shell {
             let icon_path = match surface {
                 RightSurface::File(_) => icons::DOCUMENT,
                 RightSurface::Diff(_) => icons::FILE_DIFF, // slopty: the Changes glyph.
-                RightSurface::Inspector => icons::EYE, // slopty: the inspector
+                // slopty: the inspector, steps in time as a trace reads; the eye is the inbox's.
+                RightSurface::Inspector => icons::SORT_BY_TIME,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Browser(_) => icons::GLOBE,
                 // slopty: a window's chip wears the window glyph its picker row wore; a desktop,
@@ -7573,51 +7364,6 @@ fn linux_caption_button(
         )
 }
 
-/// A titlebar history button (slopty window-controls.tsx): enabled it is a
-/// normal window-control button; disabled it dims to 35% opacity and ignores
-/// the pointer (`disabled:pointer-events-none disabled:opacity-35`).
-// slopty: named with its key, and disabled it keeps its name, dimmed.
-fn nav_history_button(
-    id: &'static str,
-    icon_path: &'static str,
-    label: &'static str,
-    keys: crate::settings::widgets::Keys,
-    enabled: bool,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-    cx: &App,
-) -> AnyElement {
-    use crate::settings::widgets::ActionHint as _;
-    if !enabled {
-        // slopty: as wide a press as the enabled one's (#23).
-        let reach = crate::surface_chrome::touch_reach(24.0);
-        return div()
-            .id(id)
-            .debug_selector(move || id.to_owned())
-            .role(gpui::Role::Button)
-            .aria_disabled(true) // slopty: says it is off, not only looks it.
-            .action_hint(label, keys, cx)
-            .size(px(24.0 + 2.0 * reach))
-            .m(px(-reach))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            // Even disabled it reads as a control — occlude so double-clicks
-            // on it don't fall through to the titlebar strip's zoom handler.
-            .occlude()
-            .child(
-                icon(icon_path)
-                    .size(px(16.0))
-                    .text_color(theme.text_muted.opacity(crate::theme::DISABLED_OPACITY)),
-            )
-            .into_any_element();
-    }
-    window_control_button(id, icon_path, theme, on_click)
-        .action_hint(label, keys, cx)
-        .into_any_element()
-}
-
 /// A size-7 icon button for the main-panel header (slopty __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
 // slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
@@ -7792,6 +7538,7 @@ impl Render for Shell {
         if !matches!(gate, GatePhase::Ready)
             || matches!(self.route, Route::Settings(_))
             || self.sidebar_target() <= 0.0
+            || self.settings.sidebar_collapsed // slopty: the rail has no rows
         {
             self.dismiss_session_card(cx);
         }
@@ -7866,6 +7613,8 @@ impl Render for Shell {
                 window,
                 |this: &mut Shell, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
+                    // The titlebar's title dims while the window is not the key one.
+                    cx.notify();
                     // slopty: no self-updater.
                     // slopty: voice removed.
                     if !window.is_window_active() {
@@ -8139,7 +7888,8 @@ impl Render for Shell {
                 // A collapsed or fit-hidden sidebar has no seam: the window's
                 // own left edge sits there, and a press must resize the window
                 // rather than drag the sidebar open.
-                let sidebar_handle = (self.sidebar_now() > 0.5).then(|| {
+                // slopty: the rail is no seam to drag.
+                let sidebar_handle = (!self.settings.sidebar_collapsed && self.sidebar_now() > 0.5).then(|| {
                     self.resize_handle(
                         "sidebar-resize",
                         PaneResizeKind::Sidebar,
@@ -8243,7 +7993,7 @@ impl Render for Shell {
                 } else {
                     Empty.into_any_element()
                 };
-                let title_bar = self.render_title_bar(cx);
+                let title_bar = self.render_session_title_bar(window, cx);
                 let compact_nav = self.render_compact_nav_bar(cx); // slopty: the phone's
                 // slopty: a phone's inspector, a sheet over the session.
                 let compact_inspector = self.render_compact_inspector(window, cx);
@@ -8490,9 +8240,7 @@ mod tests {
     #[test]
     fn narrowest_sidebar_keeps_its_options_button_beside_the_titlebar_controls() {
         for is_macos in [true, false] {
-            let cluster_end = cluster_buttons_start(is_macos, false, 0)
-                + CLUSTER_BUTTONS_WIDTH
-                + TITLEBAR_ACTION_SLOT_WIDTH;
+            let cluster_end = cluster_buttons_start(is_macos, false, 0) + CLUSTER_BUTTONS_WIDTH;
             let options_right = cluster_end + TITLEBAR_GROUP_GAP + 24.0;
             assert!(
                 options_right + Theme::SPACE_SM <= SIDEBAR_MIN,
@@ -8614,20 +8362,6 @@ mod tests {
                 id.label()
             );
         }
-    }
-
-    #[test]
-    fn island_stays_centered_on_controls_while_expanding() {
-        let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
-        for step in 0..=20 {
-            let (top, height) = titlebar_island_vertical_geometry(step as f32 / 20.0);
-            assert_eq!(top + height * 0.5, center);
-            assert!((28.0..=32.0).contains(&height));
-        }
-        let (top, height) = titlebar_island_vertical_geometry(1.0);
-        assert_eq!(center, 21.0);
-        assert_eq!(center - 12.0 - top, 4.0);
-        assert_eq!(top + height - (center + 12.0), 4.0);
     }
 
     #[test]
@@ -8796,21 +8530,6 @@ mod tests {
     }
 
     #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
-        // slopty: no pull-request pages.
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
-            0.0
-        );
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false),
-            0.0
-        );
-    }
-
-    #[test]
     fn right_panel_content_keeps_the_larger_width_only_during_transition() {
         assert_eq!(right_panel_content_width(520.0, None, None), 520.0);
         assert_eq!(
@@ -8869,29 +8588,8 @@ mod tests {
         assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
         assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
         assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
-        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
-        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
+        assert_eq!(CLUSTER_BUTTONS_WIDTH, 24.0);
         assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
-    }
-
-    #[test]
-    fn titlebar_spacer_selects_per_platform_and_fullscreen() {
-        // macOS, lights visible: spacer fills up to the 88px cluster start.
-        assert_eq!(titlebar_spacer_width(true, false, 10.0), 78.0);
-        assert_eq!(titlebar_spacer_width(true, false, 12.0), 76.0);
-        assert_eq!(titlebar_spacer_width(true, false, 26.0), 62.0);
-        // macOS fullscreen: the inset animates away (clamped at zero when the
-        // strip's own padding already exceeds the 12px cluster start).
-        assert_eq!(titlebar_spacer_width(true, true, 10.0), 2.0);
-        assert_eq!(titlebar_spacer_width(true, true, 26.0), 0.0);
-        // Linux / Windows: never any inset.
-        assert_eq!(titlebar_spacer_width(false, false, 10.0), 0.0);
-        assert_eq!(titlebar_spacer_width(false, true, 10.0), 0.0);
-        assert_eq!(
-            TITLEBAR_CLUSTER_PAD + titlebar_spacer_width(true, false, TITLEBAR_CLUSTER_PAD),
-            titlebar_cluster_start(false),
-            "the rendered row padding and spacer must land on the declared cluster start"
-        );
     }
 
     #[test]
@@ -8918,26 +8616,6 @@ mod tests {
         assert_eq!(cluster_buttons_start(false, false, 3), 10.0 + 76.0 + 2.0);
         // macOS ignores the Linux caption count entirely.
         assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
-    }
-
-    #[test]
-    fn cluster_clearance_clears_the_overlay_buttons() {
-        // Linux: buttons at 10..92; a 16px-padded header needs 84 more px to
-        // put content at 92 + 8 breathing room.
-        assert_eq!(cluster_clearance(false, false, 0, 16.0), 84.0);
-        assert_eq!(cluster_clearance(false, false, 0, 10.0), 90.0);
-        // Linux with a left-side close caption: everything shifts one slot.
-        assert_eq!(cluster_clearance(false, false, 1, 16.0), 84.0 + 26.0);
-        // macOS: buttons start at the 88px traffic-light cluster start.
-        assert_eq!(
-            cluster_clearance(true, false, 0, 16.0),
-            88.0 + CLUSTER_BUTTONS_WIDTH + 8.0 - 16.0
-        );
-        // macOS fullscreen: cluster reclaims the inset (starts at 12).
-        assert_eq!(
-            cluster_clearance(true, true, 0, 16.0),
-            12.0 + CLUSTER_BUTTONS_WIDTH + 8.0 - 16.0
-        );
     }
 
     // ---- per-session panel flags (§1.10/1.11 parity: slopty sessionPanels) ----
@@ -9405,9 +9083,18 @@ mod exit_regressions {
                 );
                 shell.render_time = frame_time;
                 shell.settings.sidebar_collapsed = true;
-                shell.sidebar_tween = tween;
+                // slopty: put away, the sidebar keeps its rail, so its closing tween ends there.
+                let closing = tween.map(|tween| WidthTween {
+                    to: sidebar::SIDEBAR_RAIL_WIDTH,
+                    ..tween
+                });
+                shell.sidebar_tween = closing;
                 shell.toggle_sidebar(cx);
-                assert_eq!(shell.sidebar_tween.unwrap().from, width);
+                assert_eq!(
+                    shell.sidebar_tween.unwrap().from,
+                    shell.eval_tween(closing, 0.),
+                    "reopening must not restart from the rail"
+                );
                 shell.render_time = None;
                 assert!(!shell.tween_active(tween));
                 assert_eq!(shell.active_tween_endpoints(tween), None);

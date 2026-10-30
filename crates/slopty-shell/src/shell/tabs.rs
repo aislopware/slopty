@@ -255,13 +255,12 @@ impl Shell {
     /// The trailing titlebar strip follows the columns beneath it.
     pub(super) fn titlebar_trailing_layout(&self, on_canvas: bool, cx: &App) -> TitlebarTrailing {
         let sidebar_now = self.sidebar_now();
-        let plus_inset = TITLEBAR_ACTION_SLOT_WIDTH * self.titlebar_plus_alpha(cx);
 
         // Same glide as the old strip: content starts at the inset card's
         // left edge while the sidebar is open, and slides toward the control
         // cluster as it collapses.
         let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start() + plus_inset);
+            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
 
         // Trailing titlebar section. With the changes pane open this is the
         // PANE'S HEADER — a strip exactly as wide as the pane carrying its
@@ -297,7 +296,7 @@ impl Shell {
             // window-control cluster still wins while the sidebar is
             // collapsed (the chips clear it instead of underlapping).
             let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP + plus_inset - 14.0;
+                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
             (sidebar_now - 8.0).max(cluster_end)
         } else {
             content_left
@@ -342,45 +341,20 @@ impl Shell {
         }
     }
 
-    /// The unified titlebar in chat mode:
-    /// `[new-session +] [harness icon + session title] … [toggle-changes]`.
-    /// Replaces the tab strip; inherits its titlebar duties (drag region,
-    /// animated left inset, the toggle-changes button on git projects).
-    pub(super) fn render_session_title_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    /// The titlebar row over a session (`docs/decisions/layout.md`, "One row of chrome"): the
+    /// session's identity (its program's icon, its title, then its machine and branch in
+    /// secondary text, and its state's mark), and at the trailing end the palette and a new
+    /// session. The row stands on the shown terminal's own ground (the column under it paints
+    /// it, [`Shell::shown_ground`]), its words inked for that ground, and the title dims to
+    /// secondary while the window is not the key one. Over the new-session canvas it names
+    /// nothing; it keeps its height, drag region and buttons.
+    pub(super) fn render_session_title_bar(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let theme = Theme::of(cx).clone();
-        // The canvas titles as NOTHING (user request — a "New session"
-        // header over the empty canvas was noise); the bar keeps its height,
-        // drag region, and buttons. Where a session runs, and its side-chat
-        // and project actions, live in the session card.
-        let (title, harness, on_canvas): (SharedString, Option<slopty_view_proto::HarnessId>, bool) = {
-            let state = self.state.read(cx);
-            match state.selected_chat_row() {
-                Some(chat) => (
-                    SharedString::from(transcript::single_line(
-                        &chat.title.clone().unwrap_or_else(|| "New session".into()),
-                    )),
-                    chat.config.as_ref().map(|c| c.harness),
-                    false,
-                ),
-                None => (SharedString::from(""), None, true),
-            }
-        };
-        // slopty: the title's right-click opens the chat's menu, as its sidebar row's does,
-        // under the bar so the title stays in sight.
-        let menu_chat = self.state.read(cx).selected_chat.clone().filter(|_| !on_canvas);
-        // slopty: a title the agent gives rises in over the old (Amp's), on the house's roll.
-        let rolling_title = menu_chat.as_ref().and_then(|chat| {
-            crate::roll_text::rolling(
-                format!("titlebar-title-{chat}"),
-                title.clone(),
-                crate::motion::reduced_motion(cx),
-                crate::clock::now(cx),
-            )
-        });
-
-        // The new-session `+` renders in the WINDOW-CONTROL CLUSTER whenever a
-        // session is selected (`render_titlebar_cluster`) — this row budgets
-        // one button slot so the title never sits under it.
+        let on_canvas = self.state.read(cx).selected_chat_row().is_none();
         let TitlebarTrailing {
             fit,
             right_pane_visible,
@@ -391,13 +365,12 @@ impl Shell {
             widths,
             content_width,
         } = self.titlebar_trailing_layout(on_canvas, cx);
+        // Inked for the ground under it: the terminal's over the session, the window's own over
+        // the canvas.
+        let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };
+        let identity = (!takeover && !on_canvas)
+            .then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx));
 
-        // slopty: the open session's working subagents, counted on the inspector's toggle.
-        let running_lanes = {
-            let state = self.state.read(cx);
-            let now = crate::clock::utc(cx);
-            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
-        };
         let trailing: Option<gpui::AnyElement> = if on_canvas {
             None
         } else {
@@ -559,18 +532,23 @@ impl Shell {
             )
         };
 
-        // slopty: the inspector's toggle ends the session's stretch of the titlebar, left of
-        // the side pane's tabs when one is open, else just left of the explorer toggle. A plain
-        // terminal has nothing to inspect.
+        // slopty: the inspector's toggle, and the chat's folder in the person's editor
+        // (`open_in`), until the summoned views take their place. A plain terminal has nothing
+        // to inspect.
+        let running_lanes = {
+            let state = self.state.read(cx);
+            let now = crate::clock::utc(cx);
+            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
+        };
         let inspects = crate::inspector::inspects(self.state.read(cx), &self.active_chat);
         let session_info_toggle = (!takeover && !on_canvas && inspects).then(|| {
             let open = self.inspector_shown(cx);
             let label = if open { "Hide inspector" } else { "Show inspector" };
             header_icon_button_with(
                 "toggle-inspector",
-                icons::corner_card_glyph(16.0, theme.text_muted),
+                icons::corner_card_glyph(16.0, ink.text_muted),
                 open,
-                &theme,
+                &ink,
                 cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)),
             )
             .action_hint(label, Keys::Action(Box::new(chrome_keys::ToggleInspector)), cx)
@@ -578,9 +556,36 @@ impl Shell {
             // The session's running subagents: the button counts them, open or closed, for as
             // long as they run.
             .when(running_lanes > 0, |button| {
-                crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
+                crate::running_pill::mark_titlebar_button(button, running_lanes, &ink)
             })
         });
+        let open_in = (!takeover && !on_canvas).then(|| self.render_open_in_button(cx)).flatten();
+        // At the trailing end: the palette, then a new session, which over the new-session
+        // canvas would open the canvas it is on.
+        let actions = div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(TITLEBAR_CONTROL_GAP))
+            .child(
+                window_control_button(
+                    "titlebar-palette",
+                    icons::COMMAND,
+                    &ink,
+                    cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx)),
+                )
+                .action_hint("Command palette", Keys::Action(Box::new(ToggleCommandPalette)), cx),
+            )
+            .children((!on_canvas).then(|| {
+                window_control_button(
+                    "titlebar-new-session",
+                    icons::PLUS,
+                    &ink,
+                    cx.listener(|this, _, _, cx| this.open_new_session(None, cx)),
+                )
+                .action_hint("New session", Keys::Action(Box::new(NewSession)), cx)
+            }));
         let inner = div()
             .size_full()
             .flex()
@@ -589,93 +594,211 @@ impl Shell {
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
-            // In panel takeover the header strip spans the whole band — the
-            // title would sit UNDER it (both flex_none, the row overflows and
-            // paint order stacks them), so it hides for the duration.
-            .when(!takeover, |el| {
-                el.child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when_some(
-                            harness.map(crate::pickers::harness_brand_icon),
-                            |el, (path, tint)| {
-                                el.child(
-                                    icon(path)
-                                        .size(px(14.0))
-                                        .flex_none()
-                                        .text_color(tint.unwrap_or(theme.text_muted)),
-                                )
-                            },
-                        )
-                        .when_some(menu_chat, |el, chat_id| {
-                            el.on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                    this.chat_menu.open(super::ChatMenuState {
-                                        tab: None,
-                                        chat_id: chat_id.clone(),
-                                        position: gpui::point(
-                                            event.position.x,
-                                            px(Theme::TITLEBAR_HEIGHT),
-                                        ),
-                                        page: super::ChatMenuPage::Root,
-                                    });
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }),
-                            )
-                        })
-                        // slopty: a cut title shows whole in a tooltip.
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex()
-                                .text_size(crate::typography::ui_rems(12.0))
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_color(if on_canvas {
-                                    theme.text_muted.opacity(0.7)
-                                } else {
-                                    theme.text.opacity(0.85)
-                                })
-                                .child(match rolling_title {
-                                    Some(rolling) => div()
-                                        .debug_selector(|| "chat-titlebar-title".into())
-                                        .min_w_0()
-                                        .overflow_hidden()
-                                        .child(rolling)
-                                        .into_any_element(),
-                                    None => crate::settings::widgets::truncate_with_tip(
-                                        "chat-titlebar-title",
-                                        title,
-                                    )
-                                    .into_any_element(),
-                                }),
-                        ),
-                )
-            })
+            .children(identity)
             .child(div().flex_1())
-            // slopty: the chat's folder in the person's editor (`open_in`).
-            .children((!takeover && !on_canvas).then(|| self.render_open_in_button(cx)).flatten())
+            .children(open_in)
             .children(session_info_toggle)
+            .child(actions)
             .children(trailing);
-
-        // The unified window titlebar: full-width on the glass shell, ABOVE
-        // the inset card. No bottom border — the card's own hairline is the
-        // separation; the glass gutter shows between.
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
+    }
+
+    /// The session's identity in the titlebar row: its program's icon, its title (whole in a
+    /// tooltip when cut, rising in over the old when the agent gives another), its machine and
+    /// branch in secondary text, then its state's mark, the same glyph as its row's in the
+    /// list. `ink` is the theme inked for the ground under the row; the title dims to secondary
+    /// while the window is not `key`. A right-click opens the session's menu under the row.
+    fn render_titlebar_identity(
+        &mut self,
+        ink: &Theme,
+        key: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let now = crate::clock::utc(cx);
+        let (chat_id, title, harness, machine_branch, mark) = {
+            let state = self.state.read(cx);
+            let Some(chat) = state.selected_chat_row() else {
+                return Empty.into_any_element();
+            };
+            let title = transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
+            let machine_branch =
+                machine_and_branch(state.device_name(&chat.device_id), chat.branch.as_deref());
+            let mark = super::marks::Mark::of(
+                state.display_status_for(chat, now),
+                state.session_for(&chat.id),
+                now,
+            );
+            (
+                chat.id.clone(),
+                SharedString::from(title),
+                chat.config.as_ref().map(|config| config.harness),
+                machine_branch,
+                mark,
+            )
+        };
+        // slopty: a title the agent gives rises in over the old (Amp's), on the house's roll.
+        let rolling_title = crate::roll_text::rolling(
+            format!("titlebar-title-{chat_id}"),
+            title.clone(),
+            crate::motion::reduced_motion(cx),
+            crate::clock::now(cx),
+        );
+        // An agent's mark in its brand's colour; a plain terminal's the terminal glyph.
+        let (glyph, tint) = harness
+            .map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
+        let title_ink = if key { ink.text } else { ink.text_muted };
+        let ground = self.shown_ground(cx);
+        let mark = super::marks::mark_element(
+            SharedString::from(format!("titlebar-mark-{chat_id}")),
+            "titlebar-mark".to_owned(),
+            &mark,
+            crate::loaders::status_mark::MARK_SMALL,
+            ground,
+        );
+        let menu_chat = chat_id.clone();
+        div()
+            .id("titlebar-identity")
+            .debug_selector(|| "titlebar-identity".into())
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .text_size(crate::typography::ui_rems(13.0))
+            .child(icon(glyph).size(px(14.0)).flex_none().text_color(tint.unwrap_or(title_ink)))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.chat_menu.open(super::ChatMenuState::for_row(
+                        menu_chat.clone(),
+                        gpui::point(event.position.x, px(Theme::TITLEBAR_HEIGHT)),
+                    ));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            // slopty: a cut title shows whole in a tooltip.
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(title_ink)
+                    .child(match rolling_title {
+                        Some(rolling) => div()
+                            .debug_selector(|| "chat-titlebar-title".into())
+                            .min_w_0()
+                            .overflow_hidden()
+                            .child(rolling)
+                            .into_any_element(),
+                        None => crate::settings::widgets::truncate_with_tip(
+                            "chat-titlebar-title",
+                            title,
+                        )
+                        .into_any_element(),
+                    }),
+            )
+            .children(machine_branch.map(|words| {
+                div()
+                    .debug_selector(|| "titlebar-machine-branch".into())
+                    .flex_none()
+                    .max_w(px(240.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(ink.text_muted)
+                    .child(SharedString::from(words))
+            }))
+            .children(mark)
+            .into_any_element()
+    }
+
+    /// The ground the session on screen stands on: its terminal's program's background (OSC 11,
+    /// else the theme's), which the titlebar row above it wears too; the theme's session ground
+    /// until its terminal's view says.
+    pub(super) fn shown_ground(&self, cx: &App) -> gpui::Hsla {
+        self.session_terminal
+            .read(cx)
+            .shown_ground(cx)
+            .unwrap_or_else(|| Theme::of(cx).session_ground())
+    }
+}
+
+/// The identity's secondary words: the session's machine and its branch, "Studio · fix-lexer",
+/// or whichever of the two is known.
+fn machine_and_branch(machine: Option<&str>, branch: Option<&str>) -> Option<String> {
+    let (machine, branch) =
+        (machine.filter(|words| !words.is_empty()), branch.filter(|words| !words.is_empty()));
+    match (machine, branch) {
+        (Some(machine), Some(branch)) => Some(format!("{machine} \u{b7} {branch}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.to_owned()),
+        (None, None) => None,
+    }
+}
+
+/// Whether text over `ground` reads as on a light one, as Ghostty picks a transparent
+/// titlebar's appearance from the terminal's background: its luma past half.
+fn ground_is_light(ground: gpui::Hsla) -> bool {
+    let rgb = ground.to_rgb();
+    0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b > 0.5
+}
+
+/// The theme inked for words over `ground`: the window's own when the ground is of its
+/// appearance, else the other appearance's, so a dark program's titlebar row in a light window
+/// keeps its title readable (`docs/decisions/layout.md`, "One row of chrome").
+pub(super) fn ink_for(ground: gpui::Hsla, theme: &Theme) -> Theme {
+    let light = ground_is_light(ground);
+    if light == !theme.appearance.is_dark() {
+        theme.clone()
+    } else {
+        let appearance = if light {
+            crate::theme::Appearance::Light
+        } else {
+            crate::theme::Appearance::Dark
+        };
+        Theme::for_appearance(appearance)
     }
 }
 
 #[cfg(test)]
 mod panel_titlebar_tests {
     use super::*;
+
+    /// The identity's secondary words say the machine and the branch, or whichever is known.
+    #[test]
+    fn the_identity_says_its_machine_and_branch() {
+        assert_eq!(
+            machine_and_branch(Some("Studio"), Some("fix-lexer")).as_deref(),
+            Some("Studio \u{b7} fix-lexer")
+        );
+        assert_eq!(machine_and_branch(Some("Studio"), None).as_deref(), Some("Studio"));
+        assert_eq!(machine_and_branch(None, Some("main")).as_deref(), Some("main"));
+        assert_eq!(machine_and_branch(Some(""), Some("")), None, "nothing known, nothing said");
+    }
+
+    /// The row is inked for the ground it stands on, as Ghostty's transparent titlebar picks
+    /// its appearance: a dark program's ground in a light window gets the dark ink, a light
+    /// one in a dark window the light ink, and a ground of the window's own appearance its own.
+    #[test]
+    fn the_row_is_inked_for_the_ground_it_stands_on() {
+        let (light, dark) = (
+            Theme::for_appearance(crate::theme::Appearance::Light),
+            Theme::for_appearance(crate::theme::Appearance::Dark),
+        );
+        // Solarized's two backgrounds: base03 #002b36 and base3 #fdf6e3.
+        let (base03, base3) = (gpui::rgb(0x002b36).into(), gpui::rgb(0xfdf6e3).into());
+        assert!(ink_for(base03, &light).appearance.is_dark(), "dark ink on a dark program");
+        assert!(!ink_for(base3, &dark).appearance.is_dark(), "light ink on a light program");
+        assert_eq!(ink_for(base3, &light).text, light.text, "the window's own");
+        assert_eq!(ink_for(base03, &dark).text, dark.text, "the window's own");
+        assert!(
+            crate::theme::contrast_ratio(ink_for(base03, &light).text, base03) >= 4.5,
+            "the title reads on the dark ground"
+        );
+    }
 
     #[test]
     fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {

@@ -129,6 +129,14 @@ pub enum WorkspaceEvent {
         /// The file, absolute on the shell's machine.
         target: String,
     },
+    /// A web link a person chose in a shell opened for `chat` (quick select): the shell opens
+    /// `url` where a transcript's web link opens, its session's Browser or the person's browser.
+    OpenLink {
+        /// The chat the shell was opened for.
+        chat: String,
+        /// The link.
+        url: String,
+    },
     /// The worker took handoff `id` back: its notice goes.
     Withdrawn {
         /// The worker.

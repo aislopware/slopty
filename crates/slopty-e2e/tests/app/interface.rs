@@ -234,11 +234,11 @@ async fn new_project_clones_a_repository_into_the_open_folder() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     // The window lands in the clone's project, on a new session there: the thread it showed is
-    // left behind (Back returns to it), and nothing says the clone failed.
+    // left behind, and nothing says the clone failed.
     let landed = stack
         .driver
         .wait_for("a new session in the clone", STEP, |d| {
-            d.a11y_node("Button", Some("Back")).is_some()
+            d.a11y_node("Button", Some("Command palette")).is_some()
                 && d.a11y_node("Button", Some("Open in…")).is_none()
         })
         .await

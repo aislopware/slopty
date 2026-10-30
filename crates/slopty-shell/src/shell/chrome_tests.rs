@@ -112,12 +112,7 @@ fn the_palette_keeps_its_top_as_its_results_change(cx: &mut TestAppContext) {
 fn the_chat_menu_names_its_rows(cx: &mut TestAppContext) {
     let (shell, cx) = launch(cx, DESKTOP);
     shell.update(cx, |shell, cx| {
-        shell.chat_menu.open(ChatMenuState {
-            tab: None,
-            chat_id: "b".into(),
-            position: gpui::point(px(40.0), px(120.0)),
-            page: ChatMenuPage::Root,
-        });
+        shell.chat_menu.open(ChatMenuState::for_row("b", gpui::point(px(40.0), px(120.0))));
         cx.notify();
     });
     let nodes = tree(cx);
@@ -139,12 +134,7 @@ fn escape_puts_a_context_menu_away(cx: &mut TestAppContext) {
     let at = gpui::point(px(40.0), px(120.0));
     let open: [fn(&mut Shell, Point<Pixels>); 3] = [
         |shell, at| {
-            shell.chat_menu.open(ChatMenuState {
-                tab: None,
-                chat_id: "b".into(),
-                position: at,
-                page: ChatMenuPage::Root,
-            });
+            shell.chat_menu.open(ChatMenuState::for_row("b", at));
         },
         |shell, at| shell.space_menu.open(("p".into(), at)),
         |shell, _| shell.user_menu.open(()),
@@ -164,13 +154,55 @@ fn escape_puts_a_context_menu_away(cx: &mut TestAppContext) {
     }
 }
 
-/// Back and Forward, with no history to walk, say they are off as well as look it.
+/// The titlebar row is the session's identity, then its actions at the trailing end
+/// (`docs/decisions/layout.md`, "One row of chrome"): the program's icon, its title, its machine
+/// and branch, then its state's mark, the same glyph as its row's in the list; the palette and
+/// a new session at the end; past the traffic lights only the sidebar's toggle, no Back or
+/// Forward.
 #[gpui::test]
-fn back_and_forward_say_when_they_are_off(cx: &mut TestAppContext) {
-    let (_shell, cx) = launch(cx, DESKTOP);
+fn the_titlebar_row_names_the_session_then_its_actions(cx: &mut TestAppContext) {
+    let (shell, cx) = launch(cx, DESKTOP);
+    shell.update(cx, |shell, cx| {
+        shell.state.update(cx, |state, _| {
+            state.devices = vec![device()];
+            let chat = state.chats.iter_mut().find(|chat| chat.id == "a").unwrap();
+            chat.branch = Some("fix-lexer".into());
+        });
+        shell.open_chat("a".into(), cx);
+    });
+    draw(cx);
+    let at = |selector: &'static str, cx: &mut VisualTestContext| {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("no {selector}"))
+    };
+    let (title, words, mark) =
+        (at("chat-titlebar-title", cx), at("titlebar-machine-branch", cx), at("titlebar-mark", cx));
+    assert!(
+        title.right() <= words.left() && words.right() <= mark.left(),
+        "title, machine and branch, mark: {title:?} {words:?} {mark:?}"
+    );
+    assert!(mark.bottom() <= px(Theme::TITLEBAR_HEIGHT), "in the row: {mark:?}");
     let nodes = tree(cx);
-    let forward = find(&nodes, Role::Button, "Forward").expect("Forward");
-    assert!(forward.disabled, "nothing ahead: {forward:?}");
+    for gone in ["Back", "Forward"] {
+        assert!(find(&nodes, Role::Button, gone).is_none(), "no {gone} in the row");
+    }
+    let in_row = |label: &str| {
+        nodes
+            .values()
+            .find(|node| {
+                node.role == Role::Button
+                    && node.label == label
+                    && node.bounds.top() < px(Theme::TITLEBAR_HEIGHT)
+            })
+            .map(|node| node.bounds)
+            .unwrap_or_else(|| panic!("no {label} in the row"))
+    };
+    let (palette, new) = (in_row("Command palette"), in_row("New session"));
+    assert!(
+        mark.right() < palette.left() && palette.right() <= new.left(),
+        "the palette, then a new session, past the identity: {palette:?} {new:?}"
+    );
+    let toggle = in_row("Hide sidebar");
+    assert!(toggle.right() < title.left(), "the sidebar's toggle leads: {toggle:?}");
 }
 
 /// The titlebar's title opens its chat's menu on a right-click, as the chat's sidebar row does,
@@ -389,10 +421,8 @@ mod session_card {
                 prepare(shell, cx);
                 shell.debug_gate = Some(GatePhase::Ready);
                 shell.chat_menu.open(ChatMenuState {
-                    chat_id: "regular".into(),
-                    tab: None,
-                    position: gpui::point(px(40.0), px(120.0)),
                     page: ChatMenuPage::Copy,
+                    ..ChatMenuState::for_row("regular", gpui::point(px(40.0), px(120.0)))
                 });
                 cx.notify();
             })

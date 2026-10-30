@@ -134,6 +134,12 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
     slopty_shell::live::serve_drafting(cx, |view, cx| {
         view.clone().downcast::<TerminalView>().is_ok_and(|terminal| terminal.read(cx).drafting())
     });
+    // A split dims its panes without the keyboard, by brightness alone, in their own element.
+    slopty_shell::live::serve_dim(cx, |view, dimmed, cx| {
+        if let Ok(terminal) = view.clone().downcast::<TerminalView>() {
+            terminal.update(cx, |terminal, cx| terminal.set_dimmed(dimmed, cx));
+        }
+    });
     // A line an orchestrating agent asks to run goes into the shell terminal it opened: typed and
     // run, or left at the prompt for the person to read first.
     let typed = view.downgrade();
@@ -157,7 +163,8 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
 }
 
 /// Call `changed` when the view `id` says something new of itself: what the workspace hears (a
-/// title, an end), and a terminal's progress, which only its tab shows.
+/// title, an end), a terminal's progress, which only its tab shows, and its ground, which the
+/// titlebar wears.
 fn watch(
     view: &Entity<WorkspaceView>,
     id: &str,
@@ -175,7 +182,7 @@ fn watch(
         .and_then(|live| live.view.downcast::<TerminalView>().ok());
     let Some(terminal) = terminal else { return Some(heard) };
     let progress = cx.subscribe(&terminal, move |_, event, cx| {
-        if matches!(event, TerminalViewEvent::Progress) {
+        if matches!(event, TerminalViewEvent::Progress | TerminalViewEvent::Ground(_)) {
             (changed.borrow_mut())(cx);
         }
     });
@@ -310,7 +317,7 @@ fn byte(channel: f32) -> u8 {
 }
 
 /// A terminal of the workspace, as the shell places it: also the status its program ended with,
-/// how far the program says it has got, and what a drop of files on it does.
+/// how far the program says it has got, what a drop of files on it does, and its ground.
 fn hosted_terminal(view: LiveView, cx: &App) -> Hosted {
     let terminal = view.view.clone().downcast::<TerminalView>().ok();
     let mut hosted = hosted(view);
@@ -319,6 +326,7 @@ fn hosted_terminal(view: LiveView, cx: &App) -> Hosted {
         hosted.exit = terminal.exited().flatten();
         hosted.progress = terminal.progress();
         hosted.drop = Some(drop_words(terminal.takes_drops(), terminal.title()));
+        hosted.ground = Some(slopty_kit::colors::hsla(terminal.ground()));
     }
     hosted
 }

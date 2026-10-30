@@ -46,9 +46,12 @@ actions!(terminal, [ToggleTerminal, NewTerminalTab]);
 /// slopty: the panel's key context, where its own tab keys bind.
 pub const KEY_CONTEXT: &str = "TerminalPanel";
 
-/// slopty: the session panel's contexts while it shows an agent's session, whose terminal's ⌘K
-/// opens the palette (`crate::shell::apply_keymap`).
-const AGENT_SESSION_CONTEXT: &str = "TerminalPanel AgentSession";
+/// What the shown terminal says of itself that the window's chrome wears changed: its ground
+/// ([`TerminalPanel::shown_ground`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShownChanged;
+
+impl gpui::EventEmitter<ShownChanged> for TerminalPanel {}
 
 /// Bind the terminal keymap (global): Cmd+J on Apple keyboards, Ctrl+J elsewhere.
 pub fn init(cx: &mut App) {
@@ -174,6 +177,9 @@ struct TerminalTab {
     exited: Option<i32>,
     /// slopty: how far the program says it has got (`OSC 9;4`), drawn on the tab.
     progress: Option<live::Progress>,
+    /// The background its program paints with (OSC 11, else the theme's), which the titlebar
+    /// row wears while this tab is the session's shown terminal.
+    ground: Option<gpui::Hsla>,
     /// slopty: hears the view's title and end.
     _watch: Option<Subscription>,
     /// The open; dropping it cancels it.
@@ -382,6 +388,13 @@ impl TerminalPanel {
         self.active_tab(cx)?.terminal_id.as_deref()
     }
 
+    /// The background the shown terminal's program paints with, once its view said: the
+    /// ground the titlebar row and the session's column wear (`docs/decisions/layout.md`, "One
+    /// row of chrome"). [`ShownChanged`] says when it changes.
+    pub fn shown_ground(&self, cx: &App) -> Option<gpui::Hsla> {
+        self.active_tab(cx)?.ground
+    }
+
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -507,6 +520,7 @@ impl TerminalPanel {
             failure: None,
             exited: None,
             progress: None,
+            ground: None,
             _watch: None,
             _run: None,
         });
@@ -930,11 +944,20 @@ impl TerminalPanel {
         };
         let look = TerminalLook::of(cx);
         let hosted = live::terminal(&id, &look, cx);
+        let shown = self.active_tab(cx).is_some_and(|tab| tab.key == key);
         if let Some(tab) = self.tab_mut(chat, key) {
-            let (title, ended, exit, progress) = hosted
-                .map_or((None, false, None, None), |h| (h.title, h.ended, h.exit, h.progress));
+            let (title, ended, exit, progress, ground) = hosted.map_or(
+                (None, false, None, None, None),
+                |h| (h.title, h.ended, h.exit, h.progress, h.ground),
+            );
             tab.shown_title = title;
             tab.progress = progress;
+            if tab.ground != ground {
+                tab.ground = ground;
+                if shown {
+                    cx.emit(ShownChanged);
+                }
+            }
             // The status the program ended with, when it said one.
             if ended && tab.exited.is_none() {
                 tab.exited = Some(exit.unwrap_or(0));
@@ -1469,14 +1492,7 @@ impl Render for TerminalPanel {
             .flex()
             .flex_col()
             // slopty: ⌘T and ⌘W act on the panel's tabs while it has the keyboard.
-            .key_context(if self.session
-                && crate::inspector::is_agent_session(&chat)
-                && !chat.starts_with(CANVAS_PANEL_PREFIX)
-            {
-                AGENT_SESSION_CONTEXT
-            } else {
-                KEY_CONTEXT
-            })
+            .key_context(KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &NewTerminalTab, _, cx| {
                 if this.embedded {
                     cx.propagate();
@@ -1650,7 +1666,7 @@ mod progress_tests {
     use gpui::AppContext as _;
     use slopty_view_rpc::{RpcError, RpcReply, methods};
 
-    use super::TerminalPanel;
+    use super::{ShownChanged, TerminalPanel};
     use crate::live::{Hosted, Progress};
 
     /// A machine that opens terminal 7 for every tab.
@@ -1684,18 +1700,22 @@ mod progress_tests {
 
     type Heard = Rc<RefCell<Vec<Box<dyn FnMut(&mut gpui::App)>>>>;
 
+    /// What a terminal's view says of its program reaches its tab: how far it has got, and the
+    /// background it paints, which the panel tells the window's chrome of once per change.
     #[gpui::test]
-    fn a_running_programs_progress_reaches_its_tab(cx: &mut gpui::TestAppContext) {
+    fn a_running_programs_progress_and_ground_reach_its_tab(cx: &mut gpui::TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         let reported = Rc::new(RefCell::new(None::<Progress>));
+        let painted = Rc::new(RefCell::new(None::<gpui::Hsla>));
         let heard: Heard = Rc::default();
         cx.update(|cx| {
             crate::settings::init(Default::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
-            let (reported, heard) = (Rc::clone(&reported), Rc::clone(&heard));
+            let (reported, painted, heard) =
+                (Rc::clone(&reported), Rc::clone(&painted), Rc::clone(&heard));
             crate::live::install(
                 cx,
                 move |id, _, cx| {
@@ -1707,7 +1727,7 @@ mod progress_tests {
                         exit: None,
                         progress: *reported.borrow(),
                         drop: None,
-                        ground: None,
+                        ground: *painted.borrow(),
                     })
                 },
                 |_, _| None,
@@ -1765,6 +1785,23 @@ mod progress_tests {
         *reported.borrow_mut() = None;
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_none()));
+
+        // The program paints its own background (OSC 11): the tab keeps it as the shown ground,
+        // and the chrome hears it once; the same ground said again is no news.
+        let told = Rc::new(std::cell::Cell::new(0));
+        let _told = cx.update(|_, cx| {
+            let told = Rc::clone(&told);
+            cx.subscribe(&panel, move |_, _: &ShownChanged, _| told.set(told.get() + 1))
+        });
+        let dark = gpui::hsla(0.55, 0.4, 0.08, 1.0);
+        *painted.borrow_mut() = Some(dark);
+        cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
+        settle(cx, &|cx| panel.read_with(cx, |panel, cx| panel.shown_ground(cx).is_some()));
+        assert_eq!(panel.read_with(cx, |panel, cx| panel.shown_ground(cx)), Some(dark));
+        assert_eq!(told.get(), 1, "told once");
+        cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
+        cx.run_until_parked();
+        assert_eq!(told.get(), 1, "the same ground again is no news");
     }
 
     /// A machine that opens terminal 7 and keeps what each open asked.

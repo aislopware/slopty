@@ -225,7 +225,8 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
     command!("Expand side pane", crate::icons::EXPAND_ARROWS, shell::ToggleExpandPane),
     command!("Toggle files panel", crate::icons::FOLDER_TREE, shell::ToggleFiles),
     command!("Toggle terminal", crate::icons::TERMINAL, crate::terminal::panel::ToggleTerminal),
-    command!("Inspector", crate::icons::EYE, shell::ToggleInspector),
+    // slopty: steps in time, as a trace reads; the eye is the inbox's (`layout.md`).
+    command!("Inspector", crate::icons::SORT_BY_TIME, shell::ToggleInspector),
 ];
 
 /// slopty: the Go menu's moves.

@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Entity};
+use gpui::{App, AppContext as _, Context, Entity};
 use slopty_client::{ItemChange, ItemRef, WorkerKey};
-use slopty_core::{ItemId, SessionId, StreamId};
+use slopty_core::{ItemId, SessionId, StreamId, WallMs};
 use slopty_proto::ClientMsg;
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{ItemKind, ItemSync};
@@ -475,6 +475,31 @@ impl WorkspaceView {
         self.workers.values().find_map(|w| w.sessions.get(&session))
     }
 
+    /// What a session's program is called, as the bar at its pane's foot names it once it
+    /// ended: the agent whose TUI runs in it, else its command's own name, else the shell.
+    fn session_program(&self, session: SessionId, cx: &App) -> String {
+        let agent = self.hubs().find_map(|(_, hub)| {
+            let threads = hub.read(cx).threads();
+            threads
+                .rows()
+                .rows
+                .values()
+                .find(|row| row.parent.is_none() && row.terminal() == Some(session))
+                .map(|row| crate::conversation::thread::hub::agent_label(&row.agent))
+        });
+        let command = self
+            .summary(session)
+            .and_then(|summary| summary.command.first())
+            .map(|word| word.rsplit('/').next().unwrap_or(word).to_owned());
+        agent.or(command).unwrap_or_else(|| "The shell".to_owned())
+    }
+
+    /// ↩ on the bar of a session whose program ended: its worker starts it again under the same
+    /// id, so its item, its row and its tab stay ([`TermRequest::Restart`]).
+    fn start_again(&self, session: SessionId) {
+        self.send_session(session, ClientMsg::Term { session, req: TermRequest::Restart });
+    }
+
     /// A session-stream event.
     pub fn term_event(&self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
         // A refusal the person caused (typing into a program that stopped reading, a request
@@ -550,11 +575,18 @@ impl WorkspaceView {
         });
         let theme = self.theme.clone();
         let clip = self.clip_hook(key);
+        // How long it had run when this view was made, so a run that ends quickly says so.
+        let started = w.sessions.get(&session).map(|s| s.started_ms.as_millis());
+        let ran = started.map_or(Duration::ZERO, |started| {
+            Duration::from_millis(WallMs::now().as_millis().saturating_sub(started))
+        });
+        let program = self.session_program(session, cx);
         let view = cx.new(|cx| {
             let mut view = TerminalView::new(session, size, link.out.clone(), theme, cx);
             if let Some(clip) = clip {
                 view.set_clip_hook(clip);
             }
+            view.set_run(program, ran, cx);
             view
         });
         let sid = session;
@@ -583,12 +615,18 @@ impl WorkspaceView {
             }
             TerminalViewEvent::OpenPage { url } => this.open_worker_page(sid, url, cx),
             TerminalViewEvent::ViewFile { path, line } => this.view_file(sid, path, *line, cx),
+            TerminalViewEvent::Browse { url } => this.browse(sid, url, cx),
+            TerminalViewEvent::ViewCommit { hash } => Self::view_commit(hash, cx),
+            TerminalViewEvent::StartAgain => this.start_again(sid),
             #[cfg(target_os = "macos")]
             TerminalViewEvent::DragOut { path } => this.drag_shell_path(sid, path, cx),
             #[cfg(not(target_os = "macos"))]
             TerminalViewEvent::DragOut { .. } => {}
-            // The shell draws the title and the progress.
-            TerminalViewEvent::Title(_) | TerminalViewEvent::Progress => {}
+            // The shell draws the title, the progress and the titlebar in the pane's ground,
+            // through the hosted view's watch.
+            TerminalViewEvent::Title(_)
+            | TerminalViewEvent::Progress
+            | TerminalViewEvent::Ground(_) => {}
         })
         .detach();
         w.send(ClientMsg::Term { session, req: TermRequest::Attach { size } });
