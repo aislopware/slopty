@@ -2,8 +2,13 @@
 name = "slopty-syntax"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Syntax highlighting over tree-sitter: byte-ranged spans per source line, with no UI"
+
+[lints]
+workspace = true
 
 [dependencies]
 thiserror = "2"

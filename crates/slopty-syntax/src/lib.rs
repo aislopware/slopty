@@ -4,19 +4,31 @@
 //! This crate intentionally has no UI, RPC, or engine dependencies. Public
 //! ranges are byte offsets relative to one UTF-8 source line.
 
-use std::collections::BTreeSet;
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+/// The largest source highlighted by default: 1 MiB.
 pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
+/// The most spans one document yields by default.
 pub const DEFAULT_MAX_SPANS: usize = 200_000;
 
+/// What one highlight may cost before it gives up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HighlightLimits {
+    /// A longer source is refused with [`HighlightError::SourceTooLarge`].
     pub max_source_bytes: usize,
+    /// Past this many spans the highlight stops with [`HighlightError::TooManySpans`].
     pub max_spans: usize,
 }
 
@@ -26,71 +38,133 @@ impl Default for HighlightLimits {
     }
 }
 
+/// A language this crate highlights.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LanguageId {
+    /// Rust (`.rs`).
     Rust,
+    /// JavaScript (`.js`, `.mjs`, `.cjs`).
     JavaScript,
+    /// JavaScript with JSX (`.jsx`).
     Jsx,
+    /// TypeScript (`.ts`, `.mts`, `.cts`).
     TypeScript,
+    /// TypeScript with JSX (`.tsx`).
     Tsx,
+    /// Python (`.py`).
     Python,
+    /// Go (`.go`).
     Go,
+    /// JSON (`.json`).
     Json,
+    /// JSON with comments (`.jsonc`).
     Jsonc,
+    /// Bash and the POSIX shells (`.sh`, `.bash`, `.zsh`).
     Bash,
+    /// TOML (`.toml`).
     Toml,
+    /// Markdown (`.md`), its fenced code highlighted in the fence's language.
     Markdown,
+    /// HTML (`.html`), its scripts and styles highlighted too.
     Html,
+    /// CSS (`.css`).
     Css,
+    /// YAML (`.yaml`, `.yml`).
     Yaml,
+    /// C (`.c`).
     C,
+    /// C++ (`.cpp`, `.cc`, `.hpp`).
     Cpp,
+    /// C# (`.cs`).
     CSharp,
+    /// Java (`.java`).
     Java,
+    /// Kotlin (`.kt`, `.kts`).
     Kotlin,
+    /// Swift (`.swift`).
     Swift,
+    /// Ruby (`.rb`).
     Ruby,
+    /// PHP (`.php`).
     Php,
+    /// SQL (`.sql`).
     Sql,
+    /// Lua (`.lua`).
     Lua,
+    /// Luau (`.luau`), the Lua dialect agent visuals are written in.
     Luau,
+    /// Dockerfile and Containerfile.
     Dockerfile,
+    /// Nix (`.nix`).
     Nix,
+    /// Makefiles.
     Make,
 }
 
+/// What a highlighted span is, as the theme colours it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HighlightKind {
+    /// Comments.
     Comment,
+    /// Keywords.
     Keyword,
+    /// String literals.
     String,
+    /// Special strings: regexes, symbols, paths.
     StringSpecial,
+    /// Escape sequences inside strings.
     Escape,
+    /// Numeric literals.
     Number,
+    /// Boolean literals.
     Boolean,
+    /// Type names.
     Type,
+    /// The language's built-in types.
     TypeBuiltin,
+    /// Constructors and enum variants.
     Constructor,
+    /// Function names.
     Function,
+    /// The language's built-in functions.
     FunctionBuiltin,
+    /// Macros.
     Macro,
+    /// Fields and properties.
     Property,
+    /// Constants.
     Constant,
+    /// Variables.
     Variable,
+    /// Built-in variables: `self`, `this`, `super`.
     VariableSpecial,
+    /// Parameters.
     Parameter,
+    /// Operators.
     Operator,
+    /// Brackets, delimiters and other punctuation.
     Punctuation,
+    /// Markup tags.
     Tag,
+    /// Attributes and annotations.
     Attribute,
+    /// Labels.
     Label,
+    /// Markdown headings.
     MarkupHeading,
+    /// Markdown code spans and blocks.
     MarkupRaw,
+    /// Markdown link destinations.
     MarkupLink,
+    /// Markdown link text and references.
     MarkupReference,
+    /// Markdown emphasis.
     MarkupEmphasis,
+    /// Markdown strong emphasis.
     MarkupStrong,
+    /// Code embedded in another language.
     Embedded,
+    /// Text the grammar could not parse.
     Invalid,
 }
 
@@ -121,39 +195,70 @@ impl HighlightKind {
     }
 }
 
+/// One highlighted run of a line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSpan {
+    /// Byte offsets within the line (absolute in the source before
+    /// [`HighlightedDocument::from_absolute_spans`] splits it).
     pub range: Range<usize>,
+    /// What the run is.
     pub kind: HighlightKind,
 }
 
+/// A highlighted source, line by line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightedDocument {
+    /// The language it was highlighted as.
     pub language: LanguageId,
+    /// Each source line's spans, ordered and disjoint; a line with nothing highlighted is empty.
     pub lines: Vec<Vec<HighlightSpan>>,
 }
 
+/// A source to highlight and what names its language.
 #[derive(Debug, Clone, Copy)]
 pub struct HighlightRequest<'a> {
+    /// The whole source.
     pub source: &'a str,
+    /// The file's path, whose name or extension names the language.
     pub path: Option<&'a str>,
+    /// A Markdown fence's info string, which names the language ahead of the path.
     pub fence_tag: Option<&'a str>,
 }
 
+/// Why a source was not highlighted.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum HighlightError {
+    /// Neither the fence, the path nor a shebang names a language this crate knows.
     #[error("the source language is not registered")]
     UnknownLanguage,
+    /// A span runs backwards or past the source's end.
     #[error("highlight range {start}..{end} is invalid for a {len}-byte source")]
-    InvalidRange { start: usize, end: usize, len: usize },
+    InvalidRange {
+        /// The span's first byte.
+        start: usize,
+        /// The byte past the span's last.
+        end: usize,
+        /// The source's length in bytes.
+        len: usize,
+    },
+    /// A span starts or ends inside a UTF-8 character.
     #[error("highlight range {start}..{end} is not on UTF-8 boundaries")]
-    InvalidUtf8Boundary { start: usize, end: usize },
+    InvalidUtf8Boundary {
+        /// The span's first byte.
+        start: usize,
+        /// The byte past the span's last.
+        end: usize,
+    },
+    /// The source is longer than [`HighlightLimits::max_source_bytes`].
     #[error("source exceeds the configured highlighting limit")]
     SourceTooLarge,
+    /// The source yields more than [`HighlightLimits::max_spans`] spans.
     #[error("highlight output exceeds the configured span limit")]
     TooManySpans,
+    /// tree-sitter refused the grammar's queries or stopped mid-parse (cancelled, or timed out).
     #[error("parser failed: {0}")]
     Parser(String),
+    /// The language is known but its grammar is not in this build.
     #[error("the {0:?} grammar is not bundled")]
     GrammarUnavailable(LanguageId),
 }
@@ -172,21 +277,28 @@ impl HighlightedDocument {
             if span.range.is_empty() {
                 continue;
             }
-            let first_line = starts.partition_point(|&start| start <= span.range.start) - 1;
+            // `starts[0]` is 0, so the line holding the span's start is the last one at or
+            // before it.
+            let first_line =
+                starts.partition_point(|&start| start <= span.range.start).saturating_sub(1);
             for (line_ix, &start) in starts.iter().enumerate().skip(first_line) {
-                let raw_end = starts.get(line_ix + 1).copied().unwrap_or(source.len());
+                let raw_end =
+                    starts.get(line_ix.saturating_add(1)).copied().unwrap_or(source.len());
                 let mut end = raw_end;
                 if source.as_bytes().get(end.wrapping_sub(1)) == Some(&b'\n') {
-                    end -= 1;
+                    end = end.saturating_sub(1);
                     if source.as_bytes().get(end.wrapping_sub(1)) == Some(&b'\r') {
-                        end -= 1;
+                        end = end.saturating_sub(1);
                     }
                 }
                 let segment_start = span.range.start.max(start);
                 let segment_end = span.range.end.min(end);
-                if segment_start < segment_end {
-                    lines[line_ix].push(HighlightSpan {
-                        range: segment_start - start..segment_end - start,
+                if segment_start < segment_end
+                    && let Some(line) = lines.get_mut(line_ix)
+                {
+                    line.push(HighlightSpan {
+                        range: segment_start.saturating_sub(start)
+                            ..segment_end.saturating_sub(start),
                         kind: span.kind,
                     });
                 }
@@ -196,13 +308,13 @@ impl HighlightedDocument {
             }
         }
         for line in &mut lines {
-            *line = normalize_line(std::mem::take(line));
+            *line = normalize_line(line);
         }
         Ok(Self { language, lines })
     }
 }
 
-fn validate_span(source: &str, range: &Range<usize>) -> Result<(), HighlightError> {
+const fn validate_span(source: &str, range: &Range<usize>) -> Result<(), HighlightError> {
     if range.start > range.end || range.end > source.len() {
         return Err(HighlightError::InvalidRange {
             start: range.start,
@@ -216,50 +328,46 @@ fn validate_span(source: &str, range: &Range<usize>) -> Result<(), HighlightErro
     Ok(())
 }
 
-fn normalize_line(spans: Vec<HighlightSpan>) -> Vec<HighlightSpan> {
-    #[derive(Clone, Copy)]
-    enum Edge {
-        Start(usize),
-        End(usize),
+fn normalize_line(spans: &[HighlightSpan]) -> Vec<HighlightSpan> {
+    /// A span's start or end: where it is, which span (by precedence, then index), and its kind.
+    struct Edge {
+        offset: usize,
+        start: bool,
+        rank: (u8, usize),
+        kind: HighlightKind,
     }
 
     let mut edges = spans
         .iter()
         .enumerate()
         .flat_map(|(index, span)| {
-            [(span.range.start, Edge::Start(index)), (span.range.end, Edge::End(index))]
+            let rank = (span.kind.precedence(), index);
+            [
+                Edge { offset: span.range.start, start: true, rank, kind: span.kind },
+                Edge { offset: span.range.end, start: false, rank, kind: span.kind },
+            ]
         })
         .collect::<Vec<_>>();
-    edges.sort_unstable_by_key(|(offset, _)| *offset);
+    edges.sort_unstable_by_key(|edge| edge.offset);
 
     // The span index is the tie-breaker so equal-precedence overlaps retain
     // the old `Iterator::max_by_key` behavior (the later span wins).
-    let mut active = BTreeSet::new();
+    let mut active = BTreeMap::new();
     let mut normalized: Vec<HighlightSpan> = Vec::new();
-    let mut cursor = 0;
-    while cursor < edges.len() {
-        let offset = edges[cursor].0;
-        let group_start = cursor;
-        while cursor < edges.len() && edges[cursor].0 == offset {
-            if let Edge::End(index) = edges[cursor].1 {
-                active.remove(&(spans[index].kind.precedence(), index));
-            }
-            cursor += 1;
+    let mut groups = edges.chunk_by(|a, b| a.offset == b.offset).peekable();
+    while let Some(group) = groups.next() {
+        for edge in group.iter().filter(|edge| !edge.start) {
+            active.remove(&edge.rank);
         }
-        for (_, edge) in &edges[group_start..cursor] {
-            if let Edge::Start(index) = *edge {
-                active.insert((spans[index].kind.precedence(), index));
-            }
+        for edge in group.iter().filter(|edge| edge.start) {
+            active.insert(edge.rank, edge.kind);
         }
-
-        let Some(next_offset) = edges.get(cursor).map(|(next, _)| *next) else {
+        let (Some(here), Some(next)) = (group.first(), groups.peek().and_then(|g| g.first()))
+        else {
             break;
         };
-        if offset == next_offset {
-            continue;
-        }
-        if let Some((_, index)) = active.last().copied() {
-            let kind = spans[index].kind;
+        let (offset, next_offset) = (here.offset, next.offset);
+        if let Some((_, &kind)) = active.last_key_value() {
             if let Some(previous) = normalized.last_mut()
                 && previous.kind == kind
                 && previous.range.end == offset
@@ -278,15 +386,14 @@ fn line_starts(source: &str) -> Vec<usize> {
     starts.extend(
         source
             .match_indices('\n')
-            .map(|(index, _)| index + 1)
+            .map(|(index, _)| index.saturating_add(1))
             .filter(|start| *start < source.len()),
     );
     starts
 }
 
 /// Whether this build contains a parser and compatible highlight queries.
-pub const fn supports_language(language: LanguageId) -> bool {
-    let _ = language;
+pub const fn supports_language(_language: LanguageId) -> bool {
     true
 }
 
@@ -337,16 +444,21 @@ pub fn highlight_with_limits(
         )
         .map_err(|error| HighlightError::Parser(error.to_string()))?;
 
-    let mut active = Vec::new();
+    // Each open capture's kind, `None` for one outside `CAPTURE_KINDS` (it still closes).
+    let mut active: Vec<Option<HighlightKind>> = Vec::new();
     let mut spans = Vec::new();
     for event in events {
         match event.map_err(|error| HighlightError::Parser(error.to_string()))? {
-            HighlightEvent::HighlightStart(highlight) => active.push(CAPTURE_KINDS[highlight.0]),
+            HighlightEvent::HighlightStart(highlight) => {
+                active.push(CAPTURE_KINDS.get(highlight.0).copied());
+            }
             HighlightEvent::HighlightEnd => {
                 active.pop();
             }
             HighlightEvent::Source { start, end } => {
-                if let Some(kind) = active.iter().copied().max_by_key(|kind| kind.precedence()) {
+                if let Some(kind) =
+                    active.iter().flatten().copied().max_by_key(|kind| kind.precedence())
+                {
                     spans.push(HighlightSpan { range: start..end, kind });
                     if spans.len() > limits.max_spans {
                         return Err(HighlightError::TooManySpans);
@@ -359,15 +471,40 @@ pub fn highlight_with_limits(
 }
 
 fn injected_languages(parent: LanguageId) -> Vec<LanguageId> {
-    use LanguageId::*;
+    use LanguageId as L;
     match parent {
-        Html => vec![JavaScript, Css, Json],
-        Markdown => vec![
-            Rust, JavaScript, Jsx, TypeScript, Tsx, Python, Go, Json, Jsonc, Bash, Toml, Html, Css,
-            Yaml, C, Cpp, CSharp, Java, Kotlin, Swift, Ruby, Php, Sql, Lua, Luau, Dockerfile, Nix,
-            Make,
+        L::Html => vec![L::JavaScript, L::Css, L::Json],
+        L::Markdown => vec![
+            L::Rust,
+            L::JavaScript,
+            L::Jsx,
+            L::TypeScript,
+            L::Tsx,
+            L::Python,
+            L::Go,
+            L::Json,
+            L::Jsonc,
+            L::Bash,
+            L::Toml,
+            L::Html,
+            L::Css,
+            L::Yaml,
+            L::C,
+            L::Cpp,
+            L::CSharp,
+            L::Java,
+            L::Kotlin,
+            L::Swift,
+            L::Ruby,
+            L::Php,
+            L::Sql,
+            L::Lua,
+            L::Luau,
+            L::Dockerfile,
+            L::Nix,
+            L::Make,
         ],
-        Dockerfile => vec![Bash, Json, Yaml, Toml],
+        L::Dockerfile => vec![L::Bash, L::Json, L::Yaml, L::Toml],
         _ => Vec::new(),
     }
 }
@@ -516,190 +653,178 @@ fn make_configuration(
         .map_err(|error| HighlightError::Parser(error.to_string()))
 }
 
-fn javascript_family_highlights(language: LanguageId) -> String {
-    use LanguageId::*;
-
-    let queries = match language {
-        JavaScript => &[tree_sitter_javascript::HIGHLIGHT_QUERY][..],
-        Jsx => {
-            &[tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_javascript::JSX_HIGHLIGHT_QUERY]
-                [..]
-        }
-        TypeScript => {
-            &[tree_sitter_javascript::HIGHLIGHT_QUERY, tree_sitter_typescript::HIGHLIGHTS_QUERY][..]
-        }
-        Tsx => &[
-            tree_sitter_javascript::HIGHLIGHT_QUERY,
-            tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
-            tree_sitter_typescript::HIGHLIGHTS_QUERY,
-        ][..],
-        _ => unreachable!("JavaScript query composition requires a JavaScript-family language"),
-    };
-    queries.join("\n")
-}
-
+/// The JavaScript family's configuration: JavaScript, TypeScript and their JSX dialects share
+/// JavaScript's highlights, each adding its own on top.
 fn javascript_family_configuration(
     language: LanguageId,
 ) -> Result<HighlightConfiguration, HighlightError> {
-    use LanguageId::*;
+    use LanguageId as L;
+    use tree_sitter_javascript as js;
+    use tree_sitter_typescript as ts;
 
-    let highlights = javascript_family_highlights(language);
-    let (grammar, name, injections, locals) = match language {
-        JavaScript => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            "javascript",
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            tree_sitter_javascript::LOCALS_QUERY,
-        ),
-        Jsx => (
-            tree_sitter_javascript::LANGUAGE.into(),
-            "jsx",
-            tree_sitter_javascript::INJECTIONS_QUERY,
-            tree_sitter_javascript::LOCALS_QUERY,
-        ),
-        TypeScript => (
-            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-            "typescript",
-            "",
-            tree_sitter_typescript::LOCALS_QUERY,
-        ),
-        Tsx => (
-            tree_sitter_typescript::LANGUAGE_TSX.into(),
-            "tsx",
-            "",
-            tree_sitter_typescript::LOCALS_QUERY,
-        ),
-        _ => unreachable!("JavaScript configuration requires a JavaScript-family language"),
-    };
-    make_configuration(grammar, name, &highlights, injections, locals)
+    let (grammar, name, highlights, injections, locals): (tree_sitter::Language, _, &[&str], _, _) =
+        match language {
+            L::JavaScript => (
+                js::LANGUAGE.into(),
+                "javascript",
+                &[js::HIGHLIGHT_QUERY],
+                js::INJECTIONS_QUERY,
+                js::LOCALS_QUERY,
+            ),
+            L::Jsx => (
+                js::LANGUAGE.into(),
+                "jsx",
+                &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY],
+                js::INJECTIONS_QUERY,
+                js::LOCALS_QUERY,
+            ),
+            L::TypeScript => (
+                ts::LANGUAGE_TYPESCRIPT.into(),
+                "typescript",
+                &[js::HIGHLIGHT_QUERY, ts::HIGHLIGHTS_QUERY],
+                "",
+                ts::LOCALS_QUERY,
+            ),
+            L::Tsx => (
+                ts::LANGUAGE_TSX.into(),
+                "tsx",
+                &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY, ts::HIGHLIGHTS_QUERY],
+                "",
+                ts::LOCALS_QUERY,
+            ),
+            _ => return Err(HighlightError::GrammarUnavailable(language)),
+        };
+    make_configuration(grammar, name, &highlights.join("\n"), injections, locals)
 }
 
 fn configuration(language: LanguageId) -> Result<HighlightConfiguration, HighlightError> {
-    use LanguageId::*;
+    use LanguageId as L;
     match language {
-        Rust => rust_configuration(),
-        JavaScript | Jsx | TypeScript | Tsx => javascript_family_configuration(language),
-        Python => make_configuration(
+        L::Rust => rust_configuration(),
+        L::JavaScript | L::Jsx | L::TypeScript | L::Tsx => {
+            javascript_family_configuration(language)
+        }
+        L::Python => make_configuration(
             tree_sitter_python::LANGUAGE.into(),
             "python",
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Go => make_configuration(
+        L::Go => make_configuration(
             tree_sitter_go::LANGUAGE.into(),
             "go",
             tree_sitter_go::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Json | Jsonc => make_configuration(
+        L::Json | L::Jsonc => make_configuration(
             tree_sitter_json::LANGUAGE.into(),
             "json",
             tree_sitter_json::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Bash => make_configuration(
+        L::Bash => make_configuration(
             tree_sitter_bash::LANGUAGE.into(),
             "bash",
             tree_sitter_bash::HIGHLIGHT_QUERY,
             "",
             "",
         ),
-        Toml => make_configuration(
+        L::Toml => make_configuration(
             tree_sitter_toml_ng::LANGUAGE.into(),
             "toml",
             tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Markdown => markdown_configuration(),
-        Html => make_configuration(
+        L::Markdown => markdown_configuration(),
+        L::Html => make_configuration(
             tree_sitter_html::LANGUAGE.into(),
             "html",
             tree_sitter_html::HIGHLIGHTS_QUERY,
             tree_sitter_html::INJECTIONS_QUERY,
             "",
         ),
-        Css => make_configuration(
+        L::Css => make_configuration(
             tree_sitter_css::LANGUAGE.into(),
             "css",
             tree_sitter_css::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Yaml => make_configuration(
+        L::Yaml => make_configuration(
             tree_sitter_yaml::LANGUAGE.into(),
             "yaml",
             tree_sitter_yaml::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        C => make_configuration(
+        L::C => make_configuration(
             tree_sitter_c::LANGUAGE.into(),
             "c",
             tree_sitter_c::HIGHLIGHT_QUERY,
             "",
             "",
         ),
-        Cpp => make_configuration(
+        L::Cpp => make_configuration(
             tree_sitter_cpp::LANGUAGE.into(),
             "cpp",
             &format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY),
             "",
             "",
         ),
-        CSharp => make_configuration(
+        L::CSharp => make_configuration(
             tree_sitter_c_sharp::LANGUAGE.into(),
             "csharp",
             tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Java => make_configuration(
+        L::Java => make_configuration(
             tree_sitter_java::LANGUAGE.into(),
             "java",
             tree_sitter_java::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Kotlin => make_configuration(
+        L::Kotlin => make_configuration(
             tree_sitter_kotlin_ng::LANGUAGE.into(),
             "kotlin",
             include_str!("../queries/kotlin/highlights.scm"),
             "",
             "",
         ),
-        Swift => make_configuration(
+        L::Swift => make_configuration(
             tree_sitter_swift::LANGUAGE.into(),
             "swift",
             tree_sitter_swift::HIGHLIGHTS_QUERY,
             "",
             tree_sitter_swift::LOCALS_QUERY,
         ),
-        Ruby => make_configuration(
+        L::Ruby => make_configuration(
             tree_sitter_ruby::LANGUAGE.into(),
             "ruby",
             tree_sitter_ruby::HIGHLIGHTS_QUERY,
             "",
             tree_sitter_ruby::LOCALS_QUERY,
         ),
-        Php => make_configuration(
+        L::Php => make_configuration(
             tree_sitter_php::LANGUAGE_PHP.into(),
             "php",
             tree_sitter_php::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Sql => make_configuration(
+        L::Sql => make_configuration(
             tree_sitter_sequel::LANGUAGE.into(),
             "sql",
             tree_sitter_sequel::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Lua => make_configuration(
+        L::Lua => make_configuration(
             tree_sitter_lua::LANGUAGE.into(),
             "lua",
             tree_sitter_lua::HIGHLIGHTS_QUERY,
@@ -708,28 +833,28 @@ fn configuration(language: LanguageId) -> Result<HighlightConfiguration, Highlig
         ),
         // Its locals query names definitions `local.definition.var` and the
         // like, which tree-sitter-highlight doesn't resolve: no locals.
-        Luau => make_configuration(
+        L::Luau => make_configuration(
             tree_sitter_luau::LANGUAGE.into(),
             "luau",
             &luau_highlights(),
             "",
             "",
         ),
-        Nix => make_configuration(
+        L::Nix => make_configuration(
             tree_sitter_nix::LANGUAGE.into(),
             "nix",
             tree_sitter_nix::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Make => make_configuration(
+        L::Make => make_configuration(
             tree_sitter_make::LANGUAGE.into(),
             "make",
             tree_sitter_make::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
-        Dockerfile => make_configuration(
+        L::Dockerfile => make_configuration(
             tree_sitter_containerfile::LANGUAGE.into(),
             "dockerfile",
             tree_sitter_containerfile::HIGHLIGHTS_QUERY,
@@ -809,6 +934,8 @@ const CAPTURE_KINDS: &[HighlightKind] = &[
     HighlightKind::Invalid,
 ];
 
+/// The language a source is in, named by its Markdown fence tag first, then its path, then a
+/// shebang on its first line.
 pub fn detect_language(
     path: Option<&str>,
     fence_tag: Option<&str>,
@@ -820,6 +947,8 @@ pub fn detect_language(
         .or_else(|| first_line.and_then(language_for_shebang))
 }
 
+/// The language a name or extension stands for (`rs`, `typescript`, `c++`), case-insensitive;
+/// a fence's info string is read up to its first space.
 pub fn language_for_alias(alias: &str) -> Option<LanguageId> {
     let alias = alias.trim().split_ascii_whitespace().next()?.to_ascii_lowercase();
     Some(match alias.as_str() {
@@ -856,6 +985,7 @@ pub fn language_for_alias(alias: &str) -> Option<LanguageId> {
     })
 }
 
+/// The language a file is in, by its name (`Dockerfile`, `Cargo.lock`) or else its extension.
 pub fn language_for_path(path: &str) -> Option<LanguageId> {
     let path = Path::new(path);
     let name = path.file_name()?.to_str()?;
@@ -885,29 +1015,29 @@ fn language_for_shebang(line: &str) -> Option<LanguageId> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn compiled_queries_are_shared_across_concurrent_documents() {
-        let config = super::cached_configuration(super::LanguageId::Rust).unwrap();
+        let config = cached_configuration(LanguageId::Rust).unwrap();
         std::thread::scope(|scope| {
             for i in 0..8 {
                 scope.spawn(move || {
-                    let shared = super::cached_configuration(super::LanguageId::Rust).unwrap();
+                    let shared = cached_configuration(LanguageId::Rust).unwrap();
                     assert!(std::ptr::eq(config, shared));
                     let source = format!("fn example_{i}() {{ let value = {i}; }}");
-                    let document = super::highlight(super::HighlightRequest {
+                    let document = highlight(HighlightRequest {
                         source: &source,
                         path: None,
                         fence_tag: Some("rust"),
                     })
                     .unwrap();
-                    assert_eq!(document.language, super::LanguageId::Rust);
+                    assert_eq!(document.language, LanguageId::Rust);
                     assert!(document.lines.iter().flatten().next().is_some());
                 });
             }
         });
     }
-
-    use super::*;
 
     #[test]
     fn aliases_keep_language_variants_distinct() {
@@ -985,7 +1115,7 @@ mod tests {
 
     #[test]
     fn normalization_preserves_overlap_precedence_and_tie_order() {
-        let normalized = normalize_line(vec![
+        let normalized = normalize_line(&[
             HighlightSpan { range: 0..10, kind: HighlightKind::Variable },
             HighlightSpan { range: 2..8, kind: HighlightKind::Keyword },
             HighlightSpan { range: 4..6, kind: HighlightKind::String },
@@ -1025,7 +1155,7 @@ mod tests {
             .lines()
             .zip(document.lines)
             .flat_map(|(line, spans)| {
-                spans.into_iter().map(move |span| (&line[span.range], span.kind))
+                spans.into_iter().map(move |span| (line.get(span.range).unwrap(), span.kind))
             })
             .collect()
     }
@@ -1155,7 +1285,7 @@ print(typeof(label), self)"#;
 
     #[test]
     fn rust_queries_load_for_the_bundled_abi() {
-        assert!(rust_configuration().is_ok());
+        rust_configuration().unwrap();
         let language_version = std::hint::black_box(tree_sitter::LANGUAGE_VERSION);
         assert!(language_version >= tree_sitter::MIN_COMPATIBLE_LANGUAGE_VERSION);
     }
