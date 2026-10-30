@@ -9465,7 +9465,6 @@ dependencies = [
  "similar 3.2.0",
  "slopty-view-proto",
  "thiserror 2.0.21",
- "tracing",
 ]
 
 [[package]]
