@@ -1,10 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Streaming fade veil — per-appended-chunk opacity over already-committed text.
 //!
-//! The desktop app (docs/research/mugen-pretext.md §2e) commits streamed text to
-//! layout instantly and dissolves a purely cosmetic veil over the newly arrived
-//! characters. This crate is the renderer-agnostic part, shared by the desktop
-//! transcript (`slopty-shell`, which recolors GPUI text runs) and the voice call
+//! The desktop app commits streamed text to layout instantly and dissolves a purely cosmetic
+//! veil over the newly arrived characters. This crate is the renderer-agnostic part, shared by
+//! the desktop transcript (`slopty-shell`, which recolors GPUI text runs) and the voice call
 //! captions on desktop and mobile:
 //!
 //! - [`ElemVeil`] tracks, per rendered text element, the previously rendered flat text. Each append
@@ -14,13 +13,18 @@
 //! - [`CaptionVeil`] veils a live caption shown as the tail of a long utterance, and fades the
 //!   previous utterance out when the speaker turn changes.
 //!
-//! Constants and curve match mugen-markdown's web `FadePainter` (the engine the
-//! desktop app ships): per-chunk duration adapts to the stream's cadence — an
-//! EMA of inter-append gaps, `duration = clamp(ema × 3, 120ms, 400ms)` — the
-//! dissolve eases with `veil = (1 − p)^1.6` (text alpha `1 − veil`), and a
-//! backed-up stream (3+ concurrent chunks) gets a small speed boost. **Zero
-//! translate** — opacity only, per the "no positional offset on streamed
-//! content" rule.
+//! Per-chunk duration adapts to the stream's cadence — an EMA of inter-append gaps,
+//! `duration = clamp(ema × 3, 120ms, 400ms)` — the dissolve eases with `veil = (1 − p)^1.6`
+//! (text alpha `1 − veil`), and a backed-up stream (3+ concurrent chunks) gets a small speed
+//! boost. **Zero translate** — opacity only, per the "no positional offset on streamed content"
+//! rule.
+
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 mod caption;
 use std::collections::HashMap;
@@ -29,14 +33,15 @@ use std::time::Instant;
 
 pub use caption::{CAPTION_EXIT_MS, CaptionFrame, CaptionVeil, caption_tail};
 
-/// EMA seed for the inter-append gap (mugen `EMA_SEED_MS`).
+/// EMA seed for the inter-append gap.
 pub const VEIL_EMA_SEED_MS: f32 = 160.0;
-/// Duration clamp (mugen `MIN_FADE_MS` / `MAX_FADE_MS`).
+/// The shortest a chunk's fade lasts, however fast the stream.
 pub const VEIL_MIN_FADE_MS: f32 = 120.0;
+/// The longest a chunk's fade lasts, however slow the stream.
 pub const VEIL_MAX_FADE_MS: f32 = 400.0;
-/// Dissolve exponent (mugen: `alpha = (1 - p) ** 1.6`).
+/// Dissolve exponent: the veil is `(1 − p)^1.6`.
 pub const VEIL_CURVE_POW: f32 = 1.6;
-/// Gap clamp feeding the EMA (mugen: `min(gap, 1000)`).
+/// The longest gap the EMA takes in: a pause counts as one second.
 const VEIL_GAP_CLAMP_MS: f32 = 1000.0;
 
 /// One appended chunk of text mid-fade.
@@ -58,21 +63,21 @@ pub fn veil_opacity(p: f32) -> f32 {
     1.0 - (1.0 - p.clamp(0.0, 1.0)).powf(VEIL_CURVE_POW)
 }
 
-/// Chunk fade duration for the current inter-append EMA (mugen:
-/// `min(MAX, max(MIN, ema * 3))`).
+/// Chunk fade duration for the current inter-append EMA: `clamp(ema × 3, MIN, MAX)`.
 pub fn veil_duration_ms(ema_ms: f32) -> f32 {
     (ema_ms * 3.0).clamp(VEIL_MIN_FADE_MS, VEIL_MAX_FADE_MS)
 }
 
-/// Fast-stream boost: 3+ chunks fading concurrently speed up by 30% each
-/// (mugen: `1 + 0.3 * max(0, veils.length - 2)`).
+/// Fast-stream boost: from the third chunk fading concurrently, each one speeds the fades up by
+/// 30 %: `1 + 0.3 × max(0, chunks − 2)`.
 pub fn veil_boost(active_chunks: usize) -> f32 {
-    1.0 + 0.3 * active_chunks.saturating_sub(2) as f32
+    let extra = u16::try_from(active_chunks.saturating_sub(2)).unwrap_or(u16::MAX);
+    0.3_f32.mul_add(f32::from(extra), 1.0)
 }
 
-/// EMA update on a new append gap (mugen: `ema*0.7 + min(gap,1000)*0.3`).
+/// EMA update on a new append gap: `ema × 0.7 + min(gap, 1000) × 0.3`.
 pub fn veil_ema_next(ema_ms: f32, gap_ms: f32) -> f32 {
-    ema_ms * 0.7 + gap_ms.min(VEIL_GAP_CLAMP_MS) * 0.3
+    ema_ms.mul_add(0.7, gap_ms.min(VEIL_GAP_CLAMP_MS) * 0.3)
 }
 
 /// Per-element chunk tracker: remembers the last rendered flat text and fades
@@ -99,18 +104,13 @@ impl Default for ElemVeil {
 
 /// Longest common prefix length, snapped back to a char boundary.
 fn common_prefix(a: &str, b: &str) -> usize {
-    let mut p = a.as_bytes().iter().zip(b.as_bytes()).take_while(|(x, y)| x == y).count();
-    while p > 0 && !b.is_char_boundary(p) {
-        p -= 1;
-    }
-    p
+    let p = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    b.floor_char_boundary(p)
 }
 
 impl ElemVeil {
-    /// Adopt `text` as the committed baseline without fading it — the attach
-    /// semantics of mugen's `FadePainter.attach` (`length =
-    /// chromeFreeLength(content)`): content already on screen when the painter
-    /// attaches never animates; only later appends do.
+    /// Adopt `text` as the committed baseline without fading it: content already on screen
+    /// when the painter attaches never animates; only later appends do.
     fn seed(&mut self, text: &str) {
         self.prev.clear();
         self.prev.push_str(text);
@@ -131,8 +131,8 @@ impl ElemVeil {
                 c.range.start < c.range.end
             });
             if text.len() > p {
-                // Cadence-adaptive duration (mugen FadePainter): update the
-                // EMA with the gap since the previous append.
+                // Cadence-adaptive duration: update the EMA with the gap since the
+                // previous append.
                 if let Some(last) = self.last_append {
                     let gap = now.saturating_duration_since(last).as_secs_f32() * 1000.0;
                     self.ema_ms = veil_ema_next(self.ema_ms, gap);
@@ -164,14 +164,16 @@ impl ElemVeil {
     }
 
     /// Any chunk still fading (as of the last [`advance`](Self::advance))?
-    pub fn is_fading(&self) -> bool {
+    pub const fn is_fading(&self) -> bool {
         !self.chunks.is_empty()
     }
 }
 
-/// Veil state for one live streaming row, keyed by the render tree's stable
-/// per-element discriminator (top-level block ix / nested ix scheme — stable
-/// across appends because the incremental parser only reparses the tail).
+/// Veil state for one live streaming row, per rendered element.
+///
+/// Elements are keyed by the render tree's stable per-element discriminator (top-level block
+/// ix / nested ix scheme — stable across appends because the incremental parser only reparses
+/// the tail).
 #[derive(Debug, Default)]
 pub struct RowVeil {
     elems: HashMap<usize, ElemVeil>,
@@ -179,7 +181,7 @@ pub struct RowVeil {
     /// current text as the committed baseline instead of fading it in. Set for
     /// rows that already carried text when the transcript (re)attached to the
     /// chat — switching back to a streaming session must not dissolve the
-    /// whole existing reply (user report; mugen's `FadePainter.attach` baseline).
+    /// whole existing reply.
     seeding: bool,
 }
 
@@ -191,10 +193,13 @@ impl RowVeil {
 
     /// The attach pass is over — elements that appear from here on are newly
     /// streamed content and fade normally.
-    pub fn finish_seeding(&mut self) {
+    pub const fn finish_seeding(&mut self) {
         self.seeding = false;
     }
 
+    /// Advance element `elem` to `text` at `now`, as [`ElemVeil::advance`] does, and return its
+    /// active spans. An element first seen while seeding adopts `text` as its baseline and
+    /// returns none.
     pub fn advance(&mut self, elem: usize, text: &str, now: Instant) -> Vec<VeilSpan> {
         if self.seeding && !self.elems.contains_key(&elem) {
             let mut baseline = ElemVeil::default();
@@ -219,7 +224,7 @@ pub fn slice_spans(spans: &[VeilSpan], start: usize, end: usize) -> Vec<VeilSpan
         .filter_map(|(r, a)| {
             let s = r.start.max(start);
             let e = r.end.min(end);
-            (s < e).then(|| (s - start..e - start, *a))
+            (s < e).then(|| (s.saturating_sub(start)..e.saturating_sub(start), *a))
         })
         .collect()
 }
@@ -231,7 +236,7 @@ mod tests {
     use super::*;
 
     fn at(base: Instant, ms: u64) -> Instant {
-        base + Duration::from_millis(ms)
+        base.checked_add(Duration::from_millis(ms)).unwrap()
     }
 
     #[test]
@@ -245,9 +250,9 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert!(spans[0].1 > 0.0 && spans[0].1 < 1.0);
         // Settled: pruned, never re-animates.
-        assert!(v.advance("hello", at(t0, 600)).is_empty());
+        assert_eq!(v.advance("hello", at(t0, 600)), Vec::<VeilSpan>::new());
         assert!(!v.is_fading());
-        assert!(v.advance("hello", at(t0, 700)).is_empty());
+        assert_eq!(v.advance("hello", at(t0, 700)), Vec::<VeilSpan>::new());
     }
 
     #[test]
@@ -269,21 +274,16 @@ mod tests {
     }
 
     #[test]
-    fn fade_constants_match_mugen_fade_painter() {
-        // @wingleeio/mugen-markdown dist/index.mjs: EMA_SEED_MS=160,
-        // MIN_FADE_MS=120, MAX_FADE_MS=400, alpha=(1-p)**1.6,
-        // ema = ema*0.7 + min(gap,1000)*0.3, boost = 1 + 0.3*max(0,n-2).
-        assert_eq!(VEIL_EMA_SEED_MS, 160.0);
-        assert_eq!(VEIL_MIN_FADE_MS, 120.0);
-        assert_eq!(VEIL_MAX_FADE_MS, 400.0);
-        assert_eq!(VEIL_CURVE_POW, 1.6);
-        // duration = clamp(ema*3, 120, 400).
+    fn fade_cadence() {
+        // EMA seed 160 ms, fades between 120 and 400 ms, veil (1 − p)^1.6,
+        // ema = ema × 0.7 + min(gap, 1000) × 0.3, boost = 1 + 0.3 × max(0, n − 2).
+        // duration = clamp(ema × 3, 120, 400).
         assert_eq!(veil_duration_ms(160.0), 400.0); // seed → clamped at max
         assert_eq!(veil_duration_ms(30.0), 120.0); // fast stream → floor
         assert_eq!(veil_duration_ms(60.0), 180.0);
-        // EMA update.
-        assert_eq!(veil_ema_next(160.0, 100.0), 160.0 * 0.7 + 100.0 * 0.3);
-        assert_eq!(veil_ema_next(160.0, 5000.0), 160.0 * 0.7 + 1000.0 * 0.3);
+        // EMA update: a gap past a second counts as one second.
+        assert!((veil_ema_next(160.0, 100.0) - 142.0).abs() < 1e-4);
+        assert!((veil_ema_next(160.0, 5000.0) - 412.0).abs() < 1e-4);
         // Fast-stream boost kicks in at the 3rd concurrent chunk.
         assert_eq!(veil_boost(0), 1.0);
         assert_eq!(veil_boost(2), 1.0);
@@ -294,11 +294,11 @@ mod tests {
     #[test]
     fn seeded_row_adopts_existing_text_without_fading() {
         // Switching back to a streaming session: the text already on screen is
-        // the attach BASELINE (mugen FadePainter.attach) — no full-reply fade.
+        // the attach BASELINE — no full-reply fade.
         let t0 = Instant::now();
         let mut row = RowVeil::seeded();
-        assert!(row.advance(0, "already streamed text", t0).is_empty());
-        assert!(row.advance(1, "second block", t0).is_empty());
+        assert_eq!(row.advance(0, "already streamed text", t0), Vec::<VeilSpan>::new());
+        assert_eq!(row.advance(1, "second block", t0), Vec::<VeilSpan>::new());
         assert!(!row.is_fading());
         // Appends AFTER the attach fade normally — only the new suffix.
         let spans = row.advance(0, "already streamed text plus", at(t0, 100));
@@ -325,7 +325,7 @@ mod tests {
         let mut v = ElemVeil::default();
         v.advance("stable", t0);
         // Fully settled...
-        assert!(v.advance("stable", at(t0, 600)).is_empty());
+        assert_eq!(v.advance("stable", at(t0, 600)), Vec::<VeilSpan>::new());
         // ...then an append veils ONLY the new suffix.
         let spans = v.advance("stable more", at(t0, 700));
         assert_eq!(spans, vec![(6..11, 0.0)]);
@@ -362,7 +362,7 @@ mod tests {
         assert!(mid > 0.0 && mid < 1.0);
         // The pow-1.6 ease-out reveals faster than linear early on.
         assert!(mid > 0.5);
-        assert!((mid - (1.0 - 0.5f32.powf(1.6))).abs() < 1e-6);
+        assert!((mid - (1.0 - 0.5_f32.powf(1.6))).abs() < 1e-6);
         // Monotonic + clamped.
         assert!(veil_opacity(0.2) <= veil_opacity(0.4));
         assert_eq!(veil_opacity(-1.0), 0.0);
@@ -376,7 +376,7 @@ mod tests {
         let local = slice_spans(&spans, 5, 15);
         assert_eq!(local, vec![(0..5, 0.4), (7..10, 0.1)]);
         // Disjoint window → empty.
-        assert!(slice_spans(&spans, 25, 30).is_empty());
+        assert_eq!(slice_spans(&spans, 25, 30), Vec::<VeilSpan>::new());
     }
 
     #[test]

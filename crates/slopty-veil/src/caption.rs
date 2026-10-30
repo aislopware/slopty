@@ -17,23 +17,26 @@ pub fn caption_tail(text: &str, max: usize) -> String {
 /// The shown tail, the byte offset in `text` where it starts, and the length
 /// of the ellipsis in front of it.
 fn caption_window(text: &str, max: usize) -> (String, usize, usize) {
-    let start = text.len() - text.trim_start().len();
-    let end = text.trim_end().len().max(start);
-    let body = &text[start..end];
+    let body = text.trim();
+    let start = text.len().saturating_sub(text.trim_start().len());
     let count = body.chars().count();
-    if count <= max {
+    let Some(cut) = count.checked_sub(max).filter(|&cut| cut > 0) else {
         return (body.to_owned(), start, 0);
-    }
-    let skip = body.char_indices().nth(count - max).map_or(body.len(), |(i, _)| i);
-    let tail = &body[skip..];
+    };
+    let (skip, tail) = body
+        .char_indices()
+        .nth(cut)
+        .map_or((body.len(), ""), |(i, _)| (i, body.get(i..).unwrap_or_default()));
     let shown = tail.trim_start();
     let ellipsis = '…'.len_utf8();
-    (format!("…{shown}"), start + skip + (tail.len() - shown.len()), ellipsis)
+    let from = start.saturating_add(skip).saturating_add(tail.len().saturating_sub(shown.len()));
+    (format!("…{shown}"), from, ellipsis)
 }
 
 /// One frame of a caption.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptionFrame {
+    /// The caption as shown: the utterance's tail, ellipsized in front when cut.
     pub text: String,
     /// Veiled byte ranges of `text` and their opacity (0..1).
     pub spans: Vec<VeilSpan>,
@@ -43,6 +46,7 @@ pub struct CaptionFrame {
 
 /// Veil state for one call's caption. Advance it with the current utterance
 /// on every frame while [`is_animating`](Self::is_animating).
+#[derive(Debug)]
 pub struct CaptionVeil {
     max_chars: usize,
     item: Option<String>,
@@ -52,6 +56,7 @@ pub struct CaptionVeil {
 }
 
 impl CaptionVeil {
+    /// A caption that shows at most `max_chars` characters of an utterance.
     pub fn new(max_chars: usize) -> Self {
         Self {
             max_chars,
@@ -85,9 +90,15 @@ impl CaptionVeil {
         let spans = if reduced_motion {
             Vec::new()
         } else {
-            slice_spans(&spans, from, from + shown.len() - ellipsis)
+            let end = from.saturating_add(shown.len().saturating_sub(ellipsis));
+            slice_spans(&spans, from, end)
                 .into_iter()
-                .map(|(range, alpha)| (range.start + ellipsis..range.end + ellipsis, alpha))
+                .map(|(range, alpha)| {
+                    (
+                        range.start.saturating_add(ellipsis)..range.end.saturating_add(ellipsis),
+                        alpha,
+                    )
+                })
                 .collect()
         };
         self.shown.clone_from(&shown);
@@ -103,7 +114,7 @@ impl CaptionVeil {
     }
 
     /// Something is still fading (as of the last advance): keep repainting.
-    pub fn is_animating(&self) -> bool {
+    pub const fn is_animating(&self) -> bool {
         self.veil.is_fading() || self.outgoing.is_some()
     }
 }
@@ -115,7 +126,7 @@ mod tests {
     use super::*;
 
     fn at(base: Instant, ms: u64) -> Instant {
-        base + Duration::from_millis(ms)
+        base.checked_add(Duration::from_millis(ms)).unwrap()
     }
 
     #[test]
@@ -140,7 +151,7 @@ mod tests {
         assert!(caption.is_animating());
         // The final repeats the partials: nothing re-animates.
         let frame = caption.advance(Some("a"), "Hello there", at(t0, 900), false);
-        assert!(frame.spans.is_empty());
+        assert_eq!(frame.spans, Vec::<VeilSpan>::new());
         assert!(!caption.is_animating());
     }
 
@@ -156,7 +167,7 @@ mod tests {
         assert_eq!(frame.text, "…four five");
         let ellipsis = '…'.len_utf8();
         assert_eq!(frame.spans, vec![(ellipsis + 4..ellipsis + 9, 0.0)]);
-        assert_eq!(&frame.text[frame.spans[0].0.clone()], " five");
+        assert_eq!(frame.text.get(frame.spans[0].0.clone()), Some(" five"));
     }
 
     #[test]
@@ -183,10 +194,10 @@ mod tests {
         let mut caption = CaptionVeil::new(160);
         caption.advance(Some("a"), "Hi", t0, false);
         let frame = caption.advance(Some("b"), "Hello", at(t0, 50), true);
-        assert!(frame.spans.is_empty());
+        assert_eq!(frame.spans, Vec::<VeilSpan>::new());
         assert!(frame.previous.is_none());
         // Motion back on: the text already shown stays settled.
         let frame = caption.advance(Some("b"), "Hello", at(t0, 900), false);
-        assert!(frame.spans.is_empty());
+        assert_eq!(frame.spans, Vec::<VeilSpan>::new());
     }
 }
