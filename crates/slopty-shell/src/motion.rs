@@ -1707,7 +1707,22 @@ fn refresh_system(cx: &mut App) {
     .detach();
 }
 
-#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+/// Reduce Motion (Settings, Accessibility, Motion) on an iPhone or iPad.
+#[cfg(all(target_os = "ios", not(test)))]
+fn refresh_system(cx: &mut App) {
+    #[link(name = "UIKit", kind = "framework")]
+    unsafe extern "C" {
+        fn UIAccessibilityIsReduceMotionEnabled() -> bool;
+    }
+    // SAFETY: a UIKit accessibility getter with no arguments, called on the main thread.
+    let reduce = unsafe { UIAccessibilityIsReduceMotionEnabled() };
+    set_system(reduce, cx);
+}
+
+#[cfg(any(
+    all(target_os = "ios", test),
+    not(any(target_os = "macos", target_os = "ios", windows, target_os = "linux"))
+))]
 fn refresh_system(_cx: &mut App) {}
 
 // A line of text that is alive while its work runs (opencode's `text-shimmer`): a band of
