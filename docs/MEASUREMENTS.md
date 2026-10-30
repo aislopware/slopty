@@ -18504,3 +18504,33 @@ held still, it draws no new row, and counting the new lines is a subtraction per
 ```
 cargo test -p slopty-terminal --release --lib new_lines_and_dim_cost -- --ignored --nocapture
 ```
+
+## 2026-10-30 — the inspector's trace on a long session
+
+The inspector's trace after its redo (`docs/decisions/inspector.md`): what a frame costs on a long
+session, and how many rows it builds. `long_trace_frame_cost`
+(`crates/slopty-shell/src/transcript/surface_tests.rs`) draws 300 turns in a 480 × 900 pt pane,
+each a prompt, a sentence, six commands with 12 lines of output folded to one group line, and a
+closing reply with a list and a code fence: 1,800 rows. Three arms of 300 frames each, timed from
+the state's change to the drawn scene (headless GPUI, no screen reader): held at the end,
+scrolled 53 pt a frame through the middle, and following an answer that streams a sentence a
+frame, its row's text parsed and laid out again each frame as it grows to 300 sentences.
+A GitHub-hosted macOS runner (Apple M1, virtual, 3 cores, 7 GB), release with fat LTO off and 16
+codegen units: the hosted runner did not finish building slopty-shell's test harness with fat
+LTO inside its hour. Microseconds:
+
+| arm | p50 | p95 | max | rows built a frame |
+| --- | --- | --- | --- | --- |
+| held at the end | 312 | 345 | 416 | 12 |
+| scrolled through the middle | 309 | 349 | 1,426 | 12 to 13 |
+| following a streaming answer | 1,461 | 1,940 | 2,139 | 1 to 12 |
+
+The list builds only the rows in view, 12 of 1,800, so the session's length costs a frame
+nothing: a frame held or scrolled takes about 0.3 ms, under 4 % of a 120 Hz frame, and the
+scrolled arm's single slow frame (1.4 ms) is one of 300, its p95 the held arm's. Following a
+streaming answer takes about 1.5 ms at p50, 18 % of the frame: the answer's row is built again
+each frame, and every other row comes from the cache.
+
+```
+cargo xtask remote --name Im --probe 'CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test -p slopty-shell --release --lib long_trace_frame_cost -- --ignored --nocapture'
+```

@@ -302,3 +302,38 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     can type into a terminal.
   - **What a turn changed is said once.** The turn's line says its lines added and removed, and
     Changes names the files.
+- ✅ **How the whole detail was finished (2026-10-30).** The five parts of "Any step opens to its
+  whole detail" the earlier steps left, in the order the person reads them:
+  - **A running command's box.** A background command's output, tailed from the file Claude
+    Code writes it to, sits in a box capped at 16 lines (300 px, Amp's) that follows its own
+    bottom. Scrolling up inside it stops the following, and scrolling back to its bottom starts
+    it again. The step grows only up to the cap, so the trace under it holds still. Claude Code
+    writes nothing of a foreground command's output until it ends (no progress records in its
+    transcript), so only a background command's output grows in place.
+  - **Outputs come with their head.** The doc carries each output as the thread holds it (its
+    first 40 lines, a running command's last), not zeron's one-line summary. An open step shows
+    24 lines and "+ N lines" before anything is fetched, and "Show full output" past that.
+  - **The exit code is a field.** The decoder already read it: from "Exit code N", from a clean
+    end, and from a background task's notice. The step's facts now carry it, and its detail
+    says it on a line of its own. It shows in the failure's colour unless Claude Code read the
+    code as no failure (`returnCodeInterpretation`).
+  - **A format menu that keeps its shape.** Text, JSON and Markdown are always offered. JSON is
+    disabled where the output does not parse, and says so. With no choice kept, a parsing output
+    reads as JSON. The choice is kept per tool name in the settings file, with each MCP
+    server's tool apart. Choosing JSON or Markdown for a cut output fetches the whole first, and
+    so does opening a step of a kind kept that way. JSON is a tree with one line per value. An
+    open container shows its count; a folded one shows a preview of its first fields, as a
+    browser's console does. A small document opens whole, a larger one to its second level, and
+    each step keeps the person's folds. Markdown renders through the same flattening thoughts
+    use, so heights stay analytic. A command's standard error stays under any format other
+    than text, in the danger colour.
+  - **The raw record.** Each call names the records that hold it: its call's and its result's.
+    Raw record fetches both whole, read by their ids from the session's files as any cut text
+    is, and shows them as one tree.
+  - **Details for Claude.** A step may show something other than the text the model read: an
+    edit's diff, the list a task call draws, a command's output without the lines Claude Code
+    added after it. There the decoder keeps that text's size and where it is, none of the text,
+    and Details for Claude fetches it. A search, a fetch or an MCP tool shows the very text the
+    model read, so it has none. A subagent's card reads its report, so it has none either. Nor
+    does a step that draws what it did (an edit, the task list, the answers to a question, a
+    plan) where the model read only the line confirming it, or a command that printed nothing.
