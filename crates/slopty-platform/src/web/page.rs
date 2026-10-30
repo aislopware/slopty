@@ -37,7 +37,7 @@ use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSError, NSString, NSURL};
 use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore, WKContentWorld};
 use serde_json::{Value, json};
 pub use stage::{Change, Device, MOUNTED_CAP, Presence};
@@ -1115,16 +1115,55 @@ impl PageHost {
     }
 }
 
+/// What this process's store of compiled rule lists is named for, beside those of other processes.
+const RULES_STORE: &str = "slopty-page-rules-";
+
+/// This process's store of compiled rule lists ([`compile`]), in the temporary directory, with the
+/// stores of processes that have ended removed.
+fn rules_store() -> std::path::PathBuf {
+    let base = std::env::temp_dir();
+    let own = std::process::id();
+    for entry in std::fs::read_dir(&base).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        let pid = name.to_str().and_then(|n| n.strip_prefix(RULES_STORE)?.parse::<u32>().ok());
+        if let Some(pid) = pid.filter(|pid| *pid != own && !alive(*pid))
+            && let Err(e) = std::fs::remove_dir_all(entry.path())
+        {
+            tracing::debug!(pid, %e, "an ended process's rule list store stays");
+        }
+    }
+    base.join(format!("{RULES_STORE}{own}"))
+}
+
+/// Whether process `pid` is running: signal 0 checks that it exists and sends nothing.
+fn alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: POSIX rule (`kill(2)`): signal 0 is checked for, never sent.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        return true;
+    }
+    // A process of another user's answers `EPERM`; only `ESRCH` says it has gone.
+    std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 /// Compile `rules` into a content rule list kept under a name of its own, for `done` on the main
 /// thread.
+///
+/// The list is compiled into a store of this process's own. A store runs one process's compiles
+/// one after another, but a compile deletes the list's file before it moves the new one in and
+/// maps it, so two processes of one executable (tests run side by side, two instances of the app)
+/// compiling one list into the default store they share at once each map a file the other may
+/// just have deleted, and fail ("Mapping file failed", `WKErrorDomain` 6).
 fn compile(
     rules: &str,
     mtm: MainThreadMarker,
     done: impl FnOnce(Result<Retained<WKContentRuleList>, String>) + 'static,
 ) {
-    // SAFETY: WebKit rule (`WKContentRuleListStore.h`): the default store is shared and made on
-    // the main thread.
-    let Some(store) = (unsafe { WKContentRuleListStore::defaultStore(mtm) }) else {
+    let dir = rules_store();
+    let dir = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&dir.to_string_lossy()), true);
+    // SAFETY: WebKit rule (`WKContentRuleListStore.h`): a store at a file URL, whose directory it
+    // makes, is made on the main thread.
+    let Some(store) = (unsafe { WKContentRuleListStore::storeWithURL(Some(&dir), mtm) }) else {
         return done(Err("no content rule list store".to_owned()));
     };
     let done = Cell::new(Some(done));

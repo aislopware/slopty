@@ -30,7 +30,7 @@ mod mac {
     use slopty_platform::web::WebView;
 
     /// Every test, by name.
-    pub const TESTS: [(&str, fn()); 16] = [
+    pub const TESTS: [(&str, fn()); 17] = [
         (
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
@@ -77,7 +77,22 @@ mod mac {
             "a_page_moved_to_the_pane_keeps_its_document",
             pages::a_page_moved_to_the_pane_keeps_its_document,
         ),
+        (
+            "compiling_the_rule_list_leaves_other_processes_lists_alone",
+            pages::compiling_the_rule_list_leaves_other_processes_lists_alone,
+        ),
     ];
+
+    /// Run as the other process of
+    /// `compiling_the_rule_list_leaves_other_processes_lists_alone`, when this one is:
+    /// whether it was.
+    pub fn as_other_process() -> bool {
+        if std::env::var_os(pages::OTHER_PROCESS).is_none() {
+            return false;
+        }
+        pages::other_process();
+        true
+    }
 
     /// macOS 27 takes the corners option with the Dock hidden, and the app's options follow a
     /// remote keyboard both ways. The test binary is never the frontmost app, so the person's
@@ -454,6 +469,131 @@ mod mac {
                     host.facts(*page).is_some_and(|f| f.view_loads >= 1)
                 });
             }
+        }
+
+        /// Set in the other process of
+        /// [`compiling_the_rule_list_leaves_other_processes_lists_alone`].
+        pub(super) const OTHER_PROCESS: &str = "SLOPTY_TEST_RULES_OTHER_PROCESS";
+
+        /// A process's compile of the rule list every page loads under leaves another process's
+        /// compiled list alone, so two processes compiling it at once never race. A compile
+        /// deletes the list's file, moves the new one in and maps it; processes of one executable
+        /// compiled into the one store they shared, so one's delete could land between another's
+        /// move and map, and that one's pages failed (`WKErrorDomain` 6), as a gate's run of this
+        /// binary's page tests side by side did. Whether two compiles meet in that moment is luck;
+        /// whether one replaces the other's file is not, so that is what this checks: the file
+        /// this process's list is mapped from is still the file at its path after another process
+        /// compiled the same list and loaded a page under it, and the other's store goes once it
+        /// has ended, at this process's next compile.
+        pub(super) fn compiling_the_rule_list_leaves_other_processes_lists_alone() {
+            let events: Events = Rc::default();
+            let first = host(Device::Mac, &events);
+            let one = first.open(page("first", ""));
+            let _changes = first.mount(one);
+            view_loaded(&first, &events, &[one]);
+            let (mine, file) = mapped_rules();
+            let other = std::process::Command::new(std::env::current_exe().unwrap())
+                .env(OTHER_PROCESS, "1")
+                .output()
+                .unwrap();
+            let said = String::from_utf8_lossy(&other.stderr);
+            assert!(other.status.success(), "the other process's page: {said}");
+            assert!(
+                there(&mine, file),
+                "{} is still the file this process's list is mapped from",
+                mine.display()
+            );
+            let said = String::from_utf8(other.stdout).unwrap();
+            let theirs = std::path::PathBuf::from(said.lines().last().unwrap_or_default());
+            assert!(theirs.exists(), "the other process's list stays until the next compile");
+            let next = host(Device::Mac, &events);
+            let two = next.open(page("next", ""));
+            let _changes = next.mount(two);
+            view_loaded(&next, &events, &[two]);
+            assert!(!theirs.exists(), "the ended process's store went at the next compile");
+        }
+
+        /// The other process: a page under a host of its own, then where its list is mapped
+        /// from, on its standard output.
+        #[expect(clippy::print_stdout, reason = "where its list is mapped from, for the test")]
+        pub(super) fn other_process() {
+            let events: Events = Rc::default();
+            let host = host(Device::Mac, &events);
+            let one = host.open(page("other", ""));
+            let _changes = host.mount(one);
+            view_loaded(&host, &events, &[one]);
+            println!("{}", mapped_rules().0.display());
+        }
+
+        /// What the kernel tells of a region of a process's memory and the file it maps
+        /// (`<sys/proc_info.h>`, `proc_regionwithpathinfo`).
+        #[repr(C)]
+        struct Region {
+            /// `proc_regioninfo`'s protections, offset and page counts.
+            _head: [u64; 10],
+            address: u64,
+            size: u64,
+            vnode: libc::vnode_info_path,
+        }
+
+        /// Whether `file`, an inode, is the file at `path`.
+        fn there(path: &std::path::Path, file: u64) -> bool {
+            std::fs::metadata(path)
+                .is_ok_and(|now| std::os::unix::fs::MetadataExt::ino(&now) == file)
+        }
+
+        /// The compiled rule list file this process maps, by its path and its inode: the one of
+        /// its mapped files named as a content rule list (`ContentRuleList-`) that is still the
+        /// file at its path, since an earlier compile's may be mapped too.
+        fn mapped_rules() -> (std::path::PathBuf, u64) {
+            use std::os::unix::ffi::OsStringExt as _;
+            /// `<sys/proc_info.h>`: the region at or after an address, with its file's path.
+            const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+            let pid = libc::c_int::try_from(std::process::id()).unwrap();
+            let size = libc::c_int::try_from(size_of::<Region>()).unwrap();
+            let mut lists = Vec::new();
+            let mut address = 0;
+            loop {
+                // SAFETY: a region is integers, all of which may be zero.
+                let mut region: Region = unsafe { std::mem::zeroed() };
+                // SAFETY: Darwin rule (`proc_info.h`): `proc_pidinfo` writes at most `size` bytes
+                // of the region at or after `address` into the buffer, and says how many.
+                let wrote = unsafe {
+                    libc::proc_pidinfo(
+                        pid,
+                        PROC_PIDREGIONPATHINFO,
+                        address,
+                        (&raw mut region).cast(),
+                        size,
+                    )
+                };
+                if wrote != size {
+                    break;
+                }
+                address = region.address.checked_add(region.size).unwrap();
+                let path: Vec<u8> = region
+                    .vnode
+                    .vip_path
+                    .as_flattened()
+                    .iter()
+                    .map(|c| c.cast_unsigned())
+                    .take_while(|b| *b != 0)
+                    .collect();
+                let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(path));
+                let named = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("ContentRuleList-"));
+                let file = region.vnode.vip_vi.vi_stat.vst_ino;
+                if named && !lists.contains(&(path.clone(), file)) {
+                    lists.push((path, file));
+                }
+            }
+            let mut live: Vec<(std::path::PathBuf, u64)> =
+                lists.iter().filter(|(path, file)| there(path, *file)).cloned().collect();
+            let said = "one compiled rule list mapped and still the file at its path";
+            assert_eq!(live.len(), 1, "{said}: {lists:?}");
+            live.pop().unwrap()
         }
 
         /// What `page` logged under `key`, the last time it did.
@@ -973,6 +1113,9 @@ mod mac {
 fn main() {
     #[cfg(target_os = "macos")]
     {
+        if mac::as_other_process() {
+            return;
+        }
         let args: Vec<String> = std::env::args().skip(1).collect();
         if args.iter().any(|a| a == "--list") {
             if !args.iter().any(|a| a == "--ignored") {
