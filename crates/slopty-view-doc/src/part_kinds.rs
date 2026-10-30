@@ -68,6 +68,42 @@ pub struct ToolFacts {
     /// ("thought for 12s").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_ms: Option<u64>,
+    /// When it ran, for its row's duration and its detail's Timing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<StepTime>,
+}
+
+/// When a step ran, as its records say: its start and end, and its run alone where the agent
+/// says it apart from the wait for the person's permission.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepTime {
+    /// When it began, in ms since the epoch: its record's time.
+    pub started: i64,
+    /// When it ended, in ms since the epoch: its result's record's time; `None` while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<i64>,
+    /// How long its run alone took, in ms, by the agent's own measure, when it says (Claude
+    /// Code's hooks): the wall time from `started` to `ended` holds it and the wait for the
+    /// person's permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ran_ms: Option<u64>,
+}
+
+impl StepTime {
+    /// Its wall time, from its start to its end, once it ended.
+    #[must_use]
+    pub fn wall_ms(&self) -> Option<u64> {
+        let ended = self.ended?;
+        u64::try_from(ended.saturating_sub(self.started)).ok()
+    }
+
+    /// How long it waited before it ran, once the agent said how long its run took: its wall
+    /// time less its run.
+    #[must_use]
+    pub fn waited_ms(&self) -> Option<u64> {
+        Some(self.wall_ms()?.saturating_sub(self.ran_ms?))
+    }
 }
 
 /// How long a call has run.
