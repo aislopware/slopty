@@ -4,12 +4,7 @@ use std::time::Instant;
 use slopty_syntax::{HighlightKind, HighlightRequest, HighlightedDocument, highlight};
 
 fn document(source: &str, path: &str) -> HighlightedDocument {
-    highlight(HighlightRequest {
-        source,
-        path: Some(path),
-        fence_tag: None,
-    })
-    .unwrap()
+    highlight(HighlightRequest { source, path: Some(path), fence_tag: None }).unwrap()
 }
 
 fn fragments(source: &str, path: &str) -> Vec<(String, HighlightKind)> {
@@ -18,9 +13,7 @@ fn fragments(source: &str, path: &str) -> Vec<(String, HighlightKind)> {
         .lines()
         .zip(document.lines)
         .flat_map(|(line, spans)| {
-            spans
-                .into_iter()
-                .map(move |span| (line[span.range].to_owned(), span.kind))
+            spans.into_iter().map(move |span| (line[span.range].to_owned(), span.kind))
         })
         .collect()
 }
@@ -29,9 +22,7 @@ fn assert_fragments(source: &str, path: &str, expected: &[(&str, HighlightKind)]
     let fragments = fragments(source, path);
     for &(text, kind) in expected {
         assert!(
-            fragments
-                .iter()
-                .any(|fragment| fragment == &(text.into(), kind)),
+            fragments.iter().any(|fragment| fragment == &(text.into(), kind)),
             "missing {text:?} as {kind:?} in {path}: {fragments:#?}"
         );
     }
@@ -42,9 +33,7 @@ fn assert_valid_document(source: &str, path: &str) {
     assert_eq!(document.lines.len(), source.lines().count().max(1));
     for (line, spans) in source.lines().zip(document.lines) {
         assert!(
-            spans
-                .windows(2)
-                .all(|pair| pair[0].range.end <= pair[1].range.start),
+            spans.windows(2).all(|pair| pair[0].range.end <= pair[1].range.start),
             "overlapping spans in {path}: {spans:?}"
         );
         for span in spans {
@@ -265,10 +254,7 @@ fn affected_languages_keep_utf8_boundaries_for_incomplete_code() {
             "src/broken.ts",
             "export function café(name: string) {\n const label = `héllo ${name\n if (name ===",
         ),
-        (
-            "src/Broken.kt",
-            "fun café(name: String) {\n val label = \"héllo $name\n if (name ==",
-        ),
+        ("src/Broken.kt", "fun café(name: String) {\n val label = \"héllo $name\n if (name =="),
     ] {
         assert_valid_document(source, path);
     }
@@ -277,18 +263,10 @@ fn affected_languages_keep_utf8_boundaries_for_incomplete_code() {
 #[test]
 fn every_span_is_valid_and_non_overlapping_for_incomplete_unicode() {
     let source = "fn café(value: &str) {\n let text = r#\"héllo\nworld\"#;\n if value {";
-    let document = highlight(HighlightRequest {
-        source,
-        path: Some("broken.rs"),
-        fence_tag: None,
-    })
-    .unwrap();
+    let document =
+        highlight(HighlightRequest { source, path: Some("broken.rs"), fence_tag: None }).unwrap();
     for (line, spans) in source.lines().zip(document.lines) {
-        assert!(
-            spans
-                .windows(2)
-                .all(|pair| pair[0].range.end <= pair[1].range.start)
-        );
+        assert!(spans.windows(2).all(|pair| pair[0].range.end <= pair[1].range.start));
         for span in spans {
             assert!(line.is_char_boundary(span.range.start));
             assert!(line.is_char_boundary(span.range.end));
@@ -303,10 +281,7 @@ fn benchmark_small_medium_large_and_incomplete_documents() {
         ("small", "fn main() { println!(\"hi\"); }".to_string()),
         ("medium", "fn item() -> usize { 42 }\n".repeat(2_000)),
         ("large", "struct Item { value: usize }\n".repeat(20_000)),
-        (
-            "incomplete",
-            "fn broken( { let value = \"open".repeat(2_000),
-        ),
+        ("incomplete", "fn broken( { let value = \"open".repeat(2_000)),
     ] {
         let started = Instant::now();
         let document = highlight(HighlightRequest {
@@ -327,11 +302,7 @@ fn benchmark_small_medium_large_and_incomplete_documents() {
 #[test]
 fn reference_contains_expected_visual_roles() {
     let spans = fragments("fn call() { let value = 42; }", "main.rs");
-    for kind in [
-        HighlightKind::Keyword,
-        HighlightKind::Function,
-        HighlightKind::Number,
-    ] {
+    for kind in [HighlightKind::Keyword, HighlightKind::Function, HighlightKind::Number] {
         assert!(spans.iter().any(|(_, actual)| *actual == kind));
     }
 }
