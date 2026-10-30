@@ -238,7 +238,7 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     mark's slot. Its hover card says it is cached and names the machine, and it says no need in
     the session's name.
   - The hover card also gives the last line the agent wrote (its records' preview).
-  - The next-needs-you key (⌘., until the inbox takes ⌘J) walks every session that needs the
+  - The next-needs-you key (⌘J) walks every session that needs the
     person, then each that failed, then each done unseen, across projects and machines, each
     kind oldest first.
   - Deleted with them: the Needs you / Working / Done groups, the row's time and machine glyph,
@@ -293,7 +293,7 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     carries none, the shell's chimes and their four switches are gone, and so is the shell's own
     banner (its "Connection unavailable"), with the background-only switch that gated it. The
     Dock bounces once, as information, never until the app comes forward. iPhone keeps its
-    haptic.
+    haptic. Settings → Notifications keeps one switch, the notes themselves.
   - A tapped note lands on its session, whose terminal wears one 0.4 s accent border fade
     (Ghostty's presenting of a surface, without its repeating glow).
   - Tests: `workspace::attention::tests::the_session_on_screen_stays_quiet_and_one_behind_it_notifies`,
@@ -335,3 +335,22 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     `shell::tabs::panel_titlebar_tests::{the_identity_says_its_machine_and_branch,
     the_row_is_inked_for_the_ground_it_stands_on}` and
     `terminal::panel::tests::a_running_programs_progress_and_ground_reach_its_tab`.
+
+- ✅ **The inbox as built (2026-10-30).** `shell::inbox` builds it, behind the eye at the
+  titlebar's trailing end.
+  - It lists every session that calls or works, across projects and machines, the loudest kind
+    first (needs you, failed, done unseen, then at work), each kind oldest first. A session at
+    rest is not in it.
+  - A row is two lines, 44 pt, as Rex's: the program's mark, the title over the need in the
+    agent's words (else the last line the agent wrote), and the state's mark over its age. A
+    screen reader hears the title, the state, the need, the place and the age.
+  - The eye wears a dot in the loudest calling row's hue while anything needs you, failed or
+    finished unseen; at work alone wears none.
+  - The filter is at the popover's foot, as Rex's, 360 pt wide; typing narrows by title, need
+    and place, ↑ ↓ walk, ⏎ lands on the session, Esc puts it away. The keyboard's row is kept by
+    session, so a row arriving above it never moves it.
+  - It answers nothing: no button acts on a session from here.
+  - Keys: ⇧⌘J opens it, beside ⌘J, the jump to the next session that needs the person; the Go
+    menu names both. The bottom terminal panel's ⌘J toggle is gone with the panel's shortcut.
+  - Tests: `shell::inbox::tests::the_inbox_lists_by_urgency_then_age` and
+    `shell::inbox::tests::typing_filters_the_inbox`.

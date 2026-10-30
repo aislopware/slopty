@@ -669,3 +669,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   policy for a start an agent asks for; pi's gate and the ACP default it also named are gone.
   - Tests: settings `daemon::tests::a_daemon_s_own_keys_are_edited_in_place` (no map entry),
     `edit::tests` (map entries on `[clipboard.workers]` alone).
+- ✅ **The app's shortcuts keep only what the person changed (2026-10-30).** `ui-settings.json`
+  used to write every shortcut's combo, defaults included, so a default that moved (⌘J from the
+  bottom panel's toggle to the jump, the inbox on ⇧⌘J) never reached anyone who had saved
+  settings once: the old combo stayed frozen in the file. The file now keeps a `shortcuts` map
+  of only the combos that differ from their defaults, by each shortcut's own name (an empty one
+  for a shortcut the person unbound), and loading fills the rest from today's defaults. A
+  default never takes a chord the person gave another action: that shortcut arrives unbound.
+  An entry that is not a string is skipped, costing nothing else. The old `keymap` key is not
+  read (pre-release: no migration), and its load-time repairs went with it.
+  - Tests: `settings::tests::{the_file_keeps_only_the_combos_the_person_changed,
+    a_file_without_shortcuts_takes_every_default,
+    a_malformed_shortcut_is_skipped_without_losing_other_settings,
+    a_default_yields_to_a_chord_the_person_gave_another_action, round_trip}`.

@@ -456,21 +456,10 @@ pub struct UiSettings {
     /// a filter, not a level").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_filter: Option<String>,
-    /// Master switch for session notification chimes. `SLOPTY_DISABLE_SOUND`
-    /// overrides every per-event preference below.
-    pub sound_enabled: bool,
-    /// Chime when an agent run completes successfully.
-    pub sound_completion_enabled: bool,
-    /// Chime when an agent is waiting for user input.
-    pub sound_input_enabled: bool,
-    /// Chime when a run fails or the durable connection state degrades.
-    pub sound_attention_enabled: bool,
-    /// Desktop banner notifications on the same transitions.
-    /// `SLOPTY_DISABLE_NOTIFICATIONS` overrides.
+    /// slopty: the system's notes for a session in the background that needs the person, failed
+    /// or finished (`slopty_ui`'s `workspace::attention`); none make a sound
+    /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
     pub notifications_enabled: bool,
-    /// Suppress the banner while a Slopty window is focused (the chime covers
-    /// the foreground case).
-    pub notifications_background_only: bool,
     pub files_panel_width: f32,
     pub right_pane_width: f32,
     pub terminal_height: f32,
@@ -481,7 +470,9 @@ pub struct UiSettings {
     /// How often and how lately the person ran each palette command, by its name: the palette
     /// ranks by it (`shell::command_palette`, WezTerm's frecency).
     pub palette_uses: std::collections::BTreeMap<String, PaletteUse>,
-    /// Customizable shortcut combos (feature-inventory §1.4).
+    /// Customizable shortcut combos (feature-inventory §1.4). slopty: kept as `shortcuts`, only
+    /// what the person changed; the `keymap` before it froze every default and is not read.
+    #[serde(rename = "shortcuts")]
     pub keymap: KeymapConfig,
     // slopty: appshots removed.
     // slopty: no Compact-mode, Esc-to-stop, code-fence-fit or maths settings: each has one behaviour.
@@ -557,12 +548,7 @@ impl Default for UiSettings {
             open_tabs: None,
             space_filter: None,
             machine_filter: None, // slopty
-            sound_enabled: true,
-            sound_completion_enabled: true,
-            sound_input_enabled: true,
-            sound_attention_enabled: true,
             notifications_enabled: true,
-            notifications_background_only: true,
             files_panel_width: FILES_PANEL_DEFAULT,
             right_pane_width: RIGHT_PANE_DEFAULT,
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
@@ -638,7 +624,6 @@ pub enum ShortcutId {
     ToggleSidebar,
     ToggleChanges,
     ToggleFiles,
-    ToggleTerminal,
     NewSession,
     NewProject,
     NextSession,
@@ -648,6 +633,7 @@ pub enum ShortcutId {
     ReopenClosedTab,
     ResumeSession, // slopty: Claude Code's past sessions (`shell::past_sessions`)
     NextNeedsYou, // slopty: the next chat waiting on the person (`shell::sidebar_status`)
+    Inbox, // slopty: what needs the person, across sessions and machines (`shell::inbox`)
     JumpSession(usize),
 }
 
@@ -658,7 +644,6 @@ impl ShortcutId {
         ShortcutId::ToggleSidebar,
         ShortcutId::ToggleChanges,
         ShortcutId::ToggleFiles,
-        ShortcutId::ToggleTerminal,
         ShortcutId::NewSession,
         ShortcutId::NewProject,
         ShortcutId::NextSession,
@@ -667,6 +652,7 @@ impl ShortcutId {
         ShortcutId::ReopenClosedTab, // slopty
         ShortcutId::ResumeSession, // slopty
         ShortcutId::NextNeedsYou, // slopty
+        ShortcutId::Inbox, // slopty
         ShortcutId::JumpSession(0),
         ShortcutId::JumpSession(1),
         ShortcutId::JumpSession(2),
@@ -691,7 +677,6 @@ impl ShortcutId {
             ShortcutId::ToggleSidebar => "Toggle sidebar",
             ShortcutId::ToggleChanges => "Toggle side pane",
             ShortcutId::ToggleFiles => "Toggle files panel",
-            ShortcutId::ToggleTerminal => "Toggle terminal",
             ShortcutId::NewSession => "New session",
             ShortcutId::NewProject => "New project",
             ShortcutId::NextSession => "Next session or side pane tab",
@@ -700,6 +685,7 @@ impl ShortcutId {
             ShortcutId::ReopenClosedTab => "Reopen closed tab", // slopty
             ShortcutId::ResumeSession => "Resume a Claude Code session", // slopty
             ShortcutId::NextNeedsYou => "Next session that needs you", // slopty
+            ShortcutId::Inbox => "Inbox", // slopty: the titlebar eye's name
             ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -720,7 +706,6 @@ impl ShortcutId {
             ShortcutId::ToggleSidebar => "mod-b",
             ShortcutId::ToggleChanges => "mod-r",
             ShortcutId::ToggleFiles => "mod-e",
-            ShortcutId::ToggleTerminal => "mod-j",
             ShortcutId::NewSession => "mod-n",
             ShortcutId::NewProject => "mod-shift-n",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
@@ -743,9 +728,10 @@ impl ShortcutId {
             ShortcutId::ArchiveSession => "mod-shift-a",
             ShortcutId::ReopenClosedTab => "mod-shift-t", // slopty
             ShortcutId::ResumeSession => "mod-shift-o", // slopty
-            // slopty: free in the app, the terminal (its ⌘. Escape binds on iPad only, in the
-            // grid) and macOS text fields, where ⌘⇧↓ selects to the end.
-            ShortcutId::NextNeedsYou => "mod-.",
+            // slopty: ⌘J is the jump, in the bottom panel's toggle's place, and the inbox it
+            // walks sits beside it on ⇧⌘J (`docs/decisions/layout.md`).
+            ShortcutId::NextNeedsYou => "mod-j",
+            ShortcutId::Inbox => "mod-shift-j",
             ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
@@ -757,12 +743,36 @@ impl ShortcutId {
             _ => None,
         }
     }
+
+    /// slopty: its name in `ui-settings.json`'s `shortcuts` ([`StoredKeymap`]); a jump slot is
+    /// counted from 1, as its key.
+    pub fn stored_key(self) -> std::borrow::Cow<'static, str> {
+        let name = match self {
+            ShortcutId::SaveFile => "saveFile",
+            ShortcutId::BrowserReload => "browserReload",
+            ShortcutId::ToggleSidebar => "toggleSidebar",
+            ShortcutId::ToggleChanges => "toggleChanges",
+            ShortcutId::ToggleFiles => "toggleFiles",
+            ShortcutId::NewSession => "newSession",
+            ShortcutId::NewProject => "newProject",
+            ShortcutId::NextSession => "nextSession",
+            ShortcutId::PrevSession => "prevSession",
+            ShortcutId::ArchiveSession => "archiveSession",
+            ShortcutId::ReopenClosedTab => "reopenClosedTab",
+            ShortcutId::ResumeSession => "resumeSession",
+            ShortcutId::NextNeedsYou => "nextNeedsYou",
+            ShortcutId::Inbox => "inbox",
+            ShortcutId::JumpSession(slot) => return format!("jumpSession{}", slot + 1).into(),
+        };
+        name.into()
+    }
 }
 
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
-/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`].
+/// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. slopty: the file keeps only what the
+/// person changed ([`StoredKeymap`]), so a default that moves reaches everyone who left it be.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(from = "StoredKeymap", into = "StoredKeymap")]
 pub struct KeymapConfig {
     // slopty: dictation, appshots and the wallpaper shuffle removed.
     pub save_file: String,
@@ -770,7 +780,6 @@ pub struct KeymapConfig {
     pub toggle_sidebar: String,
     pub toggle_changes: String,
     pub toggle_files: String,
-    pub toggle_terminal: String,
     pub new_session: String,
     pub new_project: String,
     pub next_session: String,
@@ -780,11 +789,56 @@ pub struct KeymapConfig {
     pub reopen_closed_tab: String,
     pub resume_session: String, // slopty: Claude Code's past sessions
     pub next_needs_you: String, // slopty: the next chat waiting on the person
-    /// One combo per jump slot, in slot order. A list rather than nine fields:
-    /// [`UiSettings::load`] discards the WHOLE file on a parse error, so a
-    /// fixed-length array would let one malformed entry reset every unrelated
-    /// setting. [`Self::healed`] restores the length instead.
+    pub inbox: String, // slopty: what needs the person
+    /// One combo per jump slot, in slot order; [`Self::heal_jump_slots`] keeps its length.
     pub jump_session: Vec<String>,
+}
+
+/// slopty: the keymap as `ui-settings.json` keeps it: by each shortcut's [`ShortcutId::stored_key`],
+/// only the combos that differ from their default ("" for one the person unbound). An entry
+/// that is not a string is skipped, so one bad value costs nothing else.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct StoredKeymap(std::collections::BTreeMap<String, serde_json::Value>);
+
+impl From<StoredKeymap> for KeymapConfig {
+    /// Every shortcut the file leaves out takes its default, except that a default never takes a
+    /// chord the person gave another action: that shortcut arrives unbound instead.
+    fn from(StoredKeymap(stored): StoredKeymap) -> Self {
+        let chosen = |id: ShortcutId| {
+            stored
+                .get(id.stored_key().as_ref())
+                .and_then(serde_json::Value::as_str)
+        };
+        let mut keymap = Self::default();
+        for id in ShortcutId::ALL {
+            if let Some(combo) = chosen(id) {
+                keymap.set(id, combo.to_string());
+            } else {
+                let default = platform_combo(id.default_combo());
+                let taken = ShortcutId::ALL.into_iter().any(|other| {
+                    chosen(other)
+                        .is_some_and(|combo| !combo.is_empty() && platform_combo(combo) == default)
+                });
+                if taken {
+                    keymap.set(id, String::new());
+                }
+            }
+        }
+        keymap
+    }
+}
+
+impl From<KeymapConfig> for StoredKeymap {
+    fn from(keymap: KeymapConfig) -> Self {
+        Self(
+            ShortcutId::ALL
+                .into_iter()
+                .filter(|&id| keymap.get(id) != id.default_combo())
+                .map(|id| (id.stored_key().into_owned(), keymap.get(id).into()))
+                .collect(),
+        )
+    }
 }
 
 /// Stable key for device-local preferences that belong to one workspace
@@ -837,7 +891,6 @@ impl Default for KeymapConfig {
             toggle_sidebar: ShortcutId::ToggleSidebar.default_combo().into(),
             toggle_changes: ShortcutId::ToggleChanges.default_combo().into(),
             toggle_files: ShortcutId::ToggleFiles.default_combo().into(),
-            toggle_terminal: ShortcutId::ToggleTerminal.default_combo().into(),
             new_session: ShortcutId::NewSession.default_combo().into(),
             new_project: ShortcutId::NewProject.default_combo().into(),
             next_session: ShortcutId::NextSession.default_combo().into(),
@@ -846,6 +899,7 @@ impl Default for KeymapConfig {
             reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(), // slopty
             resume_session: ShortcutId::ResumeSession.default_combo().into(), // slopty
             next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(), // slopty
+            inbox: ShortcutId::Inbox.default_combo().into(), // slopty
             jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
         }
     }
@@ -860,7 +914,6 @@ impl KeymapConfig {
             ShortcutId::ToggleSidebar => &self.toggle_sidebar,
             ShortcutId::ToggleChanges => &self.toggle_changes,
             ShortcutId::ToggleFiles => &self.toggle_files,
-            ShortcutId::ToggleTerminal => &self.toggle_terminal,
             ShortcutId::NewSession => &self.new_session,
             ShortcutId::NewProject => &self.new_project,
             ShortcutId::NextSession => &self.next_session,
@@ -869,6 +922,7 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab, // slopty
             ShortcutId::ResumeSession => &self.resume_session, // slopty
             ShortcutId::NextNeedsYou => &self.next_needs_you, // slopty
+            ShortcutId::Inbox => &self.inbox, // slopty
             ShortcutId::JumpSession(slot) => self
                 .jump_session
                 .get(slot)
@@ -885,7 +939,6 @@ impl KeymapConfig {
             ShortcutId::ToggleSidebar => self.toggle_sidebar = combo,
             ShortcutId::ToggleChanges => self.toggle_changes = combo,
             ShortcutId::ToggleFiles => self.toggle_files = combo,
-            ShortcutId::ToggleTerminal => self.toggle_terminal = combo,
             ShortcutId::NewSession => self.new_session = combo,
             ShortcutId::NewProject => self.new_project = combo,
             ShortcutId::NextSession => self.next_session = combo,
@@ -894,6 +947,7 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => self.reopen_closed_tab = combo, // slopty
             ShortcutId::ResumeSession => self.resume_session = combo, // slopty
             ShortcutId::NextNeedsYou => self.next_needs_you = combo, // slopty
+            ShortcutId::Inbox => self.inbox = combo, // slopty
             ShortcutId::JumpSession(slot) => {
                 if slot < JUMP_SLOTS {
                     if self.jump_session.len() < JUMP_SLOTS {
@@ -1177,16 +1231,6 @@ pub fn bound_canonical_combo(combo: &str) -> Option<String> {
 }
 impl UiSettings {
     // slopty: appshots removed.
-    /// Whether this session event may produce audio.
-    pub fn session_sound_enabled(&self, sound: crate::sound::Sound) -> bool {
-        self.sound_enabled
-            && match sound {
-                crate::sound::Sound::Done => self.sound_completion_enabled,
-                crate::sound::Sound::Request => self.sound_input_enabled,
-                crate::sound::Sound::Attention => self.sound_attention_enabled,
-            }
-    }
-
     /// Three-way merge for a view that keeps a working copy of the settings:
     /// fields `edited` changed since `base` win, every other field keeps
     /// `current`. A stale copy therefore never reverts a choice another
@@ -1212,12 +1256,7 @@ impl UiSettings {
             open_tabs,
             space_filter,
             machine_filter,
-            sound_enabled,
-            sound_completion_enabled,
-            sound_input_enabled,
-            sound_attention_enabled,
             notifications_enabled,
-            notifications_background_only,
             files_panel_width,
             right_pane_width,
             terminal_height,
@@ -1315,81 +1354,6 @@ impl UiSettings {
                         // size; it now drives every code surface.
                         if let Some(legacy) = settings.remove("filesEditorFontSize") {
                             settings.entry("codeFontSize").or_insert(legacy);
-                        }
-                    }
-                    if let Some(keymap) = value
-                        .get_mut("keymap")
-                        .and_then(serde_json::Value::as_object_mut)
-                        && !keymap.contains_key("saveFile")
-                    {
-                        // Reserve customized chords before assigning any new defaults.
-                        // An older map may already use Cmd+S/B/R for another action.
-                        let mut migrating =
-                            vec![(ShortcutId::SaveFile, "saveFile", "", "mod-shift-s")];
-                        for (id, field, old, fallback) in [
-                            (
-                                ShortcutId::ToggleSidebar,
-                                "toggleSidebar",
-                                "mod-s",
-                                "mod-shift-b",
-                            ),
-                            (
-                                ShortcutId::ToggleChanges,
-                                "toggleChanges",
-                                "mod-b",
-                                "mod-shift-r",
-                            ),
-                        ] {
-                            if keymap
-                                .get(field)
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(old)
-                                == old
-                            {
-                                migrating.push((id, field, old, fallback));
-                            }
-                        }
-                        for (_, field, _, _) in &migrating {
-                            keymap.insert((*field).into(), serde_json::json!(""));
-                        }
-                        let mut resolved: KeymapConfig =
-                            serde_json::from_value(serde_json::Value::Object(keymap.clone()))?;
-                        for (id, field, old, fallback) in migrating {
-                            let combo = [id.default_combo(), old, fallback]
-                                .into_iter()
-                                .find(|candidate| {
-                                    !candidate.is_empty()
-                                        && !ShortcutId::ALL.iter().any(|other| {
-                                            let existing = resolved.get(*other);
-                                            !existing.is_empty()
-                                                && platform_combo(existing)
-                                                    == platform_combo(candidate)
-                                        })
-                                })
-                                .unwrap_or("");
-                            resolved.set(id, combo.into());
-                            keymap.insert(field.into(), serde_json::json!(combo));
-                        }
-                    }
-                    // A shortcut added after the file was written takes its
-                    // default only when that combo is free: a user who had
-                    // already bound the same chord elsewhere keeps their
-                    // binding and the new row arrives unbound.
-                    if let Some(keymap) = value
-                        .get_mut("keymap")
-                        .and_then(serde_json::Value::as_object_mut)
-                    {
-                        for (id, field) in [(ShortcutId::ToggleFiles, "toggleFiles")] {
-                            let default = platform_combo(id.default_combo());
-                            let taken = !keymap.contains_key(field)
-                                && keymap.values().any(|existing| {
-                                    existing
-                                        .as_str()
-                                        .is_some_and(|combo| platform_combo(combo) == default)
-                                });
-                            if taken {
-                                keymap.insert(field.into(), serde_json::json!(""));
-                            }
                         }
                     }
                     serde_json::from_value::<UiSettings>(value)
@@ -1513,7 +1477,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+            r#"{"sidebarWidth": 300, "notificationsEnabled": false}"#,
         )
         .unwrap();
 
@@ -1522,14 +1486,7 @@ mod tests {
         assert!(!loaded.pause_animations_in_background);
         assert!(loaded.smooth_scrolling);
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
-        for sound in [
-            crate::sound::Sound::Done,
-            crate::sound::Sound::Request,
-            crate::sound::Sound::Attention,
-        ] {
-            assert!(!loaded.session_sound_enabled(sound));
-        }
+        assert!(!loaded.notifications_enabled);
     }
 
     #[test]
@@ -1808,11 +1765,11 @@ mod tests {
     #[test]
     fn obsolete_steering_preference_does_not_reset_other_settings() {
         let loaded: UiSettings = serde_json::from_str(
-            r#"{"activeTurnSendBehavior":"steer","sidebarWidth":300,"soundEnabled":false}"#,
+            r#"{"activeTurnSendBehavior":"steer","sidebarWidth":300,"notificationsEnabled":false}"#,
         )
         .unwrap();
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
+        assert!(!loaded.notifications_enabled);
         assert!(
             serde_json::to_value(&loaded)
                 .unwrap()
@@ -1838,12 +1795,7 @@ mod tests {
             open_tabs: Some(vec!["b".to_string(), "a".to_string()]),
             space_filter: Some("space-1".into()),
             machine_filter: Some("studio".into()), // slopty
-            sound_enabled: false,
-            sound_completion_enabled: false,
-            sound_input_enabled: true,
-            sound_attention_enabled: false,
             notifications_enabled: false,
-            notifications_background_only: false,
             files_panel_width: 310.0,
             right_pane_width: 700.0,
             terminal_height: 320.0,
@@ -1891,6 +1843,9 @@ mod tests {
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
         assert!(json.contains(r#""machineFilter": "studio""#)); // slopty
+        // slopty: the shortcuts keep only the changed combo.
+        assert!(json.contains(r#""toggleSidebar": "mod-shift-s""#));
+        assert!(!json.contains(r#""saveFile""#));
         assert_eq!(UiSettings::load(dir.path()), settings);
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
         assert!(json.contains(r#""conversationWidth": "wide""#));
@@ -1964,7 +1919,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+            r#"{"sidebarWidth": 300, "notificationsEnabled": false}"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
@@ -1972,10 +1927,7 @@ mod tests {
         assert_eq!(loaded.accent, slopty_shell_theme::AccentSelection::ThemeDefault);
         assert_eq!(loaded.surface, slopty_shell_theme::SurfacePreference::ThemeDefault);
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled, "other keys still parse");
-        assert!(loaded.sound_completion_enabled);
-        assert!(loaded.sound_input_enabled);
-        assert!(loaded.sound_attention_enabled);
+        assert!(!loaded.notifications_enabled, "other keys still parse");
         assert_eq!(
             loaded.files_autosave_delay_ms,
             FILES_AUTOSAVE_DELAY_DEFAULT_MS
@@ -1991,39 +1943,7 @@ mod tests {
             crate::typography::TERMINAL_FONT_SIZE_DEFAULT
         );
         assert!(!loaded.files_show_all);
-        assert!(
-            loaded.notifications_enabled,
-            "pre-banner files default banners on"
-        );
-        assert!(
-            loaded.notifications_background_only,
-            "pre-banner files default background-only on"
-        );
         // slopty: no History surface (ruled out).
-    }
-
-    #[test]
-    fn session_sound_preferences_round_trip_and_gate_each_event() {
-        let settings = UiSettings {
-            sound_enabled: true,
-            sound_completion_enabled: false,
-            sound_input_enabled: true,
-            sound_attention_enabled: false,
-            ..Default::default()
-        };
-        assert!(!settings.session_sound_enabled(crate::sound::Sound::Done));
-        assert!(settings.session_sound_enabled(crate::sound::Sound::Request));
-        assert!(!settings.session_sound_enabled(crate::sound::Sound::Attention));
-
-        let value = serde_json::to_value(&settings).unwrap();
-        let restored: UiSettings = serde_json::from_value(value).unwrap();
-        assert_eq!(restored, settings);
-
-        let muted = UiSettings {
-            sound_enabled: false,
-            ..settings
-        };
-        assert!(!muted.session_sound_enabled(crate::sound::Sound::Request));
     }
 
     #[test]
@@ -2031,7 +1951,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
+            r#"{"sidebarWidth": 300, "notificationsEnabled": false}"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
@@ -2040,7 +1960,7 @@ mod tests {
             crate::typography::UiFontFamily::Geist
         );
         assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
+        assert!(!loaded.notifications_enabled);
         assert!(!loaded.diff_wrap);
         assert_eq!(
             loaded.ui_font_size,
@@ -2053,12 +1973,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"uiFontSize": 19, "soundEnabled": false}"#,
+            r#"{"uiFontSize": 19, "notificationsEnabled": false}"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.ui_font_size.pixels(), 18.0);
-        assert!(!loaded.sound_enabled);
+        assert!(!loaded.notifications_enabled);
     }
 
     #[test]
@@ -2344,7 +2264,7 @@ mod tests {
                 "newThreadComposerBackground": {"path": "/tmp/a.png", "name": "a.png"},
                 "wallpaperThemeColors": true,
                 "wallpaperColor": [51, 102, 153],
-                "keymap": {"randomWallpaper": "mod-shift-u", "saveFile": "mod-alt-s"}
+                "shortcuts": {"randomWallpaper": "mod-shift-u", "saveFile": "mod-alt-s"}
             }"#,
         )
         .unwrap();
@@ -2382,76 +2302,31 @@ mod tests {
         }
     }
 
+    /// slopty: the file keeps only what the person changed, so a default that moves reaches
+    /// every shortcut left alone.
     #[test]
-    fn legacy_panel_defaults_migrate_and_custom_shortcuts_survive() {
-        let dir = tempfile::tempdir().unwrap();
-        for (sidebar, right, expected_sidebar, expected_right) in [
-            ("mod-s", "mod-b", "mod-b", "mod-r"),
-            ("mod-shift-x", "mod-alt-b", "mod-shift-x", "mod-alt-b"),
-        ] {
-            std::fs::write(
-                UiSettings::path(dir.path()),
-                serde_json::json!({
-                    "keymap": {"toggleSidebar": sidebar, "toggleChanges": right}
-                })
-                .to_string(),
-            )
-            .unwrap();
-            let settings = UiSettings::load(dir.path());
-            assert_eq!(settings.keymap.toggle_sidebar, expected_sidebar);
-            assert_eq!(settings.keymap.toggle_changes, expected_right);
-            assert_eq!(settings.keymap.save_file, "mod-s");
-        }
-        // Once the new map has been saved, old chords can be assigned deliberately.
-        let mut settings = UiSettings::default();
-        settings.keymap.save_file = "mod-shift-s".into();
-        settings.keymap.toggle_sidebar = "mod-s".into();
-        settings.save(dir.path()).unwrap();
-        assert_eq!(UiSettings::load(dir.path()).keymap, settings.keymap);
-    }
-
-    #[test]
-    fn legacy_migration_reserves_custom_chords_and_survives_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        for (custom, expected_save) in [
-            ("mod-s", "mod-shift-s"),
-            ("mod-b", "mod-s"),
-            ("mod-r", "mod-s"),
-        ] {
-            std::fs::write(UiSettings::path(dir.path()), serde_json::json!({
-                "keymap": {"toggleSidebar": "mod-shift-b", "toggleChanges": "mod-b", "newSession": custom}
-            }).to_string()).unwrap();
-            let loaded = UiSettings::load(dir.path());
-            assert_eq!(loaded.keymap.new_session, custom);
-            assert_eq!(loaded.keymap.toggle_sidebar, "mod-shift-b");
-            assert_eq!(loaded.keymap.save_file, expected_save);
-            assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
-            loaded.save(dir.path()).unwrap();
-            assert_eq!(UiSettings::load(dir.path()).keymap, loaded.keymap);
-        }
-        // If every candidate is already custom-bound, leave the new action
-        // unbound rather than steal a working shortcut from another action.
-        std::fs::write(UiSettings::path(dir.path()), serde_json::json!({
-            "keymap": {"toggleSidebar": "mod-shift-s", "newSession": "mod-s", "toggleChanges": "mod-r"}
-        }).to_string()).unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.keymap.save_file, "");
-        assert_eq!(loaded.keymap.new_session, "mod-s");
-        assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
-    }
-
-    #[test]
-    fn new_project_shortcut_migrates_and_persists() {
-        let mut keymap: KeymapConfig =
-            serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
-        assert_eq!(keymap.get(ShortcutId::NewProject), "mod-shift-n");
-        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
+    fn the_file_keeps_only_the_combos_the_person_changed() {
+        let stored = |keymap: &KeymapConfig| serde_json::to_value(keymap).unwrap();
+        let mut keymap = KeymapConfig::default();
+        assert_eq!(stored(&keymap), serde_json::json!({}), "nothing changed, nothing kept");
         keymap.set(ShortcutId::NewProject, "mod-alt-p".into());
-        let mut restored: KeymapConfig =
-            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
-        assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
-        restored.reset(ShortcutId::NewProject);
-        assert_eq!(restored.get(ShortcutId::NewProject), "mod-shift-n");
+        keymap.set(ShortcutId::JumpSession(2), "mod-alt-3".into());
+        keymap.set(ShortcutId::ArchiveSession, String::new());
+        assert_eq!(
+            stored(&keymap),
+            serde_json::json!({"newProject": "mod-alt-p", "jumpSession3": "mod-alt-3", "archiveSession": ""}),
+            "a change, a slot counted from 1, and an unbound row"
+        );
+        let restored: KeymapConfig = serde_json::from_value(stored(&keymap)).unwrap();
+        assert_eq!(restored, keymap, "it reads back as written");
+        keymap.reset(ShortcutId::NewProject);
+        keymap.reset(ShortcutId::JumpSession(2));
+        keymap.reset(ShortcutId::ArchiveSession);
+        assert_eq!(stored(&keymap), serde_json::json!({}), "a reset row leaves the file");
+        // Every shortcut has its own name there.
+        let names: std::collections::HashSet<_> =
+            ShortcutId::ALL.into_iter().map(ShortcutId::stored_key).collect();
+        assert_eq!(names.len(), ShortcutId::ALL.len());
     }
 
     #[test]
@@ -2463,7 +2338,8 @@ mod tests {
         assert_eq!(keymap.get(ShortcutId::SaveFile), "mod-s");
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
         assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-r");
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
+        assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j"); // slopty
+        assert_eq!(keymap.get(ShortcutId::Inbox), "mod-shift-j"); // slopty
         let ctrl = if crate::keys::MOD_IS_COMMAND { // slopty
             "ctrl"
         } else {
@@ -2593,7 +2469,7 @@ mod tests {
         let conflicts = conflicted_shortcuts(&keymap);
         assert!(conflicts.contains(&ShortcutId::ToggleSidebar));
         assert!(conflicts.contains(&ShortcutId::ToggleChanges));
-        assert!(!conflicts.contains(&ShortcutId::ToggleTerminal));
+        assert!(!conflicts.contains(&ShortcutId::Inbox));
         keymap.reset(ShortcutId::ToggleChanges);
         assert!(conflicted_shortcuts(&keymap).is_empty());
     }
@@ -2613,12 +2489,18 @@ mod tests {
     }
 
     #[test]
-    fn keymap_survives_old_settings_files() {
-        // Files written before the keymap existed load with defaults.
+    fn a_file_without_shortcuts_takes_every_default() {
+        // slopty: the old `keymap`, which froze every default it was saved with, is not read.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
+        std::fs::write(
+            UiSettings::path(dir.path()),
+            r#"{"sidebarWidth": 300, "keymap": {"nextNeedsYou": "mod-.", "toggleTerminal": "mod-j"}}"#,
+        )
+        .unwrap();
         let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.sidebar_width, 300.0);
         assert_eq!(loaded.keymap, KeymapConfig::default());
+        assert_eq!(loaded.keymap.get(ShortcutId::NextNeedsYou), "mod-j");
     }
 
     #[test]
@@ -2671,21 +2553,21 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_jump_list_heals_without_losing_other_settings() {
-        // Healing happens on load, so an odd jumpSession must not cost the
-        // user their sidebar width or their other combos.
+    fn a_malformed_shortcut_is_skipped_without_losing_other_settings() {
+        // An odd entry must not cost the person their sidebar width or their other combos.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "keymap": {"toggleSidebar": "mod-shift-x", "jumpSession": ["mod-alt-1", "mod-alt-2"]}}"#,
+            r#"{"sidebarWidth": 300, "shortcuts": {"toggleSidebar": "mod-shift-x", "jumpSession1": "mod-alt-1", "jumpSession2": 7, "jumpSession10": "mod-0"}}"#,
         )
         .unwrap();
         let loaded = UiSettings::load(dir.path());
         assert_eq!(loaded.sidebar_width, 300.0);
         assert_eq!(loaded.keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
         assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(0)), "mod-alt-1");
+        assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(1)), "mod-2", "not a string: the default");
         assert_eq!(loaded.keymap.get(ShortcutId::JumpSession(8)), "mod-9");
-        assert_eq!(loaded.keymap.jump_session.len(), JUMP_SLOTS);
+        assert_eq!(loaded.keymap.jump_session.len(), JUMP_SLOTS, "no tenth slot");
     }
 
     #[test]
@@ -2775,49 +2657,39 @@ mod tests {
     }
 
     #[test]
-    fn a_new_shortcut_default_yields_to_an_existing_custom_binding() {
-        // Upgrade path: a file that predates the files-panel shortcut and had
-        // already put its default chord on another action keeps that binding
-        // and the new row arrives unbound rather than double-bound.
+    fn a_default_yields_to_a_chord_the_person_gave_another_action() {
+        // slopty: ⌘J moved to the jump; a person who had put it on another action keeps it there
+        // and the jump arrives unbound, rather than one chord binding twice.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"keymap": {"saveFile": "mod-s", "toggleTerminal": "mod-e"}}"#,
+            r#"{"shortcuts": {"saveFile": "mod-j"}}"#,
         )
         .unwrap();
-        let keymap = UiSettings::load(dir.path()).keymap;
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-e");
-        assert_eq!(keymap.get(ShortcutId::ToggleFiles), "");
-        assert!(conflicted_shortcuts(&keymap).is_empty());
+        let loaded = UiSettings::load(dir.path());
+        assert_eq!(loaded.keymap.get(ShortcutId::SaveFile), "mod-j");
+        assert_eq!(loaded.keymap.get(ShortcutId::NextNeedsYou), "");
+        assert!(conflicted_shortcuts(&loaded.keymap).is_empty());
+        loaded.save(dir.path()).unwrap();
+        assert_eq!(
+            UiSettings::load(dir.path()).keymap.get(ShortcutId::NextNeedsYou),
+            "",
+            "it stays unbound once saved"
+        );
 
-        // With the chord free, the new row takes its default.
+        // With the chord free, the shortcut follows its default, and the rest keep theirs.
         std::fs::write(
             UiSettings::path(dir.path()),
-            r#"{"keymap": {"saveFile": "mod-s", "toggleTerminal": "mod-j"}}"#,
-        )
-        .unwrap();
-        let keymap = UiSettings::load(dir.path()).keymap;
-        assert_eq!(keymap.get(ShortcutId::ToggleFiles), "mod-e");
-    }
-
-    #[test]
-    fn a_keymap_missing_newer_shortcuts_keeps_its_customizations() {
-        // Upgrade path: a file from a build that predates session cycling and
-        // archiving carries the user's rebinds and defaults only the new rows.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"keymap": {"toggleSidebar": "mod-shift-x"}}"#,
+            r#"{"shortcuts": {"toggleSidebar": "mod-shift-x"}}"#,
         )
         .unwrap();
         let keymap = UiSettings::load(dir.path()).keymap;
         assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
+        assert_eq!(keymap.get(ShortcutId::NextNeedsYou), "mod-j");
         assert_eq!(
             keymap.get(ShortcutId::NextSession),
             ShortcutId::NextSession.default_combo()
         );
-        assert_eq!(keymap.get(ShortcutId::ArchiveSession), "mod-shift-a");
     }
 
     #[test]
