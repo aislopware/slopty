@@ -57,8 +57,13 @@ fn state() -> &'static Mutex<Option<MdSelection>> {
 #[cfg(test)]
 pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    LOCK.lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    let held = LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // slopty: each holder starts with no selection, as a new app does. The state is the
+    // process's, which keeps it across a `#[gpui::test]`'s seeds: the drag one seed left open
+    // read as the next one's (the nightly's GPUI seeds, 2026-10-29).
+    *state().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    held
 }
 
 /// Resolve the spans for a selection between `a` and `b`, each an

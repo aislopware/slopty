@@ -191,6 +191,7 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
 /// A shell window on `screen`, with two chats, the first of them at work, and no chat open yet.
 /// GPUI checks every frame it draws against one from scratch, and panics on a stale one.
 pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>, &mut VisualTestContext) {
+    crate::motion::forget_for_test(); // slopty: no hover from the last seed
     let dir = tempfile::tempdir().unwrap();
     compact::force_touch(screen.touch);
     cx.update(|cx| {

@@ -1419,6 +1419,17 @@ thread_local! {
     static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
 }
 
+/// slopty: forget every hover fade and state morph, as a new app starts with none. The stores
+/// are this thread's, which keeps them across a `#[gpui::test]`'s seeds, so a test that reads
+/// them starts here and no seed inherits the hover the last one left (the nightly's GPUI seeds,
+/// 2026-10-29).
+#[cfg(test)]
+pub(crate) fn forget_for_test() {
+    HOVER_FADES.with(|fades| *fades.borrow_mut() = HoverFades::default());
+    HOVER_FRAME.with(|frame| frame.set(None));
+    STATE_MORPHS.with(|morphs| *morphs.borrow_mut() = StateMorphs::default());
+}
+
 /// Morph progress (0..1) of `key` toward `on` at `now`, the frame's moment (`cx.frame_time()`).
 // slopty: the frame's moment, not the wall clock's, so a frame drawn again from scratch at the
 // same moment stands the morph where it stood.

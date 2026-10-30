@@ -13731,6 +13731,7 @@ mod tests {
     #[gpui::test]
     fn generated_image_fixture_uses_cache_and_retries(cx: &mut gpui::TestAppContext) {
         use crate::attachments::*;
+        forget_for_test(); // slopty: no load the last seed claimed
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);

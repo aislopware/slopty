@@ -1073,6 +1073,7 @@ mod tests {
 
     #[gpui::test]
     fn a_tabs_close_fades_with_its_hover(cx: &mut gpui::TestAppContext) {
+        crate::motion::forget_for_test(); // slopty: no hover from the last seed
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             cx.set_reduce_motion(true);

@@ -490,6 +490,15 @@ fn cache() -> &'static Mutex<ImageCache> {
     CACHE.get_or_init(|| Mutex::new(ImageCache::default()))
 }
 
+/// slopty: empty the image cache and its eviction shield, as a new app starts with neither. Both
+/// are the process's, which keeps them across a `#[gpui::test]`'s seeds: a load the last seed
+/// claimed read as this one's (the nightly's GPUI seeds, 2026-10-29).
+#[cfg(test)]
+pub(crate) fn forget_for_test() {
+    *cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ImageCache::default();
+    protected().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+}
+
 /// Keys shielded from LRU eviction — the open transcript's attachments. The
 /// gpui list caches rendered rows across frames, so a VISIBLE thumbnail's
 /// `last_used` tick can go stale and budget pressure evicted images still on
