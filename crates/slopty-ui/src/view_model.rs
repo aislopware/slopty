@@ -34,8 +34,8 @@ use slopty_view_doc::{
     calls,
 };
 use slopty_view_proto::{
-    Chat, ChatConnectivity, Connectivity, ConnectivityState, Device, EngineInfo, ServerPresence,
-    Session, Space, WorkspaceScope,
+    Chat, Connectivity, ConnectivityState, Device, EngineInfo, ServerPresence, Session, Space,
+    WorkspaceScope,
 };
 use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -267,17 +267,16 @@ impl Feed {
     }
 
     /// How this client reaches the workers: whether any is linked now (`None` with none at
-    /// all), which stands for the whole where no server is followed, and each chat by its
-    /// worker's link (`chats`). Unchanged, it wakes no watch.
-    pub fn links(&self, workers: Option<bool>, chats: Vec<ChatConnectivity>) {
+    /// all), which stands for the whole where no server is followed. Unchanged, it wakes no
+    /// watch.
+    pub fn links(&self, workers: Option<bool>) {
         *self.workers_up.lock() = workers;
         self.connectivity.send_if_modified(|now| {
             let state = edge(now.server.as_ref(), workers);
-            if now.state == state && now.chats == chats {
+            if now.state == state {
                 return false;
             }
             now.state = state;
-            now.chats = chats;
             true
         });
     }
@@ -599,7 +598,6 @@ impl RpcService for ViewModel {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
         match method {
             methods::ENGINE_INFO => RpcReply::value(&self.info),
-            methods::ENGINE_READY => RpcReply::value(&serde_json::json!({ "ready": true })),
             // This machine's worker, once the app knows whether there is one; the client's own
             // id when there is none.
             methods::LOCAL_DEVICE => {

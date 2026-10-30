@@ -1,4 +1,4 @@
-//! What the shell reads of the chats through the workspace: each chat's link to its machine and
+//! What the shell reads of the chats through the workspace: how it reaches their machines and
 //! the chats found by their words.
 
 use gpui::AppContext as _;
@@ -6,7 +6,7 @@ use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{TableFrame, ThreadFrame};
 use slopty_proto::thread::{Cursor, ThreadState};
-use slopty_view_proto::{ChatSyncState, ConnectivityState};
+use slopty_view_proto::ConnectivityState;
 use slopty_view_rpc::methods;
 use tokio::sync::mpsc::Receiver;
 
@@ -48,34 +48,22 @@ fn holding<'a>(
     (workspace, cx, rx, feed)
 }
 
-/// A chat whose worker drops says so, by the chat, and recovers once the link is back; with no
-/// server, the whole is as reachable as its workers.
+/// With no server, the whole is as reachable as its workers: reconnecting while the only one
+/// drops, connected once its link is back.
 #[gpui::test]
-fn a_chat_whose_worker_drops_says_so_and_recovers(cx: &mut gpui::TestAppContext) {
+fn the_whole_follows_its_workers_links(cx: &mut gpui::TestAppContext) {
     let state = fixtures::thread("tools");
-    let chat = state.meta.id.to_string();
     let (workspace, cx, _rx, feed) = holding(&state, |_| {}, cx);
     let link_of = |status: WorkerStatus, cx: &mut gpui::VisualTestContext| {
         workspace.update(cx, |v, cx| {
             v.set_worker_status(KEY, status, cx);
             v.view_publish(cx);
         });
-        let said = feed.said_connectivity();
-        let chat = said.chats.into_iter().find(|c| c.chat_id == chat).expect("the chat's link");
-        (said.state, chat.sync_state, chat.connected, chat.delivery_live)
+        feed.said_connectivity().state
     };
-    assert_eq!(
-        link_of(WorkerStatus::Relinking, cx),
-        (ConnectivityState::Reconnecting, ChatSyncState::Connecting, false, false)
-    );
-    assert_eq!(
-        link_of(WorkerStatus::NoAnswer, cx),
-        (ConnectivityState::Reconnecting, ChatSyncState::Offline, false, false)
-    );
-    assert_eq!(
-        link_of(WorkerStatus::Connected, cx),
-        (ConnectivityState::Connected, ChatSyncState::Synced, true, true)
-    );
+    assert_eq!(link_of(WorkerStatus::Relinking, cx), ConnectivityState::Reconnecting);
+    assert_eq!(link_of(WorkerStatus::NoAnswer, cx), ConnectivityState::Reconnecting);
+    assert_eq!(link_of(WorkerStatus::Connected, cx), ConnectivityState::Connected);
     feed.server(Some(slopty_view_proto::ServerPresence {
         name: "hub".to_owned(),
         online: false,

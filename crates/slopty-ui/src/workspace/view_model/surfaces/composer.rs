@@ -63,9 +63,7 @@ impl WorkspaceView {
     ) -> Option<Task<Result<RpcReply, RpcError>>> {
         Some(match method {
             methods::READ_ATTACHMENT_CHUNK => self.read_attachment(params, cx),
-            methods::FOCUS_CHAT | methods::PROBE_SYNC | methods::RELEASE_HOME_FOLDER_SEARCH => {
-                Task::ready(value(&serde_json::json!({})))
-            }
+            methods::RELEASE_HOME_FOLDER_SEARCH => Task::ready(value(&serde_json::json!({}))),
             methods::LIST_PROJECT_ACTIONS => self.list_project_actions(params, cx),
             methods::RUN_PROJECT_ACTION => self.run_project_action(params, cx),
             methods::UPSERT_PROJECT_ACTION => self.upsert_project_action(params, cx),

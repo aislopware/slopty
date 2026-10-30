@@ -260,7 +260,6 @@ impl WorkspaceView {
         let mut chats = Vec::new();
         let mut sessions = Vec::new();
         let mut folders: BTreeMap<(String, String), Folder> = BTreeMap::new();
-        let mut links = Vec::new();
         let mut leases = std::mem::take(&mut self.view_model.leases);
         let mut heard_leases = HashMap::new();
         // Every worker's rows at once: an agent may start its subagents on other machines.
@@ -327,10 +326,6 @@ impl WorkspaceView {
                 now.checked_sub_signed(ago.unwrap_or_default()).unwrap_or(now)
             });
             let mut session = rows::session(row, device, running, heard, leased);
-            let unsent = self
-                .held_hub(*key)
-                .map_or(0, |hub| hub.read(cx).threads().outbox().of(row.id).count());
-            links.push(self.view_chat_link(&id, *key, unsent));
             session.chat_id = id;
             chats.push(chat);
             sessions.push(session);
@@ -382,7 +377,7 @@ impl WorkspaceView {
         self.view_model.leases = heard_leases;
         let workers_up = (!self.workers.is_empty())
             .then(|| self.workers.values().any(|worker| worker.status.is_up()));
-        feed.links(workers_up, links);
+        feed.links(workers_up);
         // A thread whose state has not come says nothing yet: an empty transcript would stand as
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
         // thread had its empty transcript when followed.
@@ -406,36 +401,6 @@ impl WorkspaceView {
     fn view_unreachable(&self, chat: &str, cx: &Context<Self>) -> bool {
         let Some((key, _)) = self.view_model.followed.get(chat) else { return false };
         self.held_hub(*key).is_none_or(|hub| !hub.read(cx).threads().linked())
-    }
-
-    /// How the chat `chat` on `key` reaches its machine, with `unsent` of its asks not answered
-    /// yet: delivered while its worker's link is up, on its way back while it is being dialled,
-    /// offline while nothing answers there.
-    fn view_chat_link(
-        &self,
-        chat: &str,
-        key: WorkerKey,
-        unsent: usize,
-    ) -> slopty_view_proto::ChatConnectivity {
-        use slopty_view_proto::ChatSyncState;
-
-        use crate::workspace::WorkerStatus as S;
-        let status = self.workers.get(&key).map(|worker| &worker.status);
-        let sync_state = match status {
-            Some(S::Connected | S::Checking) => ChatSyncState::Synced,
-            Some(S::Connecting | S::Silent(_) | S::Relinking | S::Reconnecting(_)) => {
-                ChatSyncState::Connecting
-            }
-            _ => ChatSyncState::Offline,
-        };
-        let up = status.is_some_and(crate::workspace::WorkerStatus::is_up);
-        slopty_view_proto::ChatConnectivity {
-            chat_id: chat.to_owned(),
-            sync_state,
-            connected: up,
-            delivery_live: up,
-            pending_pushes: u64::try_from(unsent).unwrap_or(u64::MAX),
-        }
     }
 
     /// The transcript of the chat `chat` as its thread stands here, and whether older turns
