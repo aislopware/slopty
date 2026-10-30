@@ -16,7 +16,7 @@
 //!    transparent wherever nothing was drawn.
 
 use slopty_visual::{Camera, CameraFrame, Color, Scene, V3};
-use wgpu::util::DeviceExt;
+use wgpu::util::DeviceExt as _;
 
 use crate::textures::{Loaded, Space};
 use crate::{EDGE_FADE, FORMAT, Frame, gpu};
@@ -50,9 +50,9 @@ impl Vertex {
         4 => Float32x4, 5 => Float32x4, 6 => Float32x2
     ];
 
-    fn layout() -> wgpu::VertexBufferLayout<'static> {
+    const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as u64,
+            array_stride: size_of::<Self>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &Self::ATTRIBUTES,
         }
@@ -83,18 +83,14 @@ struct Globals {
     lens: [f32; 4],
 }
 
-fn bytes<T>(value: &T) -> &[u8] {
+const fn bytes<T>(value: &T) -> &[u8] {
     // SAFETY: plain-old-data `repr(C)` structs of `f32`s.
-    unsafe {
-        std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
-    }
+    unsafe { std::slice::from_raw_parts(std::ptr::from_ref(value).cast::<u8>(), size_of::<T>()) }
 }
 
-fn slice_bytes<T>(values: &[T]) -> &[u8] {
+const fn slice_bytes<T>(values: &[T]) -> &[u8] {
     // SAFETY: as above, for a slice.
-    unsafe {
-        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
-    }
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), size_of_val(values)) }
 }
 
 pub(crate) struct Pipelines {
@@ -121,7 +117,7 @@ pub(crate) struct Pipelines {
     white: wgpu::TextureView,
 }
 
-const SURFACE: &str = r#"
+const SURFACE: &str = "
 struct Globals {
     view_proj: mat4x4<f32>,
     light_view_proj: mat4x4<f32>,
@@ -333,9 +329,9 @@ struct Screen { @builtin(position) clip: vec4<f32>, @location(0) ndc: vec2<f32> 
     let c = i.color.rgb * (1.0 + i.mat.z);
     return vec4<f32>(c * i.color.a, i.color.a);
 }
-"#;
+";
 
-const GLASS: &str = r#"
+const GLASS: &str = "
 @group(2) @binding(0) var behind: texture_2d<f32>;
 @group(2) @binding(1) var behind_sampler: sampler;
 
@@ -391,9 +387,9 @@ const GLASS: &str = r#"
         + albedo * i.mat.z;
     return vec4<f32>(color, alpha);
 }
-"#;
+";
 
-const POST: &str = r#"
+const POST: &str = "
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 @group(0) @binding(2) var<uniform> post: vec4<f32>;
@@ -465,7 +461,7 @@ const NEIGHBOURS = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i
     let fade = edge_fade(i.clip.xy, vec2<f32>(size));
     return vec4<f32>(to_srgb(aces(straight)), alpha * fade);
 }
-"#;
+";
 
 impl Pipelines {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -554,7 +550,7 @@ impl Pipelines {
                 format: DEPTH,
                 depth_write_enabled: Some(write),
                 depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
+                stencil: wgpu::StencilState::default(),
                 bias,
             })
         };
@@ -571,7 +567,7 @@ impl Pipelines {
                     vertex: wgpu::VertexState {
                         module,
                         entry_point: Some("vs"),
-                        compilation_options: Default::default(),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
                         buffers: &[Some(Vertex::layout())],
                     },
                     primitive: wgpu::PrimitiveState::default(),
@@ -580,7 +576,7 @@ impl Pipelines {
                     fragment: Some(wgpu::FragmentState {
                         module,
                         entry_point: Some(fragment),
-                        compilation_options: Default::default(),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: HDR,
                             blend,
@@ -597,7 +593,7 @@ impl Pipelines {
             &surface_layout,
             "fs_opaque",
             None,
-            depth(true, Default::default()),
+            depth(true, wgpu::DepthBiasState::default()),
         );
         let overlay = surface_pipeline(
             "scene lines and points",
@@ -613,7 +609,7 @@ impl Pipelines {
             &glass_pipeline_layout,
             "fs_glass",
             None,
-            depth(true, Default::default()),
+            depth(true, wgpu::DepthBiasState::default()),
         );
         // Drawn far to near, so it tests depth but doesn't write it.
         let translucent = surface_pipeline(
@@ -622,7 +618,7 @@ impl Pipelines {
             &surface_layout,
             "fs_translucent",
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-            depth(false, Default::default()),
+            depth(false, wgpu::DepthBiasState::default()),
         );
         let sprite = surface_pipeline(
             "scene sprites",
@@ -641,7 +637,7 @@ impl Pipelines {
                     operation: wgpu::BlendOperation::Add,
                 },
             }),
-            depth(false, Default::default()),
+            depth(false, wgpu::DepthBiasState::default()),
         );
         let background = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("scene environment"),
@@ -649,7 +645,7 @@ impl Pipelines {
             vertex: wgpu::VertexState {
                 module: &surface,
                 entry_point: Some("vs_background"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[],
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -657,14 +653,14 @@ impl Pipelines {
                 format: DEPTH,
                 depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: Default::default(),
-                bias: Default::default(),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: msaa,
             fragment: Some(wgpu::FragmentState {
                 module: &surface,
                 entry_point: Some("fs_background"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: HDR,
                     blend: None,
@@ -680,7 +676,7 @@ impl Pipelines {
             vertex: wgpu::VertexState {
                 module: &surface,
                 entry_point: Some("vs_shadow"),
-                compilation_options: Default::default(),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[Some(Vertex::layout())],
             },
             primitive: wgpu::PrimitiveState::default(),
@@ -688,10 +684,10 @@ impl Pipelines {
                 format: DEPTH,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: Default::default(),
+                stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
             }),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState::default(),
             fragment: None,
             multiview_mask: None,
             cache: None,
@@ -703,16 +699,16 @@ impl Pipelines {
                 vertex: wgpu::VertexState {
                     module: &post,
                     entry_point: Some("vs"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
-                primitive: Default::default(),
+                primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &post,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: None,
@@ -787,10 +783,14 @@ fn scale(a: V3, s: f32) -> V3 {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 fn dot(a: V3, b: V3) -> f32 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))
 }
 fn cross(a: V3, b: V3) -> V3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1].mul_add(b[2], -(a[2] * b[1])),
+        a[2].mul_add(b[0], -(a[0] * b[2])),
+        a[0].mul_add(b[1], -(a[1] * b[0])),
+    ]
 }
 fn normalize(a: V3) -> V3 {
     let len = dot(a, a).sqrt();
@@ -806,14 +806,9 @@ fn linear(rgba: [f32; 4]) -> [f32; 4] {
 }
 
 /// Rows of a matrix into WGSL's column-major layout.
-fn columns(rows: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut cols = [[0.0; 4]; 4];
-    for (i, row) in rows.iter().enumerate() {
-        for (j, value) in row.iter().enumerate() {
-            cols[j][i] = *value;
-        }
-    }
-    cols
+const fn columns(rows: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let [[a0, a1, a2, a3], [b0, b1, b2, b3], [c0, c1, c2, c3], [d0, d1, d2, d3]] = rows;
+    [[a0, b0, c0, d0], [a1, b1, c1, d1], [a2, b2, c2, d2], [a3, b3, c3, d3]]
 }
 
 /// The world-space key light, from above and to the side, so shadows fall
@@ -835,9 +830,11 @@ fn push_batch(
     texture: Option<u32>,
     vertices: &[Vertex],
 ) {
-    let start = out.len() as u32;
+    // A frame's vertices number far below `u32::MAX`.
+    let count = |out: &Vec<Vertex>| u32::try_from(out.len()).unwrap_or(u32::MAX);
+    let start = count(out);
     out.extend_from_slice(vertices);
-    let end = out.len() as u32;
+    let end = count(out);
     match batches.last_mut() {
         Some(last) if last.texture == texture && last.range.end == start => last.range.end = end,
         _ => batches.push(Batch { texture, range: start..end }),
@@ -884,21 +881,23 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
         // A texture needs coordinates to be sampled by.
         let texture = face.texture.filter(|_| face.uvs.is_some());
         let vertex = |i: usize| Vertex {
-            pos: face.corners[i],
-            normal: face.normals.map_or(face.normal, |n| n[i]),
+            pos: face.corners.get(i).copied().unwrap_or_default(),
+            normal: face.normals.and_then(|n| n.get(i).copied()).unwrap_or(face.normal),
             face: face.normal,
             color,
             mat: [m.roughness, m.metalness, m.glow, m.glass],
             opt: [m.ior, m.dispersion, if face.two_sided { 1.0 } else { 0.0 }, 0.0],
-            uv: face.uvs.map_or([0.0; 2], |uv| uv[i]),
+            uv: face.uvs.and_then(|uv| uv.get(i).copied()).unwrap_or([0.0; 2]),
         };
-        let mut tris = Vec::with_capacity((face.corners.len() - 2) * 3);
-        for i in 1..face.corners.len() - 1 {
-            tris.extend([vertex(0), vertex(i), vertex(i + 1)]);
+        // A fan from the first corner.
+        let corners = face.corners.len();
+        let mut tris = Vec::with_capacity(corners.saturating_sub(2).saturating_mul(3));
+        for i in 1..corners.saturating_sub(1) {
+            tris.extend([vertex(0), vertex(i), vertex(i.saturating_add(1))]);
         }
         if m.glass > 0.0 || color[3] < 0.999 {
             let centroid = face.corners.iter().fold([0.0; 3], |acc, c| add(acc, *c));
-            let centroid = scale(centroid, 1.0 / face.corners.len() as f32);
+            let centroid = scale(centroid, 1.0 / count(corners));
             let distance = dot(sub(centroid, frame.eye), frame.forward);
             // Only glass refracts; a faded wall or pane is just see-through.
             if m.glass > 0.0 {
@@ -948,23 +947,18 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
         let side_b = normalize(cross(dir, sub(b, frame.eye)));
         let wa = scale(side_a, width.max(1.0) * 0.5 * world_per_pixel(a));
         let wb = scale(side_b, width.max(1.0) * 0.5 * world_per_pixel(b));
-        let quad = [add(a, wa), add(b, wb), sub(b, wb), sub(a, wa)];
-        for i in [0, 1, 2, 0, 2, 3] {
-            out.overlay.push(flat(quad[i], color, 1.0, [0.0; 2]));
+        let [q0, q1, q2, q3] = [add(a, wa), add(b, wb), sub(b, wb), sub(a, wa)];
+        for pos in [q0, q1, q2, q0, q2, q3] {
+            out.overlay.push(flat(pos, color, 1.0, [0.0; 2]));
         }
     }
     for (at, radius, color) in scene.point_views() {
         let color = linear(rgba(color));
         let r = radius * world_per_pixel(at);
         let (x, y) = (scale(frame.right, r), scale(frame.up, r));
-        let corners = [
-            (add(sub(at, x), y), [-1.0, 1.0]),
-            (add(add(at, x), y), [1.0, 1.0]),
-            (sub(add(at, x), y), [1.0, -1.0]),
-            (sub(sub(at, x), y), [-1.0, -1.0]),
-        ];
-        for i in [0, 1, 2, 0, 2, 3] {
-            out.overlay.push(flat(corners[i].0, color, 2.0, corners[i].1));
+        let [c0, c1, c2, c3] = billboard(at, x, y);
+        for (pos, uv) in [c0, c1, c2, c0, c2, c3] {
+            out.overlay.push(flat(pos, color, 2.0, uv));
         }
     }
     let mut sprites: Vec<_> = scene.sprites().iter().collect();
@@ -973,18 +967,12 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
         let color = linear(rgba(sprite.color));
         let r = sprite.size * 0.5 * world_per_pixel(sprite.at);
         let (x, y) = (scale(frame.right, r), scale(frame.up, r));
-        let at = sprite.at;
-        let corners = [
-            (add(sub(at, x), y), [-1.0, 1.0]),
-            (add(add(at, x), y), [1.0, 1.0]),
-            (sub(add(at, x), y), [1.0, -1.0]),
-            (sub(sub(at, x), y), [-1.0, -1.0]),
-        ];
-        let quad: Vec<Vertex> = [0, 1, 2, 0, 2, 3]
+        let [c0, c1, c2, c3] = billboard(sprite.at, x, y);
+        let quad: Vec<Vertex> = [c0, c1, c2, c0, c2, c3]
             .into_iter()
-            .map(|i| Vertex {
+            .map(|(pos, uv)| Vertex {
                 mat: [if sprite.texture.is_some() { 1.0 } else { 0.0 }, 0.0, sprite.glow, 0.0],
-                ..flat(corners[i].0, color, 3.0, corners[i].1)
+                ..flat(pos, color, 3.0, uv)
             })
             .collect();
         push_batch(&mut out.sprites, &mut out.sprite_batches, sprite.texture, &quad);
@@ -992,8 +980,26 @@ fn geometry(scene: &Scene, frame: &CameraFrame, rgba: &dyn Fn(Color) -> [f32; 4]
     out
 }
 
+/// A camera-facing square around `at`, `x` and `y` its half extents along the
+/// screen's right and up: each corner with its coordinates in -1..1.
+fn billboard(at: V3, x: V3, y: V3) -> [(V3, [f32; 2]); 4] {
+    [
+        (add(sub(at, x), y), [-1.0, 1.0]),
+        (add(add(at, x), y), [1.0, 1.0]),
+        (sub(add(at, x), y), [1.0, -1.0]),
+        (sub(sub(at, x), y), [-1.0, -1.0]),
+    ]
+}
+
+/// A count as `f32`: exact for anything a scene holds, below 2^24.
+#[expect(clippy::cast_precision_loss, reason = "a scene's counts stay below 2^24, exact in `f32`")]
+const fn count(n: usize) -> f32 {
+    n as f32
+}
+
 /// One scene's render targets between frames (about 70 MB at a Retina
 /// size): made once, then reused while the size holds.
+#[derive(Debug)]
 pub struct SceneState {
     size: (u32, u32),
     shadow_map: wgpu::Texture,
@@ -1043,9 +1049,22 @@ impl SceneState {
 }
 
 /// Render `scene` on the GPU for a canvas `width` by `height` logical pixels
-/// at `pixel_scale`, reusing `state`'s targets (made or remade as needed).
+/// at `pixel_scale`.
+///
+/// It reuses `state`'s targets (made or remade as needed), and answers
 /// `None` without a GPU (or geometry), so the caller can fall back to the
 /// software renderer.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the scene, its view, the canvas and the caller's palette and cache each vary per call"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    reason = "pixel sizes are rounded, at least 1 and far below 2^24, which `u32` and `f32` hold \
+              exactly, as they do a texture's few mip levels"
+)]
 pub fn render_scene(
     scene: &Scene,
     camera: Camera,
@@ -1076,32 +1095,48 @@ pub fn render_scene(
     // Camera: the same framing and projection as the software renderer.
     let distance = dot(sub(frame.center, frame.eye), sub(frame.center, frame.eye)).sqrt();
     let near = frame.near;
-    let far = distance + frame.radius * 2.0;
+    let far = frame.radius.mul_add(2.0, distance);
     let (sx, sy) = (frame.focal / (width / 2.0), frame.focal / (height / 2.0));
-    let (a, b) = (far / (far - near), -far * near / (far - near));
+    // Depth from `near` to `far` onto 0..1.
+    let (depth_scale, depth_offset) = (far / (far - near), -far * near / (far - near));
     let row = |axis: V3, s: f32| [axis[0] * s, axis[1] * s, axis[2] * s, -dot(axis, frame.eye) * s];
-    let f = frame.forward;
+    let forward = frame.forward;
     let view_proj = columns([
         row(frame.right, sx),
         row(frame.up, sy),
-        [f[0] * a, f[1] * a, f[2] * a, -dot(f, frame.eye) * a + b],
-        row(f, 1.0),
+        [
+            forward[0] * depth_scale,
+            forward[1] * depth_scale,
+            forward[2] * depth_scale,
+            (-dot(forward, frame.eye)).mul_add(depth_scale, depth_offset),
+        ],
+        row(forward, 1.0),
     ]);
     // The key light's orthographic view, fitted to the geometry.
     let light = normalize(KEY_LIGHT);
     let light_forward = scale(light, -1.0);
     let light_right = normalize(cross(light_forward, [0.0, 0.0, 1.0]));
     let light_up = cross(light_right, light_forward);
-    let r = frame.radius * 1.1;
-    let c = frame.center;
+    let reach = frame.radius * 1.1;
+    let center = frame.center;
     let light_view_proj = columns([
-        [light_right[0] / r, light_right[1] / r, light_right[2] / r, -dot(light_right, c) / r],
-        [light_up[0] / r, light_up[1] / r, light_up[2] / r, -dot(light_up, c) / r],
         [
-            light_forward[0] / (2.0 * r),
-            light_forward[1] / (2.0 * r),
-            light_forward[2] / (2.0 * r),
-            (-dot(light_forward, c) + r) / (2.0 * r),
+            light_right[0] / reach,
+            light_right[1] / reach,
+            light_right[2] / reach,
+            -dot(light_right, center) / reach,
+        ],
+        [
+            light_up[0] / reach,
+            light_up[1] / reach,
+            light_up[2] / reach,
+            -dot(light_up, center) / reach,
+        ],
+        [
+            light_forward[0] / (2.0 * reach),
+            light_forward[1] / (2.0 * reach),
+            light_forward[2] / (2.0 * reach),
+            (-dot(light_forward, center) + reach) / (2.0 * reach),
         ],
         [0.0, 0.0, 0.0, 1.0],
     ]);
@@ -1116,7 +1151,7 @@ pub fn render_scene(
         depth: [near, far, frame.radius, 0.0],
         right: [frame.right[0], frame.right[1], frame.right[2], 0.0],
         up: [frame.up[0], frame.up[1], frame.up[2], 0.0],
-        forward: [f[0], f[1], f[2], 0.0],
+        forward: [forward[0], forward[1], forward[2], 0.0],
         env: match &environment {
             Some((e, map)) => {
                 [e.intensity, 1.0, if e.background { 1.0 } else { 0.0 }, map.mips as f32]
@@ -1132,10 +1167,10 @@ pub fn render_scene(
     });
 
     // Targets, kept between frames.
-    if state.as_ref().is_none_or(|t| t.size != (w, h)) {
-        *state = Some(SceneState::new(gpu, (w, h)));
-    }
-    let targets = state.as_mut().expect("made above");
+    let targets = match state {
+        Some(targets) if targets.size == (w, h) => targets,
+        _ => state.insert(SceneState::new(gpu, (w, h))),
+    };
     let SceneState {
         shadow_map,
         msaa_color,
@@ -1150,7 +1185,7 @@ pub fn render_scene(
         ..
     } = targets;
     let half = ((w / 2).max(1), (h / 2).max(1));
-    let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+    let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
 
     let env_view = environment.as_ref().map_or(&pipelines.white, |(_, map)| &map.view);
     // Slot 0 is plain white (untextured); texture `i` is slot `i + 1`.
@@ -1175,8 +1210,10 @@ pub fn render_scene(
             })
         })
         .collect();
+    // A texture past the scene's draws with the last one, as it always has.
     let material = |texture: Option<u32>| {
-        &material_binds[texture.map_or(0, |t| t as usize + 1).min(material_binds.len() - 1)]
+        let slot = texture.map_or(0, |t| (t as usize).saturating_add(1));
+        material_binds.get(slot).or_else(|| material_binds.last())
     };
     let globals_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("scene globals"),
@@ -1218,7 +1255,7 @@ pub fn render_scene(
     let draw = |pass: &mut wgpu::RenderPass, buffer: &Option<wgpu::Buffer>, count: usize| {
         if let Some(buffer) = buffer {
             pass.set_vertex_buffer(0, buffer.slice(..));
-            pass.draw(0..count as u32, 0..1);
+            pass.draw(0..u32::try_from(count).unwrap_or(u32::MAX), 0..1);
         }
     };
     let draw_batches =
@@ -1232,7 +1269,7 @@ pub fn render_scene(
             }
         };
 
-    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     // 1. Shadow. Its bind group (with the sampled map) is unused here: the
     // shadow vertex stage only reads the globals.
     let shadow_globals = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1545,7 +1582,7 @@ mod tests {
                 (
                     "checker.png".to_owned(),
                     png(64, 64, |x, y| {
-                        if (x / 8 + y / 8) % 2 == 0 {
+                        if (x / 8).is_multiple_of(2) == (y / 8).is_multiple_of(2) {
                             [240, 240, 240, 255]
                         } else {
                             [30, 60, 200, 255]
@@ -1556,7 +1593,8 @@ mod tests {
                     "sky.png".to_owned(),
                     png(256, 128, |x, y| {
                         let band = (x / 32) % 2 == 0;
-                        let up = 255 - (y * 2).min(255) as u8;
+                        let up = 255_u8
+                            .saturating_sub(u8::try_from(y.saturating_mul(2)).unwrap_or(u8::MAX));
                         if band { [255, up, 80, 255] } else { [40, 80, up, 255] }
                     }),
                 ),
@@ -1601,15 +1639,20 @@ mod tests {
         // the edge fade (15% of the 720 px height), and a faded frame edge.
         let (w, h) = (frame.width as usize, frame.height as usize);
         let band = 110;
-        let mut inside = frame.bgra.chunks_exact(4).enumerate().filter(|(i, _)| {
+        let mut inside = frame.bgra.as_chunks::<4>().0.iter().enumerate().filter(|(i, _)| {
             let (x, y) = (i % w, i / w);
             (band..w - band).contains(&x) && (band..h - band).contains(&y)
         });
         assert!(inside.all(|(_, p)| p[3] == 255));
         assert!(frame.bgra[3] < 3, "the corner fades out");
         // The checker shows both of its colors somewhere.
-        let blueish =
-            frame.bgra.chunks_exact(4).filter(|p| p[0] > 150 && p[2] < 90 && p[1] < 120).count();
+        let blueish = frame
+            .bgra
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[0] > 150 && p[2] < 90 && p[1] < 120)
+            .count();
         assert!(blueish > 500, "{blueish}");
         // A texture uploads once, however many frames draw it.
         render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
@@ -1632,23 +1675,27 @@ mod tests {
             crate::dump_ppm(&frame, &path);
         }
         assert_eq!((frame.width, frame.height), (1440, 720));
-        let drawn = frame.bgra.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let drawn = frame.bgra.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
         let total = (frame.width * frame.height) as usize;
         assert!(drawn > total / 8, "geometry fills the frame: {drawn}");
         assert!(drawn < total, "and the background stays clear");
     }
 
     /// The mean column of the strongly red pixels.
+    #[expect(clippy::cast_precision_loss, reason = "pixel columns and counts are far below 2^52")]
     fn red_center(frame: &Frame) -> f64 {
-        let (mut sum, mut count) = (0.0, 0usize);
-        for (i, p) in frame.bgra.chunks_exact(4).enumerate() {
-            if p[2] > 120 && p[2] as i32 - p[0] as i32 > 50 {
-                sum += (i % frame.width as usize) as f64;
-                count += 1;
-            }
-        }
+        let columns: Vec<usize> = frame
+            .bgra
+            .as_chunks::<4>()
+            .0
+            .chunks(frame.width as usize)
+            .flat_map(|row| row.iter().enumerate())
+            .filter(|(_, p)| p[2] > 120 && p[2].saturating_sub(p[0]) > 50)
+            .map(|(x, _)| x)
+            .collect();
+        let count = columns.len();
         assert!(count > 1000, "the red box shows: {count}");
-        sum / count as f64
+        columns.iter().map(|&x| x as f64).sum::<f64>() / count as f64
     }
 
     #[test]

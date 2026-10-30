@@ -3,10 +3,11 @@
 //! optional bloom and compositing by blend mode, read back as an image.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use slopty_visual::shader::{Blend, MAX_BUFFERS, ShaderUniforms};
-use wgpu::util::DeviceExt;
+use parking_lot::Mutex;
+use slopty_visual::shader::{Blend, MAX_BUFFERS, MAX_TEXTURES, ShaderUniforms};
+use wgpu::util::DeviceExt as _;
 
 use crate::{EDGE_FADE, FORMAT, Frame, gpu};
 
@@ -16,12 +17,17 @@ const HDR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const NOISE_SIZE: u32 = 256;
 
 /// What to run: the image pass, its buffers, and how it composites.
+#[derive(Debug)]
 pub struct ShaderSpec<'a> {
+    /// The image pass's GLSL `mainImage`.
     pub image: &'a str,
+    /// Buffer passes A to D, in order; past [`MAX_BUFFERS`] are dropped.
     pub buffers: &'a [String],
     /// Named float inputs, in slot order.
     pub inputs: &'a [String],
+    /// How the image composites over what is behind it.
     pub blend: Blend,
+    /// Bloom strength; 0 skips the bloom passes.
     pub bloom: f32,
     /// Images sampled as `iTexture0`-`3`.
     pub textures: &'a [slopty_visual::TextureData],
@@ -30,6 +36,7 @@ pub struct ShaderSpec<'a> {
 /// One shader's textures between frames: each buffer's previous and
 /// current frame, the image, and the post targets. Recreated when the size
 /// or the number of buffers changes.
+#[derive(Debug)]
 pub struct ShaderState {
     size: (u32, u32),
     buffers: Vec<[wgpu::Texture; 2]>,
@@ -62,7 +69,7 @@ const FULLSCREEN: &str =
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }";
 
-const POST: &str = r#"
+const POST: &str = "
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 // Bright/blur: xy is one texel along the blur. Composite: x bloom strength,
@@ -124,7 +131,7 @@ fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     let straight = clamp((clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)) * c.a + g) / a, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(straight, a * fade);
 }
-"#;
+";
 
 impl Pipelines {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -200,16 +207,16 @@ impl Pipelines {
                 vertex: wgpu::VertexState {
                     module: &post,
                     entry_point: Some("vs"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
-                primitive: Default::default(),
+                primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
-                multisample: Default::default(),
+                multisample: wgpu::MultisampleState::default(),
                 fragment: Some(wgpu::FragmentState {
                     module: &post,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format,
                         blend: None,
@@ -235,14 +242,14 @@ impl Pipelines {
         // Independent random RGBA per texel, fixed so a shader looks the
         // same on every device.
         let mut state = 0x2545_f491_u32;
-        let noise_bytes: Vec<u8> = (0..NOISE_SIZE * NOISE_SIZE * 4)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 17;
-                state ^= state << 5;
-                (state >> 24) as u8
-            })
-            .collect();
+        let noise_bytes: Vec<u8> = std::iter::repeat_with(|| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state >> 24) as u8
+        })
+        .take((NOISE_SIZE * NOISE_SIZE * 4) as usize)
+        .collect();
         let noise = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
@@ -299,7 +306,9 @@ impl Pipelines {
         device: &wgpu::Device,
         program: &str,
     ) -> Result<Arc<wgpu::RenderPipeline>, String> {
-        let mut passes = self.passes.lock().unwrap_or_else(|e| e.into_inner());
+        // Held while compiling, so two visuals asking for one program
+        // compile it once.
+        let mut passes = self.passes.lock();
         if let Some(cached) = passes.get(program) {
             return cached.clone();
         }
@@ -318,7 +327,7 @@ impl Pipelines {
                 vertex: wgpu::VertexState {
                     module: &self.fullscreen,
                     entry_point: Some("main"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     buffers: &[],
                 },
                 primitive: wgpu::PrimitiveState::default(),
@@ -327,7 +336,7 @@ impl Pipelines {
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some("main"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: HDR,
                         blend: None,
@@ -373,14 +382,14 @@ impl ShaderState {
         let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
         Self {
             size,
-            buffers: (0..buffers)
-                .map(|_| {
-                    [
-                        texture(device, "shader buffer", size, HDR),
-                        texture(device, "shader buffer", size, HDR),
-                    ]
-                })
-                .collect(),
+            buffers: std::iter::repeat_with(|| {
+                [
+                    texture(device, "shader buffer", size, HDR),
+                    texture(device, "shader buffer", size, HDR),
+                ]
+            })
+            .take(buffers)
+            .collect(),
             latest: 0,
             image: texture(device, "shader image", size, HDR),
             bloom: [
@@ -395,6 +404,10 @@ impl ShaderState {
 
 /// Run one frame of a `ui.shader` at `width` by `height` device pixels.
 /// `state` carries the buffers between frames; pass the same one each frame.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "sizes are clamped to 8192 pixels, which `f32` holds exactly"
+)]
 pub fn render_shader(
     spec: &ShaderSpec,
     uniforms: &ShaderUniforms,
@@ -414,53 +427,46 @@ pub fn render_shader(
     let device = &gpu.device;
     let pipelines = gpu.shaders.get_or_init(|| Pipelines::new(device, &gpu.queue));
     // Compile every pass first, so an error leaves the state untouched.
-    let mut programs = Vec::with_capacity(buffers + 1);
+    let mut programs = Vec::with_capacity(buffers.saturating_add(1));
     for code in spec.buffers.iter().take(buffers).map(String::as_str).chain([spec.image]) {
         let (program, _) = slopty_visual::shader::program(code, spec.inputs);
         programs.push(pipelines.pass(device, &program)?);
     }
-    let fresh =
-        state.as_ref().is_none_or(|s| s.size != (width, height) || s.buffers.len() != buffers);
-    if fresh {
-        *state = Some(ShaderState::new(device, (width, height), buffers));
-    }
-    let state = state.as_mut().expect("just made");
-    let (read, write) = (state.latest, 1 - state.latest);
+    let state = match state {
+        Some(state) if state.size == (width, height) && state.buffers.len() == buffers => state,
+        _ => state.insert(ShaderState::new(device, (width, height), buffers)),
+    };
+    // Write to the other of each pair.
+    let (read, write) = (state.latest, usize::from(state.latest == 0));
 
     let mut uniforms = *uniforms;
-    for channel in &mut uniforms.channels {
-        *channel = [width as f32, height as f32, 1.0, 0.0];
-    }
+    uniforms.channels.fill([width as f32, height as f32, 1.0, 0.0]);
     let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("shader inputs"),
         contents: uniforms.as_bytes(),
         usage: wgpu::BufferUsages::UNIFORM,
     });
-    let view = |t: &wgpu::Texture| t.create_view(&Default::default());
+    let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
     let empty = view(&pipelines.empty);
     let noise = view(&pipelines.noise);
-    let images: Vec<wgpu::TextureView> = (0..slopty_visual::shader::MAX_TEXTURES)
-        .map(|i| {
-            spec.textures
-                .get(i)
-                .and_then(|data| {
-                    gpu.textures.get(device, &gpu.queue, data, crate::textures::Space::Raw).ok()
-                })
-                .map_or_else(|| empty.clone(), |loaded| loaded.view)
-        })
-        .collect();
+    let images: [wgpu::TextureView; MAX_TEXTURES] = std::array::from_fn(|i| {
+        spec.textures
+            .get(i)
+            .and_then(|data| {
+                gpu.textures.get(device, &gpu.queue, data, crate::textures::Space::Raw).ok()
+            })
+            .map_or_else(|| empty.clone(), |loaded| loaded.view)
+    });
     // Channel `j` as pass `pass` sees it: an earlier buffer's frame from
-    // this frame, its own and later ones' from the last.
+    // this frame, its own and later ones' from the last; empty past the
+    // buffers.
     let channel = |pass: usize, j: usize| -> wgpu::TextureView {
-        if j >= buffers {
-            return empty.clone();
-        }
         let frame = if j < pass { write } else { read };
-        view(&state.buffers[j][frame])
+        state.buffers.get(j).and_then(|pair| pair.get(frame)).map_or_else(|| empty.clone(), view)
     };
-    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     for (pass, pipeline) in programs.iter().enumerate() {
-        let channels: Vec<wgpu::TextureView> = (0..4).map(|j| channel(pass, j)).collect();
+        let channels: [wgpu::TextureView; 4] = std::array::from_fn(|j| channel(pass, j));
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shader inputs"),
             layout: &pipelines.layout,
@@ -512,8 +518,12 @@ pub fn render_shader(
                 },
             ],
         });
-        let target =
-            if pass < buffers { view(&state.buffers[pass][write]) } else { view(&state.image) };
+        // The buffers' passes, then the image's.
+        let target = state
+            .buffers
+            .get(pass)
+            .and_then(|pair| pair.get(write))
+            .map_or_else(|| view(&state.image), view);
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("shader pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -539,7 +549,7 @@ pub fn render_shader(
     let post_uniform = |values: [f32; 4]| {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("shader post"),
-            contents: uniform_bytes(&values),
+            contents: &uniform_bytes(values),
             usage: wgpu::BufferUsages::UNIFORM,
         })
     };
@@ -635,9 +645,13 @@ pub fn render_shader(
     Ok(frame)
 }
 
-fn uniform_bytes(values: &[f32; 4]) -> &[u8] {
-    // SAFETY: four `f32`s.
-    unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), 16) }
+/// A `vec4<f32>` uniform's bytes.
+fn uniform_bytes(values: [f32; 4]) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    for (out, value) in bytes.as_chunks_mut().0.iter_mut().zip(values) {
+        *out = value.to_ne_bytes();
+    }
+    bytes
 }
 
 #[cfg(test)]
@@ -649,8 +663,9 @@ mod tests {
     }
 
     fn px(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
-        let o = ((y * frame.width + x) * 4) as usize;
-        [frame.bgra[o + 2], frame.bgra[o + 1], frame.bgra[o], frame.bgra[o + 3]]
+        let [blue, green, red, alpha] =
+            frame.bgra.as_chunks().0[y.saturating_mul(frame.width).saturating_add(x) as usize];
+        [red, green, blue, alpha]
     }
 
     #[test]
@@ -807,7 +822,7 @@ mod tests {
         };
         let frame =
             render_shader(&spec(code, &[], Blend::Alpha), &uniforms, 96, 96, &mut None).unwrap();
-        let lit = frame.bgra.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let lit = frame.bgra.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
         assert!(lit > 96 * 96 / 10, "the fractal covers the middle: {lit}");
         assert!(lit < 96 * 96, "and the sky stays clear");
     }

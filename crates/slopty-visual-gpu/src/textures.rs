@@ -3,9 +3,10 @@
 //! once per asset, then shared by every frame and every visual that uses
 //! the same bytes.
 
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, Weak};
+use std::hash::{Hash as _, Hasher as _};
+use std::sync::{Arc, Weak};
 
+use parking_lot::Mutex;
 use slopty_visual::TextureData;
 use slopty_visual::image::{Image, Pixels};
 
@@ -25,8 +26,9 @@ pub(crate) enum Space {
 /// A texture ready to bind.
 #[derive(Clone)]
 pub(crate) struct Loaded {
-    pub(crate) view: wgpu::TextureView,
-    pub(crate) mips: u32,
+    pub view: wgpu::TextureView,
+    /// How many mip levels it has.
+    pub mips: u32,
 }
 
 /// The bytes' content and how they're read: the same image uploads once,
@@ -60,7 +62,7 @@ pub(crate) struct Textures {
     state: Mutex<State>,
 }
 
-fn bytes_of(data: &TextureData) -> &Arc<[u8]> {
+const fn bytes_of(data: &TextureData) -> &Arc<[u8]> {
     match data {
         TextureData::Encoded(bytes) => bytes,
         TextureData::Rgba { pixels, .. } => pixels,
@@ -85,7 +87,7 @@ impl Textures {
     ) -> Result<Loaded, String> {
         let bytes = bytes_of(data);
         let known = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             state.aliases.retain(|a| a.bytes.strong_count() > 0);
             state
                 .aliases
@@ -96,12 +98,11 @@ impl Textures {
         let hash = known.unwrap_or_else(|| content_hash(bytes));
         let key = (hash, bytes.len(), space);
         {
-            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let state = &mut *guard;
+            let state = &mut *self.state.lock();
             if known.is_none() {
                 state.aliases.push(Alias { bytes: Arc::downgrade(bytes), hash });
             }
-            state.clock += 1;
+            state.clock = state.clock.saturating_add(1);
             if let Some(entry) = state.entries.iter_mut().find(|e| e.key == key) {
                 entry.used = state.clock;
                 return entry.loaded.clone();
@@ -114,9 +115,8 @@ impl Textures {
         }
         let size = loaded.as_ref().map_or(1024, |(_, size)| *size);
         let loaded = loaded.map(|(loaded, _)| loaded);
-        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let state = &mut *guard;
-        state.clock += 1;
+        let state = &mut *self.state.lock();
+        state.clock = state.clock.saturating_add(1);
         if let Some(entry) = state.entries.iter_mut().find(|e| e.key == key) {
             // Another render uploaded it meanwhile.
             entry.used = state.clock;
@@ -126,13 +126,11 @@ impl Textures {
         while state.entries.iter().map(|e| e.size).sum::<usize>() > BUDGET_BYTES
             && state.entries.len() > 1
         {
-            let oldest = state
-                .entries
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, e)| e.used)
-                .map(|(i, _)| i)
-                .expect("not empty");
+            let Some(oldest) =
+                state.entries.iter().enumerate().min_by_key(|(_, e)| e.used).map(|(i, _)| i)
+            else {
+                break;
+            };
             state.entries.swap_remove(oldest);
         }
         loaded
@@ -140,16 +138,19 @@ impl Textures {
 }
 
 /// An `f32` as IEEE half-precision bits (finite light values only).
-fn half(value: f32) -> u16 {
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a half's exponent is at most 30 here and its mantissa 10 bits, which fit `u16`"
+)]
+const fn half(value: f32) -> u16 {
     let value = if value.is_finite() { value.clamp(0.0, 65504.0) } else { 0.0 };
     let bits = value.to_bits();
-    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
     let mantissa = bits & 0x7f_ffff;
-    if exponent <= 0 {
+    // Rebiased from `f32`'s 127 to a half's 15.
+    match ((bits >> 23) & 0xff).checked_sub(127 - 15) {
+        Some(exponent) if exponent > 0 => ((exponent << 10) | (mantissa >> 13)) as u16,
         // Too small for a normal half: flush to zero.
-        0
-    } else {
-        ((exponent as u16) << 10) | (mantissa >> 13) as u16
+        _ => 0,
     }
 }
 
@@ -157,17 +158,17 @@ fn half(value: f32) -> u16 {
 /// buffer), with the level count and format.
 fn levels(image: &Image) -> (Vec<u8>, u32, wgpu::TextureFormat) {
     let (mut w, mut h) = (image.width as usize, image.height as usize);
-    let mut mips = 1;
+    let mut mips = 1_u32;
     match &image.pixels {
         Pixels::Rgba8(pixels) => {
             let mut data = pixels.clone();
             let mut level_start = 0;
             while w > 1 || h > 1 {
-                let (next, nw, nh) = downsample(&data[level_start..], w, h);
+                let (next, nw, nh) = downsample(data.get(level_start..).unwrap_or_default(), w, h);
                 level_start = data.len();
                 data.extend_from_slice(&next);
                 (w, h) = (nw, nh);
-                mips += 1;
+                mips = mips.saturating_add(1);
             }
             (data, mips, wgpu::TextureFormat::Rgba8Unorm)
         }
@@ -179,7 +180,7 @@ fn levels(image: &Image) -> (Vec<u8>, u32, wgpu::TextureFormat) {
                 data.extend(next.iter().flat_map(|v| half(*v).to_le_bytes()));
                 level = Some(next);
                 (w, h) = (nw, nh);
-                mips += 1;
+                mips = mips.saturating_add(1);
             }
             (data, mips, wgpu::TextureFormat::Rgba16Float)
         }
@@ -193,15 +194,20 @@ fn downsample<T: Copy + Into<f32> + FromF32>(
     h: usize,
 ) -> (Vec<T>, usize, usize) {
     let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
-    let mut out = Vec::with_capacity(nw * nh * 4);
+    let mut out = Vec::with_capacity(nw.saturating_mul(nh).saturating_mul(4));
+    // Channel `c` of the texel at `x`, `y`, clamped to the last row and column.
+    let value = |x: usize, y: usize, c: usize| -> f32 {
+        let (x, y) = (x.min(w.saturating_sub(1)), y.min(h.saturating_sub(1)));
+        let at = y.saturating_mul(w).saturating_add(x).saturating_mul(4).saturating_add(c);
+        src.get(at).map_or(0.0, |&v| v.into())
+    };
     for y in 0..nh {
         for x in 0..nw {
             for c in 0..4 {
-                let mut sum = 0.0f32;
+                let mut sum = 0.0_f32;
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let sx = (x * 2 + dx).min(w - 1);
-                    let sy = (y * 2 + dy).min(h - 1);
-                    sum += src[(sy * w + sx) * 4 + c].into();
+                    let (sx, sy) = (x.saturating_mul(2), y.saturating_mul(2));
+                    sum += value(sx.saturating_add(dx), sy.saturating_add(dy), c);
                 }
                 out.push(T::from_f32(sum / 4.0));
             }
@@ -214,8 +220,13 @@ trait FromF32 {
     fn from_f32(value: f32) -> Self;
 }
 impl FromF32 for u8 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "rounded and clamped to 0..=255 first"
+    )]
     fn from_f32(value: f32) -> Self {
-        value.round().clamp(0.0, 255.0) as u8
+        value.round().clamp(0.0, 255.0) as Self
     }
 }
 impl FromF32 for f32 {
@@ -230,7 +241,7 @@ fn upload(
     image: &Image,
     space: Space,
 ) -> Result<(Loaded, usize), String> {
-    use wgpu::util::DeviceExt;
+    use wgpu::util::DeviceExt as _;
     let largest = device.limits().max_texture_dimension_2d;
     if image.width.max(image.height) > largest {
         return Err(format!(
@@ -273,13 +284,14 @@ fn upload(
             &data,
         )
     })?;
-    Ok((Loaded { view: texture.create_view(&Default::default()), mips }, size))
+    Ok((Loaded { view: texture.create_view(&wgpu::TextureViewDescriptor::default()), mips }, size))
 }
 
 /// The image upside down.
 fn flip_rows(image: &Image) -> Image {
     fn flip<T: Copy>(pixels: &[T], width: usize) -> Vec<T> {
-        pixels.chunks_exact(width * 4).rev().flatten().copied().collect()
+        // `max(1)`: a zero-width image has no rows, and `chunks_exact` takes no zero.
+        pixels.chunks_exact(width.saturating_mul(4).max(1)).rev().flatten().copied().collect()
     }
     let width = image.width as usize;
     Image {
@@ -298,7 +310,7 @@ pub(crate) fn solid(
     queue: &wgpu::Queue,
     rgba: [u8; 4],
 ) -> wgpu::TextureView {
-    use wgpu::util::DeviceExt;
+    use wgpu::util::DeviceExt as _;
     device
         .create_texture_with_data(
             queue,
@@ -315,7 +327,7 @@ pub(crate) fn solid(
             wgpu::util::TextureDataOrder::LayerMajor,
             &rgba,
         )
-        .create_view(&Default::default())
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 #[cfg(test)]
@@ -345,7 +357,9 @@ mod tests {
     fn raw_images_flip_to_bottom_row_first() {
         let image =
             Image { width: 1, height: 2, pixels: Pixels::Rgba8(vec![1, 1, 1, 1, 2, 2, 2, 2]) };
-        let Pixels::Rgba8(pixels) = flip_rows(&image).pixels else { unreachable!() };
+        let Pixels::Rgba8(pixels) = flip_rows(&image).pixels else {
+            panic!("an 8-bit image flips to 8 bits");
+        };
         assert_eq!(pixels, [2, 2, 2, 2, 1, 1, 1, 1]);
     }
 }

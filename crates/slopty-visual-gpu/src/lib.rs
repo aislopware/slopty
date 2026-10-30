@@ -8,6 +8,12 @@
 //! layered with the transcript. One device serves every visual; pipelines are
 //! cached by source, so a shader compiles once however many frames it draws.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 use std::sync::OnceLock;
 
 mod scene;
@@ -20,17 +26,26 @@ pub use shader::{ShaderSpec, ShaderState, render_shader};
 /// One rendered frame: straight-alpha BGRA, top row first.
 #[derive(Debug, Clone)]
 pub struct Frame {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// Four bytes a pixel, rows packed with no padding.
     pub bgra: Vec<u8>,
 }
 
+/// The device every visual draws with. Its fields are private to the crate
+/// root, which every module of the crate descends from, so all of them reach
+/// the fields.
 pub(crate) struct Gpu {
-    pub(crate) device: wgpu::Device,
-    pub(crate) queue: wgpu::Queue,
-    pub(crate) shaders: OnceLock<shader::Pipelines>,
-    pub(crate) scene: OnceLock<scene::Pipelines>,
-    pub(crate) textures: textures::Textures,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    /// The shader pipelines, made on the first shader.
+    shaders: OnceLock<shader::Pipelines>,
+    /// The scene pipelines, made on the first scene.
+    scene: OnceLock<scene::Pipelines>,
+    /// Images and environment maps, uploaded once.
+    textures: textures::Textures,
 }
 
 /// The shared device, made on first use; `None` without a usable adapter.
@@ -85,7 +100,7 @@ pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// edges, so light running off a visual fades out instead of stopping at a
 /// hard line. The ramp is 15% of the shorter side, eased at both ends
 /// (smootherstep) so neither the start nor the end of the fade shows.
-pub(crate) const EDGE_FADE: &str = r#"
+pub(crate) const EDGE_FADE: &str = "
 fn edge_ease(d: f32, width: f32) -> f32 {
     let t = clamp(d / width, 0.0, 1.0);
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
@@ -96,7 +111,7 @@ fn edge_fade(pixel: vec2<f32>, size: vec2<f32>) -> f32 {
     let d = min(pixel, size - pixel);
     return edge_ease(d.x, width) * edge_ease(d.y, width);
 }
-"#;
+";
 
 impl Gpu {
     async fn new() -> Result<Self, String> {
@@ -137,7 +152,7 @@ impl Gpu {
             queue,
             shaders: OnceLock::new(),
             scene: OnceLock::new(),
-            textures: Default::default(),
+            textures: textures::Textures::default(),
         })
     }
 
@@ -150,18 +165,18 @@ impl Gpu {
         staging: &mut Option<wgpu::Buffer>,
     ) -> Frame {
         let (width, height) = (texture.width(), texture.height());
-        let row = (width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let size = u64::from(row * height);
-        if staging.as_ref().is_none_or(|b| b.size() != size) {
-            *staging = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+        // A texture is far narrower than `u32` overflows at: the device caps it.
+        let row = width.saturating_mul(4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let size = u64::from(row).saturating_mul(u64::from(height));
+        let buffer: &wgpu::Buffer = match staging {
+            Some(buffer) if buffer.size() == size => buffer,
+            _ => staging.insert(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("visual readback"),
                 size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
-            }));
-        }
-        let buffer = staging.as_ref().expect("made above");
+            })),
+        };
         encoder.copy_texture_to_buffer(
             texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -177,20 +192,23 @@ impl Gpu {
         self.queue.submit([encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
+            let _gone = tx.send(result);
         });
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
-        let mut bgra = vec![0u8; (width * height * 4) as usize];
-        if let Ok(Ok(())) = rx.recv() {
+        // A wait that fails shows below, as a map that never succeeded.
+        let _waited = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let width_bytes = (width as usize).saturating_mul(4);
+        let mut bgra = vec![0_u8; width_bytes.saturating_mul(height as usize)];
+        if rx.recv() == Ok(Ok(())) {
             if let Ok(mapped) = buffer.slice(..).get_mapped_range() {
-                for y in 0..height as usize {
-                    let src = &mapped[y * row as usize..][..width as usize * 4];
-                    let dst = &mut bgra[y * width as usize * 4..][..width as usize * 4];
-                    for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                        d[0] = s[2];
-                        d[1] = s[1];
-                        d[2] = s[0];
-                        d[3] = s[3];
+                // `max(1)`: a zero-width frame has no rows to copy, and
+                // `chunks` takes no zero.
+                let rows = mapped.chunks((row as usize).max(1));
+                for (src, dst) in rows.zip(bgra.chunks_exact_mut(width_bytes.max(1))) {
+                    let src = src.get(..width_bytes).unwrap_or_default();
+                    for (d, &[r, g, b, a]) in
+                        dst.as_chunks_mut().0.iter_mut().zip(src.as_chunks().0)
+                    {
+                        *d = [b, g, r, a];
                     }
                 }
                 drop(mapped);
@@ -215,14 +233,20 @@ impl Gpu {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a blend of two bytes stays in 0..=255"
+)]
 pub(crate) fn dump_ppm(frame: &Frame, path: &str) {
     let mut out = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
-    for p in frame.bgra.chunks_exact(4) {
+    for &[b, g, r, a] in frame.bgra.as_chunks().0 {
         // Over a mid grey, so transparency reads.
-        let a = f32::from(p[3]) / 255.0;
-        for ch in [p[2], p[1], p[0]] {
-            out.push((f32::from(ch) * a + 60.0 * (1.0 - a)) as u8);
+        let a = f32::from(a) / 255.0;
+        for ch in [r, g, b] {
+            out.push(f32::from(ch).mul_add(a, 60.0 * (1.0 - a)) as u8);
         }
     }
-    let _ = std::fs::write(path, out);
+    // A debugging aid: a dump that can't be written costs nothing.
+    let _unwritten = std::fs::write(path, out);
 }

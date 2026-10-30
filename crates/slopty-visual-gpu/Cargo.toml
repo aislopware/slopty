@@ -2,9 +2,13 @@
 name = "slopty-visual-gpu"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "GPU rendering for agent visuals: shaders and 3D scenes drawn offscreen with wgpu"
+
+[lints]
+workspace = true
 
 [dependencies]
 slopty-visual = { path = "../slopty-visual" }
@@ -12,13 +16,10 @@ slopty-visual = { path = "../slopty-visual" }
 # workspace's, at the revision GPUI builds (one wgpu in the graph).
 wgpu = { workspace = true, features = ["glsl"] }
 pollster = "1.0"
+# The pipeline and texture caches, shared by every visual's render.
+parking_lot.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 # Test textures and environment maps.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-
-# Clippy lints this code trips, allowed by name.
-[lints.clippy]
-chunks_exact_to_as_chunks = "allow"
-manual_slice_fill = "allow"

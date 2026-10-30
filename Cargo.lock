@@ -9509,6 +9509,7 @@ name = "slopty-visual-gpu"
 version = "0.1.0"
 dependencies = [
  "image",
+ "parking_lot",
  "pollster 1.0.1",
  "slopty-visual",
  "tracing",
