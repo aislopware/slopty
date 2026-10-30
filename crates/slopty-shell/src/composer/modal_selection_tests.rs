@@ -1,5 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-#![allow(clippy::items_after_statements, reason = "shell lint migration: slice B")]
 use gpui::{StyledText, TestAppContext, VisualTestContext, canvas};
 
 use super::*;
@@ -164,6 +163,7 @@ fn modal_input_drag_does_not_select_transcript(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn modal_input_copy_does_not_copy_transcript_selection(cx: &mut TestAppContext) {
+    const SENTINEL: &str = "existing clipboard contents";
     let _selection = selection::test_state_lock();
     let _cleanup = SelectionCleanup;
     let (view, cx) = fixture(cx, false);
@@ -192,7 +192,6 @@ fn modal_input_copy_does_not_copy_transcript_selection(cx: &mut TestAppContext) 
         "Copy must reach the focused modal input and copy its own selection"
     );
 
-    const SENTINEL: &str = "existing clipboard contents";
     cx.update(|_, cx| {
         input.update(cx, |input, cx| input.move_to(INPUT_TEXT.len(), cx));
         cx.write_to_clipboard(ClipboardItem::new_string(SENTINEL.to_owned()));

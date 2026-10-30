@@ -168,7 +168,7 @@ impl DetailState {
         let empty = HashSet::new();
         let turned = self.turned.get(key).unwrap_or(&empty);
         let (lines, truncated_by) = doc.lines(turned, FULL_OUTPUT_MAX_LINES);
-        ToolDetail::Json { lines: Arc::new(lines), truncated_by, key: key.clone() }
+        ToolDetail::Json { lines: Arc::from(lines), truncated_by, key: key.clone() }
     }
 }
 

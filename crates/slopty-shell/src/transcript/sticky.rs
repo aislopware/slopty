@@ -334,7 +334,7 @@ mod tests {
                     10 => Row {
                         kind: RowKind::ToolGroup {
                             summary: "Ran 30 commands".into(),
-                            tools: Arc::new(runs.clone()),
+                            tools: Arc::from(runs.as_slice()),
                         },
                         ..row(ix, None)
                     },

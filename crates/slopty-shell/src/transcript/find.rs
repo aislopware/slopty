@@ -819,7 +819,7 @@ mod tests {
 
     fn group(id: &str, tools: Vec<ToolItem>) -> Row {
         Row {
-            kind: RowKind::ToolGroup { summary: "Ran 3 commands".into(), tools: Arc::new(tools) },
+            kind: RowKind::ToolGroup { summary: "Ran 3 commands".into(), tools: Arc::from(tools) },
             ..markdown(id, "")
         }
     }
