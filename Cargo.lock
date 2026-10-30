@@ -9228,7 +9228,6 @@ dependencies = [
  "gpui_platform",
  "gpui_tokio",
  "image",
- "libc",
  "merman",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -9474,6 +9473,7 @@ name = "slopty-view-proto"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "parking_lot",
  "serde",
  "serde_json",
 ]

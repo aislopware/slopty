@@ -4981,7 +4981,6 @@ mod tests {
             in_parent: false,
             space_id: None,
             last_seen_at: None,
-            room_gen: None,
             draft: None,
         }
     }

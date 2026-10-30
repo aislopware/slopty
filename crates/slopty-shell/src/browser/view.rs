@@ -118,7 +118,6 @@ impl BrowserSurface {
 
     fn preview_body(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let snapshot = &self.previews;
-        let available = snapshot.error.is_none();
         let subtitle = if snapshot.remote {
             "Running on your device"
         } else {
@@ -140,7 +139,7 @@ impl BrowserSurface {
                     .child(subtitle),
             );
         for service in &snapshot.services {
-            let url = super::preview_url(service, snapshot.proxy_port);
+            let url = service.url();
             let row_url = url.clone();
             let border_strong = theme.border_strong;
             let label = if snapshot.remote {
@@ -165,8 +164,7 @@ impl BrowserSurface {
                     .gap(px(10.0))
                     // The row's wash fades in with the pointer, as the pane's rows do
                     // (M23); its border still steps at once.
-                    .when(!available, |el| el.bg(crate::theme::ink(0.02)))
-                    .when(available, |el| {
+                    .map(|el| {
                         let fade = format!("preview-row-{}-fade", service.id);
                         el.cursor_pointer()
                             .bg(crate::motion::hover_blend(
@@ -234,7 +232,7 @@ impl BrowserSurface {
                             .text_color(theme.text_muted)
                             .role(gpui::Role::Button)
                             .aria_label(format!("Open {} preview", service.name))
-                            .when(available, |el| {
+                            .map(|el| {
                                 // The row's keyboard stop; the row itself is the
                                 // pointer's larger target for the same press (M8).
                                 let fade = format!("open-preview-{}-fade", service.id);
@@ -251,9 +249,6 @@ impl BrowserSurface {
                                         cx.stop_propagation();
                                         this.navigate(&url, window, cx)
                                     }))
-                            })
-                            .when(!available, |el| {
-                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
                             })
                             .child("Open"),
                     ),
@@ -277,15 +272,6 @@ impl BrowserSurface {
                     .line_height(px(19.0))
                     .text_color(theme.text_muted)
                     .child(message),
-            );
-        }
-        if let Some(error) = &snapshot.error {
-            content = content.child(
-                div()
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .line_height(px(17.0))
-                    .text_color(theme.text_muted)
-                    .child(error.clone()),
             );
         }
         content = content.child(
@@ -839,12 +825,7 @@ impl Render for BrowserSurface {
                 .url
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok())
-                .is_some_and(|u| {
-                    super::model::loopback(&u)
-                        && !(u.port() == Some(slopty_view_proto::PREVIEW_PROXY_PORT)
-                            && u.host_str()
-                                .is_some_and(|host| host.ends_with(".localhost")))
-                });
+                .is_some_and(|u| super::model::loopback(&u));
         div().id("browser-surface").size_full().flex().flex_col().track_focus(&self.focus)
             .key_context("Browser").on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(|this,event: &gpui::KeyUpEvent,w,cx| {

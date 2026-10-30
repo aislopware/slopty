@@ -11644,7 +11644,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   shell. "Remote window" in the right pane's picker lists the chat's machine's desktops and
   windows (`slopty.ListScreens`), shows the chosen one as a window or display item whose stream
   the workspace opens as for any (`slopty.OpenScreen`), and the pane's expand gives it the whole
-  window. The browser previews are the worker's forwarded ports (`proxy_port` 0: the preview's
+  window. The browser previews are the worker's forwarded ports (each at the preview's
   own `localhost:<local>`). Tests: `slopty-e2e`
   `app::surfaces_live::{a_split_holds_a_shell_of_the_worker,
   screen_recording::a_remote_window_is_a_view_beside_the_session_and_fills_it}`. Goldens:

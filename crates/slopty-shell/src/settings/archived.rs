@@ -1,6 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Settings → Archived (feature-inventory §1.5): archived sessions across
-//! devices, with Unarchive (Mutate setChatArchived false).
+//! Settings → Archived: archived sessions across devices, with Unarchive (Mutate
+//! setChatArchived false).
 //! A session's record is its agent's own, so Slopty archives and never deletes.
 
 use gpui::{
@@ -244,7 +244,7 @@ impl Render for ArchivedPage {
 
         let archive_key = crate::keys::for_action(&crate::shell::ArchiveSession, None, window, cx);
         let body: AnyElement = if items.is_empty() {
-            // Centered empty state (slopty settings.archived.tsx).
+            // Centered empty state.
             div()
                 .mt(px(96.0))
                 .flex()
@@ -253,8 +253,7 @@ impl Render for ArchivedPage {
                 .text_center()
                 .text_color(theme.text_muted)
                 .child(
-                    // `opacity-40` on top of the inherited muted/50 — an
-                    // effectively ~20% glyph (slopty settings.archived.tsx).
+                    // The glyph at a fifth of the muted text's strength.
                     crate::icons::icon(crate::icons::ARCHIVE_MINIMALISTIC)
                         .size(px(28.0))
                         .text_color(theme.text_muted.opacity(0.2)),
@@ -434,7 +433,6 @@ mod tests {
             in_parent: false,
             space_id: None,
             last_seen_at: None,
-            room_gen: None,
             draft: None,
         }
     }

@@ -302,12 +302,6 @@ impl BrowserSurface {
                         {
                             if this
                                 .update(cx, |this, cx| {
-                                    #[cfg(target_os = "macos")]
-                                    for service in &snapshot.services {
-                                        this.context
-                                            .data
-                                            .register_preview(&service.url(snapshot.proxy_port));
-                                    }
                                     this.previews = snapshot;
                                     this.previews_loading = false;
                                     cx.notify();
@@ -321,9 +315,9 @@ impl BrowserSurface {
                 }
                 if this
                     .update(cx, |this, cx| {
+                        // The watch ended: its list is gone until a new one answers.
                         this.previews.services.clear();
-                        this.previews.error = Some("Connecting to preview discovery…".into());
-                        this.previews_loading = false;
+                        this.previews_loading = true;
                         cx.notify();
                     })
                     .is_err()
@@ -822,16 +816,6 @@ mod tests {
                 1
             );
         });
-    }
-}
-
-/// A preview's address. Slopty forwards each port to one of this client's own
-/// (`proxy_port` 0, the forward in the hostname) rather than serving them through one proxy.
-pub(crate) fn preview_url(service: &slopty_view_proto::PreviewService, proxy_port: u16) -> String {
-    if proxy_port == 0 {
-        format!("http://{}", service.hostname)
-    } else {
-        service.url(proxy_port)
     }
 }
 

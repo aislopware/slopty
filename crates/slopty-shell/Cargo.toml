@@ -51,7 +51,6 @@ thiserror = "2"
 rust-embed = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 wry = { version = "0.57", default-features = false, features = ["os-webview"] }
 objc2 = "0.6"
 block2 = "0.6"

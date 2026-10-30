@@ -31,7 +31,6 @@ use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
 struct BrowserStore {
     profile: Option<super::profile::BrowserProfile>,
     store: Option<Retained<objc2_web_kit::WKWebsiteDataStore>>,
-    preview_hosts: std::collections::BTreeSet<String>,
 }
 #[derive(Clone, Default)]
 pub(super) struct BrowserData(Rc<RefCell<BrowserStore>>);
@@ -80,11 +79,6 @@ impl BrowserData {
                     _ => objc2_web_kit::WKWebsiteDataStore::nonPersistentDataStore(mtm),
                 }
             });
-            if let Err(error) =
-                configure_preview_proxy(data.store.as_ref().unwrap(), &data.preview_hosts)
-            {
-                tracing::warn!(%error, "preview hostname proxy unavailable");
-            }
         }
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
         unsafe {
@@ -95,29 +89,6 @@ impl BrowserData {
                 .setApplicationNameForUserAgent(Some(&NSString::from_str(&safari_user_agent())));
         }
         configuration
-    }
-    pub(super) fn register_preview(&self, address: &str) {
-        let Ok(url) = url::Url::parse(address) else {
-            return;
-        };
-        let Some(host) = url.host_str() else {
-            return;
-        };
-        if url.scheme() != "http"
-            || url.port() != Some(slopty_view_proto::PREVIEW_PROXY_PORT)
-            || !host.ends_with(".localhost")
-        {
-            return;
-        }
-        let mut data = self.0.borrow_mut();
-        if !data.preview_hosts.insert(host.into()) {
-            return;
-        }
-        if let Some(store) = &data.store {
-            if let Err(error) = configure_preview_proxy(store, &data.preview_hosts) {
-                tracing::warn!(%error, "preview hostname proxy unavailable");
-            }
-        }
     }
 }
 
@@ -151,61 +122,6 @@ impl BrowserData {
         (self.0.borrow().profile.is_some() && !persistent_profiles_supported())
             .then_some("Logins are temporary on this macOS version. Use macOS 14 or later, or open this page in your default browser, to keep them.")
     }
-}
-
-/// Network.framework objects are Objective-C OS objects. Resolve the newer API
-/// dynamically so older systems can still open ordinary browser tabs. Match
-/// only discovered/opened preview hostnames; other websites retain normal routing.
-fn configure_preview_proxy(
-    store: &objc2_web_kit::WKWebsiteDataStore,
-    hosts: &std::collections::BTreeSet<String>,
-) -> Result<(), String> {
-    if hosts.is_empty() {
-        return Ok(());
-    }
-    use objc2_foundation::{NSArray, NSObject};
-    use std::ffi::{CStr, CString, c_char};
-    unsafe {
-        let supported: bool = msg_send![store, respondsToSelector: sel!(setProxyConfigurations:)];
-        if !supported {
-            return Err("Automatic preview hostnames require macOS 14 or later".into());
-        }
-        static NETWORK: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        let handle = *NETWORK.get_or_init(|| {
-            libc::dlopen(
-                c"/System/Library/Frameworks/Network.framework/Network".as_ptr(),
-                libc::RTLD_LAZY,
-            ) as usize
-        });
-        let symbol = |name: &CStr| -> Result<*mut std::ffi::c_void, String> {
-            let value = libc::dlsym(handle as *mut _, name.as_ptr());
-            if handle == 0 || value.is_null() {
-                Err("Preview proxy API unavailable".into())
-            } else {
-                Ok(value)
-            }
-        };
-        let endpoint: unsafe extern "C" fn(*const c_char, *const c_char) -> *mut NSObject =
-            std::mem::transmute(symbol(c"nw_endpoint_create_host")?);
-        let proxy: unsafe extern "C" fn(*mut NSObject, *mut NSObject) -> *mut NSObject =
-            std::mem::transmute(symbol(c"nw_proxy_config_create_http_connect")?);
-        let match_domain: unsafe extern "C" fn(*mut NSObject, *const c_char) =
-            std::mem::transmute(symbol(c"nw_proxy_config_add_match_domain")?);
-        let endpoint = Retained::from_raw(endpoint(c"127.0.0.1".as_ptr(), c"7331".as_ptr()))
-            .ok_or("Could not create preview endpoint")?;
-        let config = Retained::from_raw(proxy(
-            Retained::as_ptr(&endpoint) as *mut _,
-            std::ptr::null_mut(),
-        ))
-        .ok_or("Could not create preview proxy")?;
-        for host in hosts {
-            let host = CString::new(host.as_str()).map_err(|_| "Invalid preview hostname")?;
-            match_domain(Retained::as_ptr(&config) as *mut _, host.as_ptr());
-        }
-        let proxies = NSArray::arrayWithObject(&*config);
-        let _: () = msg_send![store, setProxyConfigurations: &*proxies];
-    }
-    Ok(())
 }
 
 type Sender = tokio::sync::mpsc::Sender<NativeEvent>;
@@ -538,7 +454,6 @@ impl NativePage {
     }
     pub fn load(&self, url: &str) -> Result<(), String> {
         let host = self.0.borrow();
-        host.data.register_preview(url);
         host.observer.ivars().error.borrow_mut().take();
         *host.observer.ivars().requested_url.borrow_mut() = Some(url.into());
         host.web.load_url(url).map_err(|e| e.to_string())

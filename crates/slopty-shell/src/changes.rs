@@ -1,6 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! The right-pane "Changes" content (feature-inventory §1.11): a unified-diff
-//! viewer over `WatchCheckoutDiffs`.
+//! The right-pane "Changes" content: a unified-diff viewer over `WatchCheckoutDiffs`.
 //!
 //! - pure patch parser: `diff --git` sections → file/hunk/line/notice rows,
 //!   with add/delete/rename/binary detection and per-file counts;
@@ -5854,7 +5853,6 @@ rename to new_name.rs
             in_parent: false,
             space_id: None,
             last_seen_at: None,
-            room_gen: None,
             draft: None,
         }
     }

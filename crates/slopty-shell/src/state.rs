@@ -179,8 +179,6 @@ impl EngineHandle {
             engine_info: EngineInfo {
                 device_id: "local".into(),
                 workspace_scope: WorkspaceScope::Local,
-                cursor_sdk_version: None,
-                capabilities: Vec::new(),
             },
             slow_calls: Arc::default(), // no watch on a test client
         }
@@ -225,8 +223,6 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
             Ok(EngineInfo {
                 device_id: legacy.device_id,
                 workspace_scope: WorkspaceScope::Synced,
-                cursor_sdk_version: None,
-                capabilities: Vec::new(),
             })
         }
         Err(err) => Err(err),
@@ -242,8 +238,8 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 // and with their own test suite. Re-exported here because every call site in
 // this crate reads them as `state::…`.
 pub use slopty_view_proto::view::{
-    ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, attention_rank,
-    chat_location, display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
+    ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, chat_location,
+    display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
     parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
@@ -880,28 +876,6 @@ impl AppState {
             .and_then(|d| d.version.as_deref())
             .and_then(version_triple)
             .is_some_and(|v| v >= min)
-    }
-
-    /// Capability checks use the live EngineInfo for this device (including a
-    /// localhost daemon that may not match the UI binary) and synced device
-    /// rows for peers. Missing declarations are conservatively unsupported.
-    pub fn device_supports(&self, device_id: &str, capability: &str) -> bool {
-        if let Some(engine) = self.engine.as_ref()
-            && engine.engine_info().device_id == device_id
-        {
-            return engine.engine_info().supports(capability);
-        }
-        self.devices
-            .iter()
-            .find(|device| device.id == device_id)
-            .is_some_and(|device| device.supports(capability))
-    }
-
-    pub fn chat_host_supports(&self, chat_id: &str, capability: &str) -> bool {
-        self.chats
-            .iter()
-            .find(|chat| chat.id == chat_id)
-            .is_some_and(|chat| self.device_supports(&chat.device_id, capability))
     }
 
     /// First project on the composer's picked device (falling back through
@@ -2345,7 +2319,6 @@ mod tests {
             in_parent: false,
             space_id: None,
             last_seen_at: None,
-            room_gen: None,
             draft: None,
         }
     }
@@ -2610,8 +2583,6 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: None,
-            cursor_sdk_version: None,
-            capabilities: Vec::new(),
             actions: Vec::new(),
             ssh_host: None,
             turned_away: None,
@@ -3415,14 +3386,13 @@ mod tests {
         assert!(!state.apply_connectivity(Connectivity::default()));
         let reconnecting = Connectivity {
             state: ConnectivityState::Reconnecting,
-            retry_at_ms: 5_000,
             ..Default::default()
         };
         assert!(state.apply_connectivity(reconnecting.clone()));
-        assert!(!state.apply_connectivity(reconnecting.clone()));
+        assert!(!state.apply_connectivity(reconnecting));
         assert!(state.apply_connectivity(Connectivity {
-            retry_at_ms: 9_000,
-            ..reconnecting
+            state: ConnectivityState::Connected,
+            ..Default::default()
         }));
     }
 
@@ -3741,8 +3711,6 @@ mod tests {
             last_seen_at: None,
             created_at: None,
             version: Some("0.2.12".into()),
-            cursor_sdk_version: None,
-            capabilities: Vec::new(),
             actions: Vec::new(),
             ssh_host: None,
             turned_away: None,
@@ -3755,41 +3723,4 @@ mod tests {
             "unstamped version conservatively fails the gate"
         );
     }
-
-    #[test]
-    fn explicit_capabilities_distinguish_same_version_builds() {
-        let mut state = AppState::default();
-        state.devices = vec![
-            Device {
-                id: "personal".into(),
-                name: "personal".into(),
-                platform: "macos".into(),
-                last_seen_at: None,
-                created_at: None,
-                version: Some("0.2.31".into()),
-                cursor_sdk_version: None,
-                capabilities: vec![slopty_view_proto::capabilities::MESSAGE_QUEUE_V1.into()],
-                actions: Vec::new(),
-                ssh_host: None,
-                turned_away: None,
-            },
-            Device {
-                id: "upstream".into(),
-                name: "upstream".into(),
-                platform: "macos".into(),
-                last_seen_at: None,
-                created_at: None,
-                version: Some("0.2.31".into()),
-                cursor_sdk_version: None,
-                capabilities: Vec::new(),
-                actions: Vec::new(),
-                ssh_host: None,
-                turned_away: None,
-            },
-        ];
-
-        assert!(state.device_supports("personal", slopty_view_proto::capabilities::MESSAGE_QUEUE_V1));
-        assert!(!state.device_supports("upstream", slopty_view_proto::capabilities::MESSAGE_QUEUE_V1));
-    }
-
 }
