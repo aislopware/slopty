@@ -55,6 +55,7 @@ use crate::motion::HoverFade as _;
 
 // slopty: Slopty's own rows, and find in thread.
 mod context_menu; // slopty: right-click menus in the chat.
+mod detail; // slopty: an open step's format, running box, exit code and fetched sections.
 mod extras;
 // slopty: background work in the transcript (task notices, notices, a call's facts) and a
 // subagent's card, which opens in place.
@@ -67,6 +68,7 @@ mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
 pub mod work;
 pub(crate) mod find;
 mod jump; // slopty: the pill that says what waits below and goes back to it.
+mod json_tree; // slopty: JSON as a tree, for an output and a raw record.
 mod turns; // slopty: a turn's root row, its figures under its prompt.
 pub(crate) mod trace; // slopty: the trace's one fold depth.
 pub use extras::claude_too_old;
@@ -289,8 +291,8 @@ pub struct ToolItem {
     /// to one truncated line. Rendered above `detail` in the open card.
     /// Precomputed for the same reason as `detail`.
     pub invocation: Option<Arc<ToolDetail>>,
-    /// Sidecar key of the full output (chat2-sync A3) — the doc carries only
-    /// a one-line summary; expanding offers a lazy "Show full output" fetch.
+    /// Sidecar key of the full output: the doc carries its head (a running
+    /// command's tail), and expanding offers a lazy "Show full output" fetch.
     pub output_ref: Option<SharedString>,
     /// Full-output size, for the affordance label ("Show full output (12 KB)").
     pub output_bytes: Option<u64>,
@@ -309,6 +311,9 @@ pub struct ToolItem {
     /// part. A `Thought`'s text is the `detail`; `resolved == false` means it
     /// is still streaming.
     pub kind: ToolItemKind,
+    /// slopty: its output's text as the doc holds it, which its format menu reads as JSON or
+    /// markdown (`transcript/detail.rs`).
+    pub output_text: Option<Arc<str>>,
     /// Image files the call read, wrote or printed (as reported; relative
     /// paths resolve against the chat cwd). Expanding the chip previews them.
     pub images: Arc<[SharedString]>,
@@ -684,6 +689,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         subagent_ref: None,
         subagent_status: None,
         kind: ToolItemKind::Thought,
+        output_text: None,
         images: Arc::new([]),
         facts: None,
     }
@@ -722,10 +728,18 @@ pub enum ToolDetail {
     Stats {
         stats: Arc<Vec<slopty_view_doc::ToolDiffStat>>,
     },
+    /// slopty: JSON as a tree, laid out with the folds the person changed in section `key`, one
+    /// fixed-height line each (`transcript/json_tree.rs`).
+    Json {
+        lines: Arc<Vec<json_tree::Line>>,
+        truncated_by: usize,
+        key: SharedString,
+    },
 }
 
-/// Max verbatim output lines per chip before the counted tail row.
-pub const OUTPUT_DETAIL_MAX_LINES: usize = 24;
+/// Max verbatim output lines per chip before the counted tail row. slopty: the view model's own,
+/// which offers the whole of a longer one.
+pub const OUTPUT_DETAIL_MAX_LINES: usize = slopty_view_doc::OUTPUT_HEAD_LINES;
 
 /// Max diff lines an inline tool-diff detail renders — the detail is one
 /// stacked element inside its transcript row, so it must stay bounded
@@ -1320,6 +1334,8 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
                     acc.extend_from_slice(&stat.deletions.to_le_bytes());
                 }
             }
+            // slopty: a tree is laid out as it is drawn, never held by a row.
+            Some(ToolDetail::Json { .. }) => acc.push(5),
         }
         // The invocation block is pure over `call`, which the one-line hash
         // above only covers by length — hash its bytes so an in-place call
@@ -1575,6 +1591,7 @@ pub fn rows_for_entry(
                     subagent_ref: subagent_ref.clone().map(SharedString::from),
                     subagent_status: *subagent_status,
                     kind: ToolItemKind::Call,
+                    output_text: output.as_deref().map(Arc::from), // slopty: for its formats
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                     facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
                 };
@@ -2477,6 +2494,10 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
         }
         ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
+        ToolDetail::Json { lines, truncated_by, .. } => {
+            let rows = lines.len() + usize::from(*truncated_by > 0);
+            rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
+        }
     };
     DETAIL_SEPARATOR + body
 }
@@ -3507,6 +3528,8 @@ pub struct Transcript {
     /// recently (click "Show full output" after a diff → see the output).
     blob_fetch_order: HashMap<SharedString, u64>,
     blob_fetch_counter: u64,
+    /// slopty: what open steps' details keep: fetched texts, formats' forms, folds, boxes.
+    step_detail: detail::DetailState,
     _observe: Subscription,
     _text_changes: Subscription,
 }
@@ -3834,6 +3857,7 @@ impl Transcript {
             blob_details: HashMap::new(),
             blob_fetch_order: HashMap::new(),
             blob_fetch_counter: 0,
+            step_detail: Default::default(),
             _observe: observe,
             _text_changes: text_changes,
         };
@@ -5005,18 +5029,23 @@ impl Transcript {
                 Duration::from_secs(20),
             )
             .await;
-            let fetched = match reply {
+            let (fetched, text) = match reply {
                 Ok(value) => {
                     let text = value
                         .get("text")
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
-                    blob_detail(text, is_diff)
-                        .map_or_else(|| BlobFetch::Failed("it came back empty".into()), |d| BlobFetch::Ready(Arc::new(d)))
+                    let fetched = blob_detail(text, is_diff)
+                        .map_or_else(|| BlobFetch::Failed("it came back empty".into()), |d| BlobFetch::Ready(Arc::new(d)));
+                    // slopty: the text too, which a step's formats and its raw record read.
+                    (fetched, (!is_diff).then(|| text.to_owned()))
                 }
-                Err(err) => BlobFetch::Failed(SharedString::from(err)),
+                Err(err) => (BlobFetch::Failed(SharedString::from(err)), None),
             };
             this.update(cx, |this, cx| {
+                if let Some(text) = text {
+                    this.step_detail.fetched(ref_key.clone(), &text);
+                }
                 this.blob_details.insert(ref_key, fetched);
                 cx.notify();
             })
@@ -7443,30 +7472,36 @@ impl Transcript {
         // one, upgraded in place by a fetched sidecar blob (chat2-sync A3).
         // Resolved per paint (a HashMap probe per chip) so fetched content
         // needs no row rebuild — arrival is a cx.notify, like a fold toggle.
-        let details: Vec<Option<Arc<ToolDetail>>> = tools
+        // slopty: and which fetched whole each shows, which its format menu reads.
+        let (details, wholes): (Vec<Option<Arc<ToolDetail>>>, Vec<Option<SharedString>>) = tools
             .iter()
             .map(|tool| {
                 // Spawn chips never expand — the subagent doc is the record
                 // of what the tool did, and an inline body would only repeat
                 // it. The whole chip is the "open that doc" click instead.
                 if is_spawn_link(tool) || quiet_read(tool) {
-                    return None;
+                    return (None, None);
                 }
                 // Among fetched blobs, the most recently REQUESTED one wins —
                 // a tool can carry both a diff and an output ref, and the
                 // user's last click decides which upgrade is showing.
-                let mut best: Option<(u64, Arc<ToolDetail>)> = None;
+                let mut best: Option<(u64, Arc<ToolDetail>, &SharedString)> = None;
                 for blob_ref in [&tool.diff_ref, &tool.output_ref].into_iter().flatten() {
                     if let Some(BlobFetch::Ready(detail)) = self.blob_details.get(blob_ref) {
                         let order = self.blob_fetch_order.get(blob_ref).copied().unwrap_or(0);
-                        if best.as_ref().is_none_or(|(o, _)| order > *o) {
-                            best = Some((order, detail.clone()));
+                        if best.as_ref().is_none_or(|(o, _, _)| order > *o) {
+                            best = Some((order, detail.clone(), blob_ref));
                         }
                     }
                 }
-                best.map(|(_, d)| d).or_else(|| tool.detail.clone())
+                match best {
+                    Some((_, detail, blob)) => {
+                        (Some(detail), (Some(blob) == tool.output_ref.as_ref()).then(|| blob.clone()))
+                    }
+                    None => (tool.detail.clone(), None),
+                }
             })
-            .collect();
+            .unzip();
         // Full-invocation blocks — with them, EVERY chip expands: the click
         // always answers "what exactly was this call?", output or not.
         let invocations: Vec<Option<Arc<ToolDetail>>> = tools
@@ -7568,6 +7603,21 @@ impl Transcript {
                     .and_then(|detail| self.tool_diff_highlight_for(row_id, ix, detail, cx))
             })
             .collect();
+        // slopty: what each step opened, or closing, shows past zeron's body: its output in its
+        // format, its exit code and its fetched sections (`transcript/detail.rs`).
+        let mut outputs: Vec<Option<detail::StepOutput>> = Vec::with_capacity(tools.len());
+        let mut sections: Vec<Vec<detail::Section>> = Vec::with_capacity(tools.len());
+        for (ix, tool) in tools.iter().enumerate() {
+            let shown = detail_opens[ix] || detail_folds[ix].toggled_at.is_some();
+            if !shown || is_spawn_link(tool) || quiet_read(tool) {
+                outputs.push(None);
+                sections.push(Vec::new());
+                continue;
+            }
+            let key = SharedString::from(format!("{row_id}#d{ix}"));
+            outputs.push(Some(self.step_output(tool, &key, details[ix].clone(), wholes[ix].as_ref(), cx)));
+            sections.push(self.step_sections(tool, &key));
+        }
         let base_row_height = if collapses {
             TOOL_TREE_ROW_HEIGHT
         } else {
@@ -7581,8 +7631,9 @@ impl Transcript {
             .zip(&detail_opens)
             .zip(&detail_folds)
             .zip(tools.iter())
+            .zip(outputs.iter().zip(&sections))
             .map(
-                |(((((detail, invocation), affordance), open), fold), tool)| {
+                |((((((detail, invocation), affordance), open), fold), tool), (output, sections))| {
                     let target = if *open {
                         base_row_height
                             + invocation.as_deref().map_or(0.0, detail_height)
@@ -7591,7 +7642,10 @@ impl Transcript {
                             } else {
                                 0.0
                             }
-                            + detail.as_deref().map_or(0.0, detail_height)
+                            + output.as_ref().map_or_else(
+                                || detail.as_deref().map_or(0.0, detail_height),
+                                detail::StepOutput::height,
+                            )
                             + if affordance.is_some() {
                                 BLOB_AFFORDANCE_HEIGHT
                             } else {
@@ -7599,6 +7653,7 @@ impl Transcript {
                             }
                             + detail_lines(tool, detail.is_some() || affordance.is_some()) as f32
                                 * BLOB_AFFORDANCE_HEIGHT
+                            + sections.iter().map(detail::Section::height).sum::<f32>()
                     } else {
                         base_row_height
                     };
@@ -7838,6 +7893,7 @@ impl Transcript {
                         .is_some_and(|at| frame_now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW);
                 let toggle_key = key.clone();
                 let reveal_row = row_id.clone();
+                let (format_kind, whole_ref) = (detail::format_kind(&tool.call), tool.output_ref.clone());
                 let mut card = div()
                     .my(px((base_row_height - CHIP_CARD_HEIGHT) / 2.0))
                     .when(collapses, |el| el.ml(px(activity_text_gap(solo))))
@@ -7882,6 +7938,7 @@ impl Transcript {
                                 entry.toggled_at = Some(crate::clock::now(cx));
                                 if !currently_open {
                                     this.reveal_opened(reveal_row.clone());
+                                    this.step_opening(&format_kind, whole_ref.clone(), cx);
                                 }
                                 cx.notify();
                             }))
@@ -7934,20 +7991,29 @@ impl Transcript {
                             self.render_tool_image_strip(&key, images, collapses, theme, cx),
                         );
                     }
-                    if let Some(detail) = detail.as_deref() {
-                        panel = panel
-                            .child(
-                                div()
-                                    .h(px(DETAIL_SEPARATOR))
-                                    .flex_none()
-                                    .when(!collapses, |line| line.bg(crate::theme::hairline(0.06))),
-                            )
-                            .child(detail_body(
-                                detail,
-                                detail_highlights[ix].clone(),
-                                &format!("{key}-out"),
-                                theme,
-                            ));
+                    let separator = || {
+                        div()
+                            .h(px(DETAIL_SEPARATOR))
+                            .flex_none()
+                            .when(!collapses, |line| line.bg(crate::theme::hairline(0.06)))
+                    };
+                    // slopty: its output in its format, a running one in its box, its standard
+                    // error apart under a format that is not text.
+                    let output = outputs[ix].as_ref();
+                    if let Some(menu) = output.and_then(|output| output.menu.as_ref()) {
+                        panel = panel.child(self.format_menu(&key, menu, theme, cx));
+                    }
+                    let body = output.map_or_else(|| detail.clone(), |output| output.body.clone());
+                    if let Some(body) = body.as_deref() {
+                        let formatted = output.is_some_and(|output| output.menu.is_some() || output.boxed);
+                        panel = panel.child(separator()).child(if formatted {
+                            self.output_body(&key, body, output.is_some_and(|output| output.boxed), theme, cx)
+                        } else {
+                            detail_body(body, detail_highlights[ix].clone(), &format!("{key}-out"), theme)
+                        });
+                    }
+                    if let Some(stderr) = output.and_then(|output| output.stderr.as_deref()) {
+                        panel = panel.child(separator()).child(detail_body(stderr, None, &format!("{key}-err"), theme));
                     }
                     // slopty: an output that never came says so, and when the step ran closes it.
                     let said_none = no_output(tool, detail.is_some() || affordance.is_some());
@@ -7994,9 +8060,17 @@ impl Transcript {
                     if said_none {
                         panel = panel.child(detail_line(&format!("{key}-none"), None, "No output".into(), theme));
                     }
+                    if let Some(exit) = step_exit(tool) {
+                        panel = panel.child(Self::exit_line(&key, exit, theme));
+                    }
                     if let Some(time) = step_time(tool) {
                         let words = work::timing_words(time, &chrono::Local);
                         panel = panel.child(detail_line(&format!("{key}-timing"), Some("Timing"), words.into(), theme));
+                    }
+                    // slopty: what the model read where the step shows otherwise, and its raw
+                    // record, each fetched when opened.
+                    for section in &sections[ix] {
+                        panel = panel.child(self.section(section, theme, cx));
                     }
                     card = card.child(panel);
                 }
@@ -8773,6 +8847,26 @@ fn detail_body(
                 block.child(more_lines_row(*truncated_by, theme))
             })
             .into_any_element(),
+        // slopty: a tree with no view to fold it reads as its lines (`Transcript::detail_element`
+        // draws it with its folds).
+        ToolDetail::Json { lines, truncated_by, .. } => body
+            .py(px(6.0))
+            .font_family(theme.font_mono.clone())
+            .text_size(px(TOOL_TEXT_SIZE))
+            .children(lines.iter().enumerate().map(|(line_ix, line)| {
+                let text = SharedString::from(line.text.clone());
+                let runs = plain(&text, theme.text_faint);
+                div()
+                    .h(px(OUTPUT_LINE_HEIGHT))
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .pl(px(f32::from(line.depth) * 14.0))
+                    .child(selectable(line_ix, text, runs))
+            }))
+            .when(*truncated_by > 0, |block| block.child(more_lines_row(*truncated_by, theme)))
+            .into_any_element(),
     }
 }
 
@@ -8800,9 +8894,17 @@ fn no_output(tool: &ToolItem, has_output: bool) -> bool {
     tool.resolved && tool.kind == ToolItemKind::Call && !has_output && !chip_has_images(tool)
 }
 
-/// slopty: the one-line rows an open step's detail ends on: "No output", and its Timing.
+/// slopty: how step `tool`'s command exited, where its records say.
+fn step_exit(tool: &ToolItem) -> Option<slopty_view_doc::ExitCode> {
+    tool.facts.as_ref().and_then(|facts| facts.exit)
+}
+
+/// slopty: the one-line rows an open step's detail ends on: "No output", its exit code, and its
+/// Timing.
 fn detail_lines(tool: &ToolItem, has_output: bool) -> usize {
-    usize::from(no_output(tool, has_output)) + usize::from(step_time(tool).is_some())
+    usize::from(no_output(tool, has_output))
+        + usize::from(step_exit(tool).is_some())
+        + usize::from(step_time(tool).is_some())
 }
 
 /// slopty: one of those rows, [`BLOB_AFFORDANCE_HEIGHT`] tall: its section's name, then its words,
@@ -13552,6 +13654,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             kind: ToolItemKind::Call,
+            output_text: None,
             images: Arc::new([]),
             facts: None,
         };
@@ -13572,6 +13675,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             kind: ToolItemKind::Call,
+            output_text: None,
             images: Arc::new([]),
             facts: None,
         };
@@ -13647,6 +13751,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 kind: ToolItemKind::Call,
+                output_text: None,
                 images: Arc::new([]),
                 facts: None,
             },
@@ -13665,6 +13770,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 kind: ToolItemKind::Call,
+                output_text: None,
                 images: Arc::new([]),
                 facts: None,
             },
@@ -13681,6 +13787,7 @@ mod tests {
                 subagent_ref: None,
                 subagent_status: None,
                 kind: ToolItemKind::Call,
+                output_text: None,
                 images: Arc::new([]),
                 facts: None,
             },
@@ -13855,6 +13962,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             kind: ToolItemKind::Call,
+            output_text: None,
         };
         // The chip header inside a clickable parent, standing in for the
         // accordion toggle that wraps it in `render_tool_group`.

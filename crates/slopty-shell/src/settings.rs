@@ -234,6 +234,20 @@ pub fn smooth_scrolling(cx: &App) -> bool {
         .is_some_and(|store| store.current.smooth_scrolling)
 }
 
+/// slopty: the format the person chose for the output of steps of kind `kind`, read on every
+/// frame an open step draws, so without cloning the settings; `None` when they never chose one.
+pub fn output_format(kind: &str, cx: &App) -> Option<String> {
+    cx.try_global::<SettingsStore>()
+        .and_then(|store| store.current.output_formats.get(kind).cloned())
+}
+
+/// slopty: keep `format` as how the output of steps of kind `kind` is shown.
+pub fn set_output_format(kind: &str, format: &str, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.output_formats.insert(kind.to_owned(), format.to_owned());
+    });
+}
+
 pub fn set_smooth_scrolling(enabled: bool, cx: &mut App) {
     update(SavePolicy::Immediate, cx, |settings| {
         settings.smooth_scrolling = enabled;
@@ -472,6 +486,11 @@ pub struct UiSettings {
     /// How often and how lately the person ran each palette command, by its name: the palette
     /// ranks by it (`shell::command_palette`, WezTerm's frecency).
     pub palette_uses: std::collections::BTreeMap<String, PaletteUse>,
+    /// slopty: how the inspector shows each kind of step's output, by the kind's name, as the
+    /// person last chose it in a step's format menu (`transcript::detail`): `text`, `json` or
+    /// `markdown`. A kind not here is shown as its output reads.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub output_formats: std::collections::BTreeMap<String, String>,
     /// Customizable shortcut combos (feature-inventory §1.4). slopty: kept as `shortcuts`, only
     /// what the person changed; the `keymap` before it froze every default and is not read.
     #[serde(rename = "shortcuts")]
@@ -557,6 +576,7 @@ impl Default for UiSettings {
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
             palette_uses: std::collections::BTreeMap::new(),
+            output_formats: std::collections::BTreeMap::new(), // slopty: the inspector's formats
             keymap: KeymapConfig::default(),
             settings_section: crate::shell::SettingsSection::default(),
             // slopty: appshots removed.
@@ -1256,6 +1276,7 @@ impl UiSettings {
             terminal_height,
             session_panels, // slopty: kept panes
             session_tabs, // slopty: kept panes
+            output_formats,
             palette_uses,
             keymap,
             // slopty: appshots removed.
@@ -1799,6 +1820,8 @@ mod tests {
                 "Toggle sidebar".into(),
                 PaletteUse { count: 3, last_ms: 1_793_000_000_000 },
             )]),
+            // slopty: the inspector's format for a kind of step's output.
+            output_formats: std::collections::BTreeMap::from([("Bash".into(), "markdown".into())]),
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()
@@ -1837,6 +1860,7 @@ mod tests {
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
         assert!(json.contains(r#""diffWrap": true"#));
         assert!(json.contains(r#""machineFilter": "studio""#)); // slopty
+        assert!(json.contains(r#""outputFormats": {"#)); // slopty
         // slopty: the shortcuts keep only the changed combo.
         assert!(json.contains(r#""toggleSidebar": "mod-shift-s""#));
         assert!(!json.contains(r#""saveFile""#));

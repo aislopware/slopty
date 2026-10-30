@@ -204,6 +204,7 @@ fn step_body(tool: &ToolItem) -> Vec<String> {
                 out.extend(file.hunks.iter().flat_map(|hunk| hunk.lines.iter().map(|line| line.text.clone())));
             }
             ToolDetail::Stats { stats } => out.extend(stats.iter().map(|stat| stat.path.clone())),
+            ToolDetail::Json { lines, .. } => out.extend(lines.iter().map(|line| line.text.clone())),
         }
     }
     out
@@ -706,6 +707,7 @@ mod tests {
             subagent_ref: None,
             subagent_status: None,
             kind: ToolItemKind::Call,
+            output_text: None,
             images: Arc::new([]),
             facts: None,
         }

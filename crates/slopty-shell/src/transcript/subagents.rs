@@ -761,6 +761,7 @@ mod tests {
             invocation: None,
             output_ref: None,
             output_bytes: None,
+            output_text: None,
             diff_ref: None,
             subagent_ref: Some("child".into()),
             subagent_status: Some(SubagentStatus::Running),

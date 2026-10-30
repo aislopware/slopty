@@ -10,8 +10,8 @@ use std::sync::Arc;
 use gpui::accesskit::{NodeId, Role};
 use gpui::{Entity, IntoElement, Pixels, Point, Render, VisualTestContext, Window, div, point, prelude::*, px};
 use slopty_view_doc::{
-    MessagePart, MessageRole, MessageStatus, NoteRow, SessionMessageEntry, SubagentProgress,
-    SubagentStatus, TaskRow, ToolFacts,
+    BlobLink, ExitCode, MessagePart, MessageRole, MessageStatus, NoteRow, SessionMessageEntry,
+    SubagentProgress, SubagentStatus, TaskRow, ToolFacts,
 };
 use slopty_view_proto::ToolCall;
 
@@ -938,7 +938,7 @@ fn a_lone_call_shows_itself(cx: &mut gpui::TestAppContext) {
     assert!(find(&nodes, Role::Button, "Ran 2 commands").is_some(), "two calls fold");
 }
 
-/// A call pressed open says its result to assistive tech, whole, as its code block draws it.
+/// A call pressed open says its result to assistive tech, whole: JSON as the tree it draws.
 #[gpui::test]
 fn an_open_calls_result_says_its_lines(cx: &mut gpui::TestAppContext) {
     const SAID: &str = "\"liveness\": \"online\"";
@@ -948,9 +948,7 @@ fn an_open_calls_result_says_its_lines(cx: &mut gpui::TestAppContext) {
         *output = Some(format!("[\n  {{\n    \"name\": \"studio\",\n    {SAID}\n  }}\n]"));
     }
     let (_, cx) = open(cx, entry(MessageStatus::Complete, vec![call, text("One machine.")]));
-    let says = |nodes: &HashMap<NodeId, Node>| {
-        nodes.values().any(|node| node.role == Role::Code && node.label.contains(SAID))
-    };
+    let says = |nodes: &HashMap<NodeId, Node>| find(nodes, Role::TreeItem, "liveness: \"online\"").is_some();
     let nodes = draw(cx);
     assert!(!says(&nodes), "folded to its line");
     let line = find(&nodes, Role::Button, "MCP slopty · machines").expect("its line").clone();
@@ -958,6 +956,78 @@ fn an_open_calls_result_says_its_lines(cx: &mut gpui::TestAppContext) {
     let nodes = draw(cx);
     let words: Vec<_> = nodes.values().map(|node| (node.role, node.label.as_str())).collect();
     assert!(says(&nodes), "its result, whole: {words:?}");
+}
+
+/// Step 4b: an open step reads in its kind's format from a menu that keeps its shape, says its
+/// exit code on a line of its own, and offers what the model read and its raw record, fetched
+/// when opened, the record a tree whose values fold at a press; a running command's output sits
+/// in a capped box, so the trace under it holds still.
+#[gpui::test]
+fn an_open_step_reads_in_its_format_with_its_exit_code_and_records(cx: &mut gpui::TestAppContext) {
+    let mut done = exec("one", "cargo test", true, false);
+    if let MessagePart::Tool { output, facts, .. } = &mut done {
+        *output = Some("{\"passed\": 3, \"failed\": [\"a\"]}".into());
+        *facts = Some(Box::new(ToolFacts {
+            exit: Some(ExitCode { code: 2, quiet: false }),
+            seen: Some(BlobLink { blob: "chat/one.seen".into(), lines: 3 }),
+            raw: Some("chat/one.raw".into()),
+            ..ToolFacts::default()
+        }));
+    }
+    let mut running = exec("two", "npm run dev", true, false);
+    if let MessagePart::Tool { output, facts, .. } = &mut running {
+        *output = Some((1..=40).map(|n| format!("tick {n}\n")).collect());
+        *facts = Some(Box::new(ToolFacts { growing: true, ..ToolFacts::default() }));
+    }
+    let parts = vec![done, text("Done."), running, text("Watching.")];
+    let (transcript, cx) = open(cx, entry(MessageStatus::Complete, parts));
+    let press = |nodes: &HashMap<NodeId, Node>, role: Role, label: &str, cx: &mut VisualTestContext| {
+        let labels: Vec<&str> = nodes.values().map(|n| n.label.as_str()).collect();
+        let node = find(nodes, role, label).unwrap_or_else(|| panic!("{label}: {labels:?}")).clone();
+        cx.simulate_click(node.center, gpui::Modifiers::default());
+        draw(cx)
+    };
+    let nodes = press(&draw(cx), Role::Button, "Run cargo test", cx);
+
+    // JSON reads as a tree by itself, under a menu of all three formats.
+    for format in ["Text", "JSON", "Markdown"] {
+        assert!(find(&nodes, Role::Tab, format).is_some(), "the menu keeps its shape: {format}");
+    }
+    assert!(find(&nodes, Role::TreeItem, "passed: 3").is_some(), "JSON as a tree");
+    assert!(find(&nodes, Role::Paragraph, "Exit code 2").is_some(), "its exit code, on its line");
+    let nodes = press(&nodes, Role::TreeItem, "{2}", cx);
+    assert!(find(&nodes, Role::TreeItem, "passed: 3").is_none(), "a value folds at a press");
+    assert!(find(&nodes, Role::TreeItem, "{passed: 3, failed: […]}").is_some(), "to its preview");
+
+    // The format chosen is kept for the kind; text reads as the TUI shows it.
+    let nodes = press(&nodes, Role::Tab, "Text", cx);
+    let kept = cx.update(|_, cx| crate::settings::output_format("Bash", cx));
+    assert_eq!(kept.as_deref(), Some("text"));
+    assert!(nodes.values().any(|n| n.role == Role::Code && n.label.contains("\"passed\": 3")));
+
+    // What the model read, and the raw record, open once fetched.
+    transcript.update(cx, |this, cx| {
+        for (blob, text) in [("chat/one.seen", "Exit code 2\nfailed: a\nok"), ("chat/one.raw", "[{\"type\": \"assistant\"}]")] {
+            let detail = super::blob_detail(text, false).expect("a body");
+            this.blob_details.insert(blob.into(), super::BlobFetch::Ready(Arc::new(detail)));
+            this.step_detail.fetched(blob.into(), text);
+        }
+        cx.notify();
+    });
+    let nodes = press(&draw(cx), Role::Button, "Details for Claude · 3 lines", cx);
+    assert!(nodes.values().any(|n| n.role == Role::Code && n.label.contains("failed: a")), "what the model read");
+    let nodes = press(&nodes, Role::Button, "Raw record", cx);
+    assert!(find(&nodes, Role::TreeItem, "type: \"assistant\"").is_some(), "its raw record, as a tree");
+
+    // A running command's 40 lines sit in a box of 16: with its row, its command and its menu,
+    // the step is far short of the 720 pt the 40 lines alone would take.
+    let nodes = press(&nodes, Role::Button, "Run cargo test", cx);
+    let nodes = press(&nodes, Role::Button, "Run npm run dev", cx);
+    let row = find(&nodes, Role::Button, "Run npm run dev").expect("the call").clone();
+    let under = find(&nodes, Role::Paragraph, "Watching.").expect("what follows").clone();
+    let held = top(&under) - top(&row);
+    assert!(held < 25.0 * super::OUTPUT_LINE_HEIGHT, "capped: {held}");
+    assert!(nodes.values().any(|n| n.role == Role::Code && n.label.contains("tick 40")), "its tail, whole");
 }
 
 /// #12: a turn that ended on a call that never settled says it stopped, never that it runs.
@@ -1142,6 +1212,7 @@ fn a_failed_call_tints_only_its_icon_and_result() {
         subagent_ref: None,
         subagent_status: None,
         kind: super::ToolItemKind::Call,
+        output_text: None,
         images: Arc::new([]),
         facts: None,
     };
