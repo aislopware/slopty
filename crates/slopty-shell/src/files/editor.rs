@@ -1,11 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Boundary between the Files surface and the `gpui-base` editor.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::rc::Rc;
 
@@ -29,9 +23,9 @@ pub(super) const GUTTER_INSET: f32 = 12.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct EditorMenuAvailability {
-    pub(super) cut: bool,
-    pub(super) copy: bool,
-    pub(super) paste: bool,
+    pub cut: bool,
+    pub copy: bool,
+    pub paste: bool,
 }
 
 impl EditorMenuAvailability {
@@ -83,16 +77,14 @@ pub(super) fn new_file_editor(
             let Some(menu_editor) = menu_editor.upgrade() else {
                 return;
             };
-            surface
-                .update(cx, |surface, cx| {
-                    surface.open_editor_context_menu(
-                        menu_editor,
-                        EditorMenuAvailability::new(capabilities, clipboard_has_text),
-                        position,
-                        cx,
-                    );
-                })
-                .ok();
+            let _gone = surface.update(cx, |surface, cx| {
+                surface.open_editor_context_menu(
+                    menu_editor,
+                    EditorMenuAvailability::new(capabilities, clipboard_has_text),
+                    position,
+                    cx,
+                );
+            });
         }));
     });
     editor
@@ -157,7 +149,9 @@ pub(super) fn toggle_markdown_task(
         }
         let selection = state.selected_range();
         let scroll = state.scroll_offset();
-        state.set_selected_range(task.range.start + 1..task.range.start + 2, cx);
+        // Inside the `[ ]` the marker check just read, so neither end passes the text's.
+        let start = task.range.start;
+        state.set_selected_range(start.saturating_add(1)..start.saturating_add(2), cx);
         state.replace(if task.checked { " " } else { "x" }, window, cx);
         state.set_selected_range(selection, cx);
         state.set_scroll_offset(scroll, cx);

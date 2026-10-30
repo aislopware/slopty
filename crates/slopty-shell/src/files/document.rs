@@ -1,11 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Lifecycle and optimistic-concurrency state for an open workspace file.
-#![allow(
-    clippy::assigning_clones,
-    clippy::rc_buffer,
-    clippy::ref_patterns,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::sync::Arc;
 
@@ -54,7 +48,7 @@ pub(super) struct FileDocument {
     pub generation: u64,
     pub phase: DocumentPhase,
     pub file: Option<WorkspaceFileText>,
-    pub lines: Arc<Vec<SharedString>>,
+    pub lines: Arc<[SharedString]>,
     pub editor: Option<Entity<EditorState>>,
     pub editor_events: Option<Subscription>,
     pub editor_observer: Option<Subscription>,
@@ -84,7 +78,7 @@ impl FileDocument {
             generation: 1,
             phase: DocumentPhase::Loading,
             file: None,
-            lines: Arc::new(Vec::new()),
+            lines: Arc::default(),
             editor: None,
             editor_events: None,
             editor_observer: None,
@@ -130,16 +124,15 @@ impl FileDocument {
         self.editor_observer = None;
         self.encoding = writable_encoding(file.encoding);
         self.line_ending = writable_line_ending(file.line_ending);
-        self.lines = Arc::new(
-            file.text
-                .as_deref()
-                .unwrap_or_default()
-                .split('\n')
-                .map(|line| SharedString::from(line.to_owned()))
-                .collect(),
-        );
+        self.lines = file
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .split('\n')
+            .map(|line| SharedString::from(line.to_owned()))
+            .collect();
         self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
-        self.loaded_hash = hash.clone();
+        self.loaded_hash.clone_from(&hash);
         self.saved_hash = hash;
         self.revision = 0;
         self.saved_revision = 0;
@@ -257,7 +250,7 @@ impl FileDocument {
         let hash = file.content_hash.clone();
         self.encoding = writable_encoding(file.encoding);
         self.line_ending = writable_line_ending(file.line_ending);
-        self.loaded_hash = hash.clone();
+        self.loaded_hash.clone_from(&hash);
         self.saved_hash = hash;
         self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
         self.file = Some(file);
@@ -272,15 +265,14 @@ impl FileDocument {
         let hash = file.content_hash.clone();
         self.encoding = writable_encoding(file.encoding);
         self.line_ending = writable_line_ending(file.line_ending);
-        self.lines = Arc::new(
-            file.text
-                .as_deref()
-                .unwrap_or_default()
-                .split('\n')
-                .map(|line| SharedString::from(line.to_owned()))
-                .collect(),
-        );
-        self.loaded_hash = hash.clone();
+        self.lines = file
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .split('\n')
+            .map(|line| SharedString::from(line.to_owned()))
+            .collect();
+        self.loaded_hash.clone_from(&hash);
         self.saved_hash = hash;
         self.saved_revision = self.revision;
         self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
@@ -309,10 +301,9 @@ impl FileDocument {
             .as_ref()
             .and_then(|file| file.text.as_ref())
             .map_or(0, String::capacity);
-        let line_bytes =
-            self.lines.capacity().saturating_mul(size_of::<SharedString>()).saturating_add(
-                self.lines.iter().fold(0_usize, |total, line| total.saturating_add(line.len())),
-            );
+        let line_bytes = self.lines.len().saturating_mul(size_of::<SharedString>()).saturating_add(
+            self.lines.iter().fold(0_usize, |total, line| total.saturating_add(line.len())),
+        );
         let pending_save_bytes = self.pending_save.as_ref().map_or(0, |save| save.text.capacity());
         let editor_text_bytes = if self.editor.is_some() { file_text_bytes } else { 0 };
 
@@ -479,9 +470,9 @@ mod tests {
         assert!(document.conflict_save(revision, Some("disk-hash".into())));
         assert!(document.is_dirty());
         assert!(matches!(
-            document.phase,
+            &document.phase,
             DocumentPhase::Conflict {
-                disk_hash: Some(ref hash)
+                disk_hash: Some(hash)
             } if hash == "disk-hash"
         ));
         assert!(!document.can_autosave());
@@ -515,9 +506,9 @@ mod tests {
         assert_eq!(document.revision, 2);
         assert!(!document.can_autosave());
         assert!(matches!(
-            document.phase,
+            &document.phase,
             DocumentPhase::ExternallyModified {
-                disk_hash: Some(ref hash)
+                disk_hash: Some(hash)
             } if hash == "hash-3"
         ));
     }

@@ -1,12 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-#![allow(
-    let_underscore_drop,
-    clippy::clone_on_ref_ptr,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice C"
-)]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -18,7 +10,7 @@ use super::model::parent_path;
 use super::{FilesEvent, FilesSurface};
 
 impl FilesSurface {
-    pub(super) fn ensure_watch(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn ensure_watch(&mut self, cx: &Context<Self>) {
         if self.watch_task.is_some() {
             return;
         }
@@ -33,10 +25,15 @@ impl FilesSurface {
             loop {
                 match client.watch().await {
                     Ok(mut receiver) => {
-                        let _ = this.update(cx, |surface, cx| {
-                            surface.watch_error = None;
-                            cx.notify();
-                        });
+                        if this
+                            .update(cx, |surface, cx| {
+                                surface.watch_error = None;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
                         while let Some(value) = receiver.recv().await {
                             let frame = serde_json::from_value::<WorkspaceFileChanges>(value);
                             if this
@@ -155,7 +152,7 @@ impl FilesSurface {
                     if let Some(parent) = parent_path(&change.path) {
                         parents.insert(parent);
                     }
-                    self.reconcile_document(change.path, cx);
+                    self.reconcile_document(&change.path, cx);
                 }
                 WorkspaceFileChangeKind::Removed => {
                     self.tree.remove(&change.path);
@@ -168,7 +165,7 @@ impl FilesSurface {
                     if let Some(old_path) = change.old_path {
                         self.tree.relocate_subtree(&old_path, &change.path, None);
                         for (old_path, new_path) in
-                            self.rename_documents(&old_path, change.path.clone(), cx)
+                            self.rename_documents(&old_path, &change.path, cx)
                         {
                             cx.emit(FilesEvent::FileRenamed { old_path, new_path });
                         }
@@ -229,7 +226,7 @@ mod tests {
         });
         let files = cx.new(|cx| super::super::test_support::explorer(state, cx));
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });

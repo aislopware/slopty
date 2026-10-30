@@ -1,19 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-#![allow(
-    let_underscore_drop,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::trivially_copy_pass_by_ref,
-    reason = "shell lint migration: slice C"
-)]
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, Window, div, list, px,
@@ -31,8 +16,15 @@ use crate::theme::Theme;
 /// Fade band under the tree's edges (the sidebar's 24px).
 const TREE_FADE_BAND: f32 = 24.0;
 
+/// The height of one row of the tree.
 pub const TREE_ROW_HEIGHT: f32 = 27.0;
 pub(super) const TREE_INDENT: f32 = 14.0;
+
+/// `depth` levels of the tree's indent, in points.
+#[expect(clippy::cast_precision_loss, reason = "a tree is never 2^24 levels deep")]
+pub(super) fn indent(depth: usize) -> f32 {
+    depth as f32 * TREE_INDENT
+}
 
 /// Draw each ancestor's guide in the row itself so virtualized rows join
 /// seamlessly, including when the parent has scrolled out of view.
@@ -53,7 +45,7 @@ pub(super) fn with_indent_guides(
                 .top_0()
                 .bottom_0()
                 // Align with the center of the ancestor's 14px disclosure slot.
-                .left(px(8.0 + 7.0 + level as f32 * TREE_INDENT))
+                .left(px(8.0 + 7.0 + indent(level)))
                 .w(px(1.0))
                 .bg(theme.border)
         }))
@@ -72,10 +64,12 @@ pub(super) fn sync_list_rows(
     }
     let mut anchor = list.logical_scroll_top();
     let prefix = old.iter().zip(new).take_while(|(a, b)| a == b).count();
-    let suffix = old[prefix..]
+    let suffix = old
+        .get(prefix..)
+        .unwrap_or_default()
         .iter()
         .rev()
-        .zip(new[prefix..].iter().rev())
+        .zip(new.get(prefix..).unwrap_or_default().iter().rev())
         .take_while(|(a, b)| a == b)
         .count();
     let positions = new
@@ -96,10 +90,12 @@ pub(super) fn sync_list_rows(
     let target = target.or_else(|| {
         old.iter()
             .skip(old_index)
-            .chain(old[..old_index].iter().rev())
+            .chain(old.get(..old_index).unwrap_or_default().iter().rev())
             .find_map(|row| positions.get(row.path.as_str()).copied())
     });
-    list.splice(prefix..old.len() - suffix, new.len() - prefix - suffix);
+    // The rows both keep at either end are counted within both lists, so neither end passes.
+    let changed_old = prefix..old.len().saturating_sub(suffix);
+    list.splice(changed_old, new.len().saturating_sub(prefix).saturating_sub(suffix));
     list.clone().with_uniform_item_height(px(TREE_ROW_HEIGHT));
     anchor.item_ix = target.unwrap_or(0);
     if target.is_none() {
@@ -170,7 +166,7 @@ impl FilesSurface {
     /// through the list state's own scrollbar offset setter, which clamps to
     /// the live content height. `false` when no drag is engaged.
     fn apply_tree_rail_target(
-        &mut self,
+        &self,
         metrics: &popover::MenuScrollbarMetrics,
         track_top: gpui::Pixels,
         pointer_y: gpui::Pixels,
@@ -189,8 +185,8 @@ impl FilesSurface {
         cx.notify();
     }
 
-    fn on_tree_hovered(&mut self, hovered: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        if self.tree_bar.set_list_hovered(*hovered) {
+    fn on_tree_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.tree_bar.set_list_hovered(hovered) {
             cx.notify();
         }
     }
@@ -226,7 +222,7 @@ impl FilesSurface {
                     this.begin_tree_delete(paths, window, cx);
                 }
             }))
-            .on_hover(cx.listener(Self::on_tree_hovered))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| this.on_tree_hovered(*hovered, cx)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
@@ -281,7 +277,7 @@ impl FilesSurface {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let padding = 8.0 + row.depth as f32 * TREE_INDENT;
+        let padding = 8.0 + indent(row.depth);
         let drop_key = row.path.clone();
         let drop_target = match &row.kind {
             VisibleRowKind::Entry => Some(row.path.clone()),
@@ -406,7 +402,7 @@ impl FilesSurface {
                     )
                     .when(!renaming, |element| {
                         element.on_drag(drag_payload, move |payload, _, _, cx| {
-                            let _ = drag_owner.update(cx, Self::close_tree_context_menu);
+                            let _gone = drag_owner.update(cx, Self::close_tree_context_menu);
                             cx.stop_propagation();
                             workspace_path_drag_ghost(payload, cx)
                         })
@@ -559,7 +555,7 @@ impl FilesSurface {
         if is_directory {
             self.toggle_tree_directory(path, cx);
         } else {
-            self.open_tree_file(path, cx);
+            Self::open_tree_file(path, cx);
         }
         self.reveal_tree_selection();
         cx.notify();
@@ -810,7 +806,7 @@ mod tests {
             ],
         );
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -886,7 +882,7 @@ mod tests {
 
         cx.simulate_click(empty, gpui::Modifiers::default());
         files.update_in(cx, |files, window, _| {
-            assert!(files.tree.selected_paths().is_empty());
+            assert_eq!(files.tree.selected_paths(), Vec::<String>::new());
             assert_eq!(files.tree.selected(), None);
             assert!(files.tree_focus.is_focused(window));
         });

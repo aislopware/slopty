@@ -1,20 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-#![allow(
-    let_underscore_drop,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::partial_pub_fields,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice C"
-)]
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -33,8 +17,9 @@ use crate::icons::{self, icon};
 use crate::motion::HoverFade as _;
 use crate::theme::Theme;
 
+/// The height of one row of the search's results.
 pub const SEARCH_ROW_HEIGHT: f32 = 27.0;
-const SEARCH_RESULT_LIMIT: usize = 200;
+const SEARCH_RESULT_LIMIT: u16 = 200;
 
 #[derive(Debug, Clone)]
 struct SearchTreeNode {
@@ -68,7 +53,7 @@ impl SearchTreeRow {
 }
 
 #[derive(Debug, Default)]
-struct SearchTreeModel {
+pub(super) struct SearchTreeModel {
     nodes: HashMap<String, SearchTreeNode>,
     roots: Vec<String>,
     collapsed: HashSet<String>,
@@ -98,7 +83,7 @@ impl SearchTreeModel {
                     .entry(path.clone())
                     .and_modify(|node| {
                         if is_match {
-                            node.name = result.name.clone();
+                            node.name.clone_from(&result.name);
                             node.kind = result.kind;
                             node.score = Some(node.score.unwrap_or(i64::MIN).max(result.score));
                         }
@@ -230,7 +215,7 @@ fn append_search_rows(
     });
     if has_children && !collapsed.contains(path) {
         for child in &node.children {
-            append_search_rows(child, depth + 1, nodes, collapsed, rows);
+            append_search_rows(child, depth.saturating_add(1), nodes, collapsed, rows);
         }
     }
 }
@@ -263,10 +248,10 @@ pub(super) struct FileSearchState {
     pub active: usize,
     pub task: Option<Task<()>>,
     pub reveal_task: Option<Task<()>>,
-    reveal_generation: u64,
-    reveal_intent: RevealIntent,
-    reveal_scroll_pending: bool,
-    tree: SearchTreeModel,
+    pub reveal_generation: u64,
+    pub reveal_intent: RevealIntent,
+    pub reveal_scroll_pending: bool,
+    pub tree: SearchTreeModel,
 }
 
 impl FileSearchState {
@@ -289,7 +274,7 @@ impl FilesSurface {
             self.cancel_reveal();
         }
         self.search_state.generation = self.search_state.generation.wrapping_add(1);
-        self.search_state.query = query.clone();
+        self.search_state.query.clone_from(&query);
         self.search_state.active = 0;
         self.search_state.error = None;
         self.search_state.task = None;
@@ -325,13 +310,13 @@ impl FilesSurface {
             target: context.target.clone(),
             query: query.clone(),
             include_ignored: self.tree.include_ignored(),
-            limit: Some(SEARCH_RESULT_LIMIT as u16),
+            limit: Some(SEARCH_RESULT_LIMIT),
         };
         let client = WorkspaceFilesClient::new(engine, context.clone());
         self.search_state.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(200)).await;
             let result = client.search(request).await;
-            let _ = this.update(cx, |surface, cx| {
+            let _gone = this.update(cx, |surface, cx| {
                 if !surface.search_state.accepts(generation, &query)
                     || surface.request_context.as_ref() != Some(&context)
                 {
@@ -363,7 +348,7 @@ impl FilesSurface {
         cx.notify();
     }
 
-    pub(super) fn clear_search(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn clear_search(&self, cx: &mut Context<Self>) {
         self.search.update(cx, |search, cx| search.set_text("", cx));
     }
 
@@ -408,7 +393,7 @@ impl FilesSurface {
     pub(super) fn reveal_search_result(
         &mut self,
         result: WorkspaceFileSearchMatch,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) {
         let intent = match result.kind {
             WorkspaceEntryKind::Directory => RevealIntent::ActivateDirectory,
@@ -417,12 +402,7 @@ impl FilesSurface {
         self.reveal_path(result.path, intent, cx);
     }
 
-    pub(super) fn reveal_path(
-        &mut self,
-        path: String,
-        intent: RevealIntent,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn reveal_path(&mut self, path: String, intent: RevealIntent, cx: &Context<Self>) {
         self.cancel_reveal();
         let Some(context) = self.request_context.clone() else {
             return;
@@ -466,7 +446,7 @@ impl FilesSurface {
                 {
                     Ok(page) => pages.push(page),
                     Err(error) => {
-                        let _ = this.update(cx, |surface, cx| {
+                        let _gone = this.update(cx, |surface, cx| {
                             if surface.accepts_reveal(&context, generation, reveal_generation) {
                                 surface.search_state.error = Some(error.to_string().into());
                                 cx.notify();
@@ -476,7 +456,7 @@ impl FilesSurface {
                     }
                 }
             }
-            let _ = this.update(cx, |surface, cx| {
+            let _gone = this.update(cx, |surface, cx| {
                 if !surface.accepts_reveal(&context, generation, reveal_generation) {
                     return;
                 }
@@ -511,7 +491,7 @@ impl FilesSurface {
         }
         if intent.opens_file() {
             self.selected_editor_path = Some(path.clone());
-            self.open_tree_file(path, cx);
+            Self::open_tree_file(path, cx);
         }
         if self.search_state.query.is_empty() {
             self.reveal_tree_selection();
@@ -521,7 +501,7 @@ impl FilesSurface {
         cx.notify();
     }
 
-    pub(super) fn render_search_results(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_search_results(&self, cx: &Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         if let Some(error) = self.search_state.error.clone() {
             return centered_search_message(error, theme.danger.opacity(0.82));
@@ -539,7 +519,7 @@ impl FilesSurface {
             .min_h_0()
             .flex()
             .flex_col()
-            .when(self.search_state.results.len() >= SEARCH_RESULT_LIMIT, |element| {
+            .when(self.search_state.results.len() >= usize::from(SEARCH_RESULT_LIMIT), |element| {
                 element.child(
                     div()
                         .h(px(24.0))
@@ -576,7 +556,7 @@ impl FilesSurface {
         let expanded = row.has_children && self.search_state.tree.is_expanded(&row.path);
         let is_directory = row.kind == WorkspaceEntryKind::Directory;
         let decoration = self.git_decoration(&row.path, is_directory, cx);
-        let padding = 8.0 + row.depth as f32 * super::tree::TREE_INDENT;
+        let padding = 8.0 + super::tree::indent(row.depth);
         let drag_payload = WorkspacePathDrag::new(row.path.clone(), is_directory).with_origin(
             self.interaction_origin(cx),
             super::WorkspacePathSource::Search,
@@ -779,7 +759,7 @@ mod reveal_tests {
             FilesSurface::new_explorer(state, "chat".into(), false, cx)
         });
         let opened = Rc::new(RefCell::new(Vec::new()));
-        let events = opened.clone();
+        let events = Rc::clone(&opened);
         let _sub = cx.update(|cx| {
             cx.subscribe(&surface, move |_, event, _| {
                 if let FilesEvent::OpenFile(path) = event {
@@ -802,7 +782,7 @@ mod reveal_tests {
         });
         assert_eq!(*opened.borrow(), ["src/config.rs"]);
         surface.read_with(cx, |surface, cx| {
-            assert!(surface.search.read(cx).text().is_empty());
+            assert_eq!(surface.search.read(cx).text(), "");
             assert!(!surface.search_state.reveal_scroll_pending);
         });
     }
@@ -814,7 +794,7 @@ mod reveal_tests {
             FilesSurface::new_explorer(state, "chat".into(), false, cx)
         });
         let opened = Rc::new(RefCell::new(Vec::new()));
-        let events = opened.clone();
+        let events = Rc::clone(&opened);
         let _sub = cx.update(|cx| {
             cx.subscribe(&surface, move |_, event, _| {
                 if let FilesEvent::OpenFile(path) = event {
@@ -827,8 +807,8 @@ mod reveal_tests {
             surface.finish_reveal("emptydir".into(), RevealIntent::ActivateDirectory, cx);
         });
         surface.read_with(cx, |surface, cx| {
-            assert!(surface.search.read(cx).text().is_empty());
-            assert!(surface.search_state.query.is_empty());
+            assert_eq!(surface.search.read(cx).text(), "");
+            assert_eq!(surface.search_state.query, "");
             assert!(!surface.search_state.reveal_scroll_pending);
         });
         assert!(opened.borrow().is_empty());
@@ -854,7 +834,7 @@ mod reveal_tests {
             surface.apply_target(Some(context("second")), cx);
             assert!(!surface.accepts_reveal(&first, tree_generation, reveal_generation));
             assert!(!surface.search_state.accepts(search_generation, "config"));
-            assert!(surface.search_state.results.is_empty());
+            assert_eq!(surface.search_state.results, []);
         });
     }
 }

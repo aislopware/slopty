@@ -1,12 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Inline single-line rename and permanent-delete confirmation.
-#![allow(
-    clippy::assertions_on_result_states,
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::partial_pub_fields,
-    reason = "shell lint migration: slice C"
-)]
 use gpui::{AnyElement, Focusable as _, KeyDownEvent, MouseButton};
 use gpui_base::input::{Input, InputEvent, InputState};
 
@@ -19,8 +12,9 @@ pub(super) struct TreeRename {
     pub origin: mutations::WorkspaceInteractionOrigin,
     pub input: Entity<InputState>,
     pub submitted: bool,
-    revision: Option<String>,
-    _events: Subscription,
+    pub revision: Option<String>,
+    /// Keeps the input's events subscribed while the rename is open.
+    pub _events: Subscription,
 }
 pub(super) struct TreeDelete {
     /// Selection roots, so a folder's selected children are not deleted twice.
@@ -28,7 +22,7 @@ pub(super) struct TreeDelete {
     pub origin: mutations::WorkspaceInteractionOrigin,
     pub focus: FocusHandle,
     pub confirm_focused: bool,
-    revisions: Vec<Option<String>>,
+    pub revisions: Vec<Option<String>>,
 }
 
 pub(super) fn name_selection(name: &str, directory: bool) -> std::ops::Range<usize> {
@@ -277,7 +271,7 @@ impl FilesSurface {
         &self,
         theme: &Theme,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let dialog = self.tree_delete.as_ref()?;
         let theme = theme.for_popup();
@@ -370,7 +364,7 @@ mod tests {
     fn rename_input_keeps_focus_and_supports_caret_editing(cx: &mut gpui::TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -448,7 +442,7 @@ mod tests {
     ) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -485,7 +479,7 @@ mod tests {
     fn inline_rename_submits_once_and_cancel_delete_never_mutates(cx: &mut gpui::TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -526,7 +520,7 @@ mod tests {
     fn rename_preserves_parent_and_selects_only_basename() {
         assert_eq!(renamed_path("src/a.txt", "é.txt").unwrap(), "src/é.txt");
         for invalid in ["", ".", "..", "../a", "a/b", ".git", "a\\b"] {
-            assert!(renamed_path("src/a", invalid).is_err());
+            renamed_path("src/a", invalid).unwrap_err();
         }
         assert_eq!(name_selection("foo.test.ts", false), 0..8);
         assert_eq!(name_selection(".gitignore", false), 0..10);

@@ -1,36 +1,44 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::cast_sign_loss,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    clippy::unused_self,
-    reason = "shell lint migration: slice C"
-)]
 use std::collections::{HashMap, HashSet};
 
-use slopty_view_proto::{
-    WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind, WorkspaceFileSearchMatch,
-};
+use slopty_view_proto::{WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind};
 
+/// How far a directory's listing has come.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectoryLoadState {
+    /// Not asked for yet.
     Unloaded,
-    Loading { cursor: Option<String> },
-    Loaded { next_cursor: Option<String> },
-    Error { message: String, cursor: Option<String> },
+    /// Asked for, from `cursor` (the start when `None`).
+    Loading {
+        /// Where the page asked for starts.
+        cursor: Option<String>,
+    },
+    /// Listed, with more to come from `next_cursor` when it is `Some`.
+    Loaded {
+        /// Where the next page starts, when there is one.
+        next_cursor: Option<String>,
+    },
+    /// The listing failed.
+    Error {
+        /// Why, in the host's words.
+        message: String,
+        /// Where the page that failed starts, to ask again from.
+        cursor: Option<String>,
+    },
 }
 
+/// One entry of the tree as loaded.
 #[derive(Debug, Clone)]
 pub struct TreeNode {
+    /// The entry as the host listed it.
     pub entry: WorkspaceEntry,
+    /// A directory's children's paths, in the order the tree shows them.
     pub children: Vec<String>,
+    /// How far a directory's listing has come; a file is always loaded.
     pub load: DirectoryLoadState,
+    /// What it lists may have changed on the host since: it is listed again.
     pub stale: bool,
+    /// A listing of it finished once, so an empty one is known to be empty.
     pub has_loaded: bool,
 }
 
@@ -45,28 +53,57 @@ impl TreeNode {
     }
 }
 
+/// What a row of the tree shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VisibleRowKind {
+    /// A file or directory.
     Entry,
-    Loading { directory: String },
-    Empty { directory: String },
-    Error { directory: String, message: String },
-    LoadMore { directory: String, cursor: String },
+    /// A directory still listing.
+    Loading {
+        /// The directory.
+        directory: String,
+    },
+    /// A directory with nothing in it.
+    Empty {
+        /// The directory.
+        directory: String,
+    },
+    /// A directory whose listing failed.
+    Error {
+        /// The directory.
+        directory: String,
+        /// Why, in the host's words.
+        message: String,
+    },
+    /// A press lists a directory's next page.
+    LoadMore {
+        /// The directory.
+        directory: String,
+        /// Where its next page starts.
+        cursor: String,
+    },
 }
 
+/// One row of the tree as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibleTreeRow {
+    /// The entry's path, or a key of its own for a row that is not an entry.
     pub path: String,
+    /// How deep it is indented: 0 under the root.
     pub depth: usize,
+    /// What it shows.
     pub kind: VisibleRowKind,
 }
 
 impl VisibleTreeRow {
+    /// Whether the keyboard's cursor stops on it: an entry, or a "load more" row.
     pub const fn selectable(&self) -> bool {
         matches!(self.kind, VisibleRowKind::Entry | VisibleRowKind::LoadMore { .. })
     }
 }
 
+/// A chat's folder as far as it is listed: its entries, which are expanded, the rows shown and
+/// the selection.
 #[derive(Debug, Clone)]
 pub struct FileTreeModel {
     nodes: HashMap<String, TreeNode>,
@@ -89,10 +126,12 @@ impl Default for FileTreeModel {
 }
 
 impl FileTreeModel {
+    /// An empty tree that hides ignored files.
     pub fn new() -> Self {
         Self::with_include_ignored(false)
     }
 
+    /// An empty tree, listing ignored files when `include_ignored`.
     pub fn with_include_ignored(include_ignored: bool) -> Self {
         let mut nodes = HashMap::new();
         nodes.insert(String::new(), TreeNode::new(root_entry()));
@@ -109,26 +148,32 @@ impl FileTreeModel {
         }
     }
 
+    /// The listing generation: a page asked for in an earlier one is dropped.
     pub const fn generation(&self) -> u64 {
         self.generation
     }
 
+    /// Whether it lists the files git ignores.
     pub const fn include_ignored(&self) -> bool {
         self.include_ignored
     }
 
+    /// The rows shown, in order.
     pub fn visible_rows(&self) -> &[VisibleTreeRow] {
         &self.visible_rows
     }
 
+    /// The keyboard's cursor, when it is on an entry.
     pub fn selected(&self) -> Option<&str> {
         self.selected.as_deref()
     }
 
+    /// Whether `path` is selected.
     pub fn is_selected(&self, path: &str) -> bool {
         self.selection.contains(path)
     }
 
+    /// How many entries are selected.
     pub fn selection_len(&self) -> usize {
         self.selection.len()
     }
@@ -149,19 +194,24 @@ impl FileTreeModel {
         self.selected_paths()
             .into_iter()
             .filter(|path| {
-                !path.match_indices('/').any(|(end, _)| self.selection.contains(&path[..end]))
+                !path
+                    .match_indices('/')
+                    .any(|(end, _)| path.get(..end).is_some_and(|dir| self.selection.contains(dir)))
             })
             .collect()
     }
 
+    /// The entry at `path`, when it is loaded.
     pub fn node(&self, path: &str) -> Option<&TreeNode> {
         self.nodes.get(path)
     }
 
+    /// Whether the directory at `path` is open.
     pub fn is_expanded(&self, path: &str) -> bool {
         self.expanded.contains(path)
     }
 
+    /// The open directories but the root, parents before their children.
     pub fn expanded_directories(&self) -> Vec<String> {
         let mut paths =
             self.expanded.iter().filter(|path| !path.is_empty()).cloned().collect::<Vec<_>>();
@@ -169,6 +219,7 @@ impl FileTreeModel {
         paths
     }
 
+    /// Whether `path` is a directory whose listing finished.
     pub fn is_directory_loaded(&self, path: &str) -> bool {
         self.nodes.get(path).is_some_and(|node| {
             node.entry.kind == WorkspaceEntryKind::Directory
@@ -176,6 +227,7 @@ impl FileTreeModel {
         })
     }
 
+    /// Forget everything listed and start a new generation, which it returns.
     pub fn reset(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
         self.nodes.clear();
@@ -188,6 +240,7 @@ impl FileTreeModel {
         self.generation
     }
 
+    /// List ignored files, or not; a change resets the tree. Whether it changed.
     pub fn set_include_ignored(&mut self, include_ignored: bool) -> bool {
         if self.include_ignored == include_ignored {
             return false;
@@ -197,6 +250,8 @@ impl FileTreeModel {
         true
     }
 
+    /// Mark `directory` listing from `cursor`; whether it should be asked for (not already
+    /// loading, and of this `generation`).
     pub fn begin_load(&mut self, directory: &str, cursor: Option<String>, generation: u64) -> bool {
         if generation != self.generation {
             return false;
@@ -213,6 +268,7 @@ impl FileTreeModel {
         true
     }
 
+    /// Mark `directory`'s listing failed with `message`; whether it was of this `generation`.
     pub fn fail_load(
         &mut self,
         directory: &str,
@@ -231,6 +287,8 @@ impl FileTreeModel {
         true
     }
 
+    /// Take a listed page into the tree; whether it was of this `generation` and its directory
+    /// still there.
     pub fn apply_page(&mut self, page: WorkspaceDirectoryPage, generation: u64) -> bool {
         if generation != self.generation {
             return false;
@@ -308,6 +366,8 @@ impl FileTreeModel {
         true
     }
 
+    /// Open or close the directory at `path`; a selection inside a closed one moves to it.
+    /// Whether `path` is a directory.
     pub fn toggle_expanded(&mut self, path: &str) -> bool {
         let Some(node) = self.nodes.get(path) else {
             return false;
@@ -334,6 +394,7 @@ impl FileTreeModel {
         true
     }
 
+    /// Open the directory at `path`; whether it was closed.
     pub fn expand(&mut self, path: &str) -> bool {
         if self.nodes.get(path).is_none_or(|node| node.entry.kind != WorkspaceEntryKind::Directory)
         {
@@ -346,6 +407,7 @@ impl FileTreeModel {
         changed
     }
 
+    /// Select only `path`, the cursor on it; whether it is loaded.
     pub fn select(&mut self, path: impl Into<String>) -> bool {
         let path = path.into();
         if !self.nodes.contains_key(&path) {
@@ -386,7 +448,9 @@ impl FileTreeModel {
             .or(self.selected.as_deref())
             .and_then(|anchor| entries.iter().position(|candidate| *candidate == anchor))
             .unwrap_or(end);
-        let range = entries[start.min(end)..=start.max(end)]
+        let range = entries
+            .get(start.min(end)..=start.max(end))
+            .unwrap_or_default()
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>();
@@ -394,7 +458,7 @@ impl FileTreeModel {
             self.selection.clear();
         }
         self.selection.extend(range);
-        self.anchor = Some(entries[start].to_owned());
+        self.anchor = entries.get(start).map(ToString::to_string);
         self.selected = Some(path.to_owned());
         true
     }
@@ -418,7 +482,7 @@ impl FileTreeModel {
         };
         let target = entries.get(next)?.clone();
         if self.anchor.is_none() {
-            self.anchor = Some(entries[current.unwrap_or(next)].clone());
+            self.anchor = entries.get(current.unwrap_or(next)).cloned();
         }
         self.select_range_to(&target, false);
         self.selected.as_deref()
@@ -445,14 +509,17 @@ impl FileTreeModel {
         true
     }
 
+    /// Move the cursor, alone selected, to the next row it stops on.
     pub fn select_next(&mut self) -> Option<&str> {
         self.move_selection(1)
     }
 
+    /// Move the cursor, alone selected, to the row before.
     pub fn select_previous(&mut self) -> Option<&str> {
         self.move_selection(-1)
     }
 
+    /// Move the cursor, alone selected, to its entry's directory.
     pub fn select_parent(&mut self) -> Option<&str> {
         let selected = self.selected.clone()?;
         let parent = parent_path(&selected)?;
@@ -463,6 +530,7 @@ impl FileTreeModel {
         self.selected.as_deref()
     }
 
+    /// Move the cursor, alone selected, to its directory's first entry.
     pub fn select_first_child(&mut self) -> Option<&str> {
         let selected = self.selected.clone()?;
         let first = self.nodes.get(&selected)?.children.first()?.clone();
@@ -470,6 +538,7 @@ impl FileTreeModel {
         self.selected.as_deref()
     }
 
+    /// Mark `directory` stale, to be listed again; whether it is a directory.
     pub fn invalidate_directory(&mut self, directory: &str) -> bool {
         let Some(node) = self.nodes.get_mut(directory) else {
             return false;
@@ -481,6 +550,7 @@ impl FileTreeModel {
         true
     }
 
+    /// Mark every directory stale, to be listed again.
     pub fn invalidate_all_directories(&mut self) {
         for node in self.nodes.values_mut() {
             if node.entry.kind == WorkspaceEntryKind::Directory {
@@ -503,7 +573,7 @@ impl FileTreeModel {
             if path == old {
                 new.to_owned()
             } else if is_descendant(path, old) {
-                format!("{new}{}", &path[old.len()..])
+                format!("{new}{}", path.get(old.len()..).unwrap_or_default())
             } else {
                 path.to_owned()
             }
@@ -521,7 +591,7 @@ impl FileTreeModel {
         let nodes = std::mem::take(&mut self.nodes);
         for (path, mut node) in nodes {
             let next = remap(&path);
-            node.entry.path = next.clone();
+            node.entry.path.clone_from(&next);
             if path == old {
                 node.entry.name = new.rsplit('/').next().unwrap_or(new).into();
             }
@@ -581,6 +651,8 @@ impl FileTreeModel {
         }
     }
 
+    /// Take `path` and everything under it out of the tree; a cursor inside goes to its directory.
+    /// Whether it was there.
     pub fn remove(&mut self, path: &str) -> bool {
         if path.is_empty() || !self.nodes.contains_key(path) {
             return false;
@@ -595,7 +667,7 @@ impl FileTreeModel {
             .is_some_and(|selected| selected == path || is_descendant(selected, path))
         {
             let parent = parent_path(path).filter(|parent| !parent.is_empty());
-            self.selected = parent.clone();
+            self.selected.clone_from(&parent);
             if let Some(parent) = parent
                 && self.selection.iter().all(|selected| contains(path, selected))
             {
@@ -604,20 +676,6 @@ impl FileTreeModel {
         }
         self.rebuild_visible_rows();
         true
-    }
-
-    pub fn reveal_search_match(&mut self, result: &WorkspaceFileSearchMatch) -> Vec<String> {
-        let mut ancestors = Vec::new();
-        let mut current = parent_path(&result.path);
-        while let Some(path) = current {
-            if path.is_empty() {
-                break;
-            }
-            ancestors.push(path.clone());
-            current = parent_path(&path);
-        }
-        ancestors.reverse();
-        ancestors
     }
 
     fn move_selection(&mut self, delta: isize) -> Option<&str> {
@@ -635,13 +693,13 @@ impl FileTreeModel {
             .selected
             .as_deref()
             .and_then(|path| selectable.iter().position(|candidate| *candidate == path));
-        let next = match (current, delta.is_negative()) {
-            (Some(index), true) => index.saturating_sub(delta.unsigned_abs()),
-            (Some(index), false) => (index + delta as usize).min(selectable.len() - 1),
-            (None, true) => selectable.len() - 1,
-            (None, false) => 0,
+        let last = selectable.len().saturating_sub(1);
+        let next = match current {
+            Some(index) => index.saturating_add_signed(delta).min(last),
+            None if delta.is_negative() => last,
+            None => 0,
         };
-        self.set_single(Some(selectable[next].to_owned()));
+        self.set_single(selectable.get(next).map(ToString::to_string));
         self.selected.as_deref()
     }
 
@@ -712,7 +770,7 @@ impl FileTreeModel {
             if child.entry.kind == WorkspaceEntryKind::Directory
                 && self.expanded.contains(child_path)
             {
-                self.append_directory_rows(child_path, depth + 1, rows, visited);
+                self.append_directory_rows(child_path, depth.saturating_add(1), rows, visited);
             }
         }
 
@@ -799,6 +857,7 @@ const fn entry_rank(kind: WorkspaceEntryKind) -> u8 {
     }
 }
 
+/// The directory `path` is in (the root as `""`); `None` for the root itself.
 pub fn parent_path(path: &str) -> Option<String> {
     path.rsplit_once('/')
         .map(|(parent, _)| parent.to_owned())
@@ -1301,7 +1360,7 @@ mod tests {
         let current_generation = tree.reset();
         assert_ne!(current_generation, stale_generation);
         assert!(tree.node("secret.env").is_none());
-        assert!(tree.visible_rows().is_empty());
+        assert_eq!(tree.visible_rows(), []);
         assert!(!tree.apply_page(
             page("", vec![entry("stale.env", WorkspaceEntryKind::File)], None),
             stale_generation,
@@ -1366,7 +1425,7 @@ mod tests {
         assert!(!tree.collapse_selection());
 
         assert!(tree.clear_selection());
-        assert!(tree.selected_paths().is_empty());
+        assert_eq!(tree.selected_paths(), Vec::<String>::new());
         assert_eq!(tree.selected(), None);
         assert!(!tree.clear_selection());
         // With no cursor or anchor, the next Shift target selects only itself.
@@ -1422,7 +1481,7 @@ mod tests {
         tree.remove("src/lib.rs");
         assert_eq!(tree.selected_paths(), ["src/c.txt"]);
         tree.remove("src");
-        assert!(tree.selected_paths().is_empty());
+        assert_eq!(tree.selected_paths(), Vec::<String>::new());
         assert_eq!(tree.selection_len(), 0);
     }
 }

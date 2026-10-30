@@ -1,30 +1,31 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared identity and reconciliation for tree mutations and workspace references.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    reason = "shell lint migration: slice C"
-)]
 use slopty_view_proto::{WorkspaceEntry, WorkspaceEntryKind, WorkspaceMutationOutcome};
 
 use super::*;
 
+/// Where a gesture on the tree came from, so its outcome goes back only to the surface and the
+/// folder it began in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceInteractionOrigin {
+    /// The folder, as the surface asks the host about it.
     pub context: FilesRequestContext,
+    /// The surface the gesture was made in.
     pub surface_id: gpui::EntityId,
+    /// The surface's interaction generation then: a later target change voids the gesture.
     pub generation: u64,
+    /// The checkout the tree was listing then, when the host named one.
     pub checkout_id: Option<String>,
 }
 
+/// A move, rename or delete of one entry the person asked for, for the shell to carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationIntent {
+    /// The operation's own id, which the host's change for it carries back.
     pub operation_id: String,
+    /// Where it was asked for.
     pub origin: WorkspaceInteractionOrigin,
+    /// The entry it acts on, as the tree listed it.
     pub entry: WorkspaceEntry,
     /// None deletes; Some moves without replacement (including rename).
     pub destination: Option<String>,
@@ -87,7 +88,7 @@ impl FilesSurface {
 
     pub(crate) fn prepare_mutation(&mut self, intent: MutationIntent, cx: &mut Context<Self>) {
         // The intent is read before it is kept.
-        for (path, document) in &mut self.preview.documents {
+        for (path, document) in self.preview.documents_mut() {
             if intent.affects(path) {
                 document.autosave_task = None;
             }
@@ -100,22 +101,22 @@ impl FilesSurface {
     pub(crate) fn mutation_has_save(&self) -> bool {
         self.pending_mutation.as_ref().is_some_and(|intent| {
             self.preview
-                .documents
+                .documents()
                 .iter()
                 .any(|(path, doc)| intent.affects(path) && doc.pending_save.is_some())
         })
     }
 
-    pub(crate) fn hold_mutation(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
+    pub(crate) fn hold_mutation(&mut self, paths: Vec<String>, cx: &Context<Self>) {
         self.mutation_hold = paths;
-        let paths = self.preview.documents.keys().cloned().collect::<Vec<_>>();
+        let paths = self.preview.documents().keys().cloned().collect::<Vec<_>>();
         for path in paths {
             if self.mutation_blocks_path(&path) {
-                if let Some(document) = self.preview.documents.get_mut(&path) {
+                if let Some(document) = self.preview.documents_mut().get_mut(&path) {
                     document.autosave_task = None;
                 }
             } else {
-                self.schedule_autosave(path, cx);
+                self.schedule_autosave(&path, cx);
             }
         }
     }
@@ -136,7 +137,7 @@ impl FilesSurface {
     }
 
     pub(super) fn request_mutation(
-        &mut self,
+        &self,
         path: &str,
         destination: Option<String>,
         cx: &mut Context<Self>,
@@ -146,7 +147,7 @@ impl FilesSurface {
 
     /// Several entries become one queue that stops at its first failure.
     pub(super) fn request_mutations(
-        &mut self,
+        &self,
         requests: Vec<(String, Option<String>)>,
         cx: &mut Context<Self>,
     ) {
@@ -246,9 +247,9 @@ impl FilesSurface {
         self.tree_list_generation = self.tree.generation();
         self.refresh(cx);
         self.reconcile_open_documents(cx);
-        let paths = self.preview.documents.keys().cloned().collect::<Vec<_>>();
+        let paths = self.preview.documents().keys().cloned().collect::<Vec<_>>();
         for path in paths {
-            self.schedule_autosave(path, cx);
+            self.schedule_autosave(&path, cx);
         }
         if !self.search_state.query.is_empty() {
             self.search_state.query.clear();
@@ -282,22 +283,22 @@ impl FilesSurface {
                     self.tree.relocate_subtree(old, &change.path, entry);
                     let phases = if local {
                         self.preview
-                            .documents
+                            .documents()
                             .iter()
                             .filter(|(p, _)| contains_path(old, p))
                             .map(|(p, d)| {
-                                (format!("{}{}", change.path, &p[old.len()..]), d.phase.clone())
+                                let rest = p.get(old.len()..).unwrap_or_default();
+                                (format!("{}{rest}", change.path), d.phase.clone())
                             })
                             .collect::<Vec<_>>()
                     } else {
                         Vec::new()
                     };
-                    for (old_path, new_path) in self.rename_documents(old, change.path.clone(), cx)
-                    {
+                    for (old_path, new_path) in self.rename_documents(old, &change.path, cx) {
                         cx.emit(FilesEvent::FileRenamed { old_path, new_path });
                     }
                     for (path, phase) in phases {
-                        if let Some(doc) = self.preview.documents.get_mut(&path) {
+                        if let Some(doc) = self.preview.documents_mut().get_mut(&path) {
                             doc.phase = phase;
                         }
                     }
@@ -311,7 +312,9 @@ impl FilesSurface {
                 let index = rows.iter().position(|r| r.path == change.path);
                 let next = index
                     .and_then(|i| {
-                        rows[i + 1..].iter().chain(rows[..i].iter().rev()).find(|r| {
+                        let after = rows.get(i.saturating_add(1)..).unwrap_or_default();
+                        let before = rows.get(..i).unwrap_or_default();
+                        after.iter().chain(before.iter().rev()).find(|r| {
                             matches!(r.kind, model::VisibleRowKind::Entry)
                                 && !contains_path(&change.path, &r.path)
                         })
@@ -359,7 +362,7 @@ mod tests {
             document.phase = DocumentPhase::Ready;
             document.revision = 4;
             document.saved_revision = 1;
-            files.preview.documents.insert("a.txt".into(), document);
+            files.preview.documents_mut().insert("a.txt".into(), document);
             files.prepare_mutation(intent.clone(), cx);
             let change = slopty_view_proto::WorkspaceFileChange {
                 operation_id: Some("observed".into()),
@@ -375,7 +378,7 @@ mod tests {
                 },
                 cx,
             );
-            assert!(files.preview.documents.contains_key("a.txt"));
+            assert!(files.preview.documents().contains_key("a.txt"));
             files.apply_workspace_changes(
                 slopty_view_proto::WorkspaceFileChanges {
                     sequence: 3,
@@ -386,8 +389,8 @@ mod tests {
             );
             files.finish_mutation(&intent, &Err("reply lost".into()), cx);
             assert_eq!(files.watch_sequence, Some(3));
-            assert!(files.preview.documents["b.txt"].is_dirty());
-            assert_eq!(files.preview.documents["b.txt"].phase, DocumentPhase::Ready);
+            assert!(files.preview.documents()["b.txt"].is_dirty());
+            assert_eq!(files.preview.documents()["b.txt"].phase, DocumentPhase::Ready);
             assert!(files.mutation_error.is_none());
             assert!(!files.mutation_busy());
         });
@@ -396,7 +399,7 @@ mod tests {
     fn selection_requests_one_ordered_queue(cx: &mut TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -460,7 +463,7 @@ mod tests {
                 doc.phase = DocumentPhase::Ready;
                 doc.revision = 3;
                 doc.saved_revision = 1;
-                files.preview.documents.insert("folder/a.txt".into(), doc);
+                files.preview.documents_mut().insert("folder/a.txt".into(), doc);
                 let change = slopty_view_proto::WorkspaceFileChange {
                     operation_id: Some("op".into()),
                     kind: slopty_view_proto::WorkspaceFileChangeKind::Renamed,
@@ -469,12 +472,12 @@ mod tests {
                 };
                 files.apply_semantic_mutation(&change, None, true, cx);
                 files.apply_semantic_mutation(&change, None, true, cx);
-                let doc = &files.preview.documents["other/a.txt"];
+                let doc = &files.preview.documents()["other/a.txt"];
                 assert_eq!(doc.editor.as_ref(), Some(&editor));
                 assert_eq!(editor.read(cx).value().as_ref(), "unsaved text");
                 assert!(doc.is_dirty());
                 assert_eq!(doc.phase, DocumentPhase::Ready);
-                assert!(!files.preview.documents.contains_key("folder/a.txt"));
+                assert!(!files.preview.documents().contains_key("folder/a.txt"));
                 let removed = slopty_view_proto::WorkspaceFileChange {
                     operation_id: Some("delete".into()),
                     kind: slopty_view_proto::WorkspaceFileChangeKind::Removed,
@@ -483,7 +486,7 @@ mod tests {
                 };
                 files.apply_semantic_mutation(&removed, None, true, cx);
                 assert_eq!(
-                    files.preview.documents["other/a.txt"].phase,
+                    files.preview.documents()["other/a.txt"].phase,
                     DocumentPhase::DeletedOnDisk
                 );
                 assert_eq!(editor.read(cx).value().as_ref(), "unsaved text");

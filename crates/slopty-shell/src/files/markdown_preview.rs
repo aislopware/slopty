@@ -1,23 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Native, virtualized preview of a file's current Markdown buffer.
-#![allow(
-    let_underscore_drop,
-    trivial_casts,
-    clippy::arithmetic_side_effects,
-    clippy::assigning_clones,
-    clippy::cast_possible_truncation,
-    clippy::clone_on_ref_ptr,
-    clippy::items_after_statements,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_collect,
-    clippy::needless_for_each,
-    clippy::needless_pass_by_ref_mut,
-    clippy::or_fun_call,
-    clippy::partial_pub_fields,
-    clippy::type_complexity,
-    reason = "shell lint migration: slice C"
-)]
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -65,7 +47,9 @@ fn strip_outside_links(block: &mut Block) {
         Block::BlockQuote { children } => children.iter_mut().for_each(strip_outside_links),
         Block::List { items, .. } => items.iter_mut().flatten().for_each(strip_outside_links),
         Block::Table { header, rows, .. } => {
-            header.iter_mut().for_each(|runs| strip_runs(runs));
+            for runs in header.iter_mut() {
+                strip_runs(runs);
+            }
             rows.iter_mut().flatten().for_each(|runs| strip_runs(runs));
         }
         Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
@@ -110,9 +94,9 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
         let mut chars = s.as_bytes().iter().copied();
         while let Some(c) = chars.next() {
             if c == b'%' {
-                let a = (chars.next()? as char).to_digit(16)?;
-                let b = (chars.next()? as char).to_digit(16)?;
-                bytes.push((a * 16 + b) as u8);
+                let high = char::from(chars.next()?).to_digit(16)?;
+                let low = char::from(chars.next()?).to_digit(16)?;
+                bytes.push(u8::try_from(high.checked_mul(16)?.checked_add(low)?).ok()?);
             } else {
                 bytes.push(c);
             }
@@ -144,14 +128,14 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
 }
 
 pub(super) struct MarkdownPreview {
-    pub focus: FocusHandle,
-    pub version: Option<(u64, u64, Option<String>)>,
+    focus: FocusHandle,
+    version: Option<DocumentVersion>,
     path: String,
     media_location: Option<(Option<String>, String)>,
     scope: String,
     tree: BlockTree,
     parsed_source: Arc<str>,
-    pub editor: Option<gpui::WeakEntity<super::editor::FileEditorState>>,
+    editor: Option<gpui::WeakEntity<super::editor::FileEditorState>>,
     list: ListState,
     cache: Rc<RefCell<RenderCache>>,
     highlights: HashMap<usize, Arc<slopty_syntax::HighlightedDocument>>,
@@ -160,7 +144,7 @@ pub(super) struct MarkdownPreview {
     epoch: u64,
     loading: bool,
     truncated: bool,
-    pub media_client: Option<(super::client::WorkspaceFilesClient, String)>,
+    media_client: Option<MediaClient>,
     images: HashMap<String, Result<crate::image_media::MediaImage, String>>,
     image_task: Option<Task<()>>,
     image_generation: u64,
@@ -185,11 +169,29 @@ pub(super) struct MarkdownPreview {
     zoom_source: Option<crate::image_media::MediaImage>,
     zoom_render: Option<crate::image_media::MediaImage>,
     preview_focus: FocusHandle,
-    open_file: Rc<dyn Fn(String, &mut gpui::App)>,
+    open_file: OpenFileHandler,
     open_web_link: Option<WebLinkHandler>,
 }
 
 pub(super) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::App)>;
+
+/// What a press on a link to another file of the folder calls, with that file's path.
+pub(super) type OpenFileHandler = Rc<dyn Fn(String, &mut gpui::App)>;
+
+/// Which text a preview shows: its editor's identity, its revision, and the file's content hash.
+pub(super) type DocumentVersion = (u64, u64, Option<String>);
+
+/// What ticks a task list item's box: edits the source the preview renders.
+type TaskToggle = Rc<dyn Fn(&parser::TaskMarker, &mut Window, &mut gpui::App)>;
+
+/// How a preview reads the images a document names: the folder's client and its checkout.
+pub(super) type MediaClient = (super::client::WorkspaceFilesClient, String);
+
+impl gpui::Focusable for MarkdownPreview {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
 
 impl MarkdownPreview {
     fn close_media_preview(&mut self, cx: &mut gpui::App) {
@@ -229,14 +231,14 @@ impl MarkdownPreview {
             .chain(self.diagrams.values_mut())
             .filter_map(|m| m.as_mut().ok())
         {
-            let others = used - media.bytes;
+            let others = used.saturating_sub(media.bytes);
             let next = media.preview_within(
                 target,
                 window.scale_factor(),
                 MAX_MEDIA_BYTES.saturating_sub(others),
             );
             if !Arc::ptr_eq(&media.image, &next.image) {
-                used = others + next.bytes;
+                used = others.saturating_add(next.bytes);
                 retired.push(std::mem::replace(media, next));
                 self.media_dirty = true;
             }
@@ -258,7 +260,7 @@ impl MarkdownPreview {
             );
             // Keep a stable image identity while the viewport is unchanged.
             if !Arc::ptr_eq(&preview.image, &next.image) {
-                let old = std::mem::replace(&mut preview.image, next.image.clone());
+                let old = std::mem::replace(&mut preview.image, Arc::clone(&next.image));
                 if !Arc::ptr_eq(&old, &source.image) {
                     cx.defer(move |cx| gpui::ImageSource::Image(old).evict(None, cx));
                 }
@@ -267,11 +269,7 @@ impl MarkdownPreview {
         }
     }
 
-    pub fn new(
-        path: String,
-        open_file: Rc<dyn Fn(String, &mut gpui::App)>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(path: String, open_file: OpenFileHandler, cx: &Context<Self>) -> Self {
         cx.on_release(|view, cx| {
             view.close_media_preview(cx);
             render::clear_selection_surface(&view.scope);
@@ -333,11 +331,7 @@ impl MarkdownPreview {
     pub fn set_source(&mut self, mut source: String, truncated: bool, cx: &mut Context<Self>) {
         let clipped = source.len() > MAX_MARKDOWN_BYTES;
         if clipped {
-            let mut end = MAX_MARKDOWN_BYTES;
-            while !source.is_char_boundary(end) {
-                end -= 1;
-            }
-            source.truncate(end);
+            source.truncate(source.floor_char_boundary(MAX_MARKDOWN_BYTES));
         }
         render::clear_selection_surface(&self.scope);
         self.epoch = self.epoch.wrapping_add(1);
@@ -386,10 +380,10 @@ impl MarkdownPreview {
                                 .map(|c| if c == ' ' { '-' } else { c })
                                 .collect();
                             let mut unique = slug.clone();
-                            let mut n = 1;
+                            let mut n = 1_u32;
                             while anchors.contains_key(&unique) {
                                 unique = format!("{slug}-{n}");
-                                n += 1;
+                                n = n.saturating_add(1);
                             }
                             anchors.insert(unique, ix);
                         }
@@ -397,7 +391,7 @@ impl MarkdownPreview {
                     (tree, highlights, anchors)
                 })
                 .await;
-            let _ = this.update(cx, |view, cx| {
+            let _gone = this.update(cx, |view, cx| {
                 if view.epoch != epoch {
                     return;
                 }
@@ -405,7 +399,7 @@ impl MarkdownPreview {
                 view.list.reset(tree.len());
                 if !tree.is_empty() {
                     view.list.scroll_to(ListOffset {
-                        item_ix: offset.item_ix.min(tree.len() - 1),
+                        item_ix: offset.item_ix.min(tree.len().saturating_sub(1)),
                         offset_in_item: offset.offset_in_item,
                     });
                 }
@@ -438,18 +432,16 @@ impl MarkdownPreview {
     }
 
     fn load_images(&mut self, cx: &mut Context<Self>) {
+        use futures::{StreamExt as _, stream};
         self.media_dirty = true;
         self.image_generation = self.image_generation.wrapping_add(1);
         let generation = self.image_generation;
-        use futures::{StreamExt as _, stream};
         let sources = super::markdown_media::image_sources(&self.tree);
         self.image_allowed = Rc::new(sources.iter().take(MAX_MEDIA_ENTRIES).cloned().collect());
-        let removed: Vec<_> =
-            self.images.keys().filter(|source| !sources.contains(source)).cloned().collect();
         release_media(
-            removed
-                .into_iter()
-                .filter_map(|source| self.images.remove(&source).and_then(Result::ok)),
+            self.images
+                .extract_if(|source, _| !sources.contains(source))
+                .filter_map(|(_, media)| media.ok()),
             cx,
         );
         let Some((client, checkout)) = self.media_client.clone() else {
@@ -533,10 +525,10 @@ impl MarkdownPreview {
         self.media_dirty = true;
         let sources = super::markdown_media::diagram_sources(&self.tree);
         self.diagram_allowed = Rc::new(sources.iter().take(MAX_MEDIA_ENTRIES).cloned().collect());
-        let removed: Vec<_> =
-            self.diagrams.keys().filter(|code| !sources.contains(code)).cloned().collect();
         release_media(
-            removed.into_iter().filter_map(|code| self.diagrams.remove(&code).and_then(Result::ok)),
+            self.diagrams
+                .extract_if(|code, _| !sources.contains(code))
+                .filter_map(|(_, media)| media.ok()),
             cx,
         );
         let style = crate::theme::style_generation();
@@ -609,7 +601,7 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) {
         if self.path != path || self.media_location.as_ref() != Some(location) {
-            self.path = path.to_owned();
+            path.clone_into(&mut self.path);
             self.media_location = Some(location.clone());
             self.version = None;
             self.image_generation = self.image_generation.wrapping_add(1);
@@ -659,18 +651,6 @@ impl MarkdownPreview {
     }
 
     pub fn invalidate_images(&mut self, changed: Option<&str>, cx: &mut Context<Self>) {
-        let removed: Vec<_> = self
-            .images
-            .keys()
-            .filter(|source| {
-                changed.is_none_or(|changed| {
-                    relative_target(&self.path, source).is_some_and(|(path, _)| {
-                        path == changed || path.starts_with(&format!("{changed}/"))
-                    })
-                })
-            })
-            .cloned()
-            .collect();
         // Include pending loads in invalidation: a watcher can arrive before the first response.
         let affected = changed.is_none_or(|changed| {
             super::markdown_media::image_sources(&self.tree).iter().any(|source| {
@@ -683,10 +663,17 @@ impl MarkdownPreview {
             return;
         }
         self.close_media_preview(cx);
+        let path = &self.path;
         release_media(
-            removed
-                .into_iter()
-                .filter_map(|source| self.images.remove(&source).and_then(Result::ok)),
+            self.images
+                .extract_if(|source, _| {
+                    changed.is_none_or(|changed| {
+                        relative_target(path, source).is_some_and(|(path, _)| {
+                            path == changed || path.starts_with(&format!("{changed}/"))
+                        })
+                    })
+                })
+                .filter_map(|(_, media)| media.ok()),
             cx,
         );
         if !self.suspended {
@@ -719,7 +706,7 @@ impl MarkdownPreview {
         self.schedule_selection_scroll(cx);
     }
 
-    fn schedule_selection_scroll(&mut self, cx: &mut Context<Self>) {
+    fn schedule_selection_scroll(&mut self, cx: &Context<Self>) {
         if self.selection_task.is_some() {
             return;
         }
@@ -731,7 +718,7 @@ impl MarkdownPreview {
         }
         self.selection_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(16)).await;
-            let _ = this.update(cx, |view, cx| {
+            let _gone = this.update(cx, |view, cx| {
                 view.selection_task = None;
                 if !view.owns_selection() || !crate::markdown::selection::is_dragging() {
                     return;
@@ -750,7 +737,7 @@ impl MarkdownPreview {
         }));
     }
 
-    fn copy_ui_for(&self, row_id: &SharedString, cx: &mut Context<Self>) -> render::CopyUi {
+    fn copy_ui_for(&self, row_id: &SharedString, cx: &Context<Self>) -> render::CopyUi {
         let copied_ix = self.copied_code.as_ref().filter(|(id, _)| id == row_id).map(|(_, ix)| *ix);
         let row_key = row_id.clone();
         let entity = cx.weak_entity();
@@ -758,11 +745,11 @@ impl MarkdownPreview {
             Rc::new(move |ix, code: SharedString, _window: &mut Window, cx: &mut gpui::App| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.to_string()));
                 let row_key = row_key.clone();
-                let _ = entity.update(cx, |view, cx| {
+                let _gone = entity.update(cx, |view, cx| {
                     view.copied_code = Some((row_key, ix));
                     view.copied_clear = Some(cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_millis(1200)).await;
-                        let _ = this.update(cx, |view, cx| {
+                        let _gone = this.update(cx, |view, cx| {
                             view.copied_code = None;
                             view.copied_clear = None;
                             cx.notify();
@@ -778,7 +765,7 @@ impl MarkdownPreview {
         &mut self,
         row_id: &SharedString,
         block_ix: usize,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> render::CodeUi {
         let key: SharedString = format!("{row_id}#code{block_ix}").into();
         let runtime = self.code_fences.entry(key.clone()).or_default();
@@ -790,7 +777,7 @@ impl MarkdownPreview {
         row_id: &SharedString,
         block: &Block,
         block_ix: usize,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<HashMap<usize, render::CodeUi>> {
         let indices = render::code_block_indices(block, block_ix);
         (!indices.is_empty())
@@ -804,11 +791,11 @@ impl MarkdownPreview {
         plate: Option<gpui::Hsla>,
         weak: gpui::WeakEntity<Self>,
     ) -> AnyElement {
-        let mut preview = crate::attachments::PreviewImage::new(name, loaded.image.clone());
+        let mut preview = crate::attachments::PreviewImage::new(name, Arc::clone(&loaded.image));
         preview.plate = plate;
         let source = loaded.clone();
         crate::image_media::preview_element(loaded, id, move |window, cx| {
-            let _ = weak.update(cx, |view, cx| {
+            let _gone = weak.update(cx, |view, cx| {
                 view.close_media_preview(cx);
                 view.zoom_source = Some(source.clone());
                 preview.viewer.reset();
@@ -830,9 +817,36 @@ impl MarkdownPreview {
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.render_rows(ix..ix + 1, window, cx)
+        self.render_rows(ix..ix.saturating_add(1), window, cx)
             .pop()
             .unwrap_or_else(|| gpui::Empty.into_any_element())
+    }
+
+    /// Read the document's images through `media_client`, and check its task boxes in `editor`.
+    pub(super) fn attach(
+        &mut self,
+        media_client: Option<MediaClient>,
+        editor: Option<gpui::WeakEntity<super::editor::FileEditorState>>,
+    ) {
+        self.media_client = media_client;
+        self.editor = editor;
+    }
+
+    /// Whether it shows `version` of its document already.
+    pub(super) fn shows(&self, version: &DocumentVersion) -> bool {
+        self.version.as_ref() == Some(version)
+    }
+
+    /// Show `source`, `version` of its document.
+    pub(super) fn show_version(
+        &mut self,
+        version: DocumentVersion,
+        source: String,
+        truncated: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.version = Some(version);
+        self.set_source(source, truncated, cx);
     }
 
     pub(super) fn set_web_link_handler(&mut self, handler: WebLinkHandler) {
@@ -882,28 +896,28 @@ impl MarkdownPreview {
     fn render_rows(
         &mut self,
         range: std::ops::Range<usize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        window: &Window,
+        cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
         let link = self.link_ui(cx);
         range
             .filter_map(|ix| {
-                let top = self.tree.blocks.get(ix)?.clone();
+                let top = Arc::clone(self.tree.blocks.get(ix)?);
                 let mut opts = RenderOptions::settled(
                     format!("{}{ix}", self.scope).into(),
                     crate::clock::now(cx),
                 );
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
                 let editor = self.editor.as_ref().and_then(gpui::WeakEntity::upgrade);
-                let source = self.parsed_source.clone();
+                let source = Arc::clone(&self.parsed_source);
                 opts.tasks = Some(render::TaskUi {
                     toggle: editor
                         .filter(|editor| {
                             !self.truncated
                                 && editor.read(cx).context_menu_capabilities().is_editable()
                         })
-                        .map(|editor| {
+                        .map(|editor| -> TaskToggle {
                             let editor = editor.downgrade();
                             Rc::new(
                                 move |task: &parser::TaskMarker,
@@ -916,19 +930,18 @@ impl MarkdownPreview {
                                     }
                                 },
                             )
-                                as Rc<dyn Fn(&parser::TaskMarker, &mut Window, &mut gpui::App)>
                         }),
                 });
                 self.visible_rows.insert(opts.row_key.clone());
-                opts.cache = Some(self.cache.clone());
-                let images = self.image_snapshot.clone();
+                opts.cache = Some(Rc::clone(&self.cache));
+                let images = Rc::clone(&self.image_snapshot);
                 let image_owner = cx.weak_entity();
                 let image_link = link.clone();
                 let diagram_owner = cx.weak_entity();
-                let diagrams = self.diagram_snapshot.clone();
+                let diagrams = Rc::clone(&self.diagram_snapshot);
                 let source_visible = self.source_visible.clone();
-                let image_allowed = self.image_allowed.clone();
-                let diagram_allowed = self.diagram_allowed.clone();
+                let image_allowed = Rc::clone(&self.image_allowed);
+                let diagram_allowed = Rc::clone(&self.diagram_allowed);
                 opts.media = Some(render::MediaUi {
                     chart: None, // a chart fence is the transcript's (M)
                     diagram: Some(Rc::new(move |code, id, theme| {
@@ -965,7 +978,7 @@ impl MarkdownPreview {
                             body,
                             show_source: source_shown,
                             toggle_source: Rc::new(move |_, cx| {
-                                let _ = owner.update(cx, |view, cx| {
+                                let _gone = owner.update(cx, |view, cx| {
                                     if !view.source_visible.remove(&toggle_id) {
                                         view.source_visible.insert(toggle_id.clone());
                                     }
@@ -1026,8 +1039,8 @@ impl MarkdownPreview {
                                     format!(
                                         "{} — {}",
                                         image.alt,
-                                        state.and_then(|s| s.as_ref().err()).map_or(
-                                            if image_allowed.contains(&image.source) {
+                                        state.and_then(|s| s.as_ref().err()).map_or_else(
+                                            || if image_allowed.contains(&image.source) {
                                                 "Loading image…"
                                             } else {
                                                 "Document image preview limit reached"
@@ -1185,7 +1198,7 @@ impl Render for MarkdownPreview {
                 &self.preview_focus,
                 display_size,
                 move |window, cx| {
-                    let _ = weak.update(cx, |view, cx| {
+                    let _gone = weak.update(cx, |view, cx| {
                         view.close_media_preview(cx);
                         window.focus(&view.focus, cx);
                         cx.notify();

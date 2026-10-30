@@ -1,6 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 85006f4), see THIRD_PARTY_NOTICES.md
 //! Slopty-owned styling and highlighting adapters for `gpui-base`.
-#![allow(trivial_casts, clippy::arithmetic_side_effects, reason = "shell lint migration: slice C")]
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -80,17 +79,16 @@ impl InputHighlighter for SloptyInputHighlighter {
         }
         let removed = edit.old_end_byte.saturating_sub(edit.start_byte);
         let inserted = edit.new_end_byte.saturating_sub(edit.start_byte);
+        let delta = inserted.abs_diff(removed);
         self.spans.retain_mut(|(range, _)| {
             if range.end <= edit.start_byte {
                 return true;
             }
             if range.start >= edit.old_end_byte {
                 if inserted >= removed {
-                    let delta = inserted - removed;
                     range.start = range.start.saturating_add(delta);
                     range.end = range.end.saturating_add(delta);
                 } else {
-                    let delta = removed - inserted;
                     range.start = range.start.saturating_sub(delta);
                     range.end = range.end.saturating_sub(delta);
                 }
@@ -176,16 +174,12 @@ pub(super) fn install_highlighter(
     if !highlight_source_matches_editor(&source, &editor_source) {
         return;
     }
-    editor.update(cx, |state, cx| {
-        state.set_highlighter_factory(
-            Rc::new(move |_| {
-                #[cfg(test)]
-                probe::record(probe::Event::FactoryBuilt { source: source.clone() });
-                Some(Box::new(SloptyInputHighlighter::new(&source, &document)) as Box<_>)
-            }),
-            cx,
-        );
+    let factory: gpui_base::input::InputHighlighterFactory = Rc::new(move |_| {
+        #[cfg(test)]
+        probe::record(probe::Event::FactoryBuilt { source: source.clone() });
+        Some(Box::new(SloptyInputHighlighter::new(&source, &document)))
     });
+    editor.update(cx, |state, cx| state.set_highlighter_factory(factory, cx));
 }
 
 fn highlight_source_matches_editor(highlight_source: &str, editor_source: &str) -> bool {
@@ -200,7 +194,8 @@ fn source_matches_edited_text(source: &str, edit: &InputEdit, text: &str) -> boo
         return false;
     };
     let inserted = edit.new_end_byte.saturating_sub(edit.start_byte);
-    text.len() == prefix.len() + inserted + suffix.len()
+    prefix.len().checked_add(inserted).and_then(|len| len.checked_add(suffix.len()))
+        == Some(text.len())
         && text.starts_with(prefix)
         && text.ends_with(suffix)
 }
@@ -246,7 +241,10 @@ fn absolute_spans(
 ) -> Vec<(Range<usize>, HighlightKind)> {
     let mut starts = vec![0];
     starts.extend(
-        source.bytes().enumerate().filter_map(|(index, byte)| (byte == b'\n').then_some(index + 1)),
+        source
+            .bytes()
+            .enumerate()
+            .filter_map(|(index, byte)| (byte == b'\n').then_some(index.saturating_add(1))),
     );
     let mut spans = Vec::new();
     for (line_index, line) in document.lines.iter().enumerate() {

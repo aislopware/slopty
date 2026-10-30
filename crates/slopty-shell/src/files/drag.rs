@@ -1,12 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Workspace drag targets are scoped to the tree viewport; the chat keeps its own receiver.
-#![allow(
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::partial_pub_fields,
-    clippy::type_complexity,
-    reason = "shell lint migration: slice C"
-)]
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,16 +8,19 @@ use slopty_view_proto::WorkspaceEntryKind;
 
 use super::*;
 
+/// The tree's rows as last drawn, by row key: where each lies, and the path a drop on it names.
+type DropRows = Rc<RefCell<HashMap<String, (Bounds<Pixels>, Option<String>)>>>;
+
 #[derive(Default)]
 pub(super) struct TreeDrag {
-    rows: Rc<RefCell<HashMap<String, (Bounds<Pixels>, Option<String>)>>>,
+    pub rows: DropRows,
     pub payload: Option<WorkspacePathDrag>,
     pub destination: Option<String>,
     pub pointer: Point<Pixels>,
     pub bounds: Bounds<Pixels>,
-    hover_since: Option<std::time::Instant>,
-    last_tick: Option<std::time::Instant>,
-    tick_task: Option<Task<()>>,
+    pub hover_since: Option<std::time::Instant>,
+    pub last_tick: Option<std::time::Instant>,
+    pub tick_task: Option<Task<()>>,
 }
 
 /// The server is authoritative for existence/permissions/collisions. This
@@ -90,7 +86,7 @@ impl FilesSurface {
         height: f32,
         content: AnyElement,
     ) -> AnyElement {
-        let rows = self.tree_drag.rows.clone();
+        let rows = Rc::clone(&self.tree_drag.rows);
         div()
             .relative()
             .w_full()
@@ -110,7 +106,7 @@ impl FilesSurface {
             .into_any_element()
     }
 
-    pub(super) fn render_tree_root_target(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tree_root_target(&self, cx: &Context<Self>) -> AnyElement {
         let theme = crate::theme::Theme::of(cx);
         let active = self.tree_drag.destination.as_deref() == Some("");
         // The root row names the folder itself ("slopty"), as a Finder sidebar does.
@@ -382,7 +378,7 @@ mod tests {
     fn real_tree_drop_emits_one_move(cx: &mut gpui::TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = Rc::new(RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -458,7 +454,7 @@ mod tests {
             ],
         );
         let events = Rc::new(RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });

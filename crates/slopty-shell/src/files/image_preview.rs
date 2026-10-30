@@ -1,15 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! A read-only workspace image. The client resolves bytes on the owning device.
-#![allow(
-    let_underscore_drop,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::partial_pub_fields,
-    clippy::unreachable,
-    reason = "shell lint migration: slice C"
-)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +22,7 @@ pub(super) fn is_image(path: &str) -> bool {
 }
 
 pub(super) struct ImagePreview {
-    pub focus: FocusHandle,
+    focus: FocusHandle,
     path: String,
     context: FilesRequestContext,
     client: WorkspaceFilesClient,
@@ -66,7 +56,7 @@ impl ImagePreview {
             error: None,
             suspended: false,
             bounds: Bounds::default(),
-            viewer: Default::default(),
+            viewer: crate::image_viewer::ImageView::default(),
         };
         view.reload(cx);
         view
@@ -147,7 +137,7 @@ impl ImagePreview {
                 futures::future::Either::Left((result, _)) => result,
                 futures::future::Either::Right(_) => Err("Image preview timed out".into()),
             };
-            let _ = this.update(cx, |view, cx| view.complete(generation, result, cx));
+            let _gone = this.update(cx, |view, cx| view.complete(generation, result, cx));
         }));
     }
 
@@ -172,6 +162,12 @@ impl ImagePreview {
             Err(error) => self.error = Some(error),
         }
         cx.notify();
+    }
+}
+
+impl gpui::Focusable for ImagePreview {
+    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+        self.focus.clone()
     }
 }
 
@@ -233,7 +229,7 @@ impl Render for ImagePreview {
         root.child(
             gpui::canvas(
                 move |bounds, _, cx| {
-                    let _ = entity.update(cx, |view, cx| {
+                    let _gone = entity.update(cx, |view, cx| {
                         if view.bounds != bounds {
                             view.bounds = bounds;
                             cx.notify();
@@ -275,11 +271,11 @@ mod tests {
 
         async fn subscribe(
             &self,
-            _: &str,
+            method: &str,
             _: serde_json::Value,
         ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError>
         {
-            unreachable!()
+            Err(slopty_view_rpc::RpcError::UnknownMethod(method.to_owned()))
         }
     }
     fn preview(cx: &mut gpui::TestAppContext) -> gpui::Entity<ImagePreview> {
@@ -388,11 +384,11 @@ mod tests {
 
         async fn subscribe(
             &self,
-            _: &str,
+            method: &str,
             _: serde_json::Value,
         ) -> Result<tokio::sync::mpsc::Receiver<serde_json::Value>, slopty_view_rpc::RpcError>
         {
-            unreachable!()
+            Err(slopty_view_rpc::RpcError::UnknownMethod(method.to_owned()))
         }
     }
     #[gpui::test]
@@ -414,8 +410,10 @@ mod tests {
                     cwd: "/not/on/ui/device".into(),
                     checkout_id,
                 };
-                let client =
-                    WorkspaceFilesClient::with_transport(transport.clone(), context.clone());
+                let client = WorkspaceFilesClient::with_transport(
+                    Arc::<ImageTransport>::clone(&transport),
+                    context.clone(),
+                );
                 ImagePreview::new("remote.svg".into(), context, client, cx)
             });
             cx.run_until_parked();

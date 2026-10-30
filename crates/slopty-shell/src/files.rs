@@ -13,6 +13,7 @@ use slopty_view_proto::ListWorkspaceDirectoryRequest;
 
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion::HoverFade as _;
+use crate::settings::widgets::Keys;
 use crate::state::AppState;
 
 /// The engine calls of a chat's folder: listings, reads, writes, moves, search and the watch.
@@ -162,24 +163,22 @@ pub(super) fn toolbar_button_keyed(
     theme: &crate::theme::Theme,
     cx: &gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
-    use crate::settings::widgets::{ActionHint as _, Keys};
+    use crate::settings::widgets::ActionHint as _;
     toolbar_button_frame(id, None, theme).action_hint(label, Keys::ActionIn(action, focus), cx)
 }
 
 /// [`toolbar_button_keyed`] for a toggle: latched while `on` (the pane's `icon_toggle` look),
-/// and a screen reader hears whether it is.
-#[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice C")]
+/// and a screen reader hears whether it is. Its tooltip names `keys`.
 pub(super) fn toolbar_toggle_keyed(
     id: &'static str,
     label: &'static str,
     on: bool,
-    action: Box<dyn gpui::Action>,
-    focus: FocusHandle,
+    keys: Keys,
     theme: &crate::theme::Theme,
     cx: &gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
-    use crate::settings::widgets::{ActionHint as _, Keys};
-    toolbar_button_frame(id, Some(on), theme).action_hint(label, Keys::ActionIn(action, focus), cx)
+    use crate::settings::widgets::ActionHint as _;
+    toolbar_button_frame(id, Some(on), theme).action_hint(label, keys, cx)
 }
 
 pub(super) fn toolbar_button(
@@ -1165,7 +1164,7 @@ impl FilesSurface {
     pub fn set_autosave_delay_ms(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
         let pending = self.preview.set_autosave_delay_ms(delay_ms);
         for path in pending {
-            self.schedule_autosave(path, cx);
+            self.schedule_autosave(&path, cx);
         }
         cx.notify();
     }
@@ -1174,7 +1173,7 @@ impl FilesSurface {
     pub fn set_autosave_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let pending = self.preview.set_autosave_enabled(enabled);
         for path in pending {
-            self.schedule_autosave(path, cx);
+            self.schedule_autosave(&path, cx);
         }
         cx.notify();
     }
@@ -1222,7 +1221,7 @@ impl FilesSurface {
             && !self.preview.has_active()
             && let Some(path) = self.editor_path.clone()
         {
-            self.open_file(path, cx);
+            self.open_file(&path, cx);
         }
         if !self.presentation.is_editor() {
             self.ensure_tree_loaded(cx);
@@ -1285,8 +1284,8 @@ impl FilesSurface {
         self.editor_path.as_deref()
     }
 
-    #[expect(clippy::unused_self, reason = "shell lint migration: seam, callers in slice C")]
-    pub(super) fn open_tree_file(&self, path: String, cx: &mut Context<Self>) {
+    /// Asks the host to open `path` in an editor, as a tree or search activation does.
+    pub(super) fn open_tree_file(path: String, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::OpenFile(path));
     }
 
@@ -1301,7 +1300,7 @@ impl FilesSurface {
     }
 
     /// Synchronize selection without replacing the user's current search.
-    pub(crate) fn reveal_file(&mut self, path: String, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_file(&mut self, path: String, cx: &Context<Self>) {
         if self.selected_editor_path.as_deref() == Some(&path) {
             return;
         }
@@ -1588,8 +1587,7 @@ impl FilesSurface {
                     "files-toggle-ignored",
                     if include_ignored { "Hide hidden files" } else { "Show hidden files" },
                     include_ignored,
-                    Box::new(ToggleHiddenFiles),
-                    self.tree_focus.clone(),
+                    Keys::ActionIn(Box::new(ToggleHiddenFiles), self.tree_focus.clone()),
                     theme,
                     cx,
                 )
@@ -1845,7 +1843,7 @@ mod explorer_tests {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             let focus = files.read(cx).tree_focus.clone();
-            let keys = crate::settings::widgets::Keys::ActionIn(Box::new(ToggleHiddenFiles), focus);
+            let keys = Keys::ActionIn(Box::new(ToggleHiddenFiles), focus);
             assert_eq!(keys.text(window, cx), Some(crate::keys::combo_text("mod-shift-.")));
         });
         cx.simulate_keystrokes(&platform_combo("mod-shift-."));
@@ -1868,8 +1866,8 @@ mod explorer_tests {
             })
         });
         surface.update(cx, |surface, cx| {
-            surface.open_tree_file("src/main.rs".into(), cx);
-            surface.open_tree_file("README.md".into(), cx);
+            FilesSurface::open_tree_file("src/main.rs".into(), cx);
+            FilesSurface::open_tree_file("README.md".into(), cx);
             assert_eq!(surface.presentation, FilesPresentation::Explorer);
             assert!(surface.editor_path.is_none());
             assert!(!surface.preview.has_active());

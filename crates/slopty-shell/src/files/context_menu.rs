@@ -1,11 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Tree menus share the editor's popup surface, positioning and dismissal.
-#![allow(
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice C"
-)]
 use gpui::{ClipboardItem, KeyDownEvent, MouseButton};
 use mutations::WorkspaceInteractionOrigin;
 
@@ -24,12 +18,8 @@ pub(super) struct TreeContextMenu {
 fn absolute_workspace_path(root: &str, relative: &str) -> String {
     // Interpret the owning host's path, not the desktop's OS. PathBuf::join
     // would mix separators when viewing a Windows workspace from Linux/macOS.
-    let bytes = root.as_bytes();
     let windows = root.starts_with("\\\\")
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'));
+        || matches!(root.as_bytes(), [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
     if windows {
         format!(
             "{}\\{}",
@@ -79,7 +69,7 @@ impl FilesSurface {
     fn tree_menu_enabled(&self, paths: &[String], action: usize, cx: &gpui::App) -> bool {
         match action {
             0 => true,
-            1 => paths.len() == 1 && self.can_mutate_tree_entry(&paths[0], false, cx),
+            1 => matches!(paths, [path] if self.can_mutate_tree_entry(path, false, cx)),
             _ => paths.iter().all(|path| self.can_mutate_tree_entry(path, true, cx)),
         }
     }
@@ -167,7 +157,7 @@ impl FilesSurface {
     }
 
     /// ⌥⌘C in the tree: the selection's full paths, as the menu's "Copy full path" copies them.
-    pub(super) fn copy_tree_paths(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn copy_tree_paths(&self, window: &mut Window, cx: &mut Context<Self>) {
         let paths = self.tree_action_paths();
         let Some(origin) = self.interaction_origin(cx) else {
             return;
@@ -180,7 +170,7 @@ impl FilesSurface {
 
     // A copy says it happened: the menu closes, so a toast confirms (M5).
     fn copy_full_paths(
-        &mut self,
+        &self,
         paths: &[String],
         root: &str,
         window: &mut Window,
@@ -200,7 +190,7 @@ impl FilesSurface {
         &self,
         theme: &Theme,
         window: &Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let menu = self.tree_context_menu.get()?;
         let theme = theme.for_popup();
@@ -218,12 +208,13 @@ impl FilesSurface {
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        for (index, (label, icon_path)) in [
+        for (index, ((label, icon_path), key)) in [
             (if count > 1 { "Copy full paths" } else { "Copy full path" }.to_owned(), icons::COPY),
             ("Rename…".to_owned(), icons::PEN),
             (delete_label, icons::TRASH_BIN_MINIMALISTIC),
         ]
         .into_iter()
+        .zip(keys)
         .enumerate()
         {
             if index == 1 {
@@ -250,7 +241,7 @@ impl FilesSurface {
                         theme.text_muted
                     }))
                     .child(div().flex_1().min_w_0().child(label))
-                    .children(keys[index].as_ref().map(|keys| popover::kbd_hint(&theme, keys)))
+                    .children(key.as_ref().map(|keys| popover::kbd_hint(&theme, keys)))
                     .when(index == 1, |row| popover::fixed_key(row, &theme, "f2")),
             );
         }
@@ -335,7 +326,7 @@ mod tests {
     fn menu_selects_without_opening_and_copies_full_path(cx: &mut TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });
@@ -418,7 +409,7 @@ mod tests {
     fn menu_inside_a_selection_acts_on_every_root(cx: &mut TestAppContext) {
         let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = std::rc::Rc::clone(&events);
         let _subscription = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });

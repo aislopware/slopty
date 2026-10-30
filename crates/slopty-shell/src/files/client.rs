@@ -1,17 +1,4 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assertions_on_result_states,
-    clippy::clone_on_ref_ptr,
-    clippy::or_fun_call,
-    clippy::significant_drop_in_scrutinee,
-    clippy::significant_drop_tightening,
-    clippy::unreachable,
-    reason = "shell lint migration: slice C"
-)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -30,15 +17,21 @@ use tokio::sync::mpsc;
 
 use crate::state::{AppState, EngineHandle};
 
+/// Which folder, on which machine, the files requests of a chat address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesRequestContext {
+    /// The workspace, by the chat it belongs to.
     pub target: WorkspaceTarget,
+    /// The machine that serves it, when it is not this one.
     pub target_device_id: Option<String>,
+    /// The chat's directory there (`~` for a chat with no project).
     pub cwd: String,
+    /// The Git checkout it is in, for a chat in a project.
     pub checkout_id: Option<String>,
 }
 
 impl FilesRequestContext {
+    /// The folder of chat `chat_id`; `None` for a chat unknown or with no directory.
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
         let cwd = chat.cwd.clone().or_else(|| chat.space_id.is_none().then(|| "~".to_owned()))?;
@@ -54,19 +47,24 @@ impl FilesRequestContext {
             cwd,
             // A projectless tree is rooted at the chat's directory, even if
             // that directory happens to live inside a Git checkout.
-            checkout_id: chat.space_id.as_ref().and(chat.checkout_id.clone()),
+            checkout_id: chat.space_id.as_ref().and_then(|_| chat.checkout_id.clone()),
         })
     }
 }
 
+/// Why a files request failed.
 #[derive(Debug, thiserror::Error)]
 pub enum FilesClientError {
+    /// The request could not be written as JSON.
     #[error("workspace request could not be encoded: {0}")]
     Encode(String),
+    /// The answer did not read as what was asked for.
     #[error("workspace response was invalid: {0}")]
     Decode(String),
+    /// The connection to the machine failed or closed.
     #[error("workspace connection unavailable: {0}")]
     Transport(String),
+    /// The machine answered with an error.
     #[error("workspace request failed: {0}")]
     Request(String),
     /// The host predates this method.
@@ -75,6 +73,7 @@ pub enum FilesClientError {
 }
 
 impl FilesClientError {
+    /// Whether asking again may succeed: the connection failed, not the request.
     pub const fn retryable(&self) -> bool {
         matches!(self, Self::Transport(_))
     }
@@ -91,10 +90,19 @@ impl From<RpcError> for FilesClientError {
     }
 }
 
+/// The files requests of one folder, over the engine's connection.
 #[derive(Clone)]
 pub struct WorkspaceFilesClient {
     transport: Arc<dyn WorkspaceFilesTransport>,
     context: FilesRequestContext,
+}
+
+impl std::fmt::Debug for WorkspaceFilesClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkspaceFilesClient")
+            .field("context", &self.context)
+            .finish_non_exhaustive()
+    }
 }
 
 #[async_trait]
@@ -125,6 +133,7 @@ impl WorkspaceFilesTransport for EngineFilesTransport {
 }
 
 impl WorkspaceFilesClient {
+    /// A client of `context`'s folder over `engine`.
     pub fn new(engine: EngineHandle, context: FilesRequestContext) -> Self {
         Self { transport: Arc::new(EngineFilesTransport(engine)), context }
     }
@@ -142,6 +151,7 @@ impl WorkspaceFilesClient {
         &self.context.target
     }
 
+    /// One page of a directory's listing.
     pub async fn list_directory(
         &self,
         request: ListWorkspaceDirectoryRequest,
@@ -190,6 +200,7 @@ impl WorkspaceFilesClient {
         Ok(page)
     }
 
+    /// The files whose paths match a query.
     pub async fn search(
         &self,
         request: SearchWorkspaceFilesRequest,
@@ -197,6 +208,7 @@ impl WorkspaceFilesClient {
         self.call(methods::SEARCH_WORKSPACE_FILES, &request).await
     }
 
+    /// The lines of the folder's files that match a query.
     pub async fn search_content(
         &self,
         request: SearchWorkspaceContentRequest,
@@ -219,6 +231,7 @@ impl WorkspaceFilesClient {
         }
     }
 
+    /// A file's text, with its encoding, line ending and content hash.
     pub async fn read_file(
         &self,
         request: ReadWorkspaceFileRequest,
@@ -226,6 +239,8 @@ impl WorkspaceFilesClient {
         self.call(methods::READ_WORKSPACE_FILE, &request).await
     }
 
+    /// An image file's MIME type and bytes, read in chunks that must all be of one version of
+    /// it, from `checkout_id` (empty for a file outside the folder, by absolute path).
     pub async fn read_image(
         &self,
         path: String,
@@ -254,7 +269,7 @@ impl WorkspaceFilesClient {
             if chunk.checkout_id != request.expected_checkout_id
                 || chunk.content_hash.is_empty()
                 || chunk.size > MAX_WORKSPACE_IMAGE_BYTES
-                || chunk.data.len() > WORKSPACE_IMAGE_CHUNK_BYTES.div_ceil(3) * 4
+                || chunk.data.len() > WORKSPACE_IMAGE_CHUNK_BYTES.div_ceil(3).saturating_mul(4)
                 || request
                     .expected_content_hash
                     .as_ref()
@@ -286,6 +301,7 @@ impl WorkspaceFilesClient {
         Err(FilesClientError::Decode("Image chunk limit exceeded".into()))
     }
 
+    /// Write a file, unless it changed on the machine since it was read.
     pub async fn write_file(
         &self,
         request: WriteWorkspaceFileRequest,
@@ -293,6 +309,7 @@ impl WorkspaceFilesClient {
         self.call(methods::WRITE_WORKSPACE_FILE, &request).await
     }
 
+    /// Move or rename an entry.
     pub async fn move_entry(
         &self,
         request: slopty_view_proto::MoveWorkspaceEntryRequest,
@@ -300,6 +317,7 @@ impl WorkspaceFilesClient {
         self.call(methods::MOVE_WORKSPACE_ENTRY, &request).await
     }
 
+    /// Delete an entry.
     pub async fn delete_entry(
         &self,
         request: slopty_view_proto::DeleteWorkspaceEntryRequest,
@@ -307,6 +325,7 @@ impl WorkspaceFilesClient {
         self.call(methods::DELETE_WORKSPACE_ENTRY, &request).await
     }
 
+    /// Watch the folder: each change on the machine arrives as a frame.
     pub async fn watch(&self) -> Result<mpsc::Receiver<Value>, FilesClientError> {
         let request = WatchWorkspaceFilesRequest { target: self.context.target.clone() };
         let params = request_params(&request, self.context.target_device_id.as_deref())?;
@@ -329,6 +348,7 @@ impl WorkspaceFilesClient {
     }
 }
 
+/// `request` as JSON params, addressed to `target_device_id` when it is another machine.
 pub fn request_params<Request: Serialize>(
     request: &Request,
     target_device_id: Option<&str>,
@@ -364,7 +384,8 @@ mod tests {
     impl WorkspaceFilesTransport for DeterministicTransport {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             self.calls.lock().push((method.into(), params));
-            if let Some(response) = self.scripted_responses.lock().pop_front() {
+            let scripted = self.scripted_responses.lock().pop_front();
+            if let Some(response) = scripted {
                 return response;
             }
             Ok(self.responses.get(method).cloned().unwrap())
@@ -404,7 +425,7 @@ mod tests {
             ..Default::default()
         });
         let client = WorkspaceFilesClient::with_transport(
-            transport.clone(),
+            Arc::<DeterministicTransport>::clone(&transport),
             FilesRequestContext {
                 target: target(),
                 target_device_id: Some("host".into()),
@@ -423,7 +444,7 @@ mod tests {
                 expected_kind: slopty_view_proto::WorkspaceEntryKind::File,
             })
             .await;
-        assert!(result.is_err());
+        result.unwrap_err();
         let calls = transport.calls.lock();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, methods::MOVE_WORKSPACE_ENTRY);
@@ -441,7 +462,7 @@ mod tests {
                 ..Default::default()
             });
             let client = WorkspaceFilesClient::with_transport(
-                transport.clone(),
+                Arc::<DeterministicTransport>::clone(&transport),
                 FilesRequestContext {
                     target: target(),
                     target_device_id: Some("remote".into()),
@@ -483,7 +504,7 @@ mod tests {
                 ..Default::default()
             });
             let client = WorkspaceFilesClient::with_transport(
-                transport.clone(),
+                Arc::<DeterministicTransport>::clone(&transport),
                 FilesRequestContext {
                     target: target(),
                     target_device_id: None,
@@ -528,20 +549,18 @@ mod tests {
                     checkout_id: None,
                 },
             );
-            assert!(
-                client
-                    .list_directory_snapshot(
-                        ListWorkspaceDirectoryRequest {
-                            target: target(),
-                            directory: String::new(),
-                            include_ignored: false,
-                            cursor: None,
-                        },
-                        &["missing".into()]
-                    )
-                    .await
-                    .is_err()
-            );
+            client
+                .list_directory_snapshot(
+                    ListWorkspaceDirectoryRequest {
+                        target: target(),
+                        directory: String::new(),
+                        include_ignored: false,
+                        cursor: None,
+                    },
+                    &["missing".into()],
+                )
+                .await
+                .unwrap_err();
         }
     }
 
@@ -605,7 +624,7 @@ mod tests {
             "truncated": false
         }))
         .unwrap();
-        assert!(page.entries.is_empty());
+        assert_eq!(page.entries, []);
         assert_eq!(search[0].path, "src/lib.rs");
         assert_eq!(text.content_hash.as_deref(), Some("abc"));
     }
@@ -679,7 +698,10 @@ mod tests {
             cwd: "/workspace".into(),
             checkout_id: Some("checkout-1".into()),
         };
-        let client = WorkspaceFilesClient::with_transport(transport.clone(), context);
+        let client = WorkspaceFilesClient::with_transport(
+            Arc::<DeterministicTransport>::clone(&transport),
+            context,
+        );
 
         let page = client
             .list_directory(ListWorkspaceDirectoryRequest {
@@ -717,7 +739,7 @@ mod tests {
             .unwrap();
         let mut watch = client.watch().await.unwrap();
 
-        assert!(page.entries.is_empty());
+        assert_eq!(page.entries, []);
         assert_eq!(search[0].path, "src/lib.rs");
         assert_eq!(file.text.as_deref(), Some("fn lib() {}"));
         assert!(matches!(
@@ -725,7 +747,7 @@ mod tests {
             WriteWorkspaceFileOutcome::Written { file } if file.content_hash == "hash-2"
         ));
         assert_eq!(watch.recv().await.unwrap()["sequence"], 1);
-        let calls = transport.calls.lock();
+        let calls = transport.calls.lock().clone();
         assert_eq!(calls.len(), 5);
         assert!(calls.iter().all(|(_, params)| {
             params["chatId"] == "chat-1" && params["targetDeviceId"] == "remote-device"
@@ -752,7 +774,10 @@ mod tests {
             cwd: "/workspace".into(),
             checkout_id: Some("checkout-1".into()),
         };
-        let client = WorkspaceFilesClient::with_transport(transport.clone(), context);
+        let client = WorkspaceFilesClient::with_transport(
+            Arc::<DeterministicTransport>::clone(&transport),
+            context,
+        );
         let outcome = client
             .write_file(WriteWorkspaceFileRequest {
                 expected_checkout_id: "checkout-1".into(),
@@ -773,7 +798,7 @@ mod tests {
                 ..
             } if hash == "disk-hash"
         ));
-        let calls = transport.calls.lock();
+        let calls = transport.calls.lock().clone();
         assert_eq!(calls[0].1["expectedContentHash"], "hash");
         assert_eq!(calls[0].1["encoding"], "utf8");
         assert_eq!(calls[0].1["lineEnding"], "lf");
@@ -791,8 +816,12 @@ mod tests {
             self.responses.lock().pop_front().expect("unexpected extra request")
         }
 
-        async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
-            unreachable!()
+        async fn subscribe(
+            &self,
+            method: &str,
+            _: Value,
+        ) -> Result<mpsc::Receiver<Value>, RpcError> {
+            Err(RpcError::UnknownMethod(method.to_owned()))
         }
     }
     fn image_client(
@@ -803,7 +832,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
         });
         let client = WorkspaceFilesClient {
-            transport: transport.clone(),
+            transport: Arc::<ImageTransport>::clone(&transport),
             context: FilesRequestContext {
                 target: target(),
                 target_device_id: Some("remote".into()),
@@ -848,17 +877,17 @@ mod tests {
             let mut chunk = image_chunk(b"cd", 4, true);
             chunk[field] = "changed".into();
             let (client, _) = image_client(vec![Ok(image_chunk(b"ab", 2, false)), Ok(chunk)]);
-            assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
+            client.read_image("image.png".into(), "checkout".into()).await.unwrap_err();
         }
         for chunk in
             [image_chunk(b"ab", 0, false), image_chunk(b"ab", 2, true), image_chunk(b"", 0, false)]
         {
             let (client, _) = image_client(vec![Ok(chunk)]);
-            assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
+            client.read_image("image.png".into(), "checkout".into()).await.unwrap_err();
         }
         let (client, _) =
             image_client(vec![Err(RpcError::UnknownMethod(methods::READ_WORKSPACE_IMAGE.into()))]);
-        assert!(client.read_image("image.png".into(), "checkout".into()).await.is_err());
+        client.read_image("image.png".into(), "checkout".into()).await.unwrap_err();
     }
     #[tokio::test]
     async fn image_reads_reject_malformed_repeated_and_oversized_chunks() {
@@ -878,17 +907,17 @@ mod tests {
             let mut chunk = image_chunk(b"abcd", 4, true);
             chunk[field] = value;
             let (client, _) = image_client(vec![Ok(chunk)]);
-            assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err(), "{field}");
+            client.read_image("a.png".into(), "checkout".into()).await.expect_err(field);
         }
         let first = image_chunk(b"ab", 2, false);
         let (client, _) = image_client(vec![Ok(first.clone()), Ok(first)]);
-        assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err());
+        client.read_image("a.png".into(), "checkout".into()).await.unwrap_err();
         let mut last = image_chunk(b"cd", 4, false);
         last["size"] = 5.into();
         let (client, _) = image_client(vec![Ok(image_chunk(b"ab", 2, false)), Ok(last)]);
-        assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err());
+        client.read_image("a.png".into(), "checkout".into()).await.unwrap_err();
         let (client, transport) = image_client(Vec::new());
-        assert!(client.read_image("a.png".into(), String::new()).await.is_err());
+        client.read_image("a.png".into(), String::new()).await.unwrap_err();
         assert!(transport.calls.lock().is_empty());
     }
 }

@@ -1,7 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared metadata-only Git subscription. Views hold leases; the last lease
 //! dropping cancels the RPC. Cached sources never own their consuming views.
-#![allow(clippy::expect_used, clippy::match_same_arms, reason = "shell lint migration: slice C")]
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -148,11 +147,10 @@ impl GitStatusSource {
         let revision = snapshot.as_ref().map(|s| s.revision.clone());
         let notice = match &snapshot {
             Some(snapshot) if !snapshot.complete => Some("Git status unavailable or incomplete"),
-            Some(_) => None,
             None if self.revision.is_some() || self.notice.is_some() => {
                 Some("Git status unavailable")
             }
-            None => None,
+            Some(_) | None => None,
         };
         if revision == self.revision && notice == self.notice {
             return;
@@ -184,12 +182,20 @@ impl GitStatusSource {
         }
         let source = cx.new(|cx: &mut Context<Self>| {
             let connection = engine.clone();
-            let params = request_params(
-                &WatchWorkspaceFilesRequest { target: context.target.clone() },
-                context.target_device_id.as_deref(),
-            )
-            .expect("Git status request is serializable");
+            let request = WatchWorkspaceFilesRequest { target: context.target.clone() };
+            let target_device_id = context.target_device_id.clone();
             let task = cx.spawn(async move |this, cx| {
+                let params = match request_params(&request, target_device_id.as_deref()) {
+                    Ok(params) => params,
+                    Err(error) => {
+                        tracing::warn!(%error, "the git status request did not encode");
+                        let _gone = this.update(cx, |source, cx| {
+                            source.notice = Some("Git status unavailable");
+                            cx.notify();
+                        });
+                        return;
+                    }
+                };
                 loop {
                     match connection
                         .client()
