@@ -38,8 +38,6 @@ pub mod methods {
     // the excerpt.
     pub const SEARCH_CHATS: &str = "SearchChats";
     pub const WATCH_DOC_MESSAGES: &str = "WatchDocMessages";
-    pub const FOCUS_CHAT: &str = "FocusChat";
-    pub const PROBE_SYNC: &str = "ProbeSync";
     /// The links to the server and the machines (`slopty_view_proto::Connectivity`): the
     /// current value first, then every change, for the connection pill. No params.
     pub const WATCH_CONNECTIVITY: &str = "WatchConnectivity";
@@ -56,16 +54,10 @@ pub mod methods {
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// The view model's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
-    pub const ENGINE_READY: &str = "EngineReady";
-    pub const STOP_ENGINE: &str = "StopEngine";
     pub const AUTH_STATUS: &str = "AuthStatus";
-    pub const SIGN_IN: &str = "SignIn";
     // Repositories, branches and folders on a device.
     pub const CLONE_REPO: &str = "CloneRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
-    pub const LIST_REFS: &str = "ListRefs";
-    /// Update remote-tracking refs without changing HEAD, the index, or files.
-    pub const FETCH_ALL: &str = "FetchAll";
     pub const LIST_FOLDERS: &str = "ListFolders";
     /// The device's browse roots: home plus mounted drives/volumes.
     pub const LIST_DRIVES: &str = "ListDrives";
@@ -99,8 +91,6 @@ pub mod methods {
     /// checkout lives.
     pub const WATCH_CHECKOUT_DIFFS: &str = "WatchCheckoutDiffs";
     pub const WATCH_WORKSPACE_GIT_STATUS: &str = "WatchWorkspaceGitStatus";
-    /// Current pull request for one checkout, resolved on the checkout's host device.
-    pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
     // Attachments read back from the chat's machine.
@@ -109,7 +99,6 @@ pub mod methods {
     /// call's whole output, an edit's whole diff, a picture or a visual, read whole from its
     /// worker.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
-    pub const APPLY_UPDATE: &str = "ApplyUpdate";
     // The person's one setting for how freely agents act, `[agents] autonomy` in
     // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
     pub const GET_AGENT_SETTINGS: &str = "GetAgentSettings";
@@ -133,9 +122,6 @@ pub enum RpcError {
     UnknownMethod(String),
     #[error("bad params: {0}")]
     BadParams(String),
-    /// A capability failure, by its machine-readable code.
-    #[error("capability error: {0}")]
-    Capability(String),
     #[error("{0}")]
     Failed(String),
     #[error("transport: {0}")]
@@ -251,17 +237,20 @@ mod tests {
             method: &str,
             _params: serde_json::Value,
         ) -> Result<RpcReply, RpcError> {
-            if !matches!(
-                method,
-                methods::WATCH_CHECKOUT_CHANGE_REQUEST | "Silent"
-            ) {
-                return Err(RpcError::UnknownMethod(method.into()));
-            }
+            // `Once` says one thing and then goes quiet; `Silent` says nothing.
+            let first = match method {
+                "Once" => Some(serde_json::json!("ready")),
+                "Silent" => None,
+                _ => return Err(RpcError::UnknownMethod(method.into())),
+            };
             let guard = DropSignal(self.dropped.lock().unwrap().take());
-            let stream = futures::stream::unfold(guard, |guard| async move {
-                let item = std::future::pending::<Option<(serde_json::Value, DropSignal)>>().await;
+            let stream = futures::stream::unfold((guard, first), |(guard, first)| async move {
+                if let Some(item) = first {
+                    return Some((item, (guard, None)));
+                }
+                std::future::pending::<()>().await;
                 drop(guard);
-                item
+                None
             });
             Ok(RpcReply::Stream(stream.boxed()))
         }
@@ -284,7 +273,6 @@ mod tests {
                 }
                 "Never" => Ok(RpcReply::Stream(futures::stream::pending().boxed())),
                 "Boom" => Err(RpcError::Failed("boom".into())),
-                "Capability" => Err(RpcError::Capability("harness.missing".into())),
                 other => Err(RpcError::UnknownMethod(other.into())),
             }
         }
@@ -322,15 +310,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RpcError::Failed(m) if m == "boom"));
-
-        let err = client
-            .call("Capability", serde_json::Value::Null)
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            RpcError::Capability(code) if code == "harness.missing"
-        ));
     }
 
     #[tokio::test]
@@ -360,13 +339,11 @@ mod tests {
         let client = memory_client(Arc::new(CancelAwareService {
             dropped: Mutex::new(Some(dropped_tx)),
         }));
-        let stream = client
-            .subscribe_checked(
-                methods::WATCH_CHECKOUT_CHANGE_REQUEST,
-                serde_json::Value::Null,
-            )
+        let mut stream = client
+            .subscribe_checked("Once", serde_json::Value::Null)
             .await
             .unwrap();
+        assert_eq!(stream.recv().await, Some(serde_json::json!("ready")));
 
         drop(stream);
 
@@ -411,11 +388,11 @@ mod tests {
             dropped: Mutex::new(Some(second_tx)),
         }));
         let first_watch = first
-            .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::Value::Null)
+            .subscribe_checked("Once", serde_json::Value::Null)
             .await
             .unwrap();
         let second_watch = second
-            .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, serde_json::Value::Null)
+            .subscribe_checked("Once", serde_json::Value::Null)
             .await
             .unwrap();
 

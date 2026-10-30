@@ -350,8 +350,6 @@ async fn route_frame(shared: &Arc<Shared>, out: &mpsc::Sender<String>, frame: Se
 fn wire_error(error: String) -> RpcError {
     if let Some(method) = error.strip_prefix("unknown method: ") {
         RpcError::UnknownMethod(method.to_owned())
-    } else if let Some(code) = error.strip_prefix("capability error: ") {
-        RpcError::Capability(code.to_owned())
     } else {
         RpcError::Failed(error)
     }
