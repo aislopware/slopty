@@ -16,16 +16,10 @@ include = [
 exclude = [
     "vendor/**",
     "workspace-hack/Cargo.toml",
-    "crates/slopty-markdown/Cargo.toml",
     "crates/slopty-shell/Cargo.toml",
-    "crates/slopty-shell-theme/Cargo.toml",
-    "crates/slopty-syntax/Cargo.toml",
-    "crates/slopty-veil/Cargo.toml",
     "crates/slopty-view-doc/Cargo.toml",
     "crates/slopty-view-proto/Cargo.toml",
     "crates/slopty-view-rpc/Cargo.toml",
-    "crates/slopty-visual/Cargo.toml",
-    "crates/slopty-visual-gpu/Cargo.toml",
 ]
 
 [formatting]

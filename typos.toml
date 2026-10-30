@@ -27,6 +27,13 @@ ue = "ue"         # ue(v), the H.26x unsigned exp-Golomb code (`slopty_codec::co
 nd = "nd"         # the English ordinal suffix, 2nd (`slopty_ui::project::model::queue_words`)
 styl = "styl"     # the Stylus file extension (`slopty_kit::file_icons`)
 ede = "ede"       # Claude Code's own `ede_diagnostic` error tag (`slopty_testkit::claude_stream`)
+BRE = "BRE"       # POSIX basic regular expressions (`slopty_markdown::parser`'s tests)
+# the physically based material's metal factor (`slopty_visual::scene`)
+metalness = "metalness"
+# TeX names (`slopty_math`): the contour integral, the hom operator, amsmath's environment
+oint = "oint"
+hom = "hom"
+multline = "multline"
 
 [default.extend-identifiers]
 # the `image` crate's `Delay::from_numer_denom_ms`
@@ -47,15 +54,8 @@ extend-exclude = [
     "crates/slopty-platform/assets/page-libs/",
     # The copied UI crates keep their text as written, so a sync's merge sees only real edits
     # (`xtask/zeron.toml`, docs/decisions/ui.md).
-    "crates/slopty-markdown/",
-    "crates/slopty-math/",
     "crates/slopty-shell/",
-    "crates/slopty-shell-theme/",
-    "crates/slopty-syntax/",
-    "crates/slopty-veil/",
     "crates/slopty-view-doc/",
     "crates/slopty-view-proto/",
     "crates/slopty-view-rpc/",
-    "crates/slopty-visual/",
-    "crates/slopty-visual-gpu/",
 ]

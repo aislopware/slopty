@@ -1187,7 +1187,7 @@ const fn spacing(l: Class, r: Class, small: bool) -> f32 {
     }
 }
 
-/// Look-alikes for symbols some math fonts lack, tried after the whole chain.
+/// Lookalikes for symbols some math fonts lack, tried after the whole chain.
 const fn equivalents(ch: char) -> &'static [char] {
     match ch {
         '∖' => &['⧵', '\\'],

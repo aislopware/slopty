@@ -14,7 +14,7 @@ workspace = true
 slopty-visual = { path = "../slopty-visual" }
 # Already GPUI's renderer on Linux; here it draws offscreen on every desktop. The
 # workspace's, at the revision GPUI builds (one wgpu in the graph).
-wgpu = { workspace = true, features = ["glsl"] }
+wgpu = { workspace = true, features = [ "glsl" ] }
 pollster = "1.0"
 # The pipeline and texture caches, shared by every visual's render.
 parking_lot.workspace = true
@@ -22,4 +22,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 # Test textures and environment maps.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = [ "png" ] }
