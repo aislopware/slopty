@@ -14,26 +14,22 @@
 //!
 //! Repairs, in the spirit of remend's handler set (its html/comparison
 //! handlers don't apply here — slopty renders raw HTML literally):
-//! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested
-//!   closers innermost-first (`**a *b` → `**a *b***`), half-streamed closers
-//!   completed (`**a*` → `**a**`);
-//! - inline code backtick parity (fence-shaped tails never reach here — the
-//!   parser gates mending on the last block not being a code block);
-//! - math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) shields its TeX like a code
-//!   span — `a_1` or `x^*` inside never opens emphasis — but an unclosed
-//!   formula is *not* closed: half a formula would render broken, so it stays
-//!   literal until its own closer streams in. Only a half-streamed display
-//!   closer (`$$x$`) is completed. A display formula also ends any emphasis
-//!   or link text opened before it (closing across it would fold the formula
-//!   inline). A lone `$` before a digit is a price and one before a shell
-//!   variable (`$HOME/bin`) is prose, not openers, and an unclosed inline
-//!   formula with no closer ahead shields only its own line;
-//! - links/images: the URL never renders — `[text](partial` and a bare
-//!   `[text` both mend to `[text](`[`PENDING_LINK_URL`]`)`, so the link text
-//!   shows styled immediately and the settling URL can't collapse the line;
-//! - a last line of just `-`/`--`/`=`/`==` after text gets a zero-width space
-//!   so a streaming list item is never misread as a setext underline (the
-//!   paragraph-flashes-to-heading flicker).
+//! - emphasis parity: `**a`→`**a**`, `*a`→`*a*`, `_a`/`__a`, `~~a`, nested closers innermost-first
+//!   (`**a *b` → `**a *b***`), half-streamed closers completed (`**a*` → `**a**`);
+//! - inline code backtick parity (fence-shaped tails never reach here — the parser gates mending on
+//!   the last block not being a code block);
+//! - math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) shields its TeX like a code span — `a_1` or `x^*`
+//!   inside never opens emphasis — but an unclosed formula is *not* closed: half a formula would
+//!   render broken, so it stays literal until its own closer streams in. Only a half-streamed
+//!   display closer (`$$x$`) is completed. A display formula also ends any emphasis or link text
+//!   opened before it (closing across it would fold the formula inline). A lone `$` before a digit
+//!   is a price and one before a shell variable (`$HOME/bin`) is prose, not openers, and an
+//!   unclosed inline formula with no closer ahead shields only its own line;
+//! - links/images: the URL never renders — `[text](partial` and a bare `[text` both mend to
+//!   `[text](`[`PENDING_LINK_URL`]`)`, so the link text shows styled immediately and the settling
+//!   URL can't collapse the line;
+//! - a last line of just `-`/`--`/`=`/`==` after text gets a zero-width space so a streaming list
+//!   item is never misread as a setext underline (the paragraph-flashes-to-heading flicker).
 //!
 //! The scanner is deliberately approximate (streamdown ships the same
 //! trade-off): it prefers "stable and close to the final parse" over exact
@@ -351,10 +347,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     // Text ends inside a link/image URL: drop the partial URL, keep the text.
     if let Some(close) = pending_url {
         let byte = cs[close].0;
-        return (
-            Some(format!("{}]({PENDING_LINK_URL})", &text[..byte])),
-            false,
-        );
+        return (Some(format!("{}]({PENDING_LINK_URL})", &text[..byte])), false);
     }
 
     // Collect closers innermost-first (descending open position). A `[` open
@@ -388,13 +381,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     let trailing_dollar = n > 0
         && cs[n - 1].1 == '$'
         && (n < 2 || cs[n - 2].1 != '$')
-        && cs[..n - 1]
-            .iter()
-            .rev()
-            .take_while(|&&(_, c)| c == '\\')
-            .count()
-            % 2
-            == 0
+        && cs[..n - 1].iter().rev().take_while(|&&(_, c)| c == '\\').count() % 2 == 0
         && code.is_none()
         && math.is_none()
         && latex.is_none()
@@ -432,10 +419,7 @@ fn mend(text: &str, escape_dollar: bool) -> (Option<String>, bool) {
     // not right-flanking and would not close (remend trims the space for the
     // same reason).
     let end = text.trim_end().len();
-    (
-        Some(format!("{}{closers}{}", &text[..end], &text[end..])),
-        trailing_dollar,
-    )
+    (Some(format!("{}{closers}{}", &text[..end], &text[end..])), trailing_dollar)
 }
 
 /// Whether the text after a `$` spells a shell variable rather than a
@@ -509,11 +493,7 @@ fn delim(
         // A lone `~` never opens; `~` entries of len 1 exist only as the
         // remainder of a half-streamed closer.
         if can_open && (c != '~' || rest == 2) {
-            delims.push(OpenDelim {
-                ch: c,
-                len: rest,
-                pos: end,
-            });
+            delims.push(OpenDelim { ch: c, len: rest, pos: end });
         } else {
             *last_content = Some(end - 1);
         }
@@ -531,10 +511,7 @@ fn setext_partial(text: &str) -> bool {
     let underline =
         |c: char| !trimmed.is_empty() && trimmed.len() <= 2 && trimmed.chars().all(|x| x == c);
     (underline('-') || underline('='))
-        && text[..nl]
-            .lines()
-            .last()
-            .is_some_and(|l| !l.trim().is_empty())
+        && text[..nl].lines().last().is_some_and(|l| !l.trim().is_empty())
 }
 
 #[cfg(test)]
@@ -656,10 +633,7 @@ mod tests {
 
     #[test]
     fn shell_variables_open_no_formula() {
-        mends(
-            "set $HOME and [docs](https://x.dev/lo",
-            "set $HOME and [docs](slopty:pending-link)",
-        );
+        mends("set $HOME and [docs](https://x.dev/lo", "set $HOME and [docs](slopty:pending-link)");
         mends("echo $PATH:$HOME/bin **bo", "echo $PATH:$HOME/bin **bo**");
         mends("'$USER@$HOST' then *em", "'$USER@$HOST' then *em*");
         // All-caps formulas still shield.
@@ -690,10 +664,7 @@ mod tests {
         mends("f\\(x\\) **bo", "f\\(x\\) **bo**");
         mends("arr\\[0\\] *em", "arr\\[0\\] *em*");
         // An unclosed `\[` before prose is an escape: emphasis still mends.
-        mends(
-            "Escape \\[ in regex, **bold",
-            "Escape \\[ in regex, **bold**",
-        );
+        mends("Escape \\[ in regex, **bold", "Escape \\[ in regex, **bold**");
         // Glued as the parser glues: after an operator it opens a formula.
         mends("x=\\(*a\\) **bold", "x=\\(*a\\) **bold**");
     }
