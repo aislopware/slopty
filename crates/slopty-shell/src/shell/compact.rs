@@ -1,16 +1,17 @@
-//! slopty: the phone's anatomy, after zeron's iOS app (`apps/ios`), built from the shell's own
-//! parts. A phone shows one page at a time: Sessions (the large title, the sidebar's list at the
-//! page's width, the "New session" capsule with what is running, and the tab bar of Sessions,
-//! Settings and Search) or the chat that was opened from it, whose sidebar button goes back.
-//! Every page keeps clear of the system's edges (the status bar, the home indicator) and of the
-//! keyboard. Wider windows (an iPad's, a Mac's) keep the shell's columns.
+//! The phone's anatomy (`docs/decisions/layout.md`, "iPhone is a list, then the terminal"). A
+//! phone shows one page at a time: the session list, or a session. The list is the sidebar's at
+//! the page's width under one band: its heading, the inbox's eye, the palette, Settings and a new
+//! session. A session is its terminal, edge to edge on its program's ground, under one band on
+//! that ground: back to the list, the session's mark, its title over its machine and branch (a
+//! press puts its inspector up, a read-only sheet), and "N need you", which jumps to the next
+//! session that needs the person. While the soft keyboard is up over the terminal the key row
+//! stands on it ([`key_row`]). There is no chat view and no composer: the TUI's prompt is the only
+//! prompt. Every page keeps clear of the system's edges and of the keyboard. An iPad in a compact
+//! width takes the phone's pages; wider windows (an iPad's, a Mac's) keep the shell's columns, and
+//! an iPad's keyboard takes the row's keys in its own shortcut bar ([`Shell::publish_key_bar`]).
 //!
-//! The chat or the new-session page wears no desktop chrome there: the titlebar's sidebar and
-//! history cluster give way to a navigation bar (zeron iOS's `SessionViewController`: a back
-//! chevron to Sessions and the chat's title over "project @ device"; `NewSessionViewController`:
-//! "New session" with a close button). A chat row takes zeron iOS's gestures
-//! (`SessionListController`): a trailing swipe archives it (or brings it back from Archived), and
-//! a long press opens its menu.
+//! A session row takes the platform's gestures: a trailing swipe archives it (or brings it back
+//! from Archived), and a long press opens its menu.
 
 use std::time::{Duration, Instant};
 
@@ -20,44 +21,34 @@ use gpui::{
 };
 
 use super::Shell;
+use super::marks::Mark;
 use crate::icons::{self, icon};
 use crate::theme::Theme;
 use crate::typography::ui_rems;
-use crate::state::Indicator;
+
+mod key_row;
 
 /// A window narrower than this is a phone's, as the iOS e2e reads it.
 const PHONE_BELOW: f32 = 700.0;
-/// The large title's row, under the status bar.
-const TITLE_ROW: f32 = 52.0;
-/// The large title's size (zeron's navigation bar: Geist semibold 30).
-const TITLE_SIZE: f32 = 30.0;
-/// The "New session" capsule: its height, the plus's plate and inset.
-const CAPSULE: f32 = 48.0;
-/// The room between the capsule and the tab bar.
-const CAPSULE_BELOW: f32 = 8.0;
-const PLATE: f32 = 34.0;
-const PLATE_INSET: f32 = 7.0;
-/// The tab bar's row above the home indicator.
-const TAB_BAR: f32 = 49.0;
-/// slopty: the narrowest a sidebar's foot holds the toasts; a narrower one hands them to the top
-/// right, so a toast never spills over the session beside it.
+/// A band's row: the Mac's title row's height, which the session's column already clears; its
+/// controls take a finger's 44 pt across it.
+const BAND: f32 = Theme::TITLEBAR_HEIGHT;
+const TARGET: f32 = 44.0;
+/// The session band's title and subtitle lines, at the default text size.
+const BAND_TITLE_LINE: f32 = 17.0;
+const BAND_SUBTITLE_LINE: f32 = 13.0;
+/// The narrowest a sidebar's foot holds the toasts; a narrower one hands them to the top right, so
+/// a toast never spills over the session beside it.
 const TOAST_COLUMN_MIN: f32 = 200.0;
-/// The selected tab's glass pill, inset in its third of the bar.
-const TAB_PILL_INSET: f32 = 6.0;
-/// The capsule's status glyph, before the summary (zeron's 12 pt `StatusGlyph`).
-const CAPSULE_GLYPH: f32 = 12.0;
-/// The navigation bar's back and close targets.
+/// The inspector sheet's close, and a view page's back.
 const NAV_TARGET: f32 = 34.0;
-/// The navigation bar's title and subtitle lines, at the default text size.
-const NAV_TITLE_LINE: f32 = 20.0;
-const NAV_SUBTITLE_LINE: f32 = 15.0;
 /// A row's swipe: travel before its axis is decided, travel that commits on release, the reach
 /// past which it resists, and the return to rest.
 const SWIPE_DECIDE: f32 = 10.0;
 const SWIPE_COMMIT: f32 = 76.0;
 const SWIPE_REACH: f32 = 112.0;
 const SWIPE_SETTLE: Duration = Duration::from_millis(220);
-/// slopty: the inspector's sheet on a phone, UIKit's sheet with its medium and large detents:
+/// The inspector's sheet on a phone, UIKit's sheet with its medium and large detents:
 /// the large detent's gap under the status bar, the share of the screen the medium detent
 /// leaves above it, the top corners, the grabber's pill and the header row it heads.
 const SHEET_LARGE_GAP: f32 = 10.0;
@@ -173,7 +164,7 @@ fn swipe_offset(travel: f32) -> f32 {
     at.copysign(travel)
 }
 
-/// slopty: where the phone's inspector sheet rests.
+/// Where the phone's inspector sheet rests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Detent {
     /// Half the screen, the session's terminal above it: where it comes up.
@@ -183,7 +174,7 @@ enum Detent {
     Large,
 }
 
-/// slopty: the phone's inspector sheet: where it rests, a finger's travel while it holds it,
+/// The phone's inspector sheet: where it rests, a finger's travel while it holds it,
 /// and its glide to rest or away.
 #[derive(Default)]
 struct Sheet {
@@ -262,7 +253,7 @@ thread_local! {
     static FORCE_COMPACT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// slopty: a test elsewhere lays its views out as a touch screen's (`on`) or a Mac's.
+/// A test elsewhere lays its views out as a touch screen's (`on`) or a Mac's.
 #[cfg(test)]
 pub(crate) fn force_touch(on: bool) {
     FORCE_COMPACT.with(|force| force.set(on));
@@ -275,8 +266,8 @@ fn phone_platform() -> bool {
 
 /// Whether this build runs on a touch screen, a phone's or an iPad's: iOS, or a test that asks.
 /// There focusing a field raises the software keyboard over the page, so opening or landing on a
-/// chat leaves the composer unfocused and the keyboard comes when the person taps it, as in
-/// Messages (`docs/decisions/ui.md`, "On a touch screen the keyboard waits for a tap").
+/// session leaves it down and the keyboard comes when the person taps the terminal
+/// (`docs/decisions/ui.md`, "On a touch screen the keyboard waits for a tap").
 pub(crate) fn touch_screen() -> bool {
     #[cfg(test)]
     if FORCE_COMPACT.with(std::cell::Cell::get) {
@@ -285,54 +276,48 @@ pub(crate) fn touch_screen() -> bool {
     cfg!(target_os = "ios")
 }
 
-/// The phone's tabs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Sessions,
-    Settings,
-    Search,
+/// The phone's key row: made with the first session page, drawn on each while the soft keyboard is
+/// up over its terminal.
+struct Row(gpui::Entity<key_row::KeyRow>);
+
+impl Global for Row {}
+
+/// The session a phone's band stands for, as Slopty's records say it.
+struct BandSession {
+    chat: String,
+    title: SharedString,
+    machine_branch: Option<SharedString>,
+    harness: Option<slopty_view_proto::HarnessId>,
+    mark: Mark,
+    /// Its terminal is on screen.
+    terminal: bool,
+    /// It has an inspector to show.
+    inspects: bool,
 }
 
-impl Tab {
-    const ALL: [Self; 3] = [Self::Sessions, Self::Settings, Self::Search];
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Sessions => "Sessions",
-            Self::Settings => "Settings",
-            Self::Search => "Search",
-        }
-    }
-
-    const fn glyph(self) -> &'static str {
-        match self {
-            Self::Sessions => icons::CHAT_ROUND_LINE,
-            Self::Settings => icons::SETTINGS,
-            Self::Search => icons::MAGNIFER,
-        }
-    }
+/// A press on a band: a finger's 44 pt tall and at least as wide, centred on the band's row,
+/// named for a screen reader.
+fn band_target(id: &'static str, label: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .flex_none()
+        .h(px(TARGET))
+        .min_w(px(TARGET))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
 }
 
-/// What is running, as the capsule says it: "2 working · 1 needs you".
-fn summary(working: usize, waiting: usize) -> String {
-    let mut parts = Vec::new();
-    if working > 0 {
-        parts.push(format!("{working} working"));
-    }
-    if waiting > 0 {
-        let verb = if waiting == 1 { "needs" } else { "need" };
-        parts.push(format!("{waiting} {verb} you"));
-    }
-    parts.join(" · ")
-}
-
-/// slopty: one of the phone's navigation bar's icon buttons, a finger's target, named for a
-/// screen reader.
+/// One of the phone's icon buttons, a finger's target, named for a screen reader.
 fn nav_icon(id: &'static str, glyph: &'static str, label: &'static str, theme: &Theme) -> gpui::Stateful<gpui::Div> {
     nav_button(id, icon(glyph).size(px(19.0)).text_color(theme.text), label)
 }
 
-/// slopty: [`nav_icon`] around a drawn glyph.
+/// [`nav_icon`] around a drawn glyph.
 fn nav_button(id: &'static str, glyph: impl IntoElement, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -368,20 +353,19 @@ impl Shell {
         *pages.sessions.get_or_insert(true)
     }
 
-    /// slopty: where the toasts stand, never over a session's terminal, whose TUI draws its
-    /// prompt and status at the bottom: on a phone above its Sessions page's tab bar and capsule,
-    /// or the home indicator or the keyboard; else in the sidebar's foot, above its bottom row,
-    /// or with no sidebar to take them at the top right, under the title strip
-    /// (`docs/decisions/ui.md`, "Toasts keep off the terminal").
+    /// Where the toasts stand, never over a session's terminal, whose TUI draws its prompt and
+    /// status at the bottom: on a phone above the home indicator, or the keyboard and the key row
+    /// on it; else in the sidebar's foot, above its bottom row, or with no sidebar to take them at
+    /// the top right, under the title strip (`docs/decisions/ui.md`, "Toasts keep off the
+    /// terminal").
     pub(super) fn toast_place(&self, window: &Window, cx: &mut App) -> crate::toast::ToastPlace {
         use crate::toast::ToastPlace;
         let insets = window.insets();
         let safe = insets.safe_area;
         if self.compact() {
-            let lift = if self.compact_sessions_up(cx) {
-                f32::from(safe.bottom) + TAB_BAR + CAPSULE + CAPSULE_BELOW
-            } else if self.keyboard_band_held(window) {
-                f32::from(insets.effective().bottom)
+            let lift = if !self.compact_sessions_up(cx) && self.keyboard_band_held(window) {
+                let row = cx.try_global::<Row>().map_or(0.0, |row| row.0.read(cx).height());
+                f32::from(insets.effective().bottom) + row
             } else {
                 f32::from(safe.bottom)
             };
@@ -418,15 +402,16 @@ impl Shell {
         self.compact().then_some(self.viewport_width)
     }
 
-    /// slopty: whether a field holds the keyboard: the focus is on a text field, the only
-    /// thing the soft keyboard comes for. A pressed button (Send) or one of the shell's own
-    /// handles holds the focus with no keyboard up.
+    /// Whether a field holds the keyboard: the focus is on a text field (a terminal is one), the
+    /// only thing the soft keyboard comes for. A pressed button or one of the shell's own handles
+    /// holds the focus with no keyboard up.
     pub(super) fn keyboard_band_held(&self, window: &Window) -> bool {
         window.text_input_focused()
     }
 
-    /// `page` kept clear of the system's edges and the keyboard, on iOS. `session`: the page is
-    /// a session's column, whose ground the bands it keeps clear take.
+    /// `page` kept clear of the system's edges and the keyboard, on iOS. `session`: the page is a
+    /// session's column, whose ground the bands it keeps clear take; on a phone its key row stands
+    /// under it, over the keyboard ([`key_row`]), drawing itself only while it is up.
     pub(super) fn compact_frame(
         &self,
         page: impl IntoElement,
@@ -434,48 +419,53 @@ impl Shell {
         window: &Window,
         cx: &App,
     ) -> gpui::Div {
+        let row = if session && self.compact() { cx.try_global::<Row>().map(|row| row.0.clone()) } else { None };
+        let page = div().flex_1().min_h_0().w_full().child(page);
         if !cfg!(target_os = "ios") {
-            return div().size_full().child(page);
+            return div().size_full().flex().flex_col().child(page).children(row);
         }
         let insets = window.insets();
         let safe = insets.safe_area;
-        // slopty: the keyboard's band stays only while a field takes what is typed: once the
-        // keyboard drops (a send lets the composer go) the page reaches the safe area again,
-        // whatever keyboard frame UIKit last reported.
+        // The keyboard's band stays only while a field takes what is typed: once the keyboard
+        // drops the page reaches the safe area again, whatever keyboard frame UIKit last reported.
         let bottom = if self.keyboard_band_held(window) {
             insets.effective().bottom
         } else {
             safe.bottom
         };
-        // slopty: under a session the band over the home indicator, and the keyboard's while
-        // it rises or stands over it, continues the terminal's ground rather than standing as an
-        // empty strip of the window's; on a tablet so does the status bar's band over its title
-        // strip, right of the sidebar. A phone's status bar band continues its navigation bar.
+        // Under a session the bands it keeps clear continue its terminal's ground rather than
+        // standing as empty strips of the window's: the home indicator's, the keyboard's while it
+        // rises or stands, and on a tablet the status bar's over its title row, right of the
+        // sidebar. A phone's session takes the ground edge to edge, the screen's sides too; its
+        // other pages take the window's own fill, over the hidden column's edge, which would
+        // otherwise stand as a hairline down the screen's left.
         let theme = Theme::of(cx);
+        let ground = if session { self.shown_ground(cx) } else { theme.session_ground() };
         let left = safe.left + px(self.sidebar_now());
         let band = |top: bool, height: Pixels| {
             (session && height > Pixels::ZERO).then(|| {
-                let band = div().absolute().left(left).right_0().h(height);
-                let band = band.bg(theme.session_ground());
+                let band = div().absolute().left(left).right_0().h(height).bg(ground);
                 if top { band.top_0() } else { band.bottom_0() }
             })
         };
+        let phone = self.compact();
         div()
             .size_full()
             .relative()
-            // A phone's chat has no sidebar: the window's own fill over the hidden column's
-            // edge, which would otherwise stand as a hairline down the screen's left.
-            .when(self.compact(), |frame| frame.bg(theme.glass()))
-            .children(band(true, safe.top).filter(|_| !self.compact()))
-            .children(band(false, bottom))
+            .flex()
+            .flex_col()
+            .when(phone, |frame| frame.bg(if session { ground } else { theme.glass() }))
+            .when(!phone, |frame| frame.children(band(true, safe.top)).children(band(false, bottom)))
             .child(page)
+            .children(row)
             .pt(safe.top)
             .pb(bottom)
             .pl(safe.left)
             .pr(safe.right)
     }
 
-    /// The phone's Sessions page, when it is up; `None` leaves the window to the columns.
+    /// The phone's Sessions page, when it is up; `None` leaves the window to the columns. The
+    /// sidebar's list at the page's width, its rows as on the Mac, under one band.
     pub(super) fn render_compact_sessions(
         &mut self,
         window: &mut Window,
@@ -485,21 +475,8 @@ impl Shell {
             return None;
         }
         let theme = Theme::of(cx).clone();
-        let insets = window.insets();
-        let safe = insets.safe_area;
-        let title = div()
-            .flex_none()
-            .h(px(TITLE_ROW))
-            // On the list's leading edge (its 8 pt inset and its rows' 8), less the glyph's own
-            // side bearing at this size.
-            .px(px(15.0))
-            .flex()
-            .items_end()
-            .pb(px(6.0))
-            .text_size(ui_rems(TITLE_SIZE))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
-            .text_color(theme.text)
-            .child("Sessions");
+        let safe = window.insets().safe_area;
+        let band = self.render_sessions_band(&theme, cx);
         let list = div()
             .id("compact-sessions")
             .flex_1()
@@ -517,393 +494,290 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .pt(safe.top)
+                .pb(safe.bottom)
                 .pl(safe.left)
                 .pr(safe.right)
-                .child(title)
+                .child(band)
                 .child(list)
-                .child(self.render_compact_capsule(&theme, cx))
-                .child(self.render_compact_tabs(&theme, safe.bottom, cx))
                 .children(overlays)
                 .into_any_element(),
         )
     }
 
-    /// The capsule over the tab bar: a plus, "New session", and what is running, on the glass
-    /// zeron's accessory sits on (`AskAnythingAccessory`), the status glyph before the words.
-    fn render_compact_capsule(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (working, waiting) = {
-            let state = self.state.read(cx);
-            let now = crate::clock::utc(cx);
-            state
-                .chats
-                .iter()
-                .filter(|chat| !chat.archived && chat.is_top_level())
-                .map(|chat| state.indicator_for(&chat.id, now))
-                .fold((0_usize, 0_usize), |(working, waiting), indicator| match indicator {
-                    Indicator::Working => (working.saturating_add(1), waiting),
-                    Indicator::AwaitingInput => (working, waiting.saturating_add(1)),
-                    Indicator::None | Indicator::Errored => (working, waiting),
-                })
-        };
-        let said = summary(working, waiting);
-        // slopty: before the first chat can start, the capsule offers the step it needs, as the
-        // desktop's canvas does, never a new chat that has nowhere to go.
+    /// The Sessions page's band, the Mac's title row on a phone: the page's heading, then the
+    /// inbox's eye, the palette, Settings and a new session. Before the first session can start,
+    /// the last offers the step it needs, as the Mac's canvas does, never a session with nowhere
+    /// to go.
+    fn render_sessions_band(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let step = self.first_step(cx);
-        let words = step.map_or("New session", super::spaces::FirstStep::action);
-        let label: SharedString = if said.is_empty() {
-            words.into()
-        } else {
-            format!("{words}, {}", said.replace(" · ", ", ")).into()
+        let new_words = step.map_or("New session", super::spaces::FirstStep::action);
+        let new_glyph = step.map_or(icons::PLUS, super::spaces::FirstStep::glyph);
+        let eye = self.render_inbox_button(theme, cx);
+        type OnClick = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>;
+        let button = |id: &'static str, glyph: &'static str, label: &'static str, on_click: OnClick| {
+            super::window_control_button(id, glyph, theme, on_click).role(gpui::Role::Button).aria_label(label)
         };
-        let popup = theme.for_popup();
-        let glass = popup.is_frost();
-        // zeron's glyph: a spinner while anything works, else the input dot.
-        let glyph = (!said.is_empty()).then(|| {
-            let cell = div()
-                .flex_none()
-                .size(px(CAPSULE_GLYPH))
-                .flex()
-                .items_center()
-                .justify_center();
-            if working > 0 {
-                cell.child(crate::loaders::mini_glyph_spinner(
-                    "compact-capsule-working",
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                ))
-            } else {
-                cell.child(div().size(px(7.0)).rounded_full().bg(theme.warning))
-            }
-        });
-        let plate = div()
+        let palette = button(
+            "compact-palette",
+            icons::COMMAND,
+            "Command palette",
+            Box::new(cx.listener(|this, _, window, cx| this.toggle_command_palette(window, cx))),
+        );
+        let settings = button(
+            "compact-settings",
+            icons::SETTINGS,
+            "Settings",
+            Box::new(cx.listener(|this, _, _, cx| this.open_last_settings(cx))),
+        );
+        let new_session = button(
+            "compact-new-session",
+            new_glyph,
+            new_words,
+            Box::new(cx.listener(move |this, _, _, cx| match step {
+                Some(step) => step.take(this, cx),
+                // The picker is the whole new session, standing over Sessions as the project
+                // picker does; the session it starts takes the screen, and put away it leaves
+                // Sessions as it was.
+                None => this.open_new_session(None, cx),
+            })),
+        );
+        div()
+            .id("compact-sessions-band")
+            .debug_selector(|| "compact-sessions-band".into())
             .flex_none()
-            .size(px(PLATE))
-            .rounded_full()
-            .bg(theme.accent_wash)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(
-                icon(step.map_or(icons::PLUS, super::spaces::FirstStep::glyph))
-                    .size(px(15.0))
-                    .text_color(theme.accent),
-            );
-        let capsule = div()
-            .id("compact-new-session")
-            .debug_selector(|| "compact-new-session".into())
-            .role(gpui::Role::Button)
-            .aria_label(label)
-            .h(px(CAPSULE))
             .w_full()
-            .pl(px(PLATE_INSET))
-            .pr(px(16.0))
-            .rounded_full()
-            .bg(if glass {
-                crate::popover::surface_bg(&popup)
-            } else {
-                popup.surface_raised
-            })
-            .border_1()
-            .border_color(popup.border)
-            .when(!glass, |el| el.shadow_md())
+            .h(px(BAND))
             .flex()
             .items_center()
-            .gap(px(11.0))
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if let Some(step) = step {
-                    step.take(this, cx);
-                    return;
-                }
-                // TUI-first: the picker is the whole new session, so it stands over Sessions, as
-                // the project picker does; the session it starts takes the screen (a chat chosen
-                // leaves Sessions), and put away it leaves Sessions as it was, never an empty page.
-                this.open_new_session(None, cx);
-            }))
-            .child(plate)
+            // On the list's leading edge, its rows' title edge.
+            .pl(px(15.0))
+            .pr(px(14.0))
+            .gap(px(super::TITLEBAR_CONTROL_GAP))
             .child(
                 div()
+                    .id("compact-sessions-heading")
+                    .role(gpui::Role::Heading)
+                    .aria_label("Sessions")
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_size(ui_rems(16.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(popup.text)
-                    .child(words),
+                    .text_size(ui_rems(17.0))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(theme.text)
+                    .child("Sessions"),
             )
-            .children(glyph.map(|glyph| glyph.mr(px(-4.0))))
-            .when(!said.is_empty(), |el| {
-                el.child(
-                    div()
-                        .flex_none()
-                        .text_size(ui_rems(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(popup.text_muted)
-                        .child(said),
-                )
-            });
-        div()
-            .flex_none()
-            .px(px(16.0))
-            .pb(px(CAPSULE_BELOW))
-            .child(crate::frost::frosted(CAPSULE / 2.0, crate::frost::MENU_BLUR, capsule))
+            .child(eye)
+            .child(palette)
+            .child(settings)
+            .child(new_session)
             .into_any_element()
     }
 
-    /// The tab bar: Sessions (this page), Settings, Search (the command palette).
-    fn render_compact_tabs(
-        &self,
-        theme: &Theme,
-        bottom: Pixels,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let items = Tab::ALL.into_iter().map(|tab| {
-            let current = tab == Tab::Sessions;
-            // zeron tints the bar in `text`: the selected tab reads through its glass pill and
-            // its weight, never the accent.
-            let tone = if current { theme.text } else { theme.text_muted };
-            let pill = current.then(|| {
-                div()
-                    .absolute()
-                    .top(px(TAB_PILL_INSET * 0.5))
-                    .bottom(px(TAB_PILL_INSET * 0.5))
-                    .left(px(TAB_PILL_INSET))
-                    .right(px(TAB_PILL_INSET))
-                    .child(crate::frost::frosted(
-                        (TAB_BAR - TAB_PILL_INSET) / 2.0,
-                        crate::frost::MENU_BLUR,
-                        div().size_full().rounded_full().bg(crate::theme::wash(0.10)),
-                    ))
-            });
-            div()
-                .id(SharedString::from(format!("compact-tab-{}", tab.label())))
-                .role(gpui::Role::Tab)
-                .aria_label(tab.label())
-                .aria_selected(current)
-                .relative()
-                .flex_1()
-                .h_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(2.0))
-                .cursor_pointer()
-                .children(pill)
-                .on_click(cx.listener(move |this, _, window, cx| match tab {
-                    Tab::Sessions => {}
-                    Tab::Settings => this.open_last_settings(cx),
-                    Tab::Search => this.toggle_command_palette(window, cx),
-                }))
-                .child(icon(tab.glyph()).size(px(22.0)).text_color(tone))
-                .child(
-                    div()
-                        .text_size(ui_rems(10.0))
-                        .font_weight(if current {
-                            gpui::FontWeight::SEMIBOLD
-                        } else {
-                            gpui::FontWeight::MEDIUM
-                        })
-                        .text_color(tone)
-                        .child(tab.label()),
-                )
-        });
-        div()
-            .id("compact-tabs")
-            .role(gpui::Role::TabList)
-            .aria_label("Tabs")
-            .flex_none()
-            .w_full()
-            .border_t_1()
-            .border_color(theme.border)
-            .pb(bottom)
-            .child(div().h(px(TAB_BAR)).w_full().flex().flex_row().children(items))
-            .into_any_element()
-    }
-
-    /// The navigation bar's words: the chat's title, and "project @ device" under it.
-    fn compact_nav_words(&self, cx: &App) -> (SharedString, Option<SharedString>) {
-        let state = self.state.read(cx);
-        match state.selected_chat_row() {
-            Some(chat) => {
-                let title = crate::transcript::single_line(
-                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New session"),
-                );
-                let project = state.space_for_chat(chat).map(|space| space.display_name().to_owned());
-                let device = state.device_name(&chat.device_id).map(str::to_owned);
-                let subtitle = match (project, device) {
-                    (Some(project), Some(device)) => Some(format!("{project} @ {device}")),
-                    (Some(project), None) => Some(project),
-                    (None, Some(device)) => Some(device),
-                    (None, None) => None,
-                };
-                (title.into(), subtitle.map(SharedString::from))
-            }
-            None => ("New session".into(), None),
-        }
-    }
-
-    /// The phone's navigation bar over a chat or the new-session page, in place of the
-    /// titlebar and its sidebar and history cluster; `None` off a phone. A chat: a back
-    /// chevron to Sessions, its title over "project @ device". The new-chat page: "New session"
-    /// and a close button.
+    /// The band over a phone's session, in place of the titlebar row; `None` off a phone. It
+    /// stands on the terminal's ground, inked for it, and holds: back to Sessions (over the
+    /// new-session canvas, a close); the session's mark and its title over its machine and branch,
+    /// whose press puts the inspector up or away; and while other sessions wait on the person, "N
+    /// need you", whose press opens the next. It also tells the key row what it stands for.
     pub(super) fn render_compact_nav_bar(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if !self.compact() {
             return None;
         }
         let theme = Theme::of(cx).clone();
-        let (title, subtitle) = self.compact_nav_words(cx);
-        let on_canvas = self.state.read(cx).selected_chat.is_none();
+        let now = crate::clock::utc(cx);
+        let (session, calling) = {
+            let state = self.state.read(cx);
+            let selected = state.selected_chat.as_deref();
+            // Every other session that waits on the person, across every machine.
+            let calling = state
+                .overview_chats(now)
+                .into_iter()
+                .filter(|(_, chat)| selected != Some(chat.id.as_str()))
+                .map(|(status, chat)| Mark::of(status, state.session_for(&chat.id), now))
+                .filter(|mark| matches!(mark, Mark::NeedsYou(_)))
+                .count();
+            let session = state.selected_chat_row().map(|chat| BandSession {
+                chat: chat.id.clone(),
+                title: crate::transcript::single_line(
+                    chat.title.as_deref().filter(|title| !title.trim().is_empty()).unwrap_or("New session"),
+                )
+                .into(),
+                machine_branch: super::tabs::machine_and_branch(
+                    state.device_name(&chat.device_id),
+                    chat.branch.as_deref(),
+                )
+                .map(SharedString::from),
+                harness: chat.config.as_ref().map(|config| config.harness),
+                mark: Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now),
+                terminal: state.session_terminal(&chat.id).is_some(),
+                inspects: crate::inspector::inspects(state, &chat.id),
+            });
+            (session, calling)
+        };
+        let terminal = session.as_ref().is_some_and(|session| session.terminal);
+        let ground = terminal.then(|| self.shown_ground(cx));
+        let ink = ground.map_or_else(|| theme.clone(), |ground| super::tabs::ink_for(ground, &theme));
+        if let (Some(session), Some(ground)) = (&session, ground) {
+            self.set_key_row(session.harness, ground, cx);
+        }
         let back = |this: &mut Self, cx: &mut Context<Self>| {
             Self::set_compact_sessions(true, cx);
             this.close_chat_menu(cx);
-            // slopty: the inspector's sheet is the session's, and goes with it.
+            // The inspector's sheet is the session's, and goes with it.
             if this.inspector_shown(cx) {
                 this.put_away_view(super::RightSurface::Inspector, cx);
             }
             cx.notify();
         };
-        let lead = if on_canvas {
-            div()
-                .id("compact-close")
-                .debug_selector(|| "compact-close".into())
-                .role(gpui::Role::Button)
-                .aria_label("Close")
-                .size(px(NAV_TARGET))
-                .flex_none()
-                .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .hover(|el| el.bg(crate::theme::wash(0.06)))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| back(this, cx)))
-                .child(icon(icons::CLOSE).size(px(18.0)).text_color(theme.text))
+        let (id, glyph, label) = if session.is_some() {
+            ("compact-back", icons::ALT_ARROW_LEFT, "Back to Sessions")
         } else {
+            ("compact-close", icons::CLOSE, "Close")
+        };
+        let lead = band_target(id, label)
+            .on_click(cx.listener(move |this, _, _, cx| back(this, cx)))
+            .child(icon(glyph).size(px(20.0)).text_color(ink.text));
+        let inspector_up = self.inspector_shown(cx);
+        let identity = session.map(|session| {
+            let mark = super::marks::mark_element(
+                SharedString::from(format!("compact-band-mark-{}", session.chat)),
+                "compact-band-mark".to_owned(),
+                &session.mark,
+                crate::loaders::status_mark::MARK_SMALL,
+                ground.unwrap_or(theme.bg),
+            );
             div()
-                .id("compact-back")
-                .debug_selector(|| "compact-back".into())
-                .role(gpui::Role::Button)
-                .aria_label("Back to Sessions")
-                .h(px(NAV_TARGET))
-                .flex_none()
-                .pr(px(8.0))
-                .rounded_full()
+                .id("compact-band-identity")
+                .debug_selector(|| "compact-band-identity".into())
+                .role(if session.inspects { gpui::Role::Button } else { gpui::Role::Heading })
+                .aria_label(session.title.clone())
+                .when(session.inspects, |identity| {
+                    identity
+                        .aria_description(if inspector_up { "Hides the inspector" } else { "Shows the inspector" })
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            // The sheet comes up over the terminal, so the keyboard makes way.
+                            if !this.inspector_shown(cx) {
+                                window.dismiss_virtual_keyboard();
+                            }
+                            this.toggle_inspector(cx);
+                        }))
+                })
+                .flex_1()
+                .min_w_0()
+                .h(px(TARGET))
                 .flex()
                 .items_center()
-                .gap(px(2.0))
-                .cursor_pointer()
-                .on_click(cx.listener(move |this, _, _, cx| back(this, cx)))
-                .child(icon(icons::ALT_ARROW_LEFT).size(px(22.0)).text_color(theme.text))
+                .gap(px(7.0))
+                .children(mark)
                 .child(
                     div()
-                        .text_size(ui_rems(16.0))
-                        .text_color(theme.text)
-                        .child("Sessions"),
-                )
-        };
-        // The title centres on the bar, whatever the lead's width; the lead's side reserves
-        // room on both edges so a long title never runs under it.
-        let heading = div()
-            .absolute()
-            .top_0()
-            .bottom_0()
-            .left(px(96.0))
-            .right(px(96.0))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .child(
-                div()
-                    .id("compact-nav-title")
-                    .role(gpui::Role::Heading)
-                    .aria_label(title.clone())
-                    .max_w_full()
-                    .truncate()
-                    .text_size(ui_rems(if subtitle.is_some() { 16.0 } else { 17.0 }))
-                    .line_height(ui_rems(NAV_TITLE_LINE))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child(title),
-            )
-            .children(subtitle.map(|subtitle| {
-                div()
-                    .debug_selector(|| "compact-nav-subtitle".into())
-                    .max_w_full()
-                    .truncate()
-                    .text_size(ui_rems(11.5))
-                    .line_height(ui_rems(NAV_SUBTITLE_LINE))
-                    .text_color(theme.text_muted)
-                    .child(subtitle)
-            }));
-        // slopty: a session's files and its inspector, a finger's reach away (an iPad's titlebar
-        // has them; a phone's bar stands in for it). The session is its terminal, so the bar
-        // has no terminal of its own to show.
-        let inspects = crate::inspector::inspects(self.state.read(cx), &self.active_chat);
-        let inspector_up = self.inspector_shown(cx);
-        let running_lanes = {
-            let state = self.state.read(cx);
-            let now = crate::clock::utc(cx);
-            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
-        };
-        let trail = (!on_canvas).then(|| {
-            div()
-                .absolute()
-                .top_0()
-                .bottom_0()
-                .right(px(8.0))
-                .flex()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    nav_icon("compact-files", icons::FOLDER_TREE, "Show files", &theme)
-                        .on_click(cx.listener(|this, _, window, cx| this.summon_files(window, cx))),
-                )
-                .when(inspects, |trail| {
-                    trail.child(
-                        nav_button(
-                            "compact-inspector",
-                            icons::corner_card_glyph(19.0, theme.text),
-                            if inspector_up { "Hide inspector" } else { "Show inspector" },
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .debug_selector(|| "compact-band-title".into())
+                                .truncate()
+                                .text_size(ui_rems(14.0))
+                                .line_height(ui_rems(BAND_TITLE_LINE))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(ink.text)
+                                .child(session.title),
                         )
-                        .aria_toggled(if inspector_up {
-                            gpui::accesskit::Toggled::True
-                        } else {
-                            gpui::accesskit::Toggled::False
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-                        // The session's running subagents, counted as the titlebar's toggle counts
-                        // them.
-                        .when(running_lanes > 0, |button| {
-                            crate::running_pill::mark_titlebar_button(button, running_lanes, &theme)
-                        }),
-                    )
-                })
+                        .children(session.machine_branch.map(|words| {
+                            div()
+                                .debug_selector(|| "compact-band-subtitle".into())
+                                .truncate()
+                                .text_size(ui_rems(11.0))
+                                .line_height(ui_rems(BAND_SUBTITLE_LINE))
+                                .text_color(ink.text_muted)
+                                .child(words)
+                        })),
+                )
         });
-        // slopty: zeron's backdrop for what scrolls under a bar: frosted glass in the window's
-        // tint (opaque where nothing is frosted), so a card under the title never reads through.
-        let bar = div()
-            .id("compact-nav-bar")
-            .debug_selector(|| "compact-nav-bar".into())
+        let spacer = identity.is_none();
+        let need = (calling > 0).then(|| {
+            let words: SharedString = if calling == 1 {
+                "1 needs you".into()
+            } else {
+                format!("{calling} need you").into()
+            };
+            band_target("compact-band-need", SharedString::from(format!("{words}, go to the next")))
+                .px(px(10.0))
+                .gap(px(6.0))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.open_next_needing_you(cx);
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .size(px(7.0))
+                        .rounded_full()
+                        .bg(super::marks::hue(crate::loaders::status_mark::MarkState::Waiting, &ink)),
+                )
+                .child(
+                    div()
+                        .text_size(ui_rems(13.0))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(ink.text)
+                        .child(words),
+                )
+        });
+        // No fill of its own: the column under it already stands on the ground it takes.
+        let band = div()
+            .id("compact-band")
+            .debug_selector(|| "compact-band".into())
             .role(gpui::Role::Group)
-            .aria_label("Navigation")
+            .aria_label("Session")
             .relative()
             .w_full()
-            .h(px(Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD))
-            .bg(if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } })
+            .h(px(BAND))
             .flex()
             .items_center()
-            .px(px(8.0))
-            .child(heading)
+            .pl(px(2.0))
+            .pr(px(4.0))
+            .gap(px(2.0))
             .child(lead)
-            .children(trail);
-        Some(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, bar).into_any_element())
+            .when(spacer, |band| band.child(div().flex_1()))
+            .children(identity)
+            .children(need);
+        Some(band.into_any_element())
     }
 
-    /// slopty: a phone's page over its session for the view in front of it (`docs/decisions/
+    /// The key row's door from the band: what runs in the session on screen (its agent, by the
+    /// chat's harness, or a shell), the ground under it, and its terminal. The row is made with
+    /// the first session page a phone draws.
+    fn set_key_row(&mut self, harness: Option<slopty_view_proto::HarnessId>, ground: gpui::Hsla, cx: &mut Context<Self>) {
+        let row = if let Some(row) = cx.try_global::<Row>() {
+            row.0.clone()
+        } else {
+            let row = cx.new(key_row::KeyRow::new);
+            cx.set_global(Row(row.clone()));
+            row
+        };
+        let terminal = self.session_terminal.read(cx).focus_handle();
+        row.update(cx, |row, cx| row.set(key_row::running(harness), ground, terminal, cx));
+    }
+
+    /// What an iPad's keyboard holds in its shortcut bar for the session (`docs/decisions/
+    /// layout.md`, "iPhone is a list, then the terminal"): laid out as the Mac, while the
+    /// session's terminal holds the keyboard and no hardware keyboard is attached, the row's
+    /// fixed keys lead and the keys of what runs trail; otherwise nothing, which takes the bar's
+    /// groups away. A phone, or an iPad as narrow as one, has the key row instead.
+    pub(super) fn publish_key_bar(&self, window: &Window, cx: &mut App) {
+        let holds = touch_screen()
+            && !self.compact()
+            && !crate::live::key_row::hardware_keyboard(cx)
+            && self.session_terminal.read(cx).focus_handle().contains_focused(window, cx);
+        let bar = if holds {
+            let harness = self.state.read(cx).selected_chat_row().and_then(|chat| chat.config.as_ref()).map(|config| config.harness);
+            key_row::bar(harness)
+        } else {
+            crate::live::key_row::Bar::default()
+        };
+        crate::live::key_row::set_bar(bar, cx);
+    }
+
+    /// A phone's page over its session for the view in front of it (`docs/decisions/
     /// layout.md`, "iPhone is a list, then the terminal"): a file, Files, the changes, a page,
     /// under a bar whose back closes it and names what comes forward then, as on a Mac the
     /// pane beside it would take the keyboard: the files a file was opened from, the inspector
@@ -1011,7 +885,7 @@ impl Shell {
         )
     }
 
-    /// slopty: the sheet's pan, which a finger starts on its header (`on`): from then on the
+    /// The sheet's pan, which a finger starts on its header (`on`): from then on the
     /// gesture is the sheet's, wherever the header has moved from the place the pan started,
     /// which a touch pan's every step is hit-tested at, through the momentum after it is let go.
     fn sheet_pan(&self, on: bool, height: f32, safe_top: f32, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1093,7 +967,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// slopty: the inspector on a phone, a sheet up from the screen's foot over the session's
+    /// The inspector on a phone, a sheet up from the screen's foot over the session's
     /// terminal, as UIKit puts an inspector at a compact width. It comes up at half the screen,
     /// the terminal above it, and its header follows a finger to the whole screen under the
     /// status bar or down out of the way; a press on its grabber changes detent. Its close,
@@ -1486,7 +1360,7 @@ mod tests {
         assert_eq!(swipe_offset(-(SWIPE_REACH + 40.0)), -(SWIPE_REACH + 10.0));
     }
 
-    /// The phone's navigation bar and its session list, from a shell with no engine.
+    /// The phone's session band and its session list, from a shell with no engine.
     struct PhoneHost(gpui::Entity<Shell>);
 
     impl gpui::Render for PhoneHost {
@@ -1547,8 +1421,8 @@ mod tests {
         });
     }
 
-    // On a phone the new-session page wears a title and a close, the chat a back chevron to
-    // Sessions; the rows take a swipe and a long press. Off a phone there is no bar at all.
+    // On a phone the new-session canvas's band wears a close, a session's a back chevron to
+    // Sessions; the rows take a swipe and a long press. Off a phone there is no band at all.
     #[gpui::test]
     fn the_phone_new_session_page_has_a_close_and_no_history_arrows(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = phone(cx);
@@ -1587,7 +1461,7 @@ mod tests {
         shell.update(cx, |shell, cx| assert!(shell.render_compact_nav_bar(cx).is_none()));
     }
 
-    // slopty: an empty Sessions page says its own noun and offers no key: a phone has none.
+    // An empty Sessions page says its own noun and offers no key: a phone has none.
     #[gpui::test]
     fn an_empty_sessions_page_offers_no_key(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = phone(cx);
@@ -1614,7 +1488,7 @@ mod tests {
         assert_eq!(crate::keys::combo_text_on(true, "mod-n"), "⌘N", "a Mac's key");
     }
 
-    // slopty: a touch screen's new-session picker offers no keys to press, none at its foot;
+    // A touch screen's new-session picker offers no keys to press, none at its foot;
     // with a keyboard they stand there.
     #[gpui::test]
     fn a_touch_screens_new_session_picker_offers_no_keys(cx: &mut gpui::TestAppContext) {
@@ -1632,10 +1506,12 @@ mod tests {
         assert_eq!(keys(cx), (true, true), "a keyboard's picker names its keys");
     }
 
-    // slopty: before the first chat can start, the capsule offers the step it needs, as the
-    // desktop's canvas does: a device first, then a project, and a new chat only once one can.
+    // Before the first session can start, the list band's new session offers the step it needs,
+    // as the Mac's canvas does: a device first, then a project, and a session only once one can.
     #[gpui::test]
-    fn before_any_project_the_capsule_offers_the_step_a_chat_needs(cx: &mut gpui::TestAppContext) {
+    fn before_any_project_the_bands_new_session_offers_the_step_a_session_needs(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (shell, cx) = ipad(cx);
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         shell.update(cx, |shell, cx| shell.state.update(cx, |state, _| state.chats.clear()));
@@ -1663,8 +1539,8 @@ mod tests {
         assert_eq!(offers(cx), ["Add a project"], "a device, no project: the canvas's action");
         let read = a11y(cx);
         assert!(read.contains(&(gpui::Role::Label, "No projects yet".to_owned())), "{read:?}");
-        let capsule = cx.debug_bounds("compact-new-session").expect("the capsule").center();
-        cx.simulate_click(capsule, gpui::Modifiers::default());
+        let new = cx.debug_bounds("compact-new-session").expect("the band's new session").center();
+        cx.simulate_click(new, gpui::Modifiers::default());
         shell.update(cx, |shell, cx| {
             assert!(shell.add_space.is_some(), "the press opens the project picker");
             assert!(shell.compact_sessions_up(cx), "over the Sessions page, which stays");
@@ -1693,8 +1569,8 @@ mod tests {
         });
         assert_eq!(offers(cx), ["New session"], "back on Sessions, a chat can start");
         // Its press puts the new-session picker over Sessions, and put away it leaves Sessions up.
-        let capsule = cx.debug_bounds("compact-new-session").expect("the capsule").center();
-        cx.simulate_click(capsule, gpui::Modifiers::default());
+        let new = cx.debug_bounds("compact-new-session").expect("the band's new session").center();
+        cx.simulate_click(new, gpui::Modifiers::default());
         let picked = a11y(cx);
         shell.update(cx, |shell, cx| {
             assert!(shell.new_session.is_some(), "the press opens the new-session picker");
@@ -1760,35 +1636,74 @@ mod tests {
         (shell, cx)
     }
 
-    // slopty: the phone's navigation bar paints a backdrop over its whole width and height, so
-    // what scrolls under its title never reads through.
+    // A phone's session band names the session with its mark, its title and its machine, and
+    // while another session waits on the person says how many, its press opening the next; on
+    // that one it says nothing, the session itself being the one that waited.
     #[gpui::test]
-    fn the_phones_navigation_bar_has_a_backdrop(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = phone(cx);
+    fn a_phones_session_band_jumps_to_the_next_session_that_needs_you(cx: &mut gpui::TestAppContext) {
+        let (shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| state.select_chat(Some("fix".into()), cx));
+            let now = crate::clock::utc(cx);
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "local", "name": "Studio", "platform": "macos",
+                    }))
+                    .unwrap(),
+                ];
+                state.sessions = vec![slopty_view_proto::Session {
+                    last_completed_turn: None,
+                    chat_id: "fix".into(),
+                    device_id: "local".into(),
+                    status: slopty_view_proto::SessionStatus::AwaitingInput,
+                    started_at: Some(now),
+                    updated_at: now,
+                    running_subagents: 0,
+                    status_since: None,
+                    waiting_on: None,
+                }];
+            });
+            shell.open_chat("docs".into(), cx);
         });
-        redraw(cx);
-        let bar = cx.debug_bounds("compact-nav-bar").expect("the navigation bar");
-        let (painted, scale, theme) = cx.update(|window, cx| {
-            (window.painted_primitives(), window.scale_factor(), Theme::of(cx).clone())
-        });
-        let fill = if theme.is_frost() { theme.glass() } else { gpui::Hsla { a: 1.0, ..theme.glass() } };
-        assert!(fill.a > 0.0, "a fill that hides what is under it");
-        let size = format!(
-            "size: Size {{ {}px (scaled) × {}px (scaled) }}",
-            f32::from(bar.size.width) * scale,
-            f32::from(bar.size.height) * scale
-        );
-        let background = format!("background: Solid({fill:?})");
-        let backdrop = painted
-            .iter()
-            .any(|line| line.contains("Quad") && line.contains(&size) && line.contains(&background));
+        let docs = a11y(cx);
+        let has = |read: &[(gpui::Role, String)], label: &str| {
+            read.iter().any(|(role, said)| *role == gpui::Role::Button && said == label)
+        };
+        let subtitle = cx.debug_bounds("compact-band-subtitle").is_some();
+        let need = cx.debug_bounds("compact-band-need").expect("the band's call").center();
+        cx.simulate_click(need, gpui::Modifiers::default());
+        let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
+        let fix = a11y(cx);
         FORCE_COMPACT.with(|force| force.set(false));
-        assert!(backdrop, "no {background} over the bar's {size}");
+        assert!(has(&docs, "Back to Sessions") && has(&docs, "Chat docs"), "back and the title: {docs:?}");
+        assert!(has(&docs, "1 needs you, go to the next"), "another waits: {docs:?}");
+        assert!(subtitle, "the machine under the title");
+        assert_eq!(opened.as_deref(), Some("fix"), "the press opens the one that waits");
+        assert!(!fix.iter().any(|(_, said)| said.contains("need")), "nothing else waits: {fix:?}");
     }
 
-    // slopty: on an iPad every control of the shell's own takes a finger's 44 pt both ways
+    // A phone's list stands under one band, the Mac's title row's: its heading, the inbox's eye,
+    // the palette, Settings and a new session; no tab bar and no capsule.
+    #[gpui::test]
+    fn a_phones_list_stands_under_one_band(cx: &mut gpui::TestAppContext) {
+        let (_shell, cx) = ipad(cx);
+        cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
+        let read = a11y(cx);
+        let band = cx.debug_bounds("compact-sessions-band").expect("the band");
+        FORCE_COMPACT.with(|force| force.set(false));
+        assert!(read.contains(&(gpui::Role::Heading, "Sessions".to_owned())), "{read:?}");
+        for label in ["Inbox", "Command palette", "Settings", "Add a device"] {
+            assert!(
+                read.iter().any(|(role, said)| *role == gpui::Role::Button && said == label),
+                "{label}: {read:?}"
+            );
+        }
+        assert!(!read.iter().any(|(role, _)| *role == gpui::Role::TabList), "no tab bar: {read:?}");
+        assert!((f32::from(band.size.height) - BAND).abs() < 0.5, "one row: {band:?}");
+    }
+
+    // On an iPad every control of the shell's own takes a finger's 44 pt both ways
     // (#23); on a Mac the same controls stay as drawn.
     #[gpui::test]
     fn an_ipads_controls_take_a_fingers_press(cx: &mut gpui::TestAppContext) {
@@ -1845,19 +1760,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_capsule_says_what_runs_and_what_waits() {
-        assert_eq!(summary(0, 0), "");
-        assert_eq!(summary(2, 0), "2 working");
-        assert_eq!(summary(0, 1), "1 needs you");
-        assert_eq!(summary(2, 3), "2 working · 3 need you");
-    }
-
-    // slopty: on a phone a toast stands above the tab bar and the New session capsule, hiding
-    // neither; off a phone it rises in the sidebar's foot, above its bottom row, off the
+    // On a phone's list a toast stands at the screen's foot, under the band, where nothing of the
+    // page's stands; off a phone it rises in the sidebar's foot, above its bottom row, off the
     // terminal (`chrome_tests::a_toast_keeps_off_the_terminal`).
     #[gpui::test]
-    fn a_phones_toast_stands_over_its_tabs_and_capsule(cx: &mut gpui::TestAppContext) {
+    fn a_phones_toast_stands_at_the_foot_of_its_list(cx: &mut gpui::TestAppContext) {
         let (_shell, cx) = ipad(cx);
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         cx.update(|_, cx| {
@@ -1876,32 +1783,24 @@ mod tests {
             cx.update(|window, _| {
                 let scale = f64::from(window.scale_factor());
                 let tree = window.a11y_tree().expect("a tree");
-                let find = |role: gpui::Role, starts: &str| {
-                    tree.nodes
-                        .iter()
-                        .find(|(_, node)| {
-                            node.role() == role
-                                && node.label().is_some_and(|label| label.starts_with(starts))
-                        })
-                        .and_then(|(_, node)| node.bounds())
-                        .map(|rect| ((rect.y0 / scale) as f32, (rect.y1 / scale) as f32))
-                };
-                (
-                    find(gpui::Role::Status, "Link copied"),
-                    // The capsule: before any device, it offers to add one.
-                    find(gpui::Role::Button, "New session").or_else(|| find(gpui::Role::Button, "Add a ")),
-                    find(gpui::Role::TabList, "Tabs"),
-                    f32::from(window.viewport_size().height),
-                )
+                let toast = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == gpui::Role::Status
+                            && node.label().is_some_and(|label| label.starts_with("Link copied"))
+                    })
+                    .and_then(|(_, node)| node.bounds())
+                    .map(|rect| ((rect.y0 / scale) as f32, (rect.y1 / scale) as f32));
+                (toast, f32::from(window.viewport_size().height))
             })
         };
-        let (toast, capsule, tabs, _) = bounds(cx);
-        let (toast, capsule, tabs) =
-            (toast.expect("the toast"), capsule.expect("the capsule"), tabs.expect("the tabs"));
-        assert!(toast.1 <= capsule.0 && toast.1 <= tabs.0, "toast {toast:?}, capsule {capsule:?}, tabs {tabs:?}");
+        let (toast, height) = bounds(cx);
+        let toast = toast.expect("the toast");
+        assert!(toast.0 > BAND && height - toast.1 < 40.0, "at the foot: {toast:?} in {height}");
         FORCE_COMPACT.with(|force| force.set(false));
         cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
-        let (toast, _, _, height) = bounds(cx);
+        let (toast, height) = bounds(cx);
         let toast = toast.expect("the toast on a Mac");
         let foot = super::super::SIDEBAR_FOOTER_BUTTON_SIZE + 3.0 * Theme::SPACE_SM;
         assert!((height - toast.1 - foot).abs() < 0.5, "over the sidebar's foot: {toast:?} in {height}");
@@ -1926,9 +1825,9 @@ mod tests {
         })
     }
 
-    // slopty: a page that is not shown gives no nodes: on a phone's chat page the Sessions list is
-    // off screen, so a screen reader reads none of its rows nor its History button; back on
-    // Sessions it reads them again.
+    // A page that is not shown gives no nodes: on a phone's session page the Sessions list is
+    // off screen, so a screen reader reads none of its rows, and the session's name only once,
+    // in its band; back on Sessions it reads them again.
     #[gpui::test]
     fn a_phones_chat_page_reads_no_hidden_rows(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = ipad(cx);
@@ -1945,16 +1844,17 @@ mod tests {
         shell.update(cx, |shell, cx| shell.open_chat("fix".into(), cx));
         let chat = a11y(cx);
         let back = chat.iter().any(|(_, label)| label == "Back to Sessions");
-        let hidden = rows(&chat);
+        let named = chat.iter().filter(|(_, label)| label.contains("Chat fix")).count();
+        let other = chat.iter().filter(|(_, label)| label.contains("Chat docs")).count();
         shell.update(cx, |shell, cx| assert!(shell.compact_back(cx)));
         let again = a11y(cx);
         FORCE_COMPACT.with(|force| force.set(false));
-        assert!(back, "the chat page: {chat:?}");
-        assert_eq!(hidden, 0, "no hidden row on the chat page: {chat:?}");
+        assert!(back, "the session page: {chat:?}");
+        assert_eq!((named, other), (1, 0), "only the band names a session there: {chat:?}");
         assert!(rows(&again) >= 2, "back on Sessions: {again:?}");
     }
 
-    // slopty: a row's status says what it asks of the person: "Needs you" for a chat waiting on
+    // A row's status says what it asks of the person: "Needs you" for a chat waiting on
     // them; an agent at rest waiting on its own command is at work, its hover card saying on
     // what (`marks`).
     #[gpui::test]
@@ -1992,13 +1892,12 @@ mod tests {
         assert!(!statuses.iter().any(|label| *label == "Input" || *label == "Waiting"), "{statuses:?}");
     }
 
-    // slopty: a phone's session reaches its files and its inspector by touch, as an iPad's
-    // titlebar does: the bar's Files opens a page of them whose back returns to the session,
-    // and its Inspector puts up a sheet over the session, at half the screen, that a finger
-    // takes to the whole screen and down out of the way, and its close puts away. The prompt
-    // box is docked there from the start.
+    // A phone's session puts its inspector up by a press on the band's title: a sheet over the
+    // session at half the screen, which a finger takes to the whole screen and down out of the
+    // way, and its close puts away. A view summoned over the session (Files, from the palette) is
+    // a page whose back returns to it.
     #[gpui::test]
-    fn a_phones_session_reaches_its_files_and_its_inspector_sheet(cx: &mut gpui::TestAppContext) {
+    fn a_phones_session_puts_its_inspector_up_as_a_sheet(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = ipad(cx);
         cx.simulate_resize(gpui::size(px(390.0), px(844.0)));
         shell.update(cx, |shell, cx| shell.open_chat("docs".into(), cx));
@@ -2032,11 +1931,11 @@ mod tests {
                 });
             }
         };
-        tap(cx, "compact-files");
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.summon_files(window, cx)));
         let files = a11y(cx);
         tap(cx, "compact-side-back");
         let back = a11y(cx);
-        tap(cx, "compact-inspector");
+        tap(cx, "compact-band-identity");
         let sheet = a11y(cx);
         let medium = top(cx);
         // A flick up takes it to the whole screen, and dims what it leaves above.
@@ -2051,22 +1950,20 @@ mod tests {
         pan(cx, &[0.0, 150.0, 150.0, 2.0, 0.0]);
         let pulled = top(cx);
         let shown_after_pull = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
-        tap(cx, "compact-inspector");
+        tap(cx, "compact-band-identity");
         let reopened = top(cx);
         tap(cx, "compact-inspector-close");
         let closed = top(cx);
         let shown_after_close = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
         FORCE_COMPACT.with(|force| force.set(false));
-        assert!(has(&chat, gpui::Role::Button, "Show files"), "{chat:?}");
-        assert!(has(&chat, gpui::Role::Button, "Show inspector"), "{chat:?}");
-        assert!(!has(&chat, gpui::Role::Button, "Show terminal"), "the session is its terminal: {chat:?}");
+        assert!(has(&chat, gpui::Role::Button, "Chat docs"), "the band's title: {chat:?}");
+        assert!(!has(&chat, gpui::Role::Button, "Show files"), "views come from the palette: {chat:?}");
         assert!(has(&files, gpui::Role::Heading, "Files"), "the files page: {files:?}");
         assert!(has(&files, gpui::Role::Button, "Back to Session"), "{files:?}");
         assert!(!has(&files, gpui::Role::Button, "Back to Sessions"), "the chat's page gives way: {files:?}");
         assert!(has(&back, gpui::Role::Button, "Back to Sessions"), "back on the chat: {back:?}");
         assert!(!has(&back, gpui::Role::Heading, "Files"), "{back:?}");
         assert!(has(&sheet, gpui::Role::Dialog, "Inspector"), "the sheet: {sheet:?}");
-        assert!(has(&sheet, gpui::Role::Button, "Hide inspector"), "{sheet:?}");
         assert!(has(&sheet, gpui::Role::Button, "Back to Sessions"), "over the session's page: {sheet:?}");
         assert!(has(&sheet, gpui::Role::Button, "Expand inspector"), "{sheet:?}");
         assert_eq!(medium, Some(422.0), "up at half the screen");
@@ -2079,7 +1976,7 @@ mod tests {
         assert_eq!((closed, shown_after_close), (None, false), "closed");
     }
 
-    // slopty: a sheet let go rests at the nearer detent, or one detent the way it was flicked,
+    // A sheet let go rests at the nearer detent, or one detent the way it was flicked,
     // and goes when pulled well past half; above the whole screen it resists.
     #[test]
     fn an_inspector_sheet_rests_where_a_finger_leaves_it() {

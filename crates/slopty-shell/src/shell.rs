@@ -5796,6 +5796,8 @@ impl Render for Shell {
             }
         };
         self.window_ground.follow(shown_ground, window, cx);
+        // An iPad's keyboard shortcut bar holds the session's keys while its terminal types.
+        self.publish_key_bar(window, cx);
         // Toasts float over every phase and route.
         // Never over a session's terminal (`toast_place`).
         let place = self.toast_place(window, cx);

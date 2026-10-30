@@ -12,6 +12,7 @@
 //! transcript's web link opens ([`open_link`]): the shell serves both once its window is up.
 
 pub mod chrome;
+pub mod key_row; // the touch key row's armed modifiers, and whether a keyboard stands in for it
 pub mod menu;
 pub mod screen;
 
@@ -124,9 +125,10 @@ impl TerminalLook {
             foreground: theme.terminal.foreground,
             cursor: theme.cursor,
             selection: theme.terminal.selection,
-            // slopty: a terminal's hits wash as the transcript's find washes its matches
+            // A terminal's hits wash as the transcript's find washes its matches
             // (`markdown::find::washes`): every one plainly marked, the one the person is on
-            // stronger. Half the selection's faint wash left the rest all but unseen on dark.
+            // stronger. Half the selection's faint wash would leave the rest all but unseen on
+            // dark.
             search_match: crate::markdown::find::washes(theme).0,
             search_current: crate::markdown::find::washes(theme).1,
             faint: theme.text_faint,
@@ -202,7 +204,7 @@ impl Chrome {
             surface: theme.surface,
             raised: theme.surface_raised,
             card: theme.surface_card,
-            // slopty: what floats is the popover's plane, frosted where the theme frosts.
+            // What floats is the popover's plane, frosted where the theme frosts.
             overlay: crate::popover::surface_bg(theme),
             input: theme.input_bg,
             hover: theme.element_hover,
@@ -516,10 +518,10 @@ pub struct HostedPage {
     pub height: Option<f32>,
     /// Why it cannot be shown, when it cannot.
     pub failed: Option<SharedString>,
-    /// slopty: the machine its document waits for while that machine is out of reach, by its
+    /// The machine its document waits for while that machine is out of reach, by its
     /// name: the card says so in place of loading.
     pub waiting: Option<SharedString>,
-    /// slopty: a file the app draws itself rather than in a web view (a PDF's pages, a CSV's
+    /// A file the app draws itself rather than in a web view (a PDF's pages, a CSV's
     /// table): the card draws this, and the page has no web view.
     pub doc: Option<crate::page::PageDoc>,
 }
@@ -536,10 +538,10 @@ pub enum PageAct {
     Width(f32),
     /// Its row left the transcript: let its web view go, its picture and state kept.
     Unmount,
-    /// slopty: open it afresh, the person's Try again: its web view and what failed are let go,
+    /// Open it afresh, the person's Try again: its web view and what failed are let go,
     /// and it is read again from what showed it.
     Reload,
-    /// slopty: draw page `index` (from 0) of a PDF `width` points wide, for the card or the pane.
+    /// Draw page `index` (from 0) of a PDF `width` points wide, for the card or the pane.
     Draw {
         /// The page.
         index: usize,
