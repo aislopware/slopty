@@ -8,41 +8,6 @@
 //! (mugen's "highlight is pure paint"). Streaming fade-in is a per-appended-
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    rustdoc::private_intra_doc_links,
-    trivial_casts,
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::doc_lazy_continuation,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::float_cmp_const,
-    clippy::format_collect,
-    clippy::indexing_slicing,
-    clippy::items_after_statements,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::map_unwrap_or,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::needless_pass_by_ref_mut,
-    clippy::or_fun_call,
-    clippy::partial_pub_fields,
-    clippy::rc_buffer,
-    clippy::semicolon_if_nothing_returned,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::too_many_arguments,
-    clippy::type_complexity,
-    clippy::unreachable,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -78,20 +43,25 @@ pub const GALLERY_ID: &str = "gallery";
 pub fn in_gallery(id: &str) -> bool {
     id.contains("-gallery-")
 }
-/// Body text size / line height (14px / 22px).
+/// Body text size (14px).
 pub const MD_TEXT_SIZE: f32 = 14.0;
+/// Body line height (22px).
 pub const MD_LINE_HEIGHT: f32 = 22.0;
 /// The prose of a run read in its card, under the card's 12 pt title: Claude's compact
 /// body (#24).
 pub const MD_COMPACT_TEXT_SIZE: f32 = 13.0;
+/// The compact body's line height.
 pub const MD_COMPACT_LINE_HEIGHT: f32 = 20.0;
-/// Default code block metrics; the rendered size comes from the theme.
+/// Default code block text size; the rendered size comes from the theme.
 pub const CODE_TEXT_SIZE: f32 = 12.5;
+/// Default code block line height.
 pub const CODE_LINE_HEIGHT: f32 = 18.0;
 /// Line height as a multiple of the code size, so a user-chosen size keeps the
 /// default's row rhythm.
 const CODE_LINE_HEIGHT_RATIO: f32 = CODE_LINE_HEIGHT / CODE_TEXT_SIZE;
+/// A code block's inset from its frame, either side.
 pub const CODE_PADDING_X: f32 = 12.0;
+/// A code block's inset from its frame, above and below.
 pub const CODE_PADDING_Y: f32 = 10.0;
 const CODE_HEADER_HEIGHT: f32 = 28.0;
 // A header action is a 24 px target (the house's minimum) with a 12 px glyph.
@@ -126,7 +96,9 @@ pub fn table_hairline() -> Hsla {
 /// Options for one rendered tree (a transcript row or a whole live message).
 #[derive(Clone)]
 pub struct RenderOptions {
+    /// Task list boxes that tick; `None` draws them read-only.
     pub tasks: Option<TaskUi>,
+    /// Charts, diagrams and inline images; `None` draws their source.
     pub media: Option<MediaUi>,
     /// Stable row key — prefixes element ids (scroll state, animations).
     pub row_key: SharedString,
@@ -155,42 +127,97 @@ pub struct RenderOptions {
     /// scroll state, keyed by the same element discriminator passed to
     /// [`render_block`]. `None` keeps non-chat Markdown surfaces unchanged.
     pub code: Option<HashMap<usize, CodeUi>>,
-    // A code block's right-click menu, its header's actions; `None` offers none.
+    /// A code block's right-click menu, its header's actions; `None` offers none.
     pub code_menu: Option<Rc<MenuFn>>,
     /// The prose's size and line height, in points: paragraphs and list items
     /// ([`MD_TEXT_SIZE`], or [`MD_COMPACT_TEXT_SIZE`] in a card).
     pub body: (f32, f32),
 }
 
+impl std::fmt::Debug for RenderOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderOptions")
+            .field("row_key", &self.row_key)
+            .field("now", &self.now)
+            .field("workspace_root", &self.workspace_root)
+            .field("body", &self.body)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One choice of a right-click menu: its words, the key that does the same (in
 /// `keys::combo_text`'s spelling), and what it does.
 #[derive(Clone)]
 pub struct MenuChoice {
+    /// Its words.
     pub label: SharedString,
+    /// The key that does the same, if one does.
     pub keys: Option<&'static str>,
-    pub act: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    /// What choosing it does.
+    pub act: Rc<WindowAction>,
 }
+
+impl std::fmt::Debug for MenuChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MenuChoice")
+            .field("label", &self.label)
+            .field("keys", &self.keys)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a press does, in its window.
+pub type WindowAction = dyn Fn(&mut Window, &mut gpui::App);
 
 /// Open the menu named `label` of `choices` at the pointer.
 pub type MenuFn =
     dyn Fn(&'static str, Vec<MenuChoice>, gpui::Point<gpui::Pixels>, &mut Window, &mut gpui::App);
 
+/// How a task list item's box ticks.
 #[derive(Clone)]
 pub struct TaskUi {
-    pub toggle: Option<Rc<dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App)>>,
+    /// Ticks or clears the box of the marker it is given; `None` draws boxes read-only.
+    pub toggle: Option<Rc<TaskToggleFn>>,
 }
+
+impl std::fmt::Debug for TaskUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskUi").field("toggles", &self.toggle.is_some()).finish()
+    }
+}
+
+/// What ticks or clears a task list item's box.
+pub type TaskToggleFn = dyn Fn(&super::parser::TaskMarker, &mut Window, &mut gpui::App);
 
 /// A chart fence's page card for its language, code and frame id; `None` when the
 /// language names no chart.
 pub type ChartFn = dyn Fn(&str, &str, SharedString, &Theme) -> Option<AnyElement>;
 
+/// A Mermaid fence's presentation for its source and frame id.
+pub type DiagramFn = dyn Fn(&str, SharedString, &Theme) -> DiagramView;
+
+/// An inline image's element for the image and its element id.
+pub type ImageFn = dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement;
+
+/// How a rendered tree draws charts, diagrams and images.
 #[derive(Clone)]
 pub struct MediaUi {
     /// Chart fences (```` ```vega-lite ````, ```` ```plotly ````) draw as page cards.
     pub chart: Option<Rc<ChartFn>>,
-    pub diagram: Option<Rc<dyn Fn(&str, SharedString, &Theme) -> DiagramView>>,
+    /// Mermaid fences draw as diagrams; `None` keeps their source.
+    pub diagram: Option<Rc<DiagramFn>>,
     /// `None` keeps inline images in their ordinary text rendering.
-    pub image: Option<Rc<dyn Fn(&super::parser::InlineImage, SharedString, &Theme) -> AnyElement>>,
+    pub image: Option<Rc<ImageFn>>,
+}
+
+impl std::fmt::Debug for MediaUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MediaUi")
+            .field("charts", &self.chart.is_some())
+            .field("diagrams", &self.diagram.is_some())
+            .field("images", &self.image.is_some())
+            .finish()
+    }
 }
 
 /// How a Mermaid fence presents itself on the owning surface.
@@ -199,28 +226,64 @@ pub enum DiagramView {
     Source,
     /// The source fence, flagged with the reason it cannot be drawn.
     Failed(SharedString),
+    /// The drawn diagram, with its switch back to source.
     Diagram(DiagramUi),
 }
 
-pub struct DiagramUi {
-    pub body: AnyElement,
-    pub show_source: bool,
-    pub toggle_source: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+impl std::fmt::Debug for DiagramView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source => f.write_str("Source"),
+            Self::Failed(why) => f.debug_tuple("Failed").field(why).finish(),
+            Self::Diagram(diagram) => f.debug_tuple("Diagram").field(diagram).finish(),
+        }
+    }
 }
 
-/// Copy-button wiring for one row's code blocks: the handler writes the code
+/// A drawn Mermaid diagram on its fence.
+pub struct DiagramUi {
+    /// The diagram.
+    pub body: AnyElement,
+    /// Whether the fence shows its source instead.
+    pub show_source: bool,
+    /// Switches between the diagram and its source.
+    pub toggle_source: Rc<WindowAction>,
+}
+
+impl std::fmt::Debug for DiagramUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiagramUi").field("show_source", &self.show_source).finish_non_exhaustive()
+    }
+}
+
+/// Copy-button wiring for one row's code blocks.
+///
+/// The handler writes the code
 /// to the clipboard and flips a transient per-row "Copied" state owned by the
 /// transcript entity; `copied_ix` is the block currently showing feedback.
 #[derive(Clone)]
 pub struct CopyUi {
-    pub handler: Rc<dyn Fn(usize, SharedString, &mut Window, &mut gpui::App)>,
+    /// Copies the given block's text.
+    pub handler: Rc<CopyFn>,
+    /// The block showing "Copied", if one is.
     pub copied_ix: Option<usize>,
 }
 
+impl std::fmt::Debug for CopyUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CopyUi").field("copied_ix", &self.copied_ix).finish_non_exhaustive()
+    }
+}
+
+/// What copies block `ix`'s text.
+pub type CopyFn = dyn Fn(usize, SharedString, &mut Window, &mut gpui::App);
+
 pub use super::links::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
 
+/// How a rendered tree's links route.
 #[derive(Clone)]
 pub struct LinkUi {
+    /// The session whose transcript holds the links, when one does.
     pub source_session: Option<String>,
     /// The linking chat lives on this device — outside links get their
     /// system-level menu rows (default app, file manager).
@@ -228,9 +291,24 @@ pub struct LinkUi {
     /// The ordered checkouts a file link may resolve against on this surface,
     /// the linking chat's own first. `None` renders no trailing open glyph
     /// and offers no file paths — previews and web-only surfaces.
-    pub(crate) file_roots: Option<Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
-    pub handler: Rc<dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome>,
+    #[expect(clippy::rc_buffer, reason = "shell lint migration: seam, callers in slice B")]
+    pub file_roots: Option<Rc<Vec<crate::workspace_links::FileLinkRoot>>>,
+    /// Routes an activated link and says where it went.
+    pub handler: Rc<LinkFn>,
 }
+
+impl std::fmt::Debug for LinkUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkUi")
+            .field("source_session", &self.source_session)
+            .field("source_local", &self.source_local)
+            .field("file_roots", &self.file_roots)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What routes an activated link.
+pub type LinkFn = dyn Fn(&LinkActivation, &mut Window, &mut gpui::App) -> LinkOutcome;
 
 impl LinkUi {
     /// The workspace file `target` resolves to under this surface's roots,
@@ -246,7 +324,7 @@ impl LinkUi {
             roots.iter().map(|root| root.root.as_str()),
         )? {
             crate::workspace_links::FileLinkResolution::Owned { root: ix, link } => {
-                let root = &roots[ix];
+                let root = roots.get(ix)?;
                 let absolute = root.absolute(&link);
                 // A project root past the linking chat's own opens by
                 // absolute path (see `Shell::open_workspace_file_link`), so
@@ -269,6 +347,8 @@ impl LinkUi {
     }
 }
 
+/// Carries out `action` on `target`: copies it, or routes it through `ui` (the web's outcome
+/// with no `ui`) and opens what goes outside.
 pub fn activate_link(
     target: LinkTarget,
     action: LinkAction,
@@ -294,32 +374,66 @@ pub fn activate_link(
 
 type HoverHandler = Rc<dyn Fn(bool, &mut Window, &mut gpui::App)>;
 type PointerHandler = Rc<dyn Fn(gpui::Pixels, &mut Window, &mut gpui::App)>;
-type ReleaseHandler = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
+type ReleaseHandler = Rc<WindowAction>;
 
 /// Transcript-owned interaction for the one fenced block represented by a
-/// virtualized Markdown row. The renderer owns only layout/chrome; callbacks
+/// virtualized Markdown row.
+///
+/// The renderer owns only layout/chrome; callbacks
 /// keep durable preference and mutable scroll state in [`crate::transcript`].
 #[derive(Clone)]
 pub struct CodeUi {
+    /// The fence's key, which its element ids carry.
     pub key: SharedString,
+    /// Its sideways scroll.
     pub scroll: gpui::ScrollHandle,
+    /// Its scrollbar, while the code is wider than the fence.
     pub scrollbar: Option<CodeScrollbarUi>,
+    /// The pointer entering or leaving the code.
     pub viewport_hover: HoverHandler,
+    /// The pointer moving while a scrollbar drag is held.
     pub drag_move: PointerHandler,
 }
 
+impl std::fmt::Debug for CodeUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeUi")
+            .field("key", &self.key)
+            .field("scrollbar", &self.scrollbar)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A fence's sideways scrollbar.
 #[derive(Clone)]
 pub struct CodeScrollbarUi {
+    /// Where its thumb sits and how long it is.
     pub metrics: crate::popover::HorizontalScrollbarMetrics,
+    /// Whether it shows: hovered, dragged or scrolling.
     pub active: bool,
+    /// The pointer entering or leaving it.
     pub hover: HoverHandler,
+    /// A press on it, at its x.
     pub press: PointerHandler,
+    /// The press let go.
     pub release: ReleaseHandler,
 }
 
-#[derive(Default)]
+impl std::fmt::Debug for CodeScrollbarUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodeScrollbarUi")
+            .field("metrics", &self.metrics)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The scroll state one fence keeps between frames.
+#[derive(Debug, Default)]
 pub struct CodeFenceRuntime {
+    /// Its sideways scroll.
     pub scroll: gpui::ScrollHandle,
+    /// Its scrollbar's hover and drag.
     pub scrollbar: crate::popover::HorizontalScrollbarState,
 }
 
@@ -328,7 +442,7 @@ pub struct CodeFenceRuntime {
 /// sideways, full width, and never wraps (the Amp study's P8).
 pub fn code_ui_for<V, F>(
     key: SharedString,
-    runtime: &mut CodeFenceRuntime,
+    runtime: &CodeFenceRuntime,
     entity: gpui::WeakEntity<V>,
     runtimes: F,
 ) -> CodeUi
@@ -347,7 +461,7 @@ where
                     let key = key.clone();
                     let runtimes = runtimes.clone();
                     Rc::new(move |hovered, _, cx| {
-                        let _ = entity.update(cx, |owner, cx| {
+                        let _gone = entity.update(cx, |owner, cx| {
                             if runtimes(owner)
                                 .get_mut(&key)
                                 .is_some_and(|runtime| runtime.scrollbar.set_bar_hovered(hovered))
@@ -362,7 +476,7 @@ where
                     let key = key.clone();
                     let runtimes = runtimes.clone();
                     Rc::new(move |pointer_x, _, cx| {
-                        let _ = entity.update(cx, |owner, cx| {
+                        let _gone = entity.update(cx, |owner, cx| {
                             let Some(runtime) = runtimes(owner).get_mut(&key) else {
                                 return;
                             };
@@ -379,7 +493,7 @@ where
                     let key = key.clone();
                     let runtimes = runtimes.clone();
                     Rc::new(move |_, cx| {
-                        let _ = entity.update(cx, |owner, cx| {
+                        let _gone = entity.update(cx, |owner, cx| {
                             if let Some(runtime) = runtimes(owner).get_mut(&key) {
                                 runtime.scrollbar.end_press();
                                 cx.notify();
@@ -399,7 +513,7 @@ where
             let key = key.clone();
             let runtimes = runtimes.clone();
             Rc::new(move |hovered, _, cx| {
-                let _ = entity.update(cx, |owner, cx| {
+                let _gone = entity.update(cx, |owner, cx| {
                     if runtimes(owner)
                         .get_mut(&key)
                         .is_some_and(|runtime| runtime.scrollbar.set_viewport_hovered(hovered))
@@ -411,7 +525,7 @@ where
         },
         drag_move: {
             Rc::new(move |pointer_x, _, cx| {
-                let _ = entity.update(cx, |owner, cx| {
+                let _gone = entity.update(cx, |owner, cx| {
                     let Some(runtime) = runtimes(owner).get_mut(&key) else {
                         return;
                     };
@@ -472,23 +586,27 @@ impl RenderOptions {
 /// Cached runs carry a resolved [`gpui::Hsla`] per span, so an entry is only
 /// valid for the palette that produced it — content-only keys silently serve
 /// dark-mode text onto a light background after an appearance switch.
-/// [`RenderCache::sync_style`] drops everything when color or typography moves.
-#[derive(Default)]
+/// `RenderCache::sync_style` drops everything when color or typography moves.
+#[derive(Debug, Default)]
 pub struct RenderCache {
-    flats: HashMap<(SharedString, usize, usize), Rc<FlatText>>,
-    code: HashMap<(SharedString, usize, usize), Rc<CachedCode>>,
+    flats: HashMap<BlockKey, Rc<FlatText>>,
+    code: HashMap<BlockKey, Rc<CachedCode>>,
     /// Display formulas by block, with the source they were laid out from:
     /// a screenful of large ones can outgrow the shared formula cache, which
     /// would then lay every one out again each frame.
-    display: HashMap<
-        (SharedString, usize, usize),
-        (String, Option<std::sync::Arc<slopty_math::Formula>>),
-    >,
+    display: HashMap<BlockKey, (String, Option<std::sync::Arc<slopty_math::Formula>>)>,
     /// The [`crate::theme::style_generation`] these entries were shaped under.
     generation: u32,
 }
 
+/// A cache entry's block: `(row key, top-level block ix, element discriminator)`.
+type BlockKey = (SharedString, usize, usize);
+
+/// A table's header row, body rows and column alignments.
+type TableParts<'a> = (&'a [Vec<InlineRun>], &'a [Vec<Vec<InlineRun>>], &'a [TableAlign]);
+
 /// Cached per-line code runs (validity: code length + highlight identity).
+#[derive(Debug)]
 pub struct CachedCode {
     code_len: usize,
     /// Slice-pointer identity + len of the highlight Arc that produced this.
@@ -512,6 +630,7 @@ impl RenderCache {
         self.display.retain(|(r, ..), _| r.as_ref() != row);
     }
 
+    /// Drop every cached entry.
     pub fn clear(&mut self) {
         self.flats.clear();
         self.code.clear();
@@ -565,11 +684,11 @@ pub fn render_tree(
 }
 
 const fn quote_child_ix(ix: usize, child_ix: usize) -> usize {
-    ix * 100 + child_ix
+    ix.saturating_mul(100).saturating_add(child_ix)
 }
 
 const fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
-    ix * 100 + item_ix * 10 + child_ix
+    ix.saturating_mul(100).saturating_add(item_ix.saturating_mul(10)).saturating_add(child_ix)
 }
 
 /// Element discriminators for every code block below `block`. Transcript rows
@@ -605,7 +724,7 @@ pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
 
 /// Render one block (top-level or nested). `top_ix` is the enclosing top-level
 /// block index (cache invalidation scope); `ix` the per-element discriminator.
-#[expect(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice B")]
 pub fn render_block(
     block: &Block,
     top_ix: usize,
@@ -617,14 +736,14 @@ pub fn render_block(
 ) -> AnyElement {
     match block {
         Block::Paragraph { runs } => {
-            text_element(runs, opts.body.0, opts.body.1, false, top_ix, ix, opts, theme, window)
+            text_element(runs, (opts.body.0, opts.body.1, false), (top_ix, ix), opts, theme, window)
         }
         Block::Heading { level, runs } => {
             let (size, line) = heading_metrics(*level);
-            text_element(runs, size, line, true, top_ix, ix, opts, theme, window)
+            text_element(runs, (size, line, true), (top_ix, ix), opts, theme, window)
         }
         Block::CodeBlock { language, code } => {
-            render_code_block(language.as_deref(), code, top_ix, ix, opts, theme, highlight)
+            render_code_block((language.as_deref(), code), (top_ix, ix), opts, theme, highlight)
         }
         Block::Math { tex } => render_math_block(tex, top_ix, ix, opts, theme, highlight),
         Block::BlockQuote { children } => div()
@@ -664,8 +783,8 @@ pub fn render_block(
                 let marker: AnyElement = if let Some(task) = task {
                     let toggle = opts.tasks.as_ref().and_then(|ui| ui.toggle.clone());
                     let marker = task.clone();
-                    let label: String = match &item[0] {
-                        Block::Paragraph { runs } => {
+                    let label: String = match item.first() {
+                        Some(Block::Paragraph { runs }) => {
                             runs.iter().skip(1).map(|r| r.text.as_str()).collect()
                         }
                         _ => String::new(),
@@ -723,7 +842,10 @@ pub fn render_block(
                             // Figures that line up.
                             .text_color(theme.accent)
                             .font_features(crate::typography::tabular())
-                            .child(SharedString::from(format!("{}.", start + item_ix as u64)))
+                            .child(SharedString::from(format!(
+                                "{}.",
+                                start.saturating_add(item_ix as u64)
+                            )))
                             .into_any_element(),
                         None => div()
                             .flex_none()
@@ -747,14 +869,15 @@ pub fn render_block(
                     div().flex_1().min_w_0().flex().flex_col().gap(px(4.0)).children(
                         item.iter().enumerate().map(|(ci, child)| {
                             let task_body;
-                            let child = if ci == 0 && task.is_some() {
-                                let Block::Paragraph { runs } = child else { unreachable!() };
-                                task_body = Block::Paragraph {
-                                    runs: runs.iter().skip(1).cloned().collect(),
-                                };
-                                &task_body
-                            } else {
-                                child
+                            // A task item's first paragraph drops its marker run.
+                            let child = match child {
+                                Block::Paragraph { runs } if ci == 0 && task.is_some() => {
+                                    task_body = Block::Paragraph {
+                                        runs: runs.iter().skip(1).cloned().collect(),
+                                    };
+                                    &task_body
+                                }
+                                _ => child,
                             };
                             render_block(
                                 child,
@@ -772,7 +895,7 @@ pub fn render_block(
             .into_any_element(),
         Block::Table { header, rows, align } => {
             // A table copies as Markdown or as CSV from its hover.
-            let table = render_table(header, rows, align, top_ix, ix, opts, theme, window);
+            let table = render_table((header, rows, align), (top_ix, ix), opts, theme, window);
             table_with_copy(table, header, rows, ix, opts, theme)
         }
         Block::Rule => div().h(px(1.0)).w_full().bg(theme.border).into_any_element(),
@@ -808,7 +931,7 @@ fn render_math_block(
         None => lay_out(),
     };
     let Some(formula) = formula else {
-        return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
+        return render_code_block((Some("math"), tex), (top_ix, ix), opts, theme, highlight);
     };
     let line_height = super::math::display_line_height(
         &formula,
@@ -819,7 +942,7 @@ fn render_math_block(
     // Too big to set: the source, as for a formula slopty_math can't render.
     let Some(flat) = super::math::display_flat(tex, formula, super::math::MATH_SCALE, theme.text)
     else {
-        return render_code_block(Some("math"), tex, top_ix, ix, opts, theme, highlight);
+        return render_code_block((Some("math"), tex), (top_ix, ix), opts, theme, highlight);
     };
     let line = div()
         .min_w_full()
@@ -857,6 +980,7 @@ const fn heading_metrics(level: u8) -> (f32, f32) {
 }
 
 /// Shared per-column table geometry (port of mugen `tableColumns`).
+#[derive(Debug)]
 pub struct TableColumns {
     /// Per-column max-content width, padding included.
     pub naturals: Vec<f32>,
@@ -871,7 +995,7 @@ pub struct TableColumns {
 pub fn table_columns(content_widths: &[f32]) -> TableColumns {
     let naturals: Vec<f32> = content_widths
         .iter()
-        .map(|w| w.max(TABLE_MIN_COLUMN_CONTENT) + 2.0 * TABLE_CELL_PADDING)
+        .map(|w| 2.0_f32.mul_add(TABLE_CELL_PADDING, w.max(TABLE_MIN_COLUMN_CONTENT)))
         .collect();
     let minimums: Vec<f32> = naturals.iter().map(|n| n.min(TABLE_MIN_COLUMN_WIDTH)).collect();
     let min_table_width = minimums.iter().sum();
@@ -881,13 +1005,13 @@ pub fn table_columns(content_widths: &[f32]) -> TableColumns {
 /// `runs` (covering a text in order) cut to the byte range `range` of it.
 fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     let mut out = Vec::new();
-    let mut at = 0;
+    let mut at = 0_usize;
     for run in runs {
-        let (start, end) = (at.max(range.start), (at + run.len).min(range.end));
+        let (start, end) = (at.max(range.start), at.saturating_add(run.len).min(range.end));
         if start < end {
-            out.push(TextRun { len: end - start, ..run.clone() });
+            out.push(TextRun { len: end.saturating_sub(start), ..run.clone() });
         }
-        at += run.len;
+        at = at.saturating_add(run.len);
         if at >= range.end {
             break;
         }
@@ -897,7 +1021,7 @@ fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
 
 /// Element/cache discriminator for a table cell (row-major under the block ix).
 const fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
-    ix * 100_000 + r * 100 + c
+    ix.saturating_mul(100_000).saturating_add(r.saturating_mul(100)).saturating_add(c)
 }
 
 /// A GFM table — a port of mugen-markdown's `TableBlock` under slopty's md
@@ -911,21 +1035,23 @@ const fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
 /// the same algorithm as the web's. When even the floors no longer fit, the
 /// rows overflow the viewport and the table scrolls horizontally instead of
 /// crushing every column into per-character wrapping.
-#[expect(clippy::too_many_arguments)]
 fn render_table(
-    header: &[Vec<InlineRun>],
-    rows: &[Vec<Vec<InlineRun>>],
-    align: &[TableAlign],
-    top_ix: usize,
-    ix: usize,
+    (header, rows, align): TableParts<'_>,
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     window: &Window,
 ) -> AnyElement {
+    // The unbreakable word around each inline formula (its slot's
+    // NBSPs plus any text glued to it: `cost=$F$`), shaped at the
+    // size the cell really sets (`MD_TEXT_SIZE` rems) — once per
+    // word, however many formulas it glues together, and only up to
+    // a bounded length: past it the formula's own width stands in
+    // (cells clip what they paint either way).
+    const MAX_SHAPED_WORD: usize = 512;
     // Header row first, mirroring the source's `rows` shape (rows may be ragged).
     let all: Vec<&[Vec<InlineRun>]> = std::iter::once(header)
         .filter(|h| !h.is_empty())
-        .map(|h| h as &[Vec<InlineRun>])
         .chain(rows.iter().map(Vec::as_slice))
         .collect();
     let cols = all.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -952,13 +1078,6 @@ fn render_table(
                 continue;
             };
             let flat = flatten_cached(runs, weight, top_ix, table_cell_ix(ix, r, c), opts, theme);
-            // The unbreakable word around each inline formula (its slot's
-            // NBSPs plus any text glued to it: `cost=$F$`), shaped at the
-            // size the cell really sets (`MD_TEXT_SIZE` rems) — once per
-            // word, however many formulas it glues together, and only up to
-            // a bounded length: past it the formula's own width stands in
-            // (cells clip what they paint either way).
-            const MAX_SHAPED_WORD: usize = 512;
             // Where GPUI's wrapper breaks: after an ASCII space (or a
             // newline). Found once per cell, then by binary search per slot.
             let breaks: Vec<usize> = flat
@@ -971,19 +1090,22 @@ fn render_table(
             let mut measured = None;
             for slot in flat.math.iter().filter(|slot| !slot.display) {
                 let before = breaks.partition_point(|&at| at < slot.range.start);
-                let start = before.checked_sub(1).map_or(0, |i| breaks[i] + 1);
+                let start = before
+                    .checked_sub(1)
+                    .and_then(|i| breaks.get(i))
+                    .map_or(0, |at| at.saturating_add(1));
                 if measured == Some(start) {
                     continue;
                 }
                 measured = Some(start);
                 let after = breaks.partition_point(|&at| at < slot.range.end);
                 let end = breaks.get(after).copied().unwrap_or(flat.text.len());
-                let width = if end - start <= MAX_SHAPED_WORD {
+                let width = if end.saturating_sub(start) <= MAX_SHAPED_WORD {
                     let runs = slice_runs(&flat.runs, start..end);
                     f32::from(
                         text_system
                             .shape_line(
-                                flat.text[start..end].to_string().into(),
+                                flat.text.get(start..end).unwrap_or_default().to_owned().into(),
                                 cell_font_size,
                                 &runs,
                                 None,
@@ -994,8 +1116,10 @@ fn render_table(
                     let span = super::math::span(&slot.formula);
                     (span.end - span.start) * slot.scale * f32::from(cell_font_size)
                 };
-                if width.is_finite() {
-                    widest_formula[c] = widest_formula[c].max(width.ceil());
+                if width.is_finite()
+                    && let Some(widest) = widest_formula.get_mut(c)
+                {
+                    *widest = widest.max(width.ceil());
                 }
             }
             if !flat.text.is_empty() {
@@ -1044,21 +1168,23 @@ fn render_table(
     // header fill, outer box, or rounding.
     let hairline = table_hairline();
     let mut inner = div().flex().flex_col().w_full().min_w(px(geo.min_table_width));
-    for (r, row) in flats.iter().enumerate() {
+    for (r, (row, source)) in flats.iter().zip(&all).enumerate() {
         if r > 0 {
             inner = inner.child(div().flex_none().h(px(TABLE_DIVIDER)).w_full().bg(hairline));
         }
         let mut row_el = div().flex().flex_row();
-        for (c, cell_flat) in row.iter().enumerate() {
+        for (c, ((cell_flat, natural), minimum)) in
+            row.iter().zip(&geo.naturals).zip(&geo.minimums).enumerate()
+        {
             let mut cell = div()
                 // A cell's content never paints into its neighbors: a formula
                 // whose slot still wraps (a narrow viewport) is cut at the
                 // cell, not drawn over the next column.
                 .overflow_hidden()
-                .flex_grow(geo.naturals[c])
-                .flex_shrink(geo.naturals[c])
+                .flex_grow(*natural)
+                .flex_shrink(*natural)
                 .flex_basis(px(0.0))
-                .min_w(px(geo.minimums[c]))
+                .min_w(px(*minimum))
                 .p(px(TABLE_CELL_PADDING))
                 .text_size(crate::typography::ui_rems(MD_TEXT_SIZE))
                 .line_height(crate::typography::ui_rems(MD_LINE_HEIGHT));
@@ -1077,17 +1203,13 @@ fn render_table(
                 TableAlign::Right => cell.text_right(),
             };
             if opts.media.as_ref().is_some_and(|media| media.image.is_some())
-                && all[r]
-                    .get(c)
-                    .is_some_and(|runs| runs.iter().any(|run| run.style.image.is_some()))
+                && let Some(runs) =
+                    source.get(c).filter(|runs| runs.iter().any(|run| run.style.image.is_some()))
             {
                 cell = cell.child(text_element(
-                    &all[r][c],
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    has_header && r == 0,
-                    top_ix,
-                    table_cell_ix(ix, r, c),
+                    runs,
+                    (MD_TEXT_SIZE, MD_LINE_HEIGHT, has_header && r == 0),
+                    (top_ix, table_cell_ix(ix, r, c)),
                     opts,
                     theme,
                     window,
@@ -1113,16 +1235,23 @@ fn render_table(
     div().id(scroll_id).w_full().overflow_x_scroll().child(inner).into_any_element()
 }
 
-/// Flattened inline runs: one string + gpui `TextRun`s + clickable link ranges
-/// + inline-code ranges (their rounded washes are painted by a canvas UNDER
-/// the text — `TextRun::background_color` can only paint square boxes).
+/// Flattened inline runs: one string, its gpui `TextRun`s, its clickable link ranges
+/// and its inline-code ranges.
+///
+/// Inline code's rounded washes are painted by a canvas UNDER
+/// the text (`TextRun::background_color` can only paint square boxes).
 /// `text` is a `SharedString` so cached reuse across frames is an Arc clone.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FlatText {
+    /// The source text this presentation stands for, when it differs from `text`.
     pub original: Option<super::link_presentation::OriginalText>,
+    /// The text as shown.
     pub text: SharedString,
+    /// Its runs, covering it in order.
     pub runs: Vec<TextRun>,
+    /// Each link's range of `text` and its destination.
     pub links: Vec<(Range<usize>, String)>,
+    /// Each inline code span's range of `text`.
     pub code_ranges: Vec<Range<usize>>,
     /// Reserved slots after resolved file links — displayed-text
     /// coordinates. Each slot paints the trailing open glyph.
@@ -1136,20 +1265,27 @@ pub struct FlatText {
 pub const fn inline_code_text(theme: &Theme) -> Hsla {
     theme.code_text
 }
+/// Inline-code wash: the rounded box painted under the code.
 pub const fn inline_code_wash(theme: &Theme) -> Hsla {
     theme.code_wash
 }
-/// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
-/// x extends 1px past the glyphs, y insets 2px from the 22px line box).
-/// The wash meets the hair spaces either side of the code ([`CODE_HAIR`]), which give
-/// it room in the line rather than painting over the words beside it (#20).
+/// Rounded-wash geometry: small radius on a slightly inset box.
+///
+/// Paint-only: x extends 1px past the glyphs, y insets 2px from the 22px line box.
+/// The wash meets the hair spaces either side of the code ([`CODE_HAIR_BEFORE`],
+/// [`CODE_HAIR_AFTER`]), which give it room in the line rather than painting over the words
+/// beside it (#20).
 pub const INLINE_CODE_RADIUS: f32 = 4.5;
+/// How far the wash reaches past the code's glyphs, either side.
 pub const INLINE_CODE_PAD_X: f32 = 1.0;
-/// The hair space (U+200A) either side of inline code, inside its wash: shown, but
-/// never copied or found (#20). The one before holds to the code with a word joiner (U+2060),
+/// The hair space (U+200A) before inline code, inside its wash.
+///
+/// Shown, but never copied or found (#20). It holds to the code with a word joiner (U+2060),
 /// so a line never breaks between them and leaves a sliver of wash at its end.
 pub const CODE_HAIR_BEFORE: &str = "\u{200A}\u{2060}";
+/// The hair space (U+200A) after inline code, inside its wash: shown, but never copied or found.
 pub const CODE_HAIR_AFTER: &str = "\u{200A}";
+/// How far the wash insets from the line box, above and below.
 pub const INLINE_CODE_INSET_Y: f32 = 2.0;
 
 /// Flatten inline runs into shaped-text inputs. Pure given a theme.
@@ -1194,7 +1330,12 @@ fn flatten_runs_weighted(runs: &[InlineRun], theme: &Theme, base_weight: FontWei
         // A stretch of inline code opens and closes on a hair space (#20).
         let hair_lead = haired(run) && !after_code;
         let hair_trail = haired(run)
-            && !runs[run_ix + 1..].iter().find(|next| !next.text.is_empty()).is_some_and(haired);
+            && !runs
+                .get(run_ix.saturating_add(1)..)
+                .unwrap_or_default()
+                .iter()
+                .find(|next| !next.text.is_empty())
+                .is_some_and(haired);
         after_code = haired(run);
         let hair = |hair: &str,
                     text: &mut String,
@@ -1374,11 +1515,12 @@ fn flatten_cached(
         Some(cache) => {
             let mut cache = cache.borrow_mut();
             cache.sync_style();
-            cache
-                .flats
-                .entry((opts.row_key.clone(), top_ix, ix))
-                .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight)))
-                .clone()
+            Rc::clone(
+                cache
+                    .flats
+                    .entry((opts.row_key.clone(), top_ix, ix))
+                    .or_insert_with(|| Rc::new(flatten_runs_weighted(runs, theme, base_weight))),
+            )
         }
         None => Rc::new(flatten_runs_weighted(runs, theme, base_weight)),
     }
@@ -1393,7 +1535,7 @@ fn flat_text_element(
 ) -> AnyElement {
     if opts.link.as_ref().is_some_and(|ui| ui.source_session.is_some()) && !flat.links.is_empty() {
         return super::link_presentation::ResponsiveText {
-            flat: flat.clone(),
+            flat: Rc::clone(flat),
             ix,
             opts: opts.clone(),
             theme: theme.clone(),
@@ -1502,7 +1644,7 @@ pub(super) fn flat_text_presented_element(
             REGISTRY.with(|r| {
                 r.borrow_mut().push(RegEntry {
                     surface,
-                    key: sel_key.clone(),
+                    key: std::sync::Arc::clone(&sel_key),
                     text: flat_text.clone(),
                     layout: layout.clone(),
                     offsets: offsets.clone(),
@@ -1513,8 +1655,7 @@ pub(super) fn flat_text_presented_element(
                 hitbox,
                 &sel_key,
                 surface,
-                &flat_text,
-                &layout,
+                (&flat_text, &layout),
                 offsets.clone(),
             );
         },
@@ -1573,10 +1714,18 @@ fn link_text_element(
                 (
                     range.start..glyph_end(range),
                     LinkTarget::new(
-                        flat.original.as_ref().map_or(&flat.text[range.clone()], |original| {
-                            &original.text[original.offsets.original(range.start)
-                                ..original.offsets.original(range.end)]
-                        }),
+                        flat.original
+                            .as_ref()
+                            .map_or_else(
+                                || flat.text.get(range.clone()),
+                                |original| {
+                                    original.text.get(
+                                        original.offsets.original(range.start)
+                                            ..original.offsets.original(range.end),
+                                    )
+                                },
+                            )
+                            .unwrap_or_default(),
                         url,
                     ),
                 )
@@ -1645,13 +1794,13 @@ fn paint_text_selection_with_wash(
     REGISTRY.with(|r| {
         r.borrow_mut().push(RegEntry {
             surface,
-            key: key.clone(),
+            key: std::sync::Arc::clone(key),
             text: text.clone(),
             layout: layout.clone(),
             offsets: None,
         });
     });
-    register_selection_listeners(window, hitbox, key, surface, text, layout, None);
+    register_selection_listeners(window, hitbox, key, surface, (text, layout), None);
 }
 
 /// The wrapping div shared by every selectable text region: markdown
@@ -1733,7 +1882,9 @@ pub(super) fn selection_test_snapshot(
     })
 }
 
-/// A zero-size canvas that clears the selection registry — paint it FIRST in
+/// A zero-size canvas that clears the selection registry.
+///
+/// Paint it FIRST in
 /// the transcript root (before any markdown), so each frame's registry holds
 /// exactly that frame's visible text elements in paint order.
 pub fn selection_frame_reset() -> impl IntoElement {
@@ -1741,7 +1892,9 @@ pub fn selection_frame_reset() -> impl IntoElement {
 }
 
 /// `selection_frame_reset` for one of several surfaces painted in the same
-/// frame (the main chat beside a side chat or subagent tab). It clears only
+/// frame (the main chat beside a side chat or subagent tab).
+///
+/// It clears only
 /// its own surface's entries and stamps the text painted after it, so
 /// another transcript's reset can't wipe this one's drag anchor.
 ///
@@ -1794,11 +1947,14 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
     }
 }
 
+/// A zero-size canvas that clears the selection registry of the elements keyed under `prefix`:
+/// paint it before a surface's markdown, as [`selection_frame_reset`] is painted before a
+/// transcript's.
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |_, (), _, _| {
-            REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix)))
+            REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix)));
         },
     )
     .absolute()
@@ -1848,10 +2004,11 @@ fn registry_point(position: gpui::Point<gpui::Pixels>) -> Option<(usize, usize)>
             }
         }
         let (ei, ..) = best?;
-        let ix = match reg[ei].layout.index_for_position(position) {
+        let entry = reg.get(ei)?;
+        let ix = match entry.layout.index_for_position(position) {
             Ok(ix) | Err(ix) => ix,
         };
-        Some((ei, reg[ei].offsets.as_ref().map_or(ix, |map| map.original(ix))))
+        Some((ei, entry.offsets.as_ref().map_or(ix, |map| map.original(ix))))
     })
 }
 
@@ -1897,13 +2054,12 @@ fn register_selection_listeners(
     hitbox: gpui::Hitbox,
     key: &std::sync::Arc<str>,
     surface: u64,
-    text: &SharedString,
-    layout: &gpui::TextLayout,
+    (text, layout): (&SharedString, &gpui::TextLayout),
     offsets: Option<super::link_presentation::OffsetMap>,
 ) {
     use gpui::{DispatchPhase, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent};
     {
-        let (key, text, layout) = (key.clone(), text.clone(), layout.clone());
+        let (key, text, layout) = (std::sync::Arc::clone(key), text.clone(), layout.clone());
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, _cx| {
             if phase != DispatchPhase::Bubble || e.button != MouseButton::Left {
                 return;
@@ -1933,7 +2089,7 @@ fn register_selection_listeners(
         });
     }
     {
-        let key = key.clone();
+        let key = std::sync::Arc::clone(key);
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, _cx| {
             if phase != DispatchPhase::Bubble || !e.dragging() {
                 return;
@@ -1948,14 +2104,12 @@ fn register_selection_listeners(
         });
     }
     {
-        let key = key.clone();
+        let key = std::sync::Arc::clone(key);
         window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, _cx| {
             if phase != DispatchPhase::Bubble {
                 return;
             }
-            if let Some(_text) = super::selection::end_drag(&key) {
-                // X11 middle-click paste parity (Zed does the same).
-            }
+            super::selection::end_drag(&key);
         });
     }
 }
@@ -1988,9 +2142,9 @@ fn range_rects_with_positions(
     let mut cur = range.start;
     // Walk the range one visual row at a time: find the furthest index that
     // still sits on the current row (binary search over glyph positions).
-    let mut guard = 0;
+    let mut guard = 0_u32;
     while cur < range.end && guard < 256 {
-        guard += 1;
+        guard = guard.saturating_add(1);
         let Some(mut p1) = position_for_index(cur) else {
             break;
         };
@@ -2013,8 +2167,8 @@ fn range_rects_with_positions(
                 // Largest ix on this row (probes stay on char boundaries only
                 // at the ends; intermediate probes just need a y).
                 let (mut lo, mut hi) = (cur, range.end);
-                while hi - lo > 1 {
-                    let mid = lo + (hi - lo) / 2;
+                while hi.saturating_sub(lo) > 1 {
+                    let mid = lo.midpoint(hi);
                     match position_for_index(mid) {
                         Some(pm) if pm.y == p1.y => lo = mid,
                         _ => hi = mid,
@@ -2039,14 +2193,12 @@ fn range_rects_with_positions(
     rects
 }
 
-#[expect(clippy::too_many_arguments)]
+/// `runs` as one text element: set at `size` on `line_height` (bold unless a run says
+/// otherwise with `bold_default`), keyed by its block and element (`top_ix`, `ix`).
 pub(super) fn text_element(
     runs: &[InlineRun],
-    size: f32,
-    line_height: f32,
-    bold_default: bool,
-    top_ix: usize,
-    ix: usize,
+    (size, line_height, bold_default): (f32, f32, bool),
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     window: &Window,
@@ -2055,37 +2207,36 @@ pub(super) fn text_element(
         && runs.iter().any(|run| run.style.image.is_some())
     {
         // Images with nothing but space between them make one gallery.
+        let look = (size, line_height, bold_default);
         let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-        let mut start = 0;
+        let mut start = 0_usize;
         for (index, run) in runs.iter().enumerate() {
             if run.style.image.is_none() {
                 continue;
             }
-            let joins = runs[start..index].iter().all(|run| run.text.trim().is_empty());
+            let joins = runs
+                .get(start..index)
+                .unwrap_or_default()
+                .iter()
+                .all(|run| run.text.trim().is_empty());
             match groups.last_mut() {
                 Some((_, images)) if joins => images.push(index),
                 _ => groups.push((start, vec![index])),
             }
-            start = index + 1;
+            start = index.saturating_add(1);
         }
         let mut elements = Vec::new();
         for (text_start, images) in groups {
-            let first = images[0];
-            if runs[text_start..first].iter().any(|run| !run.text.trim().is_empty()) {
-                elements.push(text_element(
-                    &runs[text_start..first],
-                    size,
-                    line_height,
-                    bold_default,
-                    top_ix,
-                    ix.wrapping_mul(4099).wrapping_add(text_start + 1000),
-                    opts,
-                    theme,
-                    window,
-                ));
+            let Some(&first) = images.first() else {
+                continue;
+            };
+            let lead = runs.get(text_start..first).unwrap_or_default();
+            if lead.iter().any(|run| !run.text.trim().is_empty()) {
+                let lead_ix = ix.wrapping_mul(4099).wrapping_add(text_start.wrapping_add(1000));
+                elements.push(text_element(lead, look, (top_ix, lead_ix), opts, theme, window));
             }
             let image_at = |index: usize, kind: &str| {
-                let Some(image) = &runs[index].style.image else {
+                let Some(image) = runs.get(index).and_then(|run| run.style.image.as_ref()) else {
                     return gpui::Empty.into_any_element();
                 };
                 image_ui(image, format!("{}-{kind}-{ix}-{index}", opts.row_key).into(), theme)
@@ -2111,36 +2262,27 @@ pub(super) fn text_element(
                 );
             }
         }
-        if start < runs.len() && runs[start..].iter().any(|run| !run.text.trim().is_empty()) {
-            elements.push(text_element(
-                &runs[start..],
-                size,
-                line_height,
-                bold_default,
-                top_ix,
-                ix.wrapping_mul(4099).wrapping_add(start + 1000),
-                opts,
-                theme,
-                window,
-            ));
+        let rest = runs.get(start..).unwrap_or_default();
+        if rest.iter().any(|run| !run.text.trim().is_empty()) {
+            let rest_ix = ix.wrapping_mul(4099).wrapping_add(start.wrapping_add(1000));
+            elements.push(text_element(rest, look, (top_ix, rest_ix), opts, theme, window));
         }
         return div().flex().flex_col().gap(px(8.0)).children(elements).into_any_element();
     }
     if let Some(lines) =
         opts.workspace_root.as_deref().and_then(|root| plain_file_reference_lines(runs, root))
+        && let Some(first) = runs.first()
     {
-        let style = runs[0].style.clone();
+        let style = first.style.clone();
         return div()
             .flex()
             .flex_col()
             .children(lines.into_iter().enumerate().map(|(line_ix, text)| {
+                let line_ix = ix.wrapping_mul(4099).wrapping_add(line_ix.wrapping_add(2000));
                 text_element(
                     &[InlineRun { text, style: style.clone() }],
-                    size,
-                    line_height,
-                    bold_default,
-                    top_ix,
-                    ix.wrapping_mul(4099).wrapping_add(line_ix + 2000),
+                    (size, line_height, bold_default),
+                    (top_ix, line_ix),
                     opts,
                     theme,
                     window,
@@ -2276,12 +2418,9 @@ fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<Strin
         .or_else(|| sole_plain_file_reference(runs, workspace_root))
 }
 
-#[expect(clippy::too_many_arguments)]
 fn render_code_block(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
+    (language, code): (Option<&str>, &str),
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     highlight: CodeHighlight,
@@ -2301,16 +2440,18 @@ fn render_code_block(
         let diagram = match handler(code, frame_id.clone(), theme) {
             DiagramView::Source => {
                 return render_code_block_source(
-                    language, code, top_ix, ix, opts, theme, highlight,
+                    (language, code),
+                    (top_ix, ix),
+                    opts,
+                    theme,
+                    highlight,
                 );
             }
             DiagramView::Failed(reason) => {
                 let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
                 return render_code_block_source_with_actions(
-                    language,
-                    code,
-                    top_ix,
-                    ix,
+                    (language, code),
+                    (top_ix, ix),
                     opts,
                     theme,
                     highlight,
@@ -2319,7 +2460,7 @@ fn render_code_block(
             }
             DiagramView::Diagram(diagram) => diagram,
         };
-        let toggle = diagram.toggle_source.clone();
+        let toggle = Rc::clone(&diagram.toggle_source);
         let toggle_action = code_icon_action(
             format!("{frame_id}-source-toggle").into(),
             if diagram.show_source { "Show diagram" } else { "Show source" },
@@ -2329,10 +2470,8 @@ fn render_code_block(
         );
         if diagram.show_source {
             return render_code_block_source_with_actions(
-                language,
-                code,
-                top_ix,
-                ix,
+                (language, code),
+                (top_ix, ix),
                 opts,
                 theme,
                 highlight,
@@ -2344,14 +2483,14 @@ fn render_code_block(
         return code_block_frame(frame_id, language, actions, diagram.body, theme)
             .into_any_element();
     }
-    render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
+    render_code_block_source((language, code), (top_ix, ix), opts, theme, highlight)
 }
 
 fn code_icon_action(
     id: SharedString,
     label: &'static str,
     icon_path: &'static str,
-    handler: Rc<dyn Fn(&mut Window, &mut gpui::App)>,
+    handler: Rc<WindowAction>,
     theme: &Theme,
 ) -> AnyElement {
     let fade_key = id.to_string();
@@ -2411,7 +2550,7 @@ fn code_copy_button(
     opts.copy.clone().map(|copy| {
         let copied = copy.copied_ix == Some(ix);
         let code_text: SharedString = code.to_owned().into();
-        let handler = copy.handler.clone();
+        let handler = Rc::clone(&copy.handler);
         let fade_key = format!("{}-copy{ix}", opts.row_key);
         // The copy keeps its size: its tooltip says "Copied" while the check is drawn in
         // (`CopyGlyph`; design-inspiration item 12), so Run beside it never moves under the
@@ -2521,7 +2660,6 @@ pub fn table_csv(header: &[Vec<InlineRun>], rows: &[Vec<Vec<InlineRun>>]) -> Str
     };
     std::iter::once(header)
         .filter(|header| !header.is_empty())
-        .map(|header| header as &[Vec<InlineRun>])
         .chain(rows.iter().map(Vec::as_slice))
         .map(|row| row.iter().map(field).collect::<Vec<_>>().join(","))
         .collect::<Vec<_>>()
@@ -2544,8 +2682,9 @@ fn table_with_copy(
     };
     let group: SharedString = format!("{}-table-copy{ix}", opts.row_key).into();
     let button = |kind: usize, label: &'static str, text: String| {
-        let handler = copy.handler.clone();
-        let copied = copy.copied_ix == Some(TABLE_COPY_IX + ix * 2 + kind);
+        let handler = Rc::clone(&copy.handler);
+        let copy_ix = TABLE_COPY_IX.wrapping_add(ix.wrapping_mul(2)).wrapping_add(kind);
+        let copied = copy.copied_ix == Some(copy_ix);
         let id: SharedString = format!("{group}-{kind}").into();
         let text: SharedString = text.into();
         // The chip keeps its words and size; its glyph and tooltip say "Copied".
@@ -2571,7 +2710,7 @@ fn table_with_copy(
             .text_color(theme.text_muted)
             .on_click(move |_, window, cx| {
                 cx.stop_propagation();
-                handler(TABLE_COPY_IX + ix * 2 + kind, text.clone(), window, cx);
+                handler(copy_ix, text.clone(), window, cx);
             })
             .hint(if copied { "Copied" } else { label })
             .aria_label(format!("Copy as {label}"))
@@ -2643,21 +2782,16 @@ fn code_block_frame(
         .child(body)
 }
 
-#[expect(clippy::too_many_arguments)]
 fn render_code_block_source(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
+    (language, code): (Option<&str>, &str),
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     highlight: CodeHighlight,
 ) -> AnyElement {
     render_code_block_source_with_actions(
-        language,
-        code,
-        top_ix,
-        ix,
+        (language, code),
+        (top_ix, ix),
         opts,
         theme,
         highlight,
@@ -2665,12 +2799,9 @@ fn render_code_block_source(
     )
 }
 
-#[expect(clippy::too_many_arguments)]
 fn render_code_block_source_with_actions(
-    language: Option<&str>,
-    code: &str,
-    top_ix: usize,
-    ix: usize,
+    (language, code): (Option<&str>, &str),
+    (top_ix, ix): (usize, usize),
     opts: &RenderOptions,
     theme: &Theme,
     highlight: CodeHighlight,
@@ -2700,7 +2831,7 @@ fn render_code_block_source_with_actions(
                         super::ansi::runs(styled, &mono, theme),
                     );
                 }
-                let spans = highlight.and_then(|h| h.get(li)).map(|t| &**t).unwrap_or(&[]);
+                let spans = highlight.and_then(|h| h.get(li)).map_or(&[][..], Vec::as_slice);
                 (
                     SharedString::from(line.to_owned()),
                     runs_for_syntax_line(line, spans, &mono, theme),
@@ -2717,7 +2848,7 @@ fn render_code_block_source_with_actions(
             if entry.code_len != code.len() || entry.hl_key != hl_key {
                 *entry = build();
             }
-            entry.clone()
+            Rc::clone(entry)
         }
         None => build(),
     };
@@ -2744,11 +2875,11 @@ fn render_code_block_source_with_actions(
         .whitespace_nowrap()
         .flex()
         .flex_col()
-        .children((0..cached.lines.len()).scan(0_usize, move |off, li| {
-            let (line, runs) = &cached.lines[li];
+        .children(cached.lines.iter().enumerate().scan(0_usize, move |off, (li, (line, runs))| {
             let start = *off;
-            *off = start + line.len() + 1; // +1 for the '\n'
-            let local = slice_spans(&veil_spans, start, start + line.len());
+            let end = start.saturating_add(line.len());
+            *off = end.saturating_add(1); // +1 for the '\n'
+            let local = slice_spans(&veil_spans, start, end);
             let runs = apply_veil(runs.clone(), &local);
             let key = code_line_selection_key(&opts.row_key, ix, li);
             Some(
@@ -2780,10 +2911,10 @@ fn render_code_block_source_with_actions(
     let scrollbar = code_ui.as_ref().and_then(|ui| {
         let bar = ui.scrollbar.as_ref()?;
         let metrics = bar.metrics;
-        let hover = bar.hover.clone();
-        let press = bar.press.clone();
-        let release_up = bar.release.clone();
-        let release_out = bar.release.clone();
+        let hover = Rc::clone(&bar.hover);
+        let press = Rc::clone(&bar.press);
+        let release_up = Rc::clone(&bar.release);
+        let release_out = Rc::clone(&bar.release);
         let thumb_height = if bar.active {
             crate::popover::MENU_SCROLLBAR_HOVER_THUMB_WIDTH
         } else {
@@ -2828,7 +2959,7 @@ fn render_code_block_source_with_actions(
     let menu_choices = opts.code_menu.as_ref().map(|_| {
         let mut choices = Vec::new();
         if let Some(copy) = opts.copy.as_ref() {
-            let (handler, text) = (copy.handler.clone(), SharedString::from(code.to_owned()));
+            let (handler, text) = (Rc::clone(&copy.handler), SharedString::from(code.to_owned()));
             choices.push(MenuChoice {
                 label: "Copy code".into(),
                 keys: None,
@@ -2853,8 +2984,8 @@ fn render_code_block_source_with_actions(
         });
     }
     if let Some(ui) = code_ui {
-        let viewport_hover = ui.viewport_hover.clone();
-        let drag_move = ui.drag_move.clone();
+        let viewport_hover = Rc::clone(&ui.viewport_hover);
+        let drag_move = Rc::clone(&ui.drag_move);
         let drag_key = ui.key;
         block = block
             .on_hover(move |hovered, window, cx| viewport_hover(*hovered, window, cx))
@@ -2870,9 +3001,10 @@ fn render_code_block_source_with_actions(
     block.into_any_element()
 }
 
-/// Paint color for a token class — the soft syntax palette (round 9: the
-/// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
-/// asked for color; these are the diff pane's hues, now shared by both).
+/// Paint color for a token class, from the soft syntax palette.
+///
+/// The original's code blocks were monochrome `#e7e7e7`; colour was asked for, so these are the
+/// diff pane's hues, shared by both.
 pub const fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
     theme.syntax.color(kind)
 }
@@ -2889,6 +3021,7 @@ pub fn runs_for_syntax_line(
     runs_for_syntax_line_with_plain(line, spans, mono, theme.text, theme)
 }
 
+/// Paint-only runs covering one code line, `plain_color` between its tokens.
 pub fn runs_for_syntax_line_with_plain(
     line: &str,
     spans: &[HighlightSpan],
@@ -2908,7 +3041,7 @@ pub fn runs_for_syntax_line_with_plain(
     let mut at = 0_usize;
     for span in spans {
         if span.range.start > at {
-            runs.push(plain(span.range.start - at));
+            runs.push(plain(span.range.start.saturating_sub(at)));
         }
         let mut run = plain(span.range.len());
         run.color = token_color(span.kind, theme);
@@ -2916,7 +3049,7 @@ pub fn runs_for_syntax_line_with_plain(
         at = span.range.end;
     }
     if at < line.len() {
-        runs.push(plain(line.len() - at));
+        runs.push(plain(line.len().saturating_sub(at)));
     }
     runs.retain(|run| run.len > 0);
     runs
@@ -2947,31 +3080,23 @@ mod tests {
                 .child(selection_frame_reset())
                 .child(text_element(
                     &plain("before"),
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    false,
-                    0,
-                    0,
+                    (MD_TEXT_SIZE, MD_LINE_HEIGHT, false),
+                    (0, 0),
                     &opts,
                     &theme,
                     window,
                 ))
                 .child(render_code_block_source(
-                    None,
-                    "selectable\n\nsecond",
-                    1,
-                    1,
+                    (None, "selectable\n\nsecond"),
+                    (1, 1),
                     &opts,
                     &theme,
                     None,
                 ))
                 .child(text_element(
                     &plain("after"),
-                    MD_TEXT_SIZE,
-                    MD_LINE_HEIGHT,
-                    false,
-                    2,
-                    2,
+                    (MD_TEXT_SIZE, MD_LINE_HEIGHT, false),
+                    (2, 2),
                     &opts,
                     &theme,
                     window,
@@ -3043,7 +3168,8 @@ mod tests {
         for text in ["linux", "lab-linux", target, "lab-macos", "macOS jobs"] {
             let key = selection_key_for_text(text);
             let start = selection_position(&key, 1);
-            let end = selection_position(&key, text.len() - 1);
+            let last = text.len().saturating_sub(1);
+            let end = selection_position(&key, last);
             cx.simulate_event(gpui::MouseDownEvent {
                 button: gpui::MouseButton::Left,
                 position: start,
@@ -3051,9 +3177,9 @@ mod tests {
                 ..Default::default()
             });
             for (position, expected) in [
-                (end, &text[1..text.len() - 1]),
+                (end, text.get(1..last).expect("an ASCII cell")),
                 (start, ""),
-                (selection_position(&key, 0), &text[..1]),
+                (selection_position(&key, 0), text.get(..1).expect("an ASCII cell")),
             ] {
                 cx.simulate_event(gpui::MouseMoveEvent {
                     position,
@@ -3137,15 +3263,17 @@ mod tests {
 
     /// A reply of `count` paragraphs, each with a formula in its line and one on its own,
     /// none the same as another's, so none is laid out before.
-    fn formula_reply(count: usize, salt: &str) -> String {
-        (0..count)
-            .map(|i| {
-                format!(
-                    "Line {i}: $x_{{{i}}}^2 + \\frac{{a_{{{i}}}}}{{b_{salt}}}$ holds.\n\n\
-                     $$\\sum_{{k=0}}^{{{i}}} \\binom{{n_{salt}}}{{k}} = 2^{{{i}}}$$\n\n"
-                )
-            })
-            .collect()
+    fn formula_reply(count: u16, salt: &str) -> String {
+        use std::fmt::Write as _;
+        (0..count).fold(String::new(), |mut reply, i| {
+            write!(
+                reply,
+                "Line {i}: $x_{{{i}}}^2 + \\frac{{a_{{{i}}}}}{{b_{salt}}}$ holds.\n\n\
+                 $$\\sum_{{k=0}}^{{{i}}} \\binom{{n_{salt}}}{{k}} = 2^{{{i}}}$$\n\n"
+            )
+            .expect("writing to a String");
+            reply
+        })
     }
 
     /// A reply with formulas, set as the window draws it.
@@ -3170,31 +3298,28 @@ mod tests {
     /// its `$` delimiters gone, its formulas plain words, is the baseline.
     #[gpui::test]
     fn a_formula_costs_its_frame_little(cx: &mut TestAppContext) {
-        const COUNT: usize = 40;
+        const COUNT: u16 = 40;
         let _selection = super::super::selection::test_state_lock();
         cx.update(|cx| cx.set_global(Theme::dark()));
-        let mut frames = Vec::new();
-        for (salt, math) in [("off", false), ("on", true)] {
-            let source = formula_reply(COUNT, salt);
-            let source = if math { source } else { source.replace('$', "") };
-            let (_, cx) = cx.add_window_view(|_, _| MathCostHarness(source));
-            cx.simulate_resize(size(px(720.0), px(4000.0)));
-            let draw = |cx: &mut gpui::VisualTestContext| {
-                let started = Instant::now();
-                cx.update(|window, cx| {
-                    window.refresh();
-                    window.draw(cx).clear(cx);
-                });
-                started.elapsed().as_secs_f64() * 1000.0
-            };
-            let first = draw(cx);
-            let warm = (0..5).map(|_| draw(cx)).sum::<f64>() / 5.0;
-            frames.push((first, warm));
-        }
-        let [(plain_first, plain_warm), (math_first, math_warm)] = frames[..] else {
-            unreachable!()
-        };
-        let formulas = (2 * COUNT) as f64;
+        let [(plain_first, plain_warm), (math_first, math_warm)] = [("off", false), ("on", true)]
+            .map(|(salt, math)| {
+                let source = formula_reply(COUNT, salt);
+                let source = if math { source } else { source.replace('$', "") };
+                let (_, cx) = cx.add_window_view(|_, _| MathCostHarness(source));
+                cx.simulate_resize(size(px(720.0), px(4000.0)));
+                let draw = |cx: &mut gpui::VisualTestContext| {
+                    let started = Instant::now();
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                    });
+                    started.elapsed().as_secs_f64() * 1000.0
+                };
+                let first = draw(cx);
+                let warm = std::iter::repeat_with(|| draw(cx)).take(5).sum::<f64>() / 5.0;
+                (first, warm)
+            });
+        let formulas = f64::from(COUNT) * 2.0;
         let cold = (math_first - plain_first) / formulas;
         let warm = (math_warm - plain_warm) / formulas;
         println!(
@@ -3223,9 +3348,12 @@ mod tests {
             for (position, expected) in [
                 (
                     point(bounds.right() + px(4.0), selection_position(&key, text.len()).y),
-                    &text[1..],
+                    text.get(1..).expect("an ASCII paragraph"),
                 ),
-                (point(bounds.left() - px(4.0), selection_position(&key, 0).y), &text[..1]),
+                (
+                    point(bounds.left() - px(4.0), selection_position(&key, 0).y),
+                    text.get(..1).expect("an ASCII paragraph"),
+                ),
             ] {
                 cx.simulate_event(gpui::MouseDownEvent {
                     button: gpui::MouseButton::Left,
@@ -3337,11 +3465,8 @@ mod tests {
                             text: "alpha beta gamma delta".into(),
                             style: InlineStyle::default(),
                         }],
-                        MD_TEXT_SIZE,
-                        MD_LINE_HEIGHT,
-                        false,
-                        0,
-                        0,
+                        (MD_TEXT_SIZE, MD_LINE_HEIGHT, false),
+                        (0, 0),
                         &opts,
                         &theme,
                         window,
@@ -3364,7 +3489,7 @@ mod tests {
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
-            let _ = window.draw(cx);
+            window.draw(cx).clear(cx);
         });
 
         // Each pane is 320px wide; drag across the start of its text. The
@@ -3401,7 +3526,7 @@ mod tests {
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
-            let _ = window.draw(cx);
+            window.draw(cx).clear(cx);
         });
 
         // Both panes paint `fork:0`. Whichever pane the drag starts in, it
@@ -3452,7 +3577,7 @@ mod tests {
         };
         cx.update(|window, cx| {
             window.refresh();
-            let _ = window.draw(cx);
+            window.draw(cx).clear(cx);
         });
         assert!(entries(2) > 0);
 
@@ -3464,7 +3589,7 @@ mod tests {
         for _ in 0..2 {
             cx.update(|window, cx| {
                 window.refresh();
-                let _ = window.draw(cx);
+                window.draw(cx).clear(cx);
             });
         }
         assert_eq!(entries(2), 0, "the closed pane's text is dropped");
@@ -3479,7 +3604,7 @@ mod tests {
         cx.simulate_resize(size(px(640.0), px(240.0)));
         cx.update(|window, cx| {
             window.refresh();
-            let _ = window.draw(cx);
+            window.draw(cx).clear(cx);
         });
 
         let before_key = "code-selection-test:0";
@@ -3589,10 +3714,13 @@ mod tests {
     /// taken from, so they scale 1:1 and need no ratio of their own.
     #[test]
     fn the_default_code_font_size_reproduces_the_historical_code_block_size() {
-        assert_eq!(CODE_TEXT_SIZE, crate::typography::CODE_FONT_SIZE_DEFAULT);
+        assert_eq!(CODE_TEXT_SIZE.to_bits(), crate::typography::CODE_FONT_SIZE_DEFAULT.to_bits());
         let theme = Theme::dark();
-        assert_eq!(theme.code_font_size, CODE_TEXT_SIZE);
-        assert_eq!(theme.code_font_size * CODE_LINE_HEIGHT_RATIO, CODE_LINE_HEIGHT);
+        assert_eq!(theme.code_font_size.to_bits(), CODE_TEXT_SIZE.to_bits());
+        assert_eq!(
+            (theme.code_font_size * CODE_LINE_HEIGHT_RATIO).to_bits(),
+            CODE_LINE_HEIGHT.to_bits()
+        );
     }
 
     #[test]
@@ -3778,12 +3906,9 @@ mod tests {
     /// reported at the end of row 0, while byte 6 is after the first glyph on
     /// row 1.
     fn wrapped_position(ix: usize) -> Option<gpui::Point<gpui::Pixels>> {
+        let x = |ix: usize| px(f32::from(u8::try_from(ix).expect("a short line")) * 10.0);
         (ix <= 9).then(|| {
-            if ix <= 5 {
-                point(px(ix as f32 * 10.0), px(0.0))
-            } else {
-                point(px((ix - 5) as f32 * 10.0), px(22.0))
-            }
+            if ix <= 5 { point(x(ix), px(0.0)) } else { point(x(ix.saturating_sub(5)), px(22.0)) }
         })
     }
 
@@ -4052,6 +4177,11 @@ mod tests {
         assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_owned())]);
     }
 
+    /// A width of one per character, for truncation tests.
+    fn char_width(text: &str) -> f32 {
+        f32::from(u16::try_from(text.chars().count()).expect("a short label"))
+    }
+
     fn math_run(text: &str, math: bool) -> InlineRun {
         InlineRun { text: text.into(), style: InlineStyle { math, ..Default::default() } }
     }
@@ -4066,10 +4196,11 @@ mod tests {
         let [slot] = flat.math.as_slice() else {
             panic!("one formula slot");
         };
-        assert_eq!(&flat.text[..slot.range.start], "area ");
-        assert!(flat.text[slot.range.clone()].chars().all(|c| c == '\u{a0}'));
-        assert_eq!(&flat.text[slot.range.end..], " here");
-        assert!(flat.code_ranges.is_empty());
+        assert_eq!(flat.text.get(..slot.range.start), Some("area "));
+        let slot_text = flat.text.get(slot.range.clone()).expect("the slot");
+        assert!(slot_text.chars().all(|c| c == '\u{a0}'));
+        assert_eq!(flat.text.get(slot.range.end..), Some(" here"));
+        assert_eq!(flat.code_ranges, Vec::<Range<usize>>::new());
         assert_eq!(flat.runs.iter().map(|run| run.len).sum::<usize>(), flat.text.len());
         // The slot shapes in the pinned face, so its width is a fixed number
         // of ems.
@@ -4083,8 +4214,8 @@ mod tests {
         let map = &original.offsets;
         assert_eq!(original.text.as_ref(), r"area $\frac{a}{b}$ here");
         assert_eq!(
-            &original.text[map.original(slot.range.start)..map.original(slot.range.end)],
-            r"$\frac{a}{b}$"
+            original.text.get(map.original(slot.range.start)..map.original(slot.range.end)),
+            Some(r"$\frac{a}{b}$")
         );
         assert_eq!(map.original(slot.range.start + 2), map.original(slot.range.start));
         assert_eq!(map.displayed_range(6..8), slot.range);
@@ -4120,15 +4251,15 @@ mod tests {
             &Theme::dark(),
             false,
         );
-        let shown = super::super::link_presentation::truncate(&flat, 20.0, |text, _| {
-            text.chars().count() as f32
-        });
+        let shown =
+            super::super::link_presentation::truncate(&flat, 20.0, |text, _| char_width(text));
         assert!(shown.text.len() < flat.text.len(), "the link truncates");
         let [slot] = shown.math.as_slice() else {
             panic!("the slot survives");
         };
         assert_eq!(slot.range.end, shown.text.len());
-        assert!(shown.text[slot.range.clone()].chars().all(|c| c == '\u{a0}'));
+        let slot_text = shown.text.get(slot.range.clone()).expect("the slot");
+        assert!(slot_text.chars().all(|c| c == '\u{a0}'));
         let original = shown.original.as_ref().unwrap();
         assert!(original.text.ends_with(" so $x^2$"));
         assert_eq!(
@@ -4169,10 +4300,11 @@ mod tests {
 
         // Every width that truncates the label cuts before the slot or after
         // it, never inside; a formula cut away leaves nothing to paint.
-        for width in 1..flat.text.chars().count() {
+        let label_chars = u16::try_from(flat.text.chars().count()).expect("a short label");
+        for width in 1..label_chars {
             let shown =
-                super::super::link_presentation::truncate(&flat, width as f32, |text, _| {
-                    text.chars().count() as f32
+                super::super::link_presentation::truncate(&flat, f32::from(width), |text, _| {
+                    char_width(text)
                 });
             let Some(ellipsis) = shown.text.find('…') else {
                 // Too short a cut to be worth an ellipsis.

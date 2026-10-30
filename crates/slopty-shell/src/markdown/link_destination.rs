@@ -1,6 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Destination disclosure is local text only. Never fetch link previews.
-#![allow(clippy::clone_on_ref_ptr, reason = "shell lint migration: slice C")]
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, px};
 
@@ -12,7 +11,7 @@ pub struct Destination(
 );
 impl Render for Destination {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        destination_card(&self.0, self.1.clone(), window, cx)
+        destination_card(&self.0, std::rc::Rc::clone(&self.1), window, cx)
     }
 }
 fn viewport_limits(width: f32, height: f32) -> (f32, f32) {

@@ -18,25 +18,6 @@
 //! ([`slopty_math::bundled::font_at`]) whichever face set them, so each font
 //! registers and verifies once, when a glyph first needs it, and every face
 //! paints through the same ids. Faces nobody uses are never parsed.
-#![allow(
-    missing_debug_implementations,
-    unnameable_types,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::indexing_slicing,
-    clippy::option_option,
-    clippy::significant_drop_in_scrutinee,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::unreachable,
-    clippy::unused_result_ok,
-    clippy::while_float,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -87,15 +68,20 @@ pub const MATH_FACE: Face = Face::Fira;
 /// A formula's size per unit of the text around it.
 pub const MATH_SCALE: f32 = 1.0;
 
-/// A formula painted over a reserved run of NBSPs. `range` is in displayed
-/// text coordinates; `display` centers the formula in its line box instead
-/// of setting it on the text baseline. `scale` is the formula's size per
-/// unit of the element's font size ([`MATH_SCALE`]).
-#[derive(Clone)]
+/// A formula painted over a reserved run of NBSPs.
+///
+/// `range` is in displayed text coordinates; `display` centers the formula in its line box
+/// instead of setting it on the text baseline. `scale` is the formula's size per unit of the
+/// element's font size (`MATH_SCALE`).
+#[derive(Clone, Debug)]
 pub struct MathSlot {
+    /// The reserved NBSPs, in displayed text coordinates.
     pub range: Range<usize>,
+    /// The laid-out formula painted over them.
     pub formula: Arc<Formula>,
+    /// Display math, centered in its line box, rather than inline math on the baseline.
     pub display: bool,
+    /// The formula's size per unit of the element's font size.
     pub scale: f32,
     /// Its TeX, what its math node reads to assistive technologies.
     pub tex: SharedString,
@@ -124,7 +110,7 @@ impl FormulaCache {
     fn new(capacity: usize, max_bytes: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            order: Default::default(),
+            order: std::collections::BTreeMap::new(),
             bytes: 0,
             tick: 0,
             capacity,
@@ -137,17 +123,18 @@ impl FormulaCache {
         if display { slopty_math::Options::display(1.0) } else { slopty_math::Options::inline(1.0) }
     }
 
-    /// The cached result for `tex`, marked used: `Some(None)` for a cached
-    /// error, `None` when it isn't cached yet.
-    fn lookup(&mut self, tex: &str, display: bool, face: Face) -> Option<Option<Arc<Formula>>> {
-        self.tick += 1;
+    /// The cached entry for `tex`, marked used (its formula `None` for a cached error), or `None`
+    /// when it isn't cached yet.
+    fn lookup(&mut self, tex: &str, display: bool, face: Face) -> Option<&CachedFormula> {
+        // One tick per lookup: a u64 outlasts any process.
+        self.tick = self.tick.saturating_add(1);
         let tick = self.tick;
         let entry = self.entries.get_mut(&(face, display))?.get_mut(tex)?;
         if let Some(key) = self.order.remove(&entry.used) {
             self.order.insert(tick, key);
         }
         entry.used = tick;
-        Some(entry.formula.clone())
+        Some(&*entry)
     }
 
     /// Caches `formula` (laid out from `tex`, or `None` for an error) and
@@ -162,18 +149,21 @@ impl FormulaCache {
         formula: Option<Arc<Formula>>,
     ) -> Option<Arc<Formula>> {
         if let Some(cached) = self.lookup(tex, display, face) {
-            return cached;
+            return cached.formula.clone();
         }
         let tick = self.tick;
         let key: Arc<str> = tex.into();
-        let bytes = key.len()
-            + formula.as_ref().map_or(0, |formula| formula.items.len() * size_of::<Item>());
-        self.entries
-            .entry((face, display))
-            .or_default()
-            .insert(key.clone(), CachedFormula { formula: formula.clone(), used: tick, bytes });
+        let bytes = key.len().saturating_add(
+            formula
+                .as_ref()
+                .map_or(0, |formula| formula.items.len().saturating_mul(size_of::<Item>())),
+        );
+        self.entries.entry((face, display)).or_default().insert(
+            Arc::clone(&key),
+            CachedFormula { formula: formula.clone(), used: tick, bytes },
+        );
         self.order.insert(tick, (face, display, key));
-        self.bytes += bytes;
+        self.bytes = self.bytes.saturating_add(bytes);
         while self.order.len() > self.capacity || self.bytes > self.max_bytes {
             let Some((_, (face, display, key))) = self.order.pop_first() else {
                 break;
@@ -181,7 +171,7 @@ impl FormulaCache {
             if let Some(entry) =
                 self.entries.get_mut(&(face, display)).and_then(|entries| entries.remove(&key))
             {
-                self.bytes -= entry.bytes;
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
             }
         }
         formula
@@ -197,7 +187,7 @@ impl FormulaCache {
             return None;
         }
         if let Some(cached) = self.lookup(tex, display, face) {
-            return cached;
+            return cached.formula.clone();
         }
         let laid = lay_out(tex, face, &options);
         self.insert(tex, display, face, laid)
@@ -242,7 +232,9 @@ fn formula_with(
     if tex.len() > options.max_bytes {
         return None;
     }
-    if let Some(cached) = cache().lookup(tex, display, face) {
+    // The cache is let go before the layout.
+    let cached = cache().lookup(tex, display, face).map(|entry| entry.formula.clone());
+    if let Some(cached) = cached {
         return cached;
     }
     let laid = lay_out(tex, face, &options);
@@ -303,8 +295,19 @@ pub fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
     if !(fits(width) && fits(height.abs())) {
         return None;
     }
-    let count = (width / nbsp_em()).ceil().max(1.0) as usize;
+    let count = slot_count(width);
     Some(std::iter::repeat_n(NBSP, count).collect())
+}
+
+/// How many NBSPs cover `width` ems: at least one.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a slot is at most MAX_SLOT_EMS wide and the NBSP a positive advance, so the count is \
+              a small positive whole number"
+)]
+fn slot_count(width: f32) -> usize {
+    (width / nbsp_em()).ceil().max(1.0) as usize
 }
 
 /// The font a slot shapes in (see [`SLOT_FAMILY`]).
@@ -343,35 +346,36 @@ fn line_height_with(
     // hard-broken lines of formulas must not cost lines × slots per render.
     let mut slots: Vec<&MathSlot> = flat.math.iter().filter(|slot| !slot.display).collect();
     slots.sort_by_key(|slot| slot.range.start);
-    let mut next_slot = 0;
-    let (mut first_run, mut first_run_at) = (0, 0);
-    let mut start = 0;
+    let mut next_slot = 0_usize;
+    let (mut first_run, mut first_run_at) = (0_usize, 0_usize);
+    let mut start = 0_usize;
     for line in flat.text.split('\n') {
-        let range = start..start + line.len();
-        start = range.end + 1;
-        while next_slot < slots.len() && slots[next_slot].range.start < range.start {
-            next_slot += 1;
+        let range = start..start.saturating_add(line.len());
+        start = range.end.saturating_add(1);
+        while slots.get(next_slot).is_some_and(|slot| slot.range.start < range.start) {
+            next_slot = next_slot.saturating_add(1);
         }
         let begin = next_slot;
-        while next_slot < slots.len() && range.contains(&slots[next_slot].range.start) {
-            next_slot += 1;
+        while slots.get(next_slot).is_some_and(|slot| range.contains(&slot.range.start)) {
+            next_slot = next_slot.saturating_add(1);
         }
-        let line_slots = &slots[begin..next_slot];
+        let line_slots = slots.get(begin..next_slot).unwrap_or_default();
         if line_slots.is_empty() {
             continue;
         }
-        while first_run < flat.runs.len() && first_run_at + flat.runs[first_run].len <= range.start
+        while let Some(run) = flat.runs.get(first_run)
+            && first_run_at.saturating_add(run.len) <= range.start
         {
-            first_run_at += flat.runs[first_run].len;
-            first_run += 1;
+            first_run_at = first_run_at.saturating_add(run.len);
+            first_run = first_run.saturating_add(1);
         }
         let (mut ascent, mut descent) = (0.0_f32, 0.0_f32);
         let mut at = first_run_at;
-        for run in &flat.runs[first_run..] {
+        for run in flat.runs.get(first_run..).unwrap_or_default() {
             if at >= range.end {
                 break;
             }
-            let run_range = at..at + run.len;
+            let run_range = at..at.saturating_add(run.len);
             at = run_range.end;
             if run_range.end > range.start {
                 let (run_ascent, run_descent) = metrics(&run.font);
@@ -391,6 +395,11 @@ fn line_height_with(
 
 /// The line box a display formula set at `scale` sits centered in, in the
 /// units of `size`.
+#[expect(
+    clippy::suboptimal_flops,
+    reason = "the box is ceiled to a whole line: a fused multiply-add's last bit would lift a \
+              height that lands on a whole number by a line pixel"
+)]
 pub fn display_line_height(formula: &Formula, scale: f32, size: f32, line_height: f32) -> f32 {
     line_height.max((formula.height() * scale * size + 2.0 * DISPLAY_PAD_Y).ceil())
 }
@@ -425,20 +434,20 @@ pub fn display_flat(tex: &str, formula: Arc<Formula>, scale: f32, color: Hsla) -
 
 /// The paint color of the text run covering byte `at`.
 pub fn color_at(runs: &[TextRun], at: usize) -> Option<Hsla> {
-    let mut end = 0;
+    let mut end = 0_usize;
     runs.iter().find_map(|run| {
-        end += run.len;
+        end = end.saturating_add(run.len);
         (at < end).then_some(run.color)
     })
 }
 
 /// The bundled math fonts' GPUI ids, by glyph font index: `None` until a
 /// glyph first needs the font, then what [`register`] made of it. A font
-/// that fails verification stays `Some(None)` and its glyphs paint as
+/// that fails verification stays set to `None` and its glyphs paint as
 /// outlines from the bundled data, never through some other copy of the
 /// family whose glyph ids might differ.
 #[derive(Default)]
-struct MathFonts([Option<Option<FontId>>; FONTS]);
+struct MathFonts([std::cell::OnceCell<Option<FontId>>; FONTS]);
 
 impl gpui::Global for MathFonts {}
 
@@ -446,14 +455,14 @@ impl MathFonts {
     /// `font`'s id, registered through `register` the first time it's asked
     /// for. `None` paints outlines.
     fn id(
-        &mut self,
+        &self,
         font: u8,
         register: impl FnOnce(&'static slopty_math::MathFont) -> Option<FontId>,
     ) -> Option<FontId> {
         *self
             .0
-            .get_mut(usize::from(font))?
-            .get_or_insert_with(|| register(slopty_math::bundled::font_at(font)))
+            .get(usize::from(font))?
+            .get_or_init(|| register(slopty_math::bundled::font_at(font)))
     }
 }
 
@@ -525,10 +534,10 @@ fn is_bundled_face(
         strikethrough: None,
     };
     let line = text_system.layout_line(&text, px(16.0), &[run], None);
-    let mut checked = 0;
+    let mut checked = 0_usize;
     for run in &line.runs {
         for glyph in &run.glyphs {
-            let Some(c) = text[glyph.index..].chars().next() else {
+            let Some(c) = text.get(glyph.index..).and_then(|rest| rest.chars().next()) else {
                 return false;
             };
             if c == ' ' {
@@ -538,7 +547,7 @@ fn is_bundled_face(
             if run.font_id != id || expected != Some(glyph.id.0) {
                 return false;
             }
-            checked += 1;
+            checked = checked.saturating_add(1);
         }
     }
     checked > 0
@@ -579,15 +588,15 @@ pub fn paint_formula(
             Item::Glyph { font, glyph, x, y, size } => {
                 let at = point(origin.x + px(x * scale), origin.y + px(y * scale));
                 if let Some(font_id) = math_font_id(font, window, cx) {
-                    window
-                        .paint_glyph(
-                            at,
-                            font_id,
-                            GlyphId(u32::from(glyph)),
-                            px(size * scale),
-                            color,
-                        )
-                        .ok();
+                    if let Err(error) = window.paint_glyph(
+                        at,
+                        font_id,
+                        GlyphId(u32::from(glyph)),
+                        px(size * scale),
+                        color,
+                    ) {
+                        tracing::debug!(%error, "paint formula glyph");
+                    }
                 } else {
                     let sink = outlines.get_or_insert_with(OutlineSink::default);
                     slopty_math::bundled::font_at(font).outline(
@@ -788,8 +797,8 @@ impl Element for MathGlyphs {
             } else {
                 0.0
             };
-            let x = rect.origin.x + px(slack - scale * span.start);
-            placed.push((formula.clone(), point(x, baseline), math_size, *color));
+            let x = rect.origin.x + px(scale.mul_add(-span.start, slack));
+            placed.push((Arc::clone(formula), point(x, baseline), math_size, *color));
             // Its math node, over what it paints.
             let id = SharedString::from(format!("{}-node-{}", self.id, slot.range.start));
             if let Some(laid) = placed.last() {
@@ -904,19 +913,19 @@ mod tests {
 
     impl slopty_math::PathSink for CountingSink {
         fn move_to(&mut self, _: f32, _: f32) {
-            self.0 += 1;
+            self.0 = self.0.saturating_add(1);
         }
 
         fn line_to(&mut self, _: f32, _: f32) {
-            self.0 += 1;
+            self.0 = self.0.saturating_add(1);
         }
 
         fn quad_to(&mut self, _: f32, _: f32, _: f32, _: f32) {
-            self.0 += 1;
+            self.0 = self.0.saturating_add(1);
         }
 
         fn cubic_to(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32, _: f32) {
-            self.0 += 1;
+            self.0 = self.0.saturating_add(1);
         }
 
         fn close(&mut self) {}
@@ -963,7 +972,7 @@ mod tests {
 
     #[test]
     fn math_fonts_register_only_the_faces_glyphs_use() {
-        let mut fonts = MathFonts::default();
+        let fonts = MathFonts::default();
         let mut registered = Vec::new();
         let laid = formula(r"\mathcal{L} + x", false, Face::Fira).unwrap();
         for _ in 0..2 {
@@ -984,17 +993,20 @@ mod tests {
             "each used face once, no other"
         );
         assert_eq!(
-            fonts.0.iter().filter(|id| id.is_some()).count(),
+            fonts.0.iter().filter(|id| id.get().is_some()).count(),
             2,
             "untouched faces stay unregistered"
         );
         // A face that fails verification paints outlines and isn't retried.
-        let mut fresh = MathFonts::default();
+        let fresh = MathFonts::default();
         let stix = Face::StixTwo.index();
         assert_eq!(fresh.id(stix, |_| None), None);
-        assert_eq!(fresh.id(stix, |_| unreachable!()), None);
+        assert_eq!(fresh.id(stix, |_| panic!("a failed face is not retried")), None);
         // Past the table there's nothing to register.
-        assert_eq!(fonts.id(slopty_math::bundled::FONTS, |_| unreachable!()), None);
+        assert_eq!(
+            fonts.id(slopty_math::bundled::FONTS, |_| panic!("no font past the table")),
+            None
+        );
     }
 
     #[test]
@@ -1002,7 +1014,7 @@ mod tests {
         let wide = formula("a + b + c + d", false, Face::Fira).unwrap();
         let text = slot_text(&wide, 1.0).unwrap();
         assert!(text.chars().all(|c| c == NBSP));
-        let count = text.chars().count() as f32;
+        let count = f32::from(u16::try_from(text.chars().count()).unwrap());
         assert!(count * nbsp_em() >= wide.width);
         assert!((count - 1.0) * nbsp_em() < wide.width);
         // Geist's NBSP is a real advance, not the fallback guess.
@@ -1016,7 +1028,8 @@ mod tests {
         let span = span(&formula);
         assert!(span.start < -4.0 && span.end > 0.0, "{span:?}");
         // The slot reserves everything painted, not the negative advance.
-        let count = slot_text(&formula, 1.0).unwrap().chars().count() as f32;
+        let count =
+            f32::from(u16::try_from(slot_text(&formula, 1.0).unwrap().chars().count()).unwrap());
         assert!(count * nbsp_em() >= span.end - span.start);
         // An ordinary formula spans its advance box.
         let plain = self::formula("x+y", false, Face::Fira).unwrap();
@@ -1040,7 +1053,7 @@ mod tests {
     fn slots_refuse_formulas_too_big_to_set() {
         // At the cap a slot is still a bounded string.
         let edge = slot_text(&ruled(MAX_SLOT_EMS), 1.0).expect("fits");
-        assert!(edge.len() <= 2 * (MAX_SLOT_EMS / nbsp_em()).ceil() as usize);
+        assert!(edge.len() <= slot_count(MAX_SLOT_EMS).saturating_mul(2));
         assert!(edge.len() < 128 * 1024, "{}", edge.len());
         // Past it, in ems or once scaled, nothing is built.
         for (formula, scale) in [
@@ -1113,7 +1126,9 @@ mod tests {
     #[test]
     fn slots_scale_with_the_math_size() {
         let wide = formula("a + b + c + d", false, Face::Fira).unwrap();
-        let count = |scale: f32| slot_text(&wide, scale).unwrap().chars().count() as f32;
+        let count = |scale: f32| {
+            f32::from(u16::try_from(slot_text(&wide, scale).unwrap().chars().count()).unwrap())
+        };
         // 100% is the size-independent slot, unscaled.
         let span = span(&wide);
         let normal = ((span.end - span.start) / nbsp_em()).ceil();
@@ -1122,11 +1137,12 @@ mod tests {
         for scale in [0.75, 1.35, 2.0] {
             let scaled = count(scale);
             assert!(scaled * nbsp_em() >= scale * (span.end - span.start));
-            assert!((scaled - normal * scale).abs() <= 1.0, "{scale}: {scaled}");
+            assert!(normal.mul_add(-scale, scaled).abs() <= 1.0, "{scale}: {scaled}");
         }
     }
 
     #[test]
+    #[expect(clippy::suboptimal_flops, reason = "restates the line box as the layout computes it")]
     fn display_blocks_scale_the_formula_but_not_its_padding() {
         let laid = formula(r"\int_0^1 \frac{x^2}{2}\,dx", true, Face::Fira).unwrap();
         let normal = display_line_height(&laid, 1.0, 14.0, 22.0);
@@ -1137,9 +1153,12 @@ mod tests {
         assert!((grown - 1.5 * formula).abs() <= 2.0, "{normal} -> {larger}");
         // The slot widens with it.
         let width =
-            |scale| display_flat("x", laid.clone(), scale, gpui::black()).unwrap().text.len();
+            |scale| display_flat("x", Arc::clone(&laid), scale, gpui::black()).unwrap().text.len();
         assert!(width(1.5) > width(1.0));
-        assert_eq!(display_flat("x", laid.clone(), 1.5, gpui::black()).unwrap().math[0].scale, 1.5);
+        assert_eq!(
+            display_flat("x", Arc::clone(&laid), 1.5, gpui::black()).unwrap().math[0].scale,
+            1.5
+        );
     }
 
     fn inline(parts: &[(&str, bool)]) -> FlatText {
@@ -1197,6 +1216,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::suboptimal_flops, reason = "restates the line box as the layout computes it")]
     fn line_height_growth_scales_with_the_math_size() {
         const GEIST: (f32, f32) = (1.005, 0.295);
         let geist = |_: &gpui::Font| GEIST;
@@ -1231,6 +1251,7 @@ mod tests {
 
     #[test]
     #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
+    #[expect(clippy::while_float, reason = "the row widens a pixel at a time up to the whole line")]
     fn soft_wraps_never_split_a_slot_that_fits_its_row() {
         let (_native, text_system) = crate::typography::native_text_system();
         let flat = inline(&[
@@ -1259,8 +1280,12 @@ mod tests {
             .math
             .iter()
             .map(|slot| {
-                let start = flat.text[..slot.range.start].rfind(' ').map_or(0, |at| at + 1);
-                let end = flat.text[slot.range.end..]
+                let start =
+                    flat.text.get(..slot.range.start).unwrap().rfind(' ').map_or(0, |at| at + 1);
+                let end = flat
+                    .text
+                    .get(slot.range.end..)
+                    .unwrap()
                     .find(' ')
                     .map_or(flat.text.len(), |at| slot.range.end + at);
                 unwrapped.x_for_index(end) - unwrapped.x_for_index(start)

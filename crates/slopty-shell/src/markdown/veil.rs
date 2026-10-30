@@ -9,27 +9,23 @@
 //! `Attrs::compatible` ignores color/metadata, so adjacent same-font runs are
 //! shaped as one contiguous word even across the split (kerning and ligatures
 //! survive; wrapping is byte-identical to the unsplit render).
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 
 use gpui::TextRun;
 pub use slopty_veil::{RowVeil, VeilSpan, slice_spans};
 
 /// Multiply veil opacities into the runs' paint colors, splitting runs at span
-/// boundaries. Fonts, lengths, and text are untouched — the total run length is
+/// boundaries.
+///
+/// Fonts, lengths, and text are untouched — the total run length is
 /// preserved exactly, so shaping and wrapping cannot change (see module docs).
 pub fn apply_veil(runs: Vec<TextRun>, spans: &[VeilSpan]) -> Vec<TextRun> {
     if spans.is_empty() || spans.iter().all(|(_, a)| *a >= 1.0) {
         return runs;
     }
-    let mut out = Vec::with_capacity(runs.len() + spans.len() * 2);
+    let mut out = Vec::with_capacity(runs.len().saturating_add(spans.len().saturating_mul(2)));
     let mut pos = 0_usize;
     for run in runs {
-        let (start, end) = (pos, pos + run.len);
+        let (start, end) = (pos, pos.saturating_add(run.len));
         pos = end;
         let mut cuts = vec![start, end];
         for (r, _) in spans {
@@ -43,9 +39,12 @@ pub fn apply_veil(runs: Vec<TextRun>, spans: &[VeilSpan]) -> Vec<TextRun> {
         cuts.sort_unstable();
         cuts.dedup();
         for w in cuts.windows(2) {
-            let (s, e) = (w[0], w[1]);
+            let &[s, e] = w else {
+                continue;
+            };
             let mut piece = run.clone();
-            piece.len = e - s;
+            // The cuts are sorted and deduplicated, so each piece is non-empty.
+            piece.len = e.saturating_sub(s);
             if let Some(alpha) =
                 spans.iter().find(|(r, _)| r.start <= s && e <= r.end).map(|(_, a)| *a)
                 && alpha < 1.0

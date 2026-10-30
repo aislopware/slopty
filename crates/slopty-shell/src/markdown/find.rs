@@ -1,21 +1,13 @@
-//! Find in a thread, the paint half. The transcript names what it looks for and which
+//! Find in a thread, the paint half.
+//!
+//! The transcript names what it looks for and which
 //! match is current ([`set`]); every painted text element of a row with matches washes its
 //! matches under the glyphs, the current one stronger. Elements paint in document order, so
 //! counting a row's matches as its elements paint finds the current one again, the way
 //! [`super::selection`] rebuilds a drag across elements.
 //!
 //! The pure half (case-folded matching, a block's searchable text in paint order) is unit
-//! tested; [`paint`] is called from the text elements' paint canvases in `render.rs`.
-#![allow(
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::indexing_slicing,
-    clippy::match_wildcard_for_single_variants,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
+//! tested; `paint` is called from the text elements' paint canvases in `render.rs`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -75,9 +67,10 @@ pub fn frame_reset(surface: u64) -> impl IntoElement {
 /// `{row}-code{n}-line{m}` (a code line).
 pub fn row_of(key: &str) -> &str {
     if let Some(at) = key.rfind("-code")
-        && key[at..].contains("-line")
+        && let Some((row, code)) = key.split_at_checked(at)
+        && code.contains("-line")
     {
-        return &key[..at];
+        return row;
     }
     key.rsplit_once(':').map_or(key, |(row, _)| row)
 }
@@ -90,8 +83,8 @@ pub fn matches(hay: &str, needle: &str) -> Vec<Range<usize>> {
     }
     let chars: Vec<(usize, char)> = hay.char_indices().collect();
     let mut out = Vec::new();
-    let mut i = 0;
-    'start: while i < chars.len() {
+    let mut i = 0_usize;
+    'start: while let Some(&(start, _)) = chars.get(i) {
         let mut j = i;
         let mut k = 0;
         while k < needle.len() {
@@ -100,17 +93,16 @@ pub fn matches(hay: &str, needle: &str) -> Vec<Range<usize>> {
             };
             for lower in c.to_lowercase() {
                 if needle.get(k) != Some(&lower) {
-                    i += 1;
+                    i = i.saturating_add(1);
                     continue 'start;
                 }
-                k += 1;
+                k = k.saturating_add(1);
             }
-            j += 1;
+            j = j.saturating_add(1);
         }
-        let start = chars[i].0;
         let end = chars.get(j).map_or(hay.len(), |&(at, _)| at);
         out.push(start..end);
-        i = j.max(i + 1);
+        i = j.max(i.saturating_add(1));
     }
     out
 }
@@ -186,12 +178,14 @@ pub(crate) fn paint(
         let mut painted = painted.borrow_mut();
         let seen = painted.entry((surface, row.to_owned())).or_default();
         let first = *seen;
-        *seen += found.len();
+        *seen = seen.saturating_add(found.len());
         first
     });
     for (nth, range) in found.into_iter().enumerate() {
-        let active =
-            find.active.as_ref().is_some_and(|(at, place)| at == row && *place == first + nth);
+        let active = find
+            .active
+            .as_ref()
+            .is_some_and(|(at, place)| at == row && Some(*place) == first.checked_add(nth));
         let wash = if active { find.washes.1 } else { find.washes.0 };
         for rect in super::render::range_rects(layout, &displayed(range), 0.0, 0.0) {
             window.paint_quad(quad(
@@ -211,7 +205,7 @@ pub(crate) fn paint(
 pub fn washes(theme: &crate::theme::Theme) -> (Hsla, Hsla) {
     let (every, current) = match theme.appearance {
         crate::theme::Appearance::Dark => (0.40, 0.75),
-        _ => (0.22, 0.55),
+        crate::theme::Appearance::Light => (0.22, 0.55),
     };
     (theme.warning.opacity(every), theme.warning.opacity(current))
 }
@@ -226,8 +220,8 @@ mod tests {
         assert_eq!(matches("aaaa", "aa"), [0..2, 2..4]);
         let sharp = matches("Straße STRASSE", "straße");
         assert_eq!((sharp.len(), sharp.first().cloned()), (1, Some(0..7)));
-        assert!(matches("anything", "").is_empty());
-        assert!(matches("short", "longer than it").is_empty());
+        assert_eq!(matches("anything", ""), Vec::<Range<usize>>::new());
+        assert_eq!(matches("short", "longer than it"), Vec::<Range<usize>>::new());
         assert_eq!(matches("éÉ", "é"), [0..2, 2..4]);
     }
 

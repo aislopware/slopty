@@ -1,13 +1,17 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Original content and validated navigation are deliberately separate.
-#![allow(missing_docs, reason = "shell lint migration: slice C")]
+/// A link as the author wrote it, and where it may lead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkTarget {
+    /// The text the link shows.
     pub label: String,
+    /// The destination as written, which copying hands back unchanged.
     pub original: String,
+    /// The web address the destination opens, or why it opens nothing.
     pub navigation: Result<String, &'static str>,
 }
 impl LinkTarget {
+    /// The link `label` to `original`, its address validated as a chat link's must be.
     pub fn new(label: &str, original: &str) -> Self {
         Self {
             label: label.into(),
@@ -16,6 +20,7 @@ impl LinkTarget {
         }
     }
 }
+/// How the person activated a link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkAction {
     /// Normal click or keyboard activation; the user's persisted preference
@@ -23,22 +28,35 @@ pub enum LinkAction {
     Primary,
     /// Explicit "Open in Slopty" context-menu action.
     Internal,
+    /// Explicit "Open in external browser" context-menu action.
     External,
+    /// Copy the link instead of opening it.
     Copy,
 }
+/// Where an activated link goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkOutcome {
+    /// Opens inside Slopty.
     Internal,
+    /// Opens this address in the system browser.
     External(String),
+    /// Opens nothing: the destination is not one a chat link may lead to.
     Rejected,
 }
+/// One activation of a link: which, how, and from which session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkActivation {
+    /// The link.
     pub target: LinkTarget,
+    /// How it was activated.
     pub action: LinkAction,
+    /// The session whose transcript holds the link, when one does.
     pub source_session: Option<String>,
 }
 impl LinkActivation {
+    /// Where a web link goes: inside Slopty only when the host can embed a browser
+    /// (`embedded`) and the person asked for it; any other valid address opens outside, and an
+    /// invalid one goes nowhere.
     pub fn web_outcome(&self, embedded: bool) -> LinkOutcome {
         match &self.target.navigation {
             Ok(_) if embedded && self.action == LinkAction::Internal => LinkOutcome::Internal,

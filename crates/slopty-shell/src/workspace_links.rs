@@ -1,13 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Safe resolution of agent-authored Markdown links into workspace files.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::format_push_string,
-    clippy::indexing_slicing,
-    clippy::nonminimal_bool,
-    clippy::string_slice,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -69,13 +61,15 @@ pub struct WorkspaceFileLink {
     pub outside: bool,
 }
 
-/// One checkout a file link may resolve against, in priority order: a chat's
-/// working directory (its file context opens the match) or a bare project
-/// root — project roots carry no chat, so their links open in the linking
-/// chat's file context.
+/// One checkout a file link may resolve against, in priority order.
+///
+/// A root is a chat's working directory (its file context opens the match) or a bare project
+/// root: project roots carry no chat, so their links open in the linking chat's file context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileLinkRoot {
+    /// The chat whose working directory this is, or `None` for a bare project root.
     pub chat: Option<String>,
+    /// The checkout's path on its owner's machine.
     pub root: String,
     /// The owner lives on this device — the file is on this disk, so the
     /// link menu's system-level rows (default app, file manager) apply.
@@ -295,15 +289,14 @@ fn classify_file_link(target: &str) -> Option<ClassifiedLink> {
     }
 
     let file_url = target.starts_with("file://");
-    let raw = if file_url {
-        let rest = &target["file://".len()..];
+    let raw = if let Some(rest) = target.strip_prefix("file://") {
         // Only an empty host keeps this a file path — `file://localhost/…`
         // and friends are ordinary URLs — and a `?query` is never a file.
-        let host_end = rest.find('/').unwrap_or(rest.len());
-        if !rest[..host_end].is_empty() || rest.contains('?') {
+        let has_host = !rest.is_empty() && !rest.starts_with('/');
+        if has_host || rest.contains('?') {
             return None;
         }
-        &rest[host_end..]
+        rest
     } else {
         if target.contains("://") || target.starts_with("mailto:") {
             return None;
@@ -401,10 +394,9 @@ fn split_line_fragment(target: &str) -> Option<(&str, ParsedAnchor)> {
 /// `path:12`, `path:12:5` and `path:12-20` line suffixes. As with fragments,
 /// a zero line or a backwards range makes the whole target not a file link.
 fn split_line_suffix(target: &str) -> Option<(&str, ParsedAnchor)> {
-    let Some(colon) = target.rfind(':') else {
+    let Some((before, last)) = target.rsplit_once(':') else {
         return Some((target, ParsedAnchor::default()));
     };
-    let last = &target[colon + 1..];
     if let Some((start, end)) = last.split_once('-') {
         let (Ok(start), Ok(end)) = (start.parse::<u32>(), end.parse::<u32>()) else {
             return Some((target, ParsedAnchor::default()));
@@ -412,7 +404,7 @@ fn split_line_suffix(target: &str) -> Option<(&str, ParsedAnchor)> {
         return if start == 0 || end < start {
             None
         } else {
-            Some((&target[..colon], ParsedAnchor { line: Some(start), column: None }))
+            Some((before, ParsedAnchor { line: Some(start), column: None }))
         };
     }
     if last.parse::<u32>().is_ok_and(|number| number == 0) {
@@ -421,15 +413,12 @@ fn split_line_suffix(target: &str) -> Option<(&str, ParsedAnchor)> {
     let Some(last_number) = positive_number(last) else {
         return Some((target, ParsedAnchor::default()));
     };
-    let before = &target[..colon];
-    let anchor = match before.rfind(':') {
-        Some(colon2) => match positive_number(&before[colon2 + 1..]) {
-            Some(line) => {
-                (&before[..colon2], ParsedAnchor { line: Some(line), column: Some(last_number) })
-            }
+    let anchor = match before.rsplit_once(':') {
+        Some((path, line_text)) => match positive_number(line_text) {
+            Some(line) => (path, ParsedAnchor { line: Some(line), column: Some(last_number) }),
             // `a:0:5` rejects like `a:0`; `a:x:5` keeps `a:x` as the path —
             // the `:` it carries rejects it as a scheme-shaped target anyway.
-            None if before[colon2 + 1..].parse::<u32>() == Ok(0) => return None,
+            None if line_text.parse::<u32>() == Ok(0) => return None,
             None => (before, ParsedAnchor { line: Some(last_number), column: None }),
         },
         None => (before, ParsedAnchor { line: Some(last_number), column: None }),
@@ -517,7 +506,7 @@ fn clean_path(path: &str) -> bool {
         && path
             .split('/')
             .enumerate()
-            .all(|(index, part)| !(part.is_empty() && index != 0) && !matches!(part, "." | ".."))
+            .all(|(index, part)| (!part.is_empty() || index == 0) && !matches!(part, "." | ".."))
 }
 
 fn file_name(path: &str) -> &str {
@@ -546,17 +535,16 @@ fn positive_number(value: &str) -> Option<u32> {
 }
 
 fn percent_decode_path(encoded: &str) -> Option<String> {
-    let raw = encoded.as_bytes();
-    let mut bytes = Vec::with_capacity(raw.len());
-    let mut at = 0;
-    while at < raw.len() {
-        if raw[at] == b'%' {
-            let hex = std::str::from_utf8(raw.get(at + 1..at + 3)?).ok()?;
-            bytes.push(u8::from_str_radix(hex, 16).ok()?);
-            at += 3;
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut rest = encoded.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        rest = tail;
+        if byte == b'%' {
+            let (hex, tail) = rest.split_at_checked(2)?;
+            bytes.push(u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?);
+            rest = tail;
         } else {
-            bytes.push(raw[at]);
-            at += 1;
+            bytes.push(byte);
         }
     }
     String::from_utf8(bytes).ok()
@@ -566,10 +554,10 @@ fn percent_encode_path(path: &str) -> String {
     let mut out = String::new();
     for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-            out.push(byte as char);
+            out.push(char::from(byte));
         } else {
             out.push('%');
-            out.push_str(&format!("{byte:02X}"));
+            data_encoding::HEXUPPER.encode_append(&[byte], &mut out);
         }
     }
     out

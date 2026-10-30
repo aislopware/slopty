@@ -28,9 +28,13 @@ pub mod render;
 pub mod selection;
 pub mod veil;
 
+pub use link_presentation::{OffsetMap, OriginalText};
+pub use math::MathSlot;
 pub use parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full, parse_message,
 };
+
+pub use crate::workspace_links::FileLinkRoot;
 
 pub(crate) mod ansi; // terminal output in its colours.
 pub(crate) mod chat_links; // links to chats as live chips.

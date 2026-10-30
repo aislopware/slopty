@@ -7,12 +7,6 @@
 //! titles and links) is dropped. A real escape byte is read in any fence; an ` ```ansi ` fence
 //! also reads the spelled-out forms an agent writes (`\x1b[`, `\033[`, `\e[`, `\u001b[`), which
 //! in any other fence are code and stay as written.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::ops::Range;
 
@@ -152,9 +146,8 @@ fn apply_sgr(mut style: AnsiStyle, params: &str) -> AnsiStyle {
     } else {
         params.split([';', ':']).map(|p| p.parse().unwrap_or(0)).collect()
     };
-    let mut at = 0;
-    while at < codes.len() {
-        let code = codes[at];
+    let mut codes = codes.into_iter().peekable();
+    while let Some(code) = codes.next() {
         match code {
             0 => style = AnsiStyle::default(),
             1 => style.bold = true,
@@ -169,26 +162,25 @@ fn apply_sgr(mut style: AnsiStyle, params: &str) -> AnsiStyle {
             23 => style.italic = false,
             24 => style.underline = false,
             27 => style.inverse = false,
-            30..=37 => style.fg = Some(index(code - 30)),
+            30..=37 => style.fg = Some(index(code.saturating_sub(30))),
             39 => style.fg = None,
-            40..=47 => style.bg = Some(index(code - 40)),
+            40..=47 => style.bg = Some(index(code.saturating_sub(40))),
             49 => style.bg = None,
-            90..=97 => style.fg = Some(index(code - 90 + 8)),
-            100..=107 => style.bg = Some(index(code - 100 + 8)),
+            90..=97 => style.fg = Some(index(code.saturating_sub(90).saturating_add(8))),
+            100..=107 => style.bg = Some(index(code.saturating_sub(100).saturating_add(8))),
             38 | 48 => {
-                let color = match codes.get(at + 1) {
+                // An extended colour takes its form's parameters; any other code after it is a
+                // code of its own.
+                let color = match codes.peek() {
                     Some(5) => {
-                        let color = codes.get(at + 2).map(|n| index(*n));
-                        at += 2;
-                        color
+                        codes.next();
+                        codes.next().map(index)
                     }
                     Some(2) => {
-                        let channel = |ix: usize| {
-                            codes.get(at + ix).map_or(0, |n| u8::try_from(*n).unwrap_or(u8::MAX))
-                        };
-                        let color = AnsiColor::Rgb(channel(2), channel(3), channel(4));
-                        at += 4;
-                        Some(color)
+                        codes.next();
+                        let mut channel =
+                            || codes.next().map_or(0, |n| u8::try_from(n).unwrap_or(u8::MAX));
+                        Some(AnsiColor::Rgb(channel(), channel(), channel()))
                     }
                     _ => None,
                 };
@@ -200,7 +192,6 @@ fn apply_sgr(mut style: AnsiStyle, params: &str) -> AnsiStyle {
             }
             _ => {}
         }
-        at += 1;
     }
     style
 }
@@ -278,7 +269,7 @@ mod tests {
         assert_eq!(lines[0].text, "✓ passed");
         assert_eq!(lines[0].spans.len(), 2);
         let (first, style) = &lines[0].spans[0];
-        assert_eq!(&lines[0].text[first.clone()], "✓");
+        assert_eq!(lines[0].text.get(first.clone()), Some("✓"));
         assert!(style.bold);
         assert_eq!(style.fg, Some(AnsiColor::Index(2)));
         assert_eq!(lines[0].spans[1].1, AnsiStyle::default());

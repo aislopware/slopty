@@ -1,21 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Width-dependent presentation; selection offsets always refer to original text.
-#![allow(
-    missing_debug_implementations,
-    unnameable_types,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::indexing_slicing,
-    clippy::manual_midpoint,
-    clippy::renamed_function_params,
-    clippy::string_slice,
-    clippy::unicode_not_nfc,
-    reason = "shell lint migration: slice C"
-)]
 use std::ops::Range;
 
 use gpui::{SharedString, TextRun};
@@ -23,13 +7,15 @@ use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::render::FlatText;
 
-/// Maps offsets between a stage's input text and its shown text. `omissions`
-/// pairs `(input range, shown range)` in order; the shown span can be SHORTER
-/// (link truncation) or LONGER (a reserved glyph slot). Stages chain
-/// through `prior`: a slot insertion map sits under a truncation map so
-/// displayed coordinates resolve all the way back to the source text.
+/// Maps offsets between a stage's input text and its shown text.
+///
+/// `omissions` pairs `(input range, shown range)` in order; the shown span can be SHORTER (link
+/// truncation) or LONGER (a reserved glyph slot). Stages chain through `prior`: a slot insertion
+/// map sits under a truncation map so displayed coordinates resolve all the way back to the
+/// source text.
 #[derive(Clone, Debug, Default)]
 pub struct OffsetMap {
+    /// Each replaced span: its input range and the shown range standing for it, in order.
     pub omissions: Vec<(Range<usize>, Range<usize>)>,
     /// The previous stage's map (closer to the source text), if any.
     pub prior: Option<Box<Self>>,
@@ -40,7 +26,7 @@ impl OffsetMap {
         // The LAST overlapping-preceding omission's end delta already carries
         // every earlier omission's effect (the coordinate systems meet
         // there), so assigning — not summing — is the transitive shift.
-        let mut shift: isize = 0;
+        let (mut original_end, mut shown_end) = (0, 0);
         for (original, shown) in &self.omissions {
             if displayed < shown.start {
                 break;
@@ -48,14 +34,15 @@ impl OffsetMap {
             if displayed < shown.end {
                 return original.start;
             }
-            shift = original.end as isize - shown.end as isize;
+            (original_end, shown_end) = (original.end, shown.end);
         }
-        displayed.saturating_add_signed(shift)
+        // Past the omission, so `displayed` is at least its shown end.
+        displayed.saturating_sub(shown_end).saturating_add(original_end)
     }
 
     /// This stage only: shown offset for an input-text offset.
     fn local_displayed(&self, original: usize) -> usize {
-        let mut shift: isize = 0;
+        let (mut source_end, mut shown_end) = (0, 0);
         for (source, shown) in &self.omissions {
             if original < source.start {
                 break;
@@ -63,9 +50,10 @@ impl OffsetMap {
             if original < source.end {
                 return shown.start;
             }
-            shift = source.end as isize - shown.end as isize;
+            (source_end, shown_end) = (source.end, shown.end);
         }
-        original.saturating_add_signed(-shift)
+        // Past the omission, so `original` is at least its input end.
+        original.saturating_sub(source_end).saturating_add(shown_end)
     }
 
     /// This stage only: shown range for an input range — an input range that
@@ -102,18 +90,21 @@ impl OffsetMap {
         self.local_displayed_range(mid)
     }
 }
-#[derive(Clone)]
+/// The text a presentation stands for, and how its shown offsets map back to it.
+#[derive(Clone, Debug)]
 pub struct OriginalText {
+    /// The source text, which copy and selection read.
     pub text: SharedString,
+    /// Shown offsets to source offsets, through every stage.
     pub offsets: OffsetMap,
 }
 
 pub fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
-    let mut at = 0;
+    let mut at = 0_usize;
     runs.iter()
         .filter_map(|run| {
             let start = at;
-            at += run.len;
+            at = at.saturating_add(run.len);
             let len = at.min(range.end).saturating_sub(start.max(range.start));
             (len > 0).then(|| {
                 let mut run = run.clone();
@@ -134,7 +125,9 @@ pub fn truncate(
         if super::links::LinkTarget::new("", url).navigation.is_err() {
             continue;
         }
-        let label = &flat.text[range.clone()];
+        let Some(label) = flat.text.get(range.clone()) else {
+            continue;
+        };
         let runs = slice_runs(&flat.runs, range.clone());
         if measure(label, &runs) <= width {
             continue;
@@ -144,29 +137,34 @@ pub fn truncate(
         let boundaries: Vec<_> = label
             .grapheme_indices(true)
             .map(|(i, _)| i)
-            .filter(|&i| !inside_slot(flat, range.start + i))
+            .filter(|&i| !inside_slot(flat, range.start.saturating_add(i)))
             .collect();
         let candidate = |end: usize| {
-            let text = format!("{}…", &label[..end]);
+            let text = format!("{}…", label.get(..end).unwrap_or(label));
             let mut runs = slice_runs(&runs, 0..end);
-            runs.push(ellipsis_run(flat, range.start + end..range.end));
+            runs.push(ellipsis_run(flat, range.start.saturating_add(end)..range.end));
             (text, runs)
         };
-        let mut low = 0;
+        let mut low = 0_usize;
         let mut high = boundaries.len();
         while low < high {
-            let middle = (low + high) / 2;
-            let (text, runs) = candidate(boundaries[middle]);
+            let middle = low.midpoint(high);
+            let Some(&end) = boundaries.get(middle) else {
+                break;
+            };
+            let (text, runs) = candidate(end);
             if measure(&text, &runs) <= width {
-                low = middle + 1;
+                low = middle.saturating_add(1);
             } else {
                 high = middle;
             }
         }
-        let prefix = boundaries[low.saturating_sub(1)];
+        // No boundary at all (a label that is one formula's slot) puts all of it in the ellipsis.
+        let prefix = boundaries.get(low.saturating_sub(1)).copied().unwrap_or(0);
+        let cut = range.start.saturating_add(prefix);
         // Never make a short label longer just to show an ellipsis.
-        if range.end - (range.start + prefix) > '…'.len_utf8() {
-            omissions.push(range.start + prefix..range.end);
+        if range.end.saturating_sub(cut) > '…'.len_utf8() {
+            omissions.push(cut..range.end);
         }
     }
     let mut text = String::new();
@@ -174,7 +172,7 @@ pub fn truncate(
     let mut offsets = OffsetMap::default();
     let mut at = 0;
     for omitted in omissions {
-        text.push_str(&flat.text[at..omitted.start]);
+        text.push_str(flat.text.get(at..omitted.start).unwrap_or_default());
         runs.extend(slice_runs(&flat.runs, at..omitted.start));
         let start = text.len();
         text.push('…');
@@ -182,7 +180,7 @@ pub fn truncate(
         at = omitted.end;
         offsets.omissions.push((omitted, start..text.len()));
     }
-    text.push_str(&flat.text[at..]);
+    text.push_str(flat.text.get(at..).unwrap_or_default());
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
     // This stage's ranges are in `flat.text` coordinates — map them locally;
     // `prior` then chains through any earlier substitution to the source.
@@ -311,7 +309,8 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
         insertions.iter().filter(|at| **at <= offset).map(|_| FILE_GLYPH_SLOT.len()).sum()
     };
     let map_range = |range: &Range<usize>| {
-        range.start + shift_through(range.start)..range.end + shift_before(range.end)
+        range.start.saturating_add(shift_through(range.start))
+            ..range.end.saturating_add(shift_before(range.end))
     };
     let slot_run = |at: usize| {
         let mut run = slice_runs(&flat.runs, at..flat.text.len())
@@ -328,23 +327,24 @@ fn with_file_link_glyphs(flat: &FlatText, opts: &RenderOptions) -> FlatText {
         return flat.clone();
     };
 
-    let mut text =
-        String::with_capacity(flat.text.len() + insertions.len() * FILE_GLYPH_SLOT.len());
+    let mut text = String::with_capacity(
+        flat.text.len().saturating_add(insertions.len().saturating_mul(FILE_GLYPH_SLOT.len())),
+    );
     let mut runs: Vec<TextRun> = Vec::new();
     let mut offsets = OffsetMap::default();
     let mut glyphs = Vec::with_capacity(insertions.len());
     let mut at = 0;
-    for (ix, insert_at) in insertions.iter().enumerate() {
-        text.push_str(&flat.text[at..*insert_at]);
+    for (insert_at, slot) in insertions.iter().zip(slot_runs) {
+        text.push_str(flat.text.get(at..*insert_at).unwrap_or_default());
         runs.extend(slice_runs(&flat.runs, at..*insert_at));
         let start = text.len();
         text.push_str(FILE_GLYPH_SLOT);
-        runs.push(slot_runs[ix].clone());
+        runs.push(slot);
         offsets.omissions.push((*insert_at..*insert_at, start..text.len()));
         glyphs.push(start..text.len());
         at = *insert_at;
     }
-    text.push_str(&flat.text[at..]);
+    text.push_str(flat.text.get(at..).unwrap_or_default());
     runs.extend(slice_runs(&flat.runs, at..flat.text.len()));
     offsets.prior = flat.original.as_ref().map(|original| Box::new(original.offsets.clone()));
     FlatText {
@@ -377,8 +377,8 @@ fn paragraph_is_sole_file_link(flat: &FlatText, workspace_root: Option<&str>) ->
     let [(range, target)] = flat.links.as_slice() else {
         return false;
     };
-    flat.text[..range.start].trim().is_empty()
-        && flat.text[range.end..].trim().is_empty()
+    flat.text.get(..range.start).is_some_and(|before| before.trim().is_empty())
+        && flat.text.get(range.end..).is_some_and(|after| after.trim().is_empty())
         && crate::workspace_links::resolve_workspace_file_link(target, root).is_some()
 }
 impl IntoElement for ResponsiveText {
@@ -411,10 +411,10 @@ impl Element for ResponsiveText {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height =
             window.pixel_snap(style.line_height.to_pixels(font_size.into(), window.rem_size()));
-        let flat = self.flat.clone();
+        let flat = Rc::clone(&self.flat);
         let opts = self.opts.clone();
         let id = window.request_measured_layout(
-            Default::default(),
+            gpui::Style::default(),
             move |known, available, window, _| {
                 let width = known.width.or(match available.width {
                     AvailableSpace::Definite(width) => Some(width),
@@ -470,11 +470,11 @@ impl Element for ResponsiveText {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         (): &mut (),
-        child: &mut AnyElement,
+        prepaint: &mut AnyElement,
         window: &mut Window,
         cx: &mut App,
     ) {
-        child.paint(window, cx);
+        prepaint.paint(window, cx);
     }
 }
 
@@ -565,12 +565,12 @@ impl Element for FileLinkGlyphs {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         (): &mut (),
-        overlays: &mut Vec<AnyElement>,
+        prepaint: &mut Vec<AnyElement>,
         window: &mut Window,
         cx: &mut App,
     ) {
         self.child.paint(window, cx);
-        for overlay in overlays {
+        for overlay in prepaint {
             overlay.paint(window, cx);
         }
     }
@@ -591,7 +591,7 @@ mod tests {
         }
     }
     fn measured(text: &str, _: &[TextRun]) -> f32 {
-        text.graphemes(true).count() as f32
+        f32::from(u16::try_from(text.graphemes(true).count()).unwrap())
     }
 
     #[test]
@@ -629,7 +629,7 @@ mod tests {
         // Only the resolved file link grows a slot: the web link and the
         // escaped target keep their shape.
         assert_eq!(shown.file_glyphs.len(), 1);
-        assert_eq!(&shown.text[shown.file_glyphs[0].clone()], FILE_GLYPH_SLOT);
+        assert_eq!(shown.text.get(shown.file_glyphs[0].clone()), Some(FILE_GLYPH_SLOT));
         assert_eq!(shown.links.len(), 3);
         // The reserved slot sits right after the link and never reaches copy
         // or selection — both glyph ends map back to the link's end.
@@ -642,7 +642,7 @@ mod tests {
         // A paragraph that is nothing but one file link stays the sole-file
         // row (icon tile), never the trailing glyph.
         let sole = flatten_runs(&[run("src/lib.rs", Some("src/lib.rs"))], &Theme::dark(), false);
-        assert!(with_file_link_glyphs(&sole, &opts).file_glyphs.is_empty());
+        assert_eq!(with_file_link_glyphs(&sole, &opts).file_glyphs, Vec::<Range<usize>>::new());
 
         // Without a root snapshot no link grows a glyph (previews, web-only
         // surfaces).
@@ -653,11 +653,11 @@ mod tests {
             file_roots: None,
             handler: Rc::new(|_, _, _| LinkOutcome::Rejected),
         });
-        assert!(with_file_link_glyphs(&flat, &no_roots).file_glyphs.is_empty());
+        assert_eq!(with_file_link_glyphs(&flat, &no_roots).file_glyphs, Vec::<Range<usize>>::new());
     }
     #[test]
     fn truncation_preserves_graphemes_destinations_and_original_selection() {
-        let label = "https://example.com/á🙂👨‍👩‍👧‍👦界/very/long/path";
+        let label = "https://example.com/a\u{301}🙂👨‍👩‍👧‍👦界/very/long/path";
         let flat = flatten_runs(&[link(label)], &Theme::dark(), false);
         for width in [1., 12., 25., 32.] {
             let shown = truncate(&flat, width, measured);
@@ -680,7 +680,7 @@ mod tests {
         let flat = flatten_runs(
             &[
                 link(source),
-                InlineRun { text: " between ".into(), style: Default::default() },
+                InlineRun { text: " between ".into(), style: InlineStyle::default() },
                 link("https://second.example/long/path/to/resource"),
             ],
             &Theme::dark(),
@@ -690,17 +690,20 @@ mod tests {
         let map = &shown.original.as_ref().unwrap().offsets;
         assert_eq!(map.omissions.len(), 2);
         let first = &shown.links[0].0;
-        assert_eq!(&flat.text[map.original(first.start)..map.original(first.end)], source);
-        assert_eq!(&flat.text[map.original(0)..map.original(5)], "https");
+        assert_eq!(flat.text.get(map.original(first.start)..map.original(first.end)), Some(source));
+        assert_eq!(flat.text.get(map.original(0)..map.original(5)), Some("https"));
         let end = map.original(shown.text.len());
         let spans = super::super::selection::resolve_spans(
             &[("a", &flat.text), ("b", "next block")],
             (0, 0),
             (1, 4),
         );
-        let copied =
-            spans.iter().map(|span| &span.text[span.range.clone()]).collect::<Vec<_>>().join("\n");
-        assert_eq!(copied, format!("{}\nnext", &flat.text[..end]));
+        let copied = spans
+            .iter()
+            .map(|span| span.text.get(span.range.clone()).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(copied, format!("{}\nnext", flat.text.get(..end).unwrap()));
         let omission = &map.omissions[0];
         assert_eq!(map.displayed_range(omission.0.start + 1..omission.0.end - 1), omission.1);
     }
@@ -711,7 +714,7 @@ mod tests {
         let wide = truncate(&flat, 1000., measured);
         assert!(narrow.text.ends_with('…'));
         assert_eq!(wide.text, flat.text);
-        assert!(wide.original.as_ref().unwrap().offsets.omissions.is_empty());
+        assert_eq!(wide.original.as_ref().unwrap().offsets.omissions, []);
         let growing = flatten_runs(
             &[link("https://example.com/a/long/link/streaming-tail")],
             &Theme::dark(),

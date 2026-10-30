@@ -9,7 +9,6 @@
 //! an evicted diagram simply renders again when its row returns. Diagrams
 //! painted in the latest two passes are never evicted, so the budget is soft
 //! only when more diagrams than it admits are on screen at once.
-#![allow(clippy::arithmetic_side_effects, reason = "shell lint migration: slice C")]
 use std::collections::{HashMap, HashSet};
 
 use gpui::SharedString;
@@ -60,7 +59,7 @@ impl MermaidCache {
     /// palette is baked into the generated SVG; the media is returned for
     /// release.
     pub(crate) fn begin_frame(&mut self, style: u32) -> Vec<MediaImage> {
-        self.frame += 1;
+        self.frame = self.frame.saturating_add(1);
         if self.style == Some(style) {
             return Vec::new();
         }
@@ -79,11 +78,11 @@ impl MermaidCache {
         let mut used = self.retained_bytes();
         for entry in self.entries.values_mut() {
             if let State::Ready(media) = &mut entry.state {
-                let others = used - media.bytes;
+                let others = used.saturating_sub(media.bytes);
                 let next =
                     media.preview_within(target, scale, MAX_RETAINED_BYTES.saturating_sub(others));
                 if !std::sync::Arc::ptr_eq(&media.image, &next.image) {
-                    used = others + next.bytes;
+                    used = others.saturating_add(next.bytes);
                     retired.push(std::mem::replace(media, next));
                 }
             }

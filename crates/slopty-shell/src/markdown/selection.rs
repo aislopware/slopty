@@ -13,13 +13,6 @@
 //!
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::significant_drop_tightening,
-    clippy::string_slice,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -61,6 +54,11 @@ fn state() -> &'static Mutex<Option<MdSelection>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+/// Runs `step` on the selection under its lock, held for exactly the step.
+fn with_state<R>(step: impl FnOnce(&mut Option<MdSelection>) -> R) -> R {
+    step(&mut state().lock())
+}
+
 /// Selection state is process-global; tests that exercise its lifecycle must
 /// not race each other.
 #[cfg(test)]
@@ -80,7 +78,8 @@ pub(crate) fn test_state_lock() -> parking_lot::MutexGuard<'static, ()> {
 pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, usize)) -> Vec<Span> {
     let (start, end) = if (a.0, a.1) <= (b.0, b.1) { (a, b) } else { (b, a) };
     let mut spans = Vec::new();
-    for (ei, (key, text)) in elements.iter().enumerate().take(end.0 + 1).skip(start.0) {
+    for (ei, (key, text)) in elements.iter().enumerate().take(end.0.saturating_add(1)).skip(start.0)
+    {
         let from = if ei == start.0 { start.1 } else { 0 };
         let to = if ei == end.0 { end.1 } else { text.len() };
         let (from, to) = (from.min(text.len()), to.min(text.len()));
@@ -130,9 +129,10 @@ pub(crate) fn begin_with_span_in(surface: u64, key: &str, text: &str, range: Ran
 
 /// The live drag's anchor, if `key` owns it: `(anchor byte offset)`.
 pub fn drag_anchor(key: &str) -> Option<usize> {
-    let guard = state().lock();
-    let sel = guard.as_ref()?;
-    (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
+    with_state(|held| {
+        let sel = held.as_ref()?;
+        (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
+    })
 }
 
 pub(crate) fn anchor_key() -> Option<String> {
@@ -157,30 +157,32 @@ pub fn is_dragging() -> bool {
 /// overlap preserves text that is no longer painted while allowing newly
 /// visible elements at the drag edge to join the selection.
 pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
-    let mut guard = state().lock();
-    let Some(selection) = guard.as_mut().filter(|selection| selection.dragging) else {
-        return false;
-    };
-    let spans = if let Some(anchor_ei) =
-        elements.iter().position(|(key, _)| *key == selection.anchor_key)
-    {
-        let anchor = (anchor_ei, selection.anchor_ix);
-        selection.forward = Some(anchor <= head);
-        resolve_spans(elements, anchor, head)
-    } else {
-        let Some(forward) = selection.forward else {
+    with_state(|held| {
+        let Some(selection) = held.as_mut().filter(|selection| selection.dragging) else {
             return false;
         };
-        let Some(spans) = extend_virtualized_drag(&selection.spans, elements, head, forward) else {
-            return false;
+        let spans = if let Some(anchor_ei) =
+            elements.iter().position(|(key, _)| *key == selection.anchor_key)
+        {
+            let anchor = (anchor_ei, selection.anchor_ix);
+            selection.forward = Some(anchor <= head);
+            resolve_spans(elements, anchor, head)
+        } else {
+            let Some(forward) = selection.forward else {
+                return false;
+            };
+            let Some(spans) = extend_virtualized_drag(&selection.spans, elements, head, forward)
+            else {
+                return false;
+            };
+            spans
         };
-        spans
-    };
-    if selection.spans == spans {
-        return false;
-    }
-    selection.spans = spans;
-    true
+        if selection.spans == spans {
+            return false;
+        }
+        selection.spans = spans;
+        true
+    })
 }
 
 fn extend_virtualized_drag(
@@ -197,9 +199,9 @@ fn extend_virtualized_drag(
                     .position(|span| span.key == *key)
                     .map(|span_ix| (element_ix, span_ix))
             })?;
-        let start = existing[span_ix].range.start;
-        let mut merged = existing[..span_ix].to_vec();
-        merged.extend(resolve_spans(elements, (element_ix, start), head));
+        let (kept, from) = existing.split_at_checked(span_ix)?;
+        let mut merged = kept.to_vec();
+        merged.extend(resolve_spans(elements, (element_ix, from.first()?.range.start), head));
         Some(merged)
     } else {
         let (element_ix, span_ix) =
@@ -209,120 +211,124 @@ fn extend_virtualized_drag(
                     .position(|span| span.key == *key)
                     .map(|span_ix| (element_ix, span_ix))
             })?;
-        let end = existing[span_ix].range.end;
-        let mut merged = resolve_spans(elements, head, (element_ix, end));
-        merged.extend_from_slice(&existing[span_ix + 1..]);
+        let (through, kept) = existing.get(span_ix..)?.split_first()?;
+        let mut merged = resolve_spans(elements, head, (element_ix, through.range.end));
+        merged.extend_from_slice(kept);
         Some(merged)
     }
 }
 
 /// Replace the resolved spans (drag update). Returns true if they changed.
 pub fn update_spans(spans: Vec<Span>) -> bool {
-    let mut guard = state().lock();
-    let Some(sel) = guard.as_mut() else {
-        return false;
-    };
-    if sel.spans == spans {
-        return false;
-    }
-    sel.spans = spans;
-    true
+    with_state(|held| {
+        let Some(sel) = held.as_mut() else {
+            return false;
+        };
+        if sel.spans == spans {
+            return false;
+        }
+        sel.spans = spans;
+        true
+    })
 }
 
 /// End the drag for `key`'s claim; returns the joined text if non-empty.
 pub fn end_drag(key: &str) -> Option<String> {
-    let mut guard = state().lock();
-    let sel = guard.as_mut()?;
-    if sel.anchor_key != key || !sel.dragging {
-        return None;
-    }
-    sel.dragging = false;
-    if sel.spans.iter().all(|s| s.range.is_empty()) {
-        *guard = None;
-        return None;
-    }
-    Some(join_spans(&sel.spans))
+    with_state(|held| {
+        let sel = held.as_mut()?;
+        if sel.anchor_key != key || !sel.dragging {
+            return None;
+        }
+        sel.dragging = false;
+        if sel.spans.iter().all(|s| s.range.is_empty()) {
+            *held = None;
+            return None;
+        }
+        Some(join_spans(&sel.spans))
+    })
 }
 
 /// End whichever drag is active, even when virtualization has removed the
 /// anchor element (and therefore its frame-scoped mouse-up listener).
 pub fn end_active_drag() -> Option<String> {
-    let mut guard = state().lock();
-    let sel = guard.as_mut()?;
-    if !sel.dragging {
-        return None;
-    }
-    sel.dragging = false;
-    if sel.spans.iter().all(|span| span.range.is_empty()) {
-        *guard = None;
-        return None;
-    }
-    Some(join_spans(&sel.spans))
+    with_state(|held| {
+        let sel = held.as_mut()?;
+        if !sel.dragging {
+            return None;
+        }
+        sel.dragging = false;
+        if sel.spans.iter().all(|span| span.range.is_empty()) {
+            *held = None;
+            return None;
+        }
+        Some(join_spans(&sel.spans))
+    })
 }
 
 /// Clear if `key` owns a settled selection (a mouse-down landed outside the
 /// owner; the element the down landed IN claims right after). True if cleared.
 pub fn clear_if_owner(key: &str) -> bool {
-    let mut guard = state().lock();
-    if guard.as_ref().is_some_and(|s| s.anchor_key == key && !s.dragging) {
-        *guard = None;
-        return true;
-    }
-    false
+    with_state(|held| {
+        if held.as_ref().is_some_and(|s| s.anchor_key == key && !s.dragging) {
+            *held = None;
+            return true;
+        }
+        false
+    })
 }
 
 /// The wash range for `key` painted on `surface` this frame (empty ⇒ nothing
 /// to paint). Another surface showing the same key stays unwashed.
 pub fn wash_range(surface: u64, key: &str) -> Option<Range<usize>> {
-    let guard = state().lock();
-    let sel = guard.as_ref().filter(|sel| sel.surface == surface)?;
-    sel.spans.iter().find(|s| s.key == key && !s.range.is_empty()).map(|s| s.range.clone())
+    with_state(|held| {
+        let sel = held.as_ref().filter(|sel| sel.surface == surface)?;
+        sel.spans.iter().find(|s| s.key == key && !s.range.is_empty()).map(|s| s.range.clone())
+    })
 }
 
 /// The full selected text (Cmd+C), spans joined in document order.
 pub fn selected_text() -> Option<String> {
-    let guard = state().lock();
-    let sel = guard.as_ref()?;
-    if sel.spans.iter().all(|s| s.range.is_empty()) {
-        return None;
-    }
-    Some(join_spans(&sel.spans))
+    with_state(|held| {
+        let sel = held.as_ref()?;
+        if sel.spans.iter().all(|s| s.range.is_empty()) {
+            return None;
+        }
+        Some(join_spans(&sel.spans))
+    })
 }
 
 fn join_spans(spans: &[Span]) -> String {
-    spans.iter().map(|s| &s.text[s.range.clone()]).collect::<Vec<_>>().join("\n")
+    spans
+        .iter()
+        .map(|s| s.text.get(s.range.clone()).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Word range around `ix` for double-click selection: an alphanumeric/`_`
 /// run, or the single non-space char under the cursor, or empty at spaces.
 pub fn word_range(text: &str, ix: usize) -> Range<usize> {
-    let mut ix = ix.min(text.len());
     // Snap into a char boundary (mouse indices should already be on one;
     // defensive against mid-char byte offsets).
-    while ix > 0 && !text.is_char_boundary(ix) {
-        ix -= 1;
-    }
+    let ix = text.floor_char_boundary(ix);
+    let (head, tail) = text.split_at_checked(ix).unwrap_or((text, ""));
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let before = text[..ix].chars().next_back();
-    let at = text[ix..].chars().next();
+    let before = head.chars().next_back();
+    let at = tail.chars().next();
     // Off a word boundary entirely: select the single char (or nothing).
     if !at.is_some_and(is_word) && !before.is_some_and(is_word) {
         return match at {
-            Some(c) if !c.is_whitespace() => ix..ix + c.len_utf8(),
+            Some(c) if !c.is_whitespace() => ix..ix.saturating_add(c.len_utf8()),
             _ => ix..ix,
         };
     }
-    let start = text[..ix]
-        .char_indices()
-        .rev()
-        .take_while(|(_, c)| is_word(*c))
-        .last()
-        .map_or(ix, |(i, _)| i);
-    let end = text[ix..]
+    let start =
+        head.char_indices().rev().take_while(|(_, c)| is_word(*c)).last().map_or(ix, |(i, _)| i);
+    let end = tail
         .char_indices()
         .take_while(|(_, c)| is_word(*c))
         .last()
-        .map_or(ix, |(i, c)| ix + i + c.len_utf8());
+        .map_or(ix, |(i, c)| ix.saturating_add(i).saturating_add(c.len_utf8()));
     start..end
 }
 
@@ -339,7 +345,7 @@ mod tests {
         let spans = resolve_spans(&elems(), (0, 6), (0, 15));
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].key, "p1");
-        assert_eq!(&spans[0].text[spans[0].range.clone()], "paragraph");
+        assert_eq!(spans[0].text.get(spans[0].range.clone()), Some("paragraph"));
         // Reversed direction normalizes.
         assert_eq!(resolve_spans(&elems(), (0, 15), (0, 6)), spans);
     }
@@ -348,9 +354,9 @@ mod tests {
     fn spans_across_elements_cover_middles_whole() {
         let spans = resolve_spans(&elems(), (0, 6), (2, 5));
         assert_eq!(spans.len(), 3);
-        assert_eq!(&spans[0].text[spans[0].range.clone()], "paragraph");
-        assert_eq!(&spans[1].text[spans[1].range.clone()], "second");
-        assert_eq!(&spans[2].text[spans[2].range.clone()], "third");
+        assert_eq!(spans[0].text.get(spans[0].range.clone()), Some("paragraph"));
+        assert_eq!(spans[1].text.get(spans[1].range.clone()), Some("second"));
+        assert_eq!(spans[2].text.get(spans[2].range.clone()), Some("third"));
         // Reversed drag (bottom-up) resolves identically.
         assert_eq!(resolve_spans(&elems(), (2, 5), (0, 6)), spans);
     }
@@ -430,10 +436,10 @@ mod tests {
         assert_eq!(word_range(t, 4), 4..11); // at word start
         assert_eq!(word_range(t, 11), 4..11); // at word end
         assert_eq!(word_range(t, 15), 14..16); // inside 12
-        assert_eq!(&t[word_range(t, 12)], "="); // lone symbol
+        assert_eq!(t.get(word_range(t, 12)), Some("=")); // lone symbol
         assert_eq!(word_range(t, 3), 0..3); // boundary after "let"
         // Unicode-safe (mid-char byte offsets snap down).
         let u = "héllo wörld";
-        assert_eq!(&u[word_range(u, 2)], "héllo");
+        assert_eq!(u.get(word_range(u, 2)), Some("héllo"));
     }
 }

@@ -1,32 +1,23 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Isolated native Mermaid adapter. Call only on a background executor.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::assertions_on_result_states,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::items_after_statements,
-    clippy::manual_midpoint,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 use parking_lot::Mutex;
 
 use crate::theme::Theme;
 
-pub const ENGINE_VERSION: &str = "merman/0.9"; // merman draws the diagrams.
+/// The engine that draws the diagrams and its version, which a cached diagram is keyed by.
+pub const ENGINE_VERSION: &str = "merman/0.9";
+/// The largest diagram source drawn; a longer one shows as code.
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 // Bound inputs and serialize the engine's CPU work across previews; UI owners discard results
 // from superseded revisions.
 static RENDER_LOCK: Mutex<()> = Mutex::new(());
 
-/// Slopty's diagram style. The canvas is left transparent so the diagram sits
+/// Slopty's diagram style.
+///
+/// The canvas is left transparent so the diagram sits
 /// on its fence body; `canvas` is that body's opaque approximation, used where
 /// the engine needs a solid mask (edge label pills, hollow markers).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Palette {
     dark: bool,
     font: String,
@@ -45,18 +36,20 @@ pub struct Palette {
 fn color(color: gpui::Hsla, background: gpui::Hsla) -> String {
     let mut c = color.to_rgb();
     let bg = background.to_rgb();
-    c.r = c.r * c.a + bg.r * (1.0 - c.a);
-    c.g = c.g * c.a + bg.g * (1.0 - c.a);
-    c.b = c.b * c.a + bg.b * (1.0 - c.a);
-    format!(
-        "#{:02x}{:02x}{:02x}",
-        (c.r * 255.0).round() as u8,
-        (c.g * 255.0).round() as u8,
-        (c.b * 255.0).round() as u8
-    )
+    c.r = c.r.mul_add(c.a, bg.r * (1.0 - c.a));
+    c.g = c.g.mul_add(c.a, bg.g * (1.0 - c.a));
+    c.b = c.b.mul_add(c.a, bg.b * (1.0 - c.a));
+    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+}
+
+/// A 0–1 colour channel as a byte.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 0–255")]
+fn byte(channel: f32) -> u8 {
+    (channel * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 impl Palette {
+    /// The style that sets a diagram in `theme`.
     pub fn from_theme(theme: &Theme) -> Self {
         let dark = theme.appearance.is_dark();
         let canvas = Self::plate(theme);
@@ -89,6 +82,7 @@ impl Palette {
 // Merman draws the diagrams (Mermaid 12, Zed's choice), measuring labels with the fonts
 // usvg outlines them in, so no label overflows its box (`docs/decisions/ui.md`, "Mermaid through
 // merman").
+/// The SVG of the Mermaid diagram `source`, set in `palette`; why it can't be drawn otherwise.
 pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
     if source.len() > MAX_SOURCE_BYTES
         || source.lines().count() > 256
@@ -297,7 +291,7 @@ fn text_width(text: &str, size: f64, mono: bool, bold: bool) -> f64 {
         .filter(|face| face.mono == mono)
         .min_by_key(|face| face.weight.abs_diff(want));
     let Some(face) = face else {
-        return text.chars().count() as f64 * 0.6 * size;
+        return f64::from(u32::try_from(text.chars().count()).unwrap_or(u32::MAX)) * 0.6 * size;
     };
     text.chars().map(|c| face.advances.get(&c).copied().unwrap_or(face.fallback)).sum::<f64>()
         * size
@@ -345,8 +339,11 @@ mod tests {
                 let size = prepared_raster.size(0);
                 assert!(size.width.0 > 0 && size.height.0 > 0);
                 assert!(size.width.0 <= 4096 && size.height.0 <= 4096);
-                assert!(size.width.0 as usize * size.height.0 as usize <= 1024 * 1024);
-                let ratio = size.width.0 as f32 / size.height.0 as f32;
+                let (width, height) =
+                    (u32::try_from(size.width.0).unwrap(), u32::try_from(size.height.0).unwrap());
+                assert!(width.checked_mul(height).is_some_and(|area| area <= 1024 * 1024));
+                let ratio = f32::from(u16::try_from(width).unwrap())
+                    / f32::from(u16::try_from(height).unwrap());
                 assert!((ratio / (prepared.width / prepared.height) - 1.0).abs() < 0.02);
                 assert_eq!(svg, render(source, &palette).unwrap());
                 if let Ok(dir) = std::env::var("SLOPTY_MERMAID_ARTIFACTS") {
@@ -360,8 +357,8 @@ mod tests {
                     image::save_buffer(
                         format!("{dir}/{name}-{mode}.png"),
                         &rgba,
-                        size.width.0 as u32,
-                        size.height.0 as u32,
+                        u32::try_from(size.width.0).unwrap(),
+                        u32::try_from(size.height.0).unwrap(),
                         image::ColorType::Rgba8,
                     )
                     .unwrap();
@@ -372,9 +369,9 @@ mod tests {
     #[test]
     fn malformed_and_oversized_diagrams_are_recoverable() {
         let palette = Palette::from_theme(&Theme::dark());
-        assert!(render("this is not a diagram", &palette).is_err());
-        assert!(render(&"x".repeat(MAX_SOURCE_BYTES + 1), &palette).is_err());
-        assert!(render("flowchart TD\nA[Hola<br/>mundo] --> B[Fin]", &palette).is_ok());
+        render("this is not a diagram", &palette).expect_err("not a diagram");
+        render(&"x".repeat(MAX_SOURCE_BYTES + 1), &palette).expect_err("over the limit");
+        render("flowchart TD\nA[Hola<br/>mundo] --> B[Fin]", &palette).expect("a diagram");
     }
 
     // Merman's output, themed by Slopty.
@@ -397,14 +394,6 @@ mod tests {
     /// its node's box (zed#65192).
     #[test]
     fn long_labels_stay_inside_their_nodes() {
-        let palette = Palette::from_theme(&Theme::light());
-        let svg = render(
-            "flowchart TD\n    A[\"Pass 2: search the transcript with annotation blocks excised, then map \
-             offsets back to buffer space\"] --> B[\"Error describing where the matches were found\"]",
-            &palette,
-        )
-        .unwrap();
-        let tree = usvg::Tree::from_str(&svg, &crate::image_media::svg_options()).unwrap();
         fn walk(group: &usvg::Group, boxes: &mut Vec<usvg::Rect>, lines: &mut Vec<usvg::Rect>) {
             for child in group.children() {
                 match child {
@@ -422,12 +411,20 @@ mod tests {
                 }
             }
         }
+        let palette = Palette::from_theme(&Theme::light());
+        let svg = render(
+            "flowchart TD\n    A[\"Pass 2: search the transcript with annotation blocks excised, then map \
+             offsets back to buffer space\"] --> B[\"Error describing where the matches were found\"]",
+            &palette,
+        )
+        .unwrap();
+        let tree = usvg::Tree::from_str(&svg, &crate::image_media::svg_options()).unwrap();
         let (mut boxes, mut lines) = (Vec::new(), Vec::new());
         walk(tree.root(), &mut boxes, &mut lines);
         assert_eq!(boxes.len(), 2, "both nodes: {svg}");
         assert!(lines.len() >= 4, "the long label wraps: {}", lines.len());
         for line in &lines {
-            let middle = (line.top() + line.bottom()) / 2.0;
+            let middle = f32::midpoint(line.top(), line.bottom());
             let node = boxes
                 .iter()
                 .find(|node| node.top() <= middle && middle <= node.bottom())

@@ -1,15 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 1bb6259), see THIRD_PARTY_NOTICES.md
 //! Per-range hit targets share the text's shaped geometry, including wrapped links.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::indexing_slicing,
-    clippy::renamed_function_params,
-    clippy::type_complexity,
-    clippy::unwrap_used,
-    clippy::wildcard_imports,
-    reason = "shell lint migration: slice C"
-)]
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
@@ -21,10 +11,13 @@ use gpui::{
     ScrollEvent, SharedString, TextLayout, Window, div, px,
 };
 
-use super::links::*;
+use super::links::{LinkAction, LinkTarget};
 use super::render::{LinkUi, activate_link, range_rects};
 use crate::theme::Theme;
 use crate::{icons, popover};
+
+/// The open link menu: which link it belongs to and where it opened.
+type LinkMenu = Rc<RefCell<Option<(usize, Point<Pixels>)>>>;
 
 pub struct LinkRanges {
     pub id: SharedString,
@@ -38,7 +31,7 @@ struct Interaction {
     focus: Vec<FocusHandle>,
     menu_focus: [FocusHandle; 7],
     menu_focus_pending: Rc<Cell<bool>>,
-    menu: Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
+    menu: LinkMenu,
     bounds: Bounds<Pixels>,
     epoch: Rc<Cell<u64>>,
     dismissed: Rc<Cell<bool>>,
@@ -55,7 +48,7 @@ impl IntoElement for LinkRanges {
 impl Element for LinkRanges {
     type PrepaintState = (
         Vec<AnyElement>,
-        Rc<RefCell<Option<(usize, Point<Pixels>)>>>,
+        LinkMenu,
         Rc<Cell<u64>>,
         Rc<Cell<bool>>,
         Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -90,7 +83,12 @@ impl Element for LinkRanges {
         cx: &mut App,
     ) -> Self::PrepaintState {
         self.child.prepaint(window, cx);
-        window.with_element_state::<Interaction, _>(id.unwrap(), |previous, window| {
+        // An element with an id is always given its global id; without one there is no state to
+        // keep, so the links take no input.
+        let Some(id) = id else {
+            return (Vec::new(), Rc::default(), Rc::default(), Rc::default(), Rc::default());
+        };
+        window.with_element_state::<Interaction, _>(id, |previous, window| {
             let targets: Vec<_> = self.links.iter().map(|(_, t)| t.clone()).collect();
             let mut state =
                 previous.filter(|s| s.targets == targets).unwrap_or_else(|| Interaction {
@@ -119,21 +117,22 @@ impl Element for LinkRanges {
             state.tooltip_bounds.set(None);
             let theme = Theme::of(cx).clone();
             let mut overlays = Vec::new();
-            for (index, (range, target)) in self.links.iter().enumerate() {
+            for (index, ((range, target), focus)) in self.links.iter().zip(&state.focus).enumerate()
+            {
                 for (part, rect) in range_rects(&self.layout, range, 0., 0.).into_iter().enumerate()
                 {
-                    let menu = state.menu.clone();
-                    let keyboard_menu = menu.clone();
-                    let focus = state.focus[index].clone();
+                    let menu = Rc::clone(&state.menu);
+                    let keyboard_menu = Rc::clone(&menu);
+                    let focus = focus.clone();
                     let click_target = target.clone();
                     let destination = target.original.clone();
-                    let tooltip_bounds = state.tooltip_bounds.clone();
+                    let tooltip_bounds = Rc::clone(&state.tooltip_bounds);
                     let click_ui = self.ui.clone();
                     let tooltip_ui = self.ui.clone();
-                    let menu_focus_pending = state.menu_focus_pending.clone();
-                    let pointer_focus_pending = menu_focus_pending.clone();
-                    let keyboard_dismissed = state.dismissed.clone();
-                    let keyboard_epoch = state.epoch.clone();
+                    let menu_focus_pending = Rc::clone(&state.menu_focus_pending);
+                    let pointer_focus_pending = Rc::clone(&menu_focus_pending);
+                    let keyboard_dismissed = Rc::clone(&state.dismissed);
+                    let keyboard_epoch = Rc::clone(&state.epoch);
                     let hit = div()
                         .id(format!("link-{index}-{part}-{}", state.epoch.get()))
                         // Removing the builder cancels both visible tooltips
@@ -141,7 +140,7 @@ impl Element for LinkRanges {
                         .when(state.menu.borrow().is_none(), |hit| {
                             hit.hoverable_tooltip(move |_, cx| {
                                 let url = destination.clone();
-                                let bounds = tooltip_bounds.clone();
+                                let bounds = Rc::clone(&tooltip_bounds);
                                 let ui = tooltip_ui.clone();
                                 cx.new(|_| {
                                     // A file link shows its decoded path —
@@ -226,20 +225,21 @@ impl Element for LinkRanges {
             if state.menu.borrow().is_none()
                 && !state.dismissed.get()
                 && let Some(index) = focused
-                && let Some(rect) = range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
+                && let Some((range, target)) = self.links.get(index)
+                && let Some(rect) = range_rects(&self.layout, range, 0., 0.).first()
             {
                 let shown = self
                     .ui
                     .as_ref()
-                    .and_then(|ui| ui.file_link(&state.targets[index].original))
-                    .map_or_else(|| state.targets[index].original.clone(), |file| file.path);
+                    .and_then(|ui| ui.file_link(&target.original))
+                    .map_or_else(|| target.original.clone(), |file| file.path);
                 let card = super::link_destination::destination_card(
                     &shown,
-                    state.tooltip_bounds.clone(),
+                    Rc::clone(&state.tooltip_bounds),
                     window,
                     cx,
                 );
-                let dismissed = state.dismissed.clone();
+                let dismissed = Rc::clone(&state.dismissed);
                 // This disclosure is not a menu: menu_at consumes every
                 // outside press, preventing other controls from receiving it.
                 // An outside press only hides it; the links keep their
@@ -270,21 +270,23 @@ impl Element for LinkRanges {
                 );
                 overlays.push(popup);
             }
-            if let Some((index, position)) = *state.menu.borrow() {
+            if let Some((index, position)) = *state.menu.borrow()
+                && let Some(menu_target) = state.targets.get(index)
+                && let Some(return_focus) = state.focus.get(index)
+            {
                 let theme = theme.for_popup();
-                let menu = state.menu.clone();
-                let dismiss_menu = state.menu.clone();
-                let return_focus = state.focus[index].clone();
+                let menu = Rc::clone(&state.menu);
+                let dismiss_menu = Rc::clone(&state.menu);
+                let return_focus = return_focus.clone();
                 let menu_focus = state.menu_focus.clone();
-                let pending = state.menu_focus_pending.clone();
+                let pending = Rc::clone(&state.menu_focus_pending);
                 let initial_focus = state.menu_focus[0].clone();
                 // A resolved file link swaps the web actions for rows about
                 // the file itself: "Open in Slopty" opens it in the file
                 // viewer, and the system-level rows mount only when the
                 // owning root lives on this device. The tab cycle visits
                 // only mounted rows.
-                let file =
-                    self.ui.as_ref().and_then(|ui| ui.file_link(&state.targets[index].original));
+                let file = self.ui.as_ref().and_then(|ui| ui.file_link(&menu_target.original));
                 let cycle: &[usize] = match &file {
                     Some(file) if file.local => &[0, 1, 2, 3],
                     Some(_) => &[0, 3],
@@ -318,17 +320,28 @@ impl Element for LinkRanges {
                             "tab" | "down" | "up" => {
                                 let current = cycle
                                     .iter()
-                                    .position(|ix| menu_focus[*ix].is_focused(window))
+                                    .position(|slot| {
+                                        menu_focus
+                                            .get(*slot)
+                                            .is_some_and(|focus| focus.is_focused(window))
+                                    })
                                     .unwrap_or(0);
                                 let backwards = event.keystroke.key == "up"
                                     || (event.keystroke.key == "tab"
                                         && event.keystroke.modifiers.shift);
-                                let next = if backwards {
-                                    (current + cycle.len() - 1) % cycle.len()
-                                } else {
-                                    (current + 1) % cycle.len()
+                                // The cycle wraps around at either end.
+                                let last = cycle.len().saturating_sub(1);
+                                let next = match (backwards, current) {
+                                    (true, 0) => last,
+                                    (true, current) => current.saturating_sub(1),
+                                    (false, current) if current >= last => 0,
+                                    (false, current) => current.saturating_add(1),
                                 };
-                                window.focus(&menu_focus[cycle[next]], cx);
+                                if let Some(focus) =
+                                    cycle.get(next).and_then(|slot| menu_focus.get(*slot))
+                                {
+                                    window.focus(focus, cx);
+                                }
                             }
                             _ => return,
                         }
@@ -347,11 +360,11 @@ impl Element for LinkRanges {
                 let action_row = |action: LinkAction,
                                   label: &'static str,
                                   icon: &'static str,
-                                  slot: usize,
+                                  focus: &FocusHandle,
                                   selector: &'static str| {
-                    let target = state.targets[index].clone();
+                    let target = menu_target.clone();
                     let ui = self.ui.clone();
-                    let menu = state.menu.clone();
+                    let menu = Rc::clone(&state.menu);
                     let enabled = action == LinkAction::Copy
                         || target.navigation.is_ok()
                         || (action == LinkAction::Internal && file_resolved);
@@ -360,7 +373,7 @@ impl Element for LinkRanges {
                         .debug_selector(move || selector.into())
                         .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
                         .child(label)
-                        .track_focus(&state.menu_focus[slot])
+                        .track_focus(focus)
                         .role(Role::Button)
                         .aria_label(label)
                         .when(!enabled, |el| el.opacity(0.45))
@@ -375,16 +388,16 @@ impl Element for LinkRanges {
                 };
                 let file_row = |label: &'static str,
                                 icon: &'static str,
-                                slot: usize,
+                                focus: &FocusHandle,
                                 selector: &'static str,
                                 act: Rc<dyn Fn(&mut App)>| {
-                    let menu = state.menu.clone();
+                    let menu = Rc::clone(&state.menu);
                     popover::menu_row(&theme, false, format!("{}-link-{index}-{selector}", self.id))
                         .id(label)
                         .debug_selector(move || selector.into())
                         .child(icons::icon(icon).size(px(16.)).text_color(theme.text_muted))
                         .child(label)
-                        .track_focus(&state.menu_focus[slot])
+                        .track_focus(focus)
                         .role(Role::Button)
                         .aria_label(label)
                         .focus_visible(|s| s.bg(crate::theme::card_selected_bg()))
@@ -398,7 +411,7 @@ impl Element for LinkRanges {
                     LinkAction::Internal,
                     "Open in Slopty",
                     if file_resolved { icons::DOCUMENT } else { icons::GLOBE },
-                    0,
+                    &state.menu_focus[0],
                     "link-menu-open-slopty",
                 ));
                 if let Some(file) = &file {
@@ -411,7 +424,7 @@ impl Element for LinkRanges {
                             card = card.child(file_row(
                                 "Open with default app",
                                 icons::ARROW_UP_RIGHT,
-                                1,
+                                &state.menu_focus[1],
                                 "link-menu-open-default",
                                 Rc::new(move |cx| cx.open_url(url.as_str())),
                             ));
@@ -420,7 +433,7 @@ impl Element for LinkRanges {
                         card = card.child(file_row(
                             "Show in folder",
                             icons::FOLDER,
-                            2,
+                            &state.menu_focus[2],
                             "link-menu-show-in-folder",
                             Rc::new(move |cx| cx.reveal_path(&path)),
                         ));
@@ -431,7 +444,7 @@ impl Element for LinkRanges {
                     card = card.child(file_row(
                         "Copy file path",
                         icons::COPY,
-                        3,
+                        &state.menu_focus[3],
                         "link-menu-copy-path",
                         Rc::new(move |cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(path.clone()));
@@ -445,18 +458,18 @@ impl Element for LinkRanges {
                         LinkAction::External,
                         "Open in external browser",
                         icons::ARROW_UP_RIGHT,
-                        4,
+                        &state.menu_focus[4],
                         "link-menu-open-external",
                     ));
                     card = card.child(action_row(
                         LinkAction::Copy,
                         "Copy link address",
                         icons::COPY,
-                        5,
+                        &state.menu_focus[5],
                         "link-menu-copy-address",
                     ));
                     let open_in_slopty = crate::settings::current(cx).open_web_links_in_slopty;
-                    let menu = state.menu.clone();
+                    let menu = Rc::clone(&state.menu);
                     card = card.child(popover::menu_separator()).child(
                         popover::menu_row(
                             &theme,
@@ -512,10 +525,10 @@ impl Element for LinkRanges {
             (
                 (
                     overlays,
-                    state.menu.clone(),
-                    state.epoch.clone(),
-                    state.dismissed.clone(),
-                    state.tooltip_bounds.clone(),
+                    Rc::clone(&state.menu),
+                    Rc::clone(&state.epoch),
+                    Rc::clone(&state.dismissed),
+                    Rc::clone(&state.tooltip_bounds),
                 ),
                 state,
             )
@@ -528,14 +541,14 @@ impl Element for LinkRanges {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         (): &mut (),
-        paint: &mut Self::PrepaintState,
+        prepaint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
-        let menu = paint.1.clone();
-        let epoch = paint.2.clone();
-        let dismissed = paint.3.clone();
-        let tooltip_bounds = paint.4.clone();
+        let menu = Rc::clone(&prepaint.1);
+        let epoch = Rc::clone(&prepaint.2);
+        let dismissed = Rc::clone(&prepaint.3);
+        let tooltip_bounds = Rc::clone(&prepaint.4);
         window.on_mouse_event(move |event: &ScrollEvent, phase, window, _| {
             if phase == DispatchPhase::Capture
                 && !tooltip_bounds.get().is_some_and(|rect| rect.contains(&event.position))
@@ -547,7 +560,7 @@ impl Element for LinkRanges {
             }
         });
         self.child.paint(window, cx);
-        for overlay in &mut paint.0 {
+        for overlay in &mut prepaint.0 {
             overlay.paint(window, cx);
         }
     }
@@ -568,6 +581,7 @@ mod tests {
     use gpui::{MouseClickEvent, MouseDownEvent, MouseUpEvent, TestAppContext, point};
 
     use super::*;
+    use crate::markdown::links::LinkOutcome;
     #[test]
     fn selection_drags_and_secondary_clicks_do_not_navigate() {
         let mut event = MouseClickEvent {
@@ -604,7 +618,7 @@ mod tests {
                 );
                 for action in [LinkAction::Internal, LinkAction::External] {
                     let seen = Rc::new(RefCell::new(None));
-                    let captured = seen.clone();
+                    let captured = Rc::clone(&seen);
                     let ui = LinkUi {
                         source_session: Some("parent".into()),
                         source_local: false,

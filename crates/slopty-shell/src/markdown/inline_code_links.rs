@@ -15,18 +15,6 @@
 //! the linked tree is reused across frames. A directory span is not a link,
 //! but it becomes the context a later bare name in the same part resolves
 //! against.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::collection_is_never_read,
-    clippy::indexing_slicing,
-    clippy::items_after_statements,
-    clippy::maybe_infinite_iter,
-    clippy::needless_for_each,
-    clippy::string_slice,
-    clippy::unused_self,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -85,12 +73,12 @@ impl InlineCodeLinkCache {
         source_local: bool,
     ) -> Arc<BlockTree> {
         if !source_local {
-            return tree.clone();
+            return Arc::clone(tree);
         }
         if let Some(ix) = self.parts.iter().position(|part| Arc::ptr_eq(&part.source, tree)) {
             // Most recently used last.
             let part = self.parts.remove(ix);
-            let linked = part.linked.clone();
+            let linked = Arc::clone(&part.linked);
             self.parts.push(part);
             return linked;
         }
@@ -98,7 +86,7 @@ impl InlineCodeLinkCache {
         if self.parts.len() >= CACHED_PARTS {
             self.parts.remove(0);
         }
-        self.parts.push(LinkedPart { source: tree.clone(), linked: linked.clone() });
+        self.parts.push(LinkedPart { source: Arc::clone(tree), linked: Arc::clone(&linked) });
         linked
     }
 }
@@ -118,7 +106,7 @@ fn link_tree(tree: &BlockTree, roots: &[FileLinkRoot], probes: &mut PathProbes) 
         .iter()
         .map(|top| match link_block(&top.block, roots, probes, &mut dirs, &labels) {
             Some(block) => Arc::new(TopBlock { range: top.range.clone(), block }),
-            None => top.clone(),
+            None => Arc::clone(top),
         })
         .collect();
     BlockTree { blocks }
@@ -218,13 +206,15 @@ fn link_runs(
         }
         match resolve_inline_code_path(&run.text, roots, dirs, probes) {
             Some(InlineCodePath::File(target)) => {
-                let linked = linked.get_or_insert_with(|| runs.to_vec());
-                linked[ix].style.code = false;
-                linked[ix].style.link = Some(target);
+                let Some(linked) = linked.get_or_insert_with(|| runs.to_vec()).get_mut(ix) else {
+                    continue;
+                };
+                linked.style.code = false;
+                linked.style.link = Some(target);
                 // The span's text is the path, not a label the author wrote:
                 // show the file name while the text stays the copy source.
                 let label = labels.get(run.text.as_str()).copied();
-                linked[ix].style.file_label =
+                linked.style.file_label =
                     Some(label.unwrap_or_else(|| file_name(&run.text)).to_owned());
             }
             Some(InlineCodePath::Directory(dir)) => dirs.push(dir),
@@ -251,8 +241,9 @@ fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => push(runs),
         Block::Table { header, rows, .. } => {
-            header.iter().for_each(|cell| push(cell));
-            rows.iter().flatten().for_each(|cell| push(cell));
+            for cell in header.iter().chain(rows.iter().flatten()) {
+                push(cell);
+            }
         }
         Block::BlockQuote { children } => children.iter().for_each(|child| code_spans(child, out)),
         Block::List { items, .. } => {
@@ -265,7 +256,10 @@ fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
 /// The last `components` path components of `span` (all of it when it has
 /// fewer); one component is the file name, with any `:line` suffix.
 fn trailing(span: &str, components: usize) -> &str {
-    span.rmatch_indices('/').nth(components - 1).map_or(span, |(at, _)| &span[at + 1..])
+    span.rmatch_indices('/')
+        .nth(components.saturating_sub(1))
+        .and_then(|(at, _)| span.get(at.saturating_add(1)..))
+        .unwrap_or(span)
 }
 
 fn file_name(span: &str) -> &str {
@@ -289,10 +283,9 @@ fn span_labels<'a>(spans: &[&'a str]) -> Labels<'a> {
     let mut labels = Labels::new();
     for &span in spans {
         let path = without_location(span);
-        let same = &by_name[file_name(path)];
-        if same.len() < 2 {
+        let Some(same) = by_name.get(file_name(path)).filter(|same| same.len() >= 2) else {
             continue;
-        }
+        };
         // Another path ends the same way when it is the tail itself or ends
         // in `/tail`.
         let shared = |tail: &str| {
@@ -303,7 +296,8 @@ fn span_labels<'a>(spans: &[&'a str]) -> Labels<'a> {
                         .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
             })
         };
-        let components = (1..)
+        // A path of n components is its own tail at n, so the search ends there.
+        let components = (1..=path.matches('/').count().saturating_add(1))
             .find(|&components| {
                 let tail = trailing(path, components);
                 tail == path || !shared(tail)
@@ -348,11 +342,11 @@ mod tests {
             }]
         }
 
-        fn tree(&self, source: &str) -> BlockTree {
+        fn tree(source: &str) -> BlockTree {
             parse_full(source)
         }
 
-        fn linked(&self, tree: &BlockTree, roots: &[FileLinkRoot], local: bool) -> BlockTree {
+        fn linked(tree: &BlockTree, roots: &[FileLinkRoot], local: bool) -> BlockTree {
             let tree = Arc::new(tree.clone());
             let mut cache = InlineCodeLinkCache::default();
             cache.set_revision(1);
@@ -360,7 +354,7 @@ mod tests {
             BlockTree { blocks: linked.blocks.clone() }
         }
 
-        fn target(&self, tree: &BlockTree, text: &str) -> Option<String> {
+        fn target(tree: &BlockTree, text: &str) -> Option<String> {
             runs(tree).into_iter().find(|run| run.text == text).and_then(|run| run.style.link)
         }
 
@@ -370,7 +364,6 @@ mod tests {
     }
 
     fn runs(tree: &BlockTree) -> Vec<InlineRun> {
-        let mut out = Vec::new();
         fn walk(block: &Block, out: &mut Vec<InlineRun>) {
             match block {
                 Block::Paragraph { runs } | Block::Heading { runs, .. } => out.extend(runs.clone()),
@@ -379,12 +372,14 @@ mod tests {
                     items.iter().flatten().for_each(|child| walk(child, out));
                 }
                 Block::Table { header, rows, .. } => {
-                    header.iter().for_each(|cell| out.extend(cell.clone()));
-                    rows.iter().flatten().for_each(|cell| out.extend(cell.clone()));
+                    for cell in header.iter().chain(rows.iter().flatten()) {
+                        out.extend(cell.clone());
+                    }
                 }
                 Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
             }
         }
+        let mut out = Vec::new();
         for top in &tree.blocks {
             walk(&top.block, &mut out);
         }
@@ -394,7 +389,7 @@ mod tests {
     #[test]
     fn a_context_directory_resolves_bare_names_that_follow_it() {
         let fixture = Fixture::new();
-        let tree = fixture.tree(
+        let tree = Fixture::tree(
             "Paths (all under `2026-09-28/Some Title/`):\n\
              \n\
              - `SOURCES.md`\n\
@@ -402,22 +397,22 @@ mod tests {
              - `Makefile`\n\
              - `missing.md`\n",
         );
-        let linked = fixture.linked(&tree, &fixture.roots(true), true);
+        let linked = Fixture::linked(&tree, &fixture.roots(true), true);
         assert_eq!(
-            fixture.target(&linked, "SOURCES.md").as_deref(),
+            Fixture::target(&linked, "SOURCES.md").as_deref(),
             Some(fixture.file_target("2026-09-28/Some Title/SOURCES.md").as_str())
         );
         assert_eq!(
-            fixture.target(&linked, "DESCRIPTION.txt").as_deref(),
+            Fixture::target(&linked, "DESCRIPTION.txt").as_deref(),
             Some(fixture.file_target("2026-09-28/Some Title/DESCRIPTION.txt").as_str())
         );
         // No dot in the name, an icon theme would not recognize it — the
         // file still exists, so it links.
         assert_eq!(
-            fixture.target(&linked, "Makefile").as_deref(),
+            Fixture::target(&linked, "Makefile").as_deref(),
             Some(fixture.file_target("2026-09-28/Some Title/Makefile").as_str())
         );
-        assert_eq!(fixture.target(&linked, "missing.md"), None);
+        assert_eq!(Fixture::target(&linked, "missing.md"), None);
         // The directory span itself names a directory: context, not a link.
         let dir =
             runs(&linked).into_iter().find(|run| run.text == "2026-09-28/Some Title/").unwrap();
@@ -428,44 +423,44 @@ mod tests {
     #[test]
     fn a_bare_name_before_the_directory_span_stays_plain() {
         let fixture = Fixture::new();
-        let tree = fixture.tree("`SOURCES.md` then `2026-09-28/Some Title/`");
-        let linked = fixture.linked(&tree, &fixture.roots(true), true);
-        assert_eq!(fixture.target(&linked, "SOURCES.md"), None);
+        let tree = Fixture::tree("`SOURCES.md` then `2026-09-28/Some Title/`");
+        let linked = Fixture::linked(&tree, &fixture.roots(true), true);
+        assert_eq!(Fixture::target(&linked, "SOURCES.md"), None);
     }
 
     #[test]
     fn absolute_and_root_relative_and_location_spans_link() {
         let fixture = Fixture::new();
         let absolute = fixture.root.join("top.md");
-        let tree = fixture.tree(&format!(
+        let tree = Fixture::tree(&format!(
             "`{absolute}` and `top.md:12` and `https://example.com/top.md` and `~/nope.md`",
             absolute = absolute.to_string_lossy()
         ));
-        let linked = fixture.linked(&tree, &fixture.roots(true), true);
+        let linked = Fixture::linked(&tree, &fixture.roots(true), true);
         assert_eq!(
-            fixture.target(&linked, &absolute.to_string_lossy()).as_deref(),
+            Fixture::target(&linked, &absolute.to_string_lossy()).as_deref(),
             Some(format!("file://{}", absolute.to_string_lossy()).as_str())
         );
         assert_eq!(
-            fixture.target(&linked, "top.md:12").as_deref(),
+            Fixture::target(&linked, "top.md:12").as_deref(),
             Some(format!("file://{}:12", fixture.root.join("top.md").to_string_lossy()).as_str())
         );
-        assert_eq!(fixture.target(&linked, "https://example.com/top.md"), None);
-        assert_eq!(fixture.target(&linked, "~/nope.md"), None);
+        assert_eq!(Fixture::target(&linked, "https://example.com/top.md"), None);
+        assert_eq!(Fixture::target(&linked, "~/nope.md"), None);
     }
 
     #[test]
     fn remote_chats_and_remote_roots_are_never_probed() {
         let fixture = Fixture::new();
-        let tree = fixture.tree("`top.md` and `2026-09-28/Some Title/SOURCES.md`");
+        let tree = Fixture::tree("`top.md` and `2026-09-28/Some Title/SOURCES.md`");
         // A remote chat's text names files on its own device.
-        let remote = fixture.linked(&tree, &fixture.roots(true), false);
-        assert_eq!(fixture.target(&remote, "top.md"), None);
-        assert_eq!(fixture.target(&remote, "2026-09-28/Some Title/SOURCES.md"), None);
+        let remote = Fixture::linked(&tree, &fixture.roots(true), false);
+        assert_eq!(Fixture::target(&remote, "top.md"), None);
+        assert_eq!(Fixture::target(&remote, "2026-09-28/Some Title/SOURCES.md"), None);
         // A remote root's files are not on this disk.
-        let remote_root = fixture.linked(&tree, &fixture.roots(false), true);
-        assert_eq!(fixture.target(&remote_root, "top.md"), None);
-        assert_eq!(fixture.target(&remote_root, "2026-09-28/Some Title/SOURCES.md"), None);
+        let remote_root = Fixture::linked(&tree, &fixture.roots(false), true);
+        assert_eq!(Fixture::target(&remote_root, "top.md"), None);
+        assert_eq!(Fixture::target(&remote_root, "2026-09-28/Some Title/SOURCES.md"), None);
     }
 
     #[test]
@@ -473,12 +468,12 @@ mod tests {
         use crate::markdown::render::flatten_runs;
         use crate::theme::Theme;
         let fixture = Fixture::new();
-        let linked = fixture.linked(&fixture.tree("`top.md`"), &fixture.roots(true), true);
-        let target = fixture.target(&linked, "top.md").unwrap();
+        let linked = Fixture::linked(&Fixture::tree("`top.md`"), &fixture.roots(true), true);
+        let target = Fixture::target(&linked, "top.md").unwrap();
         let theme = Theme::dark();
         let from_code = flatten_runs(&runs(&linked), &theme, false);
         let from_link =
-            flatten_runs(&runs(&fixture.tree(&format!("[top.md]({target})"))), &theme, false);
+            flatten_runs(&runs(&Fixture::tree(&format!("[top.md]({target})"))), &theme, false);
         assert_eq!(from_code.text, from_link.text);
         assert_eq!(from_code.links, from_link.links);
         assert_eq!(from_code.code_ranges, from_link.code_ranges);
@@ -493,7 +488,7 @@ mod tests {
         for (source, shown) in
             [("`2026-09-28/Some Title/SOURCES.md`", "SOURCES.md"), ("`top.md:12`", "top.md:12")]
         {
-            let linked = fixture.linked(&fixture.tree(source), &fixture.roots(true), true);
+            let linked = Fixture::linked(&Fixture::tree(source), &fixture.roots(true), true);
             let flat = flatten_runs(&runs(&linked), &Theme::dark(), false);
             assert_eq!(flat.text, shown);
             if shown == source.trim_matches('`') {
@@ -507,7 +502,7 @@ mod tests {
                 assert_eq!(original.offsets.original(0), 0);
                 assert_eq!(original.offsets.original(flat.text.len()), original.text.len());
             }
-            assert_eq!(&flat.text[flat.links[0].0.clone()], shown);
+            assert_eq!(flat.text.get(flat.links[0].0.clone()), Some(shown));
         }
     }
 
@@ -520,13 +515,13 @@ mod tests {
             std::fs::create_dir_all(fixture.root.join(dir)).unwrap();
             std::fs::write(fixture.root.join(dir).join("lib.rs"), "x").unwrap();
         }
-        let tree = fixture.tree(
+        let tree = Fixture::tree(
             "- `crates/ui/src/lib.rs`\n\
              - `crates/engine/src/lib.rs:40`\n\
              - `crates/engine/src/lib.rs`\n\
              - `2026-09-28/Some Title/SOURCES.md`\n",
         );
-        let linked = fixture.linked(&tree, &fixture.roots(true), true);
+        let linked = Fixture::linked(&tree, &fixture.roots(true), true);
         let shown: Vec<String> = runs(&linked)
             .iter()
             .map(|run| flatten_runs(std::slice::from_ref(run), &Theme::dark(), false).text)
@@ -565,7 +560,7 @@ mod tests {
     #[test]
     fn a_later_span_reuses_the_cached_part_for_one_revision() {
         let fixture = Fixture::new();
-        let tree = Arc::new(fixture.tree("`top.md`"));
+        let tree = Arc::new(Fixture::tree("`top.md`"));
         let roots = fixture.roots(true);
         let mut cache = InlineCodeLinkCache::default();
         assert!(cache.set_revision(7));
@@ -585,16 +580,18 @@ mod tests {
         let roots = fixture.roots(true);
         let mut cache = InlineCodeLinkCache::default();
         cache.set_revision(1);
-        let kept = Arc::new(fixture.tree("`top.md`"));
+        let kept = Arc::new(Fixture::tree("`top.md`"));
         let first = cache.linked_tree(&kept, &roots, true);
+        // The other parts stay alive, so none reuses an address the cache compares by.
         let mut others = Vec::new();
         for ix in 0..CACHED_PARTS * 2 {
-            let other = Arc::new(fixture.tree(&format!("part {ix}")));
+            let other = Arc::new(Fixture::tree(&format!("part {ix}")));
             cache.linked_tree(&other, &roots, true);
             others.push(other);
             // A part rendered every frame stays the most recent.
             assert!(Arc::ptr_eq(&first, &cache.linked_tree(&kept, &roots, true)));
         }
         assert!(cache.parts.len() <= CACHED_PARTS);
+        assert_eq!(others.len(), CACHED_PARTS * 2);
     }
 }
