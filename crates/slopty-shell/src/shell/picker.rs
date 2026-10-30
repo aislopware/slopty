@@ -256,16 +256,11 @@ pub(super) fn session_rows(state: &AppState, typed: &str, now: DateTime<Utc>) ->
             .filter(|chat| chat.is_top_level())
             .filter_map(|chat| {
                 let mark = Mark::of(state.display_status_for(chat, now), state.session_for(&chat.id), now);
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| format!("#{} {} {} {}", pr.number, pr.title, pr.head_ref, pr.base_ref))
-                    .unwrap_or_default();
                 let fields = thread_search::ThreadFields {
                     title: chat.title.as_deref().unwrap_or("New session"),
                     project: state.space_for_chat(chat).map_or("", |space| space.display_name()),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces).unwrap_or(""),
+                    branch: sidebar_status::branch_of(chat).unwrap_or(""),
                     device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
                     archived: chat.archived,
                 };
                 let score = thread_search::score_session(&fields, mark.word().unwrap_or(""), &terms)?;

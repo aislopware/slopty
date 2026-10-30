@@ -31,14 +31,9 @@ use serde::de::DeserializeOwned;
 mod slow_calls; // a call that runs long says so
 use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use slopty_view_proto::{
-    AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
-    EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
 use slopty_view_rpc::{RpcClient, RpcError, RpcService, memory_client, methods};
-
-use crate::change_requests::{
-    ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
-};
 
 // Recently viewed transcripts stay renderable while a fresh watch opens. Move
 // ownership on navigation; never clone whale payloads or retain live watches.
@@ -467,8 +462,6 @@ pub struct AppState {
     engine: Option<EngineHandle>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
-    change_requests: ChangeRequestClientState,
-    change_request_tasks: HashMap<ChangeRequestWatchKey, Task<()>>,
     /// SUBAGENT transcripts keyed by subagent doc id (the right pane's
     /// subagent tabs read these). Independent of `selected_chat`: a tab's
     /// feed must survive chat switches — the tab itself is what scopes it.
@@ -559,8 +552,6 @@ impl AppState {
             engine: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
-            change_requests: ChangeRequestClientState::default(),
-            change_request_tasks: HashMap::new(),
             sub_transcripts: HashMap::new(),
             sub_watch_tasks: HashMap::new(),
             auto_selected: false,
@@ -865,10 +856,6 @@ impl AppState {
             && device.name == "unknown-device"
         {
             device.name = "Local".to_string();
-        }
-        for device in &devices {
-            self.change_requests
-                .clear_unsupported_on_version_change(&device.id, device.version.as_deref());
         }
         let presentation = device_presentation_at(&devices, now);
         let session_presence = session_presence_at(&self.sessions, now);
@@ -1567,12 +1554,6 @@ impl AppState {
             .map(|chat| chat.id.as_str())
     }
 
-    /// Latest valid PR for a chat, rechecked against device, checkout, cwd and branch.
-    pub fn change_request_for_chat(&self, chat: &Chat) -> Option<&ChangeRequestSummary> {
-        self.change_requests
-            .change_request_for_chat(chat, &self.spaces)
-    }
-
     pub fn gate(&self) -> GatePhase {
         gate_phase(&self.connection)
     }
@@ -1593,8 +1574,6 @@ impl AppState {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
-        self.change_request_tasks.clear();
-        self.change_requests = ChangeRequestClientState::default();
         self.connection = ConnectionStatus::Connecting;
         self.workspace_scope = None;
         self.auth = None;
@@ -1736,7 +1715,6 @@ impl AppState {
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
-        self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
         // data profile they reached before they are allowed to render Ready.
         self.connection = ConnectionStatus::Ready;
@@ -1745,34 +1723,6 @@ impl AppState {
             self.transcript_task = Some(spawn_transcript_watch(cx, handle, chat_id));
         }
         cx.notify();
-    }
-
-    fn reconcile_change_request_watches(&mut self, cx: &mut Context<Self>) {
-        let Some(handle) = self.engine.clone() else {
-            self.change_request_tasks.clear();
-            return;
-        };
-        let targets = desired_watch_targets(&self.chats, &self.spaces, |device| {
-            !self.change_requests.is_supported(device)
-        });
-
-        self.change_request_tasks
-            .retain(|target, _| targets.contains(target));
-        self.change_requests.retain_targets(&targets);
-
-        let local_device_id = self.local_device_id.clone();
-        for target in targets {
-            if self.change_request_tasks.contains_key(&target) {
-                continue;
-            }
-            let task = spawn_change_request_watch(
-                cx,
-                handle.clone(),
-                target.clone(),
-                local_device_id.clone(),
-            );
-            self.change_request_tasks.insert(target, task);
-        }
     }
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
@@ -1826,9 +1776,6 @@ impl AppState {
     /// watch server-side. Selecting a chat also lands in its space and marks it
     /// seen (a global-list click must switch the tab strip too).
     pub fn select_chat(&mut self, chat_id: Option<String>, cx: &mut Context<Self>) {
-        if let Some(id) = &chat_id {
-            self.focus_chat_sync(id, cx);
-        }
         if self.selected_chat == chat_id {
             // Re-selecting still clears a fresh "completed" badge.
             if let Some(id) = chat_id {
@@ -1975,22 +1922,6 @@ impl AppState {
     /// Synced seen marker: only fires when the chat is currently unseen
     /// (idempotence — no mutate spam), stamps the local row optimistically so
     /// the LWW round-trip is invisible, and fire-and-forgets the mutate.
-    /// Window-focus liveness sweep: ask the engine to probe every open room
-    /// (workspace + chat docs). Fire-and-forget; each room ignores the hint
-    /// unless it has been broadcast-quiet ≥30s, so spamming is harmless.
-    pub fn probe_sync(&mut self, cx: &mut Context<Self>) {
-        let Some(handle) = self.engine.clone() else {
-            return;
-        };
-        cx.spawn(async move |_, _| {
-            let params = serde_json::json!({});
-            if let Err(err) = handle.client().call(methods::PROBE_SYNC, params).await {
-                tracing::debug!(error = %err, "probe sync failed");
-            }
-        })
-        .detach();
-    }
-
     pub fn mark_chat_seen(&mut self, chat_id: &str, cx: &mut Context<Self>) {
         let Some(chat) = self.chats.iter_mut().find(|c| c.id == chat_id) else {
             return;
@@ -2015,35 +1946,7 @@ impl AppState {
         })
         .detach();
     }
-
-    /// Navigation signal is separate from watch lifetime: resubscribing,
-    /// receiving agent output and MCP reads cannot refresh focus priority.
-    pub(crate) fn focus_chat_sync(&self, chat_id: &str, cx: &mut Context<Self>) {
-        let Some(handle) = self.engine.clone() else {
-            return;
-        };
-        let chat_id = chat_id.to_owned();
-        cx.spawn(async move |_, _| {
-            if let Err(error) = handle
-                .client()
-                .call(methods::FOCUS_CHAT, serde_json::json!({ "chatId": chat_id }))
-                .await
-            {
-                tracing::debug!(%chat_id, %error, "chat focus sync hint unavailable");
-            }
-        })
-        .detach();
-    }
-
-    pub(crate) fn focus_subagent_sync(&self, doc_id: &str, cx: &mut Context<Self>) {
-        // Frozen transcripts are static blobs: navigation must not open their
-        // old room just to report focus.
-        if self.sub_watch_tasks.contains_key(doc_id) {
-            self.focus_chat_sync(doc_id, cx);
-        }
-    }
 }
-
 
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
@@ -2084,9 +1987,6 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
                     // watch reconciliation and a whole-shell re-render.
                     let changed = state.apply_chats(parsed);
                     let linked = state.apply_pending_deep_link(cx);
-                    if changed {
-                        state.reconcile_change_request_watches(cx);
-                    }
                     if changed || linked {
                         cx.notify();
                     }
@@ -2105,96 +2005,6 @@ fn spawn_chats_watch(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<(
 }
 
 pub use slopty_view_proto::version_triple;
-
-fn spawn_change_request_watch(
-    cx: &mut Context<AppState>,
-    handle: EngineHandle,
-    target: ChangeRequestWatchKey,
-    local_device_id: Option<String>,
-) -> Task<()> {
-    cx.spawn(async move |this, cx| {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
-        loop {
-            let params = watch_params(&target, local_device_id.as_deref());
-
-            let mut subscription = match handle
-                .client()
-                .subscribe_checked(methods::WATCH_CHECKOUT_CHANGE_REQUEST, params)
-                .await
-            {
-                Ok(subscription) => subscription,
-                Err(RpcError::UnknownMethod(_)) => {
-                    tracing::debug!(
-                        device = %target.device_id,
-                        "checkout change requests unsupported on device"
-                    );
-                    this.update(cx, |state, cx| {
-                        let engine_version = state
-                            .devices
-                            .iter()
-                            .find(|device| device.id == target.device_id)
-                            .and_then(|device| device.version.clone());
-                        state
-                            .change_requests
-                            .mark_unsupported(target.device_id.clone(), engine_version);
-                        cx.notify();
-                    })
-                    .ok();
-                    return;
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        device = %target.device_id,
-                        cwd = %target.cwd,
-                        error = %err,
-                        "checkout change request watch unavailable; retrying"
-                    );
-                    if this.update(cx, |_, _| {}).is_err() {
-                        return;
-                    }
-                    cx.background_executor().timer(RETRY_DELAY).await;
-                    continue;
-                }
-            };
-
-            while let Some(value) = subscription.recv().await {
-                let snapshot: CheckoutChangeRequestStatus = match serde_json::from_value(value) {
-                    Ok(snapshot) => snapshot,
-                    Err(err) => {
-                        tracing::warn!(
-                            device = %target.device_id,
-                            cwd = %target.cwd,
-                            error = %err,
-                            "dropping malformed checkout change request frame"
-                        );
-                        continue;
-                    }
-                };
-                if this
-                    .update(cx, |state, cx| {
-                        if state.change_requests.store(target.clone(), snapshot) {
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-
-            // Preserve the latest successful snapshot during a transport gap.
-            tracing::debug!(
-                device = %target.device_id,
-                cwd = %target.cwd,
-                "checkout change request stream ended; resubscribing"
-            );
-            if this.update(cx, |_, _| {}).is_err() {
-                return;
-            }
-            cx.background_executor().timer(RETRY_DELAY).await;
-        }
-    })
-}
 
 fn spawn_watch<T: DeserializeOwned + 'static>(
     cx: &mut Context<AppState>,
@@ -2236,9 +2046,6 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                 let alive = this.update(cx, |state, cx| {
                     let changed = apply(state, parsed);
                     let linked = state.apply_pending_deep_link(cx);
-                    if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
-                        state.reconcile_change_request_watches(cx);
-                    }
                     if changed || linked {
                         cx.notify();
                     }
@@ -2278,10 +2085,6 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
                 state.local_device_id = Some(id);
                 state.link_roots_revision = state.link_roots_revision.wrapping_add(1);
                 state.apply_pending_deep_link(cx);
-                // Watches opened before this probe conservatively route through
-                // targetDeviceId. Recreate them now that local routing is known.
-                state.change_request_tasks.clear();
-                state.reconcile_change_request_watches(cx);
                 cx.notify();
             })
             .ok();
@@ -2925,23 +2728,6 @@ mod tests {
 
         state.apply_devices(vec![device("local", "José's MacBook Pro")]);
         assert_eq!(state.device_name("local"), Some("José's MacBook Pro"));
-    }
-
-    #[test]
-    fn device_version_change_reenables_change_request_capability() {
-        let mut state = AppState::new();
-        state
-            .change_requests
-            .mark_unsupported("remote".into(), Some("0.2.2".into()));
-        let mut old = device("remote", "Remote");
-        old.version = Some("0.2.2".into());
-        state.apply_devices(vec![old]);
-        assert!(!state.change_requests.is_supported("remote"));
-
-        let mut upgraded = device("remote", "Remote");
-        upgraded.version = Some("0.2.3".into());
-        state.apply_devices(vec![upgraded]);
-        assert!(state.change_requests.is_supported("remote"));
     }
 
     #[test]
@@ -4006,22 +3792,4 @@ mod tests {
         assert!(!state.device_supports("upstream", slopty_view_proto::capabilities::MESSAGE_QUEUE_V1));
     }
 
-}
-
-
-#[cfg(feature = "project-palette-fixture")]
-impl AppState {
-    /// Seed provider metadata for the isolated native sidebar review fixture.
-    pub fn fixture_sidebar_change_request(
-        &mut self,
-        snapshot: slopty_view_proto::CheckoutChangeRequestStatus,
-    ) {
-        let key = crate::change_requests::ChangeRequestWatchKey {
-            device_id: snapshot.device_id.clone(),
-            cwd: snapshot.cwd.clone(),
-            branch: snapshot.branch.clone(),
-            checkout_id: Some(snapshot.checkout_id.clone()),
-        };
-        self.change_requests.store(key, snapshot);
-    }
 }

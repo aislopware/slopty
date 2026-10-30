@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The session hover card: dwell on a sidebar row and a frosted card floats
 //! out beside it with what the row has no room for — the whole title, the
-//! device and project, the branch, and the pull request.
+//! device and project, and the branch.
 //! Compact rows drop all of that, so the card is where it lives on.
 //!
 //! It also says which machine (project @ machine), the agent and model, how long the
@@ -15,8 +15,6 @@
 use std::time::Instant;
 
 use super::*;
-
-use crate::change_requests::ChangeRequestBadgeModel;
 
 /// How long the pointer rests on a row before its card shows.
 const DWELL: Duration = Duration::from_millis(550);
@@ -240,7 +238,7 @@ impl Shell {
         let now = crate::clock::utc(cx);
         // Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
-        let (title, project, local, online, turned_away, branch, change_request) = {
+        let (title, project, local, online, turned_away, branch) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
             let space = state.space_for_chat(chat);
@@ -248,13 +246,8 @@ impl Shell {
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
             let online = !super::sidebar_status::out_of_reach(state, &chat.device_id, now);
             let turned_away = super::sidebar_status::turned_away(state, &chat.device_id).is_some();
-            let branch = crate::change_requests::conversation_branch(chat, &state.spaces)
-                .map(str::trim)
-                .filter(|branch| !branch.is_empty())
+            let branch = super::sidebar_status::branch_of(chat)
                 .map(|branch| SharedString::from(branch.to_owned()));
-            let change_request = state
-                .change_request_for_chat(chat)
-                .map(ChangeRequestBadgeModel::from_summary);
             let title = SharedString::from(
                 chat.title
                     .as_deref()
@@ -262,15 +255,7 @@ impl Shell {
                     .filter(|title| !title.is_empty())
                     .unwrap_or_else(|| "New session".to_owned()),
             );
-            (
-                title,
-                project,
-                local,
-                online,
-                turned_away,
-                branch,
-                change_request,
-            )
+            (title, project, local, online, turned_away, branch)
         };
 
         let muted = theme.text_muted;
@@ -389,26 +374,6 @@ impl Shell {
                 move || format!("session-hover-card-ports-{chat_id}")
             })
         });
-        // ── The pull request as one more row under the branch: its state
-        // lives in the glyph's and number's color (the badge's).
-        let pull_request = change_request.map(|model| {
-            let tone = model.tone.color(&theme);
-            meta_row(
-                icon(icons::PULL_REQUEST)
-                    .size(px(13.0))
-                    .text_color(tone.opacity(0.9))
-                    .into_any_element(),
-                model.title,
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .font_family(theme.font_mono.clone())
-                    .text_size(crate::typography::ui_rems(11.0))
-                    .text_color(tone.opacity(0.85))
-                    .child(SharedString::from(format!("#{}", model.number))),
-            )
-        });
         let location = div()
             .flex()
             .flex_col()
@@ -418,7 +383,6 @@ impl Shell {
             .child(project_row)
             .children(folder)
             .children(branch.clone().map(|branch| meta_row(glyph(icons::GIT_BRANCH), branch)))
-            .children(pull_request)
             .children(agent)
             .children(subagents)
             .children(ports_row);
@@ -599,14 +563,12 @@ mod tests {
 
     struct RowHost {
         shell: Entity<Shell>,
-        palette: bool,
         _observation: Subscription,
         _dir: tempfile::TempDir,
     }
 
     impl Render for RowHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let palette = self.palette;
             self.shell.update(cx, |shell, cx| {
                 div().w(px(280.0)).h(px(200.0)).child(shell.render_chat_row(
                     "hover-test".into(),
@@ -615,21 +577,12 @@ mod tests {
                     "now".into(),
                     "Project".into(),
                     None,
-                    Some(slopty_view_proto::ChangeRequestSummary {
-                        provider: "github".into(),
-                        number: 90,
-                        title: "Pull request title".into(),
-                        url: "https://github.com/acme/slopty/pull/90".into(),
-                        state: slopty_view_proto::ChangeRequestState::Open,
-                        base_ref: "main".into(),
-                        head_ref: "feature/pr".into(),
-                    }),
                     None,
                     slopty_view_proto::ChatIndicator::Idle,
                     false,
                     false,
                     None,
-                    palette.then_some(""),
+                    None,
                     &Theme::default(),
                     cx,
                 ))
@@ -637,10 +590,7 @@ mod tests {
         }
     }
 
-    fn row_setup(
-        cx: &mut TestAppContext,
-        palette: bool,
-    ) -> (Entity<Shell>, &mut VisualTestContext) {
+    fn row_setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         let dir = tempfile::tempdir().unwrap();
         init_test(cx, dir.path());
         let (host, cx) = cx.add_window_view(|_, cx| {
@@ -648,7 +598,6 @@ mod tests {
             let observation = cx.observe(&shell, |_, _, cx| cx.notify());
             RowHost {
                 shell,
-                palette,
                 _observation: observation,
                 _dir: dir,
             }
@@ -676,7 +625,7 @@ mod tests {
     #[gpui::test]
     fn archive_press_cancels_pending_and_shown_cards(cx: &mut TestAppContext) {
         for shown in [false, true] {
-            let (shell, cx) = row_setup(cx, false);
+            let (shell, cx) = row_setup(cx);
             let row = cx.debug_bounds("chat-hover-test").unwrap().center();
             cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
             redraw(cx);
@@ -695,22 +644,6 @@ mod tests {
             wait_for_card(cx);
             assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
         }
-    }
-
-    #[gpui::test]
-    fn palette_pr_badge_keeps_its_tooltip_without_a_session_card(cx: &mut TestAppContext) {
-        let (shell, cx) = row_setup(cx, true);
-        let badge = cx
-            .debug_bounds("pull-request-badge-palette-chat-hover-test-pr")
-            .unwrap()
-            .center();
-        cx.simulate_mouse_move(badge, None, gpui::Modifiers::default());
-        redraw(cx);
-        wait_for_card(cx);
-        assert!(cx.debug_bounds("change-request-tooltip").is_some());
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.session_hover_card.target(), None)
-        });
     }
 
     fn shell_setup(

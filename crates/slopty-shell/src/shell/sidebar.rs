@@ -3,20 +3,6 @@
 
 use super::*;
 
-/// `connected` already includes the engine's degradation grace. A brief
-/// focus-triggered dial needs no sidebar status; queued changes or a sustained
-/// outage still deserve one.
-fn chat_sync_pill_caption(chat: &slopty_view_proto::ChatConnectivity) -> Option<&'static str> {
-    use slopty_view_proto::ChatSyncState as S;
-    let sustained_or_queued = !chat.connected || chat.pending_pushes > 0;
-    match chat.sync_state {
-        S::Waiting if sustained_or_queued => Some("Sync queued — changes are saved"),
-        S::Connecting if sustained_or_queued => Some("Syncing…"),
-        S::Offline if !chat.connected => Some("Offline — changes are saved"),
-        _ => None,
-    }
-}
-
 /// Sidebar resort glide: 260ms
 /// `cubic-bezier(0.22,1,0.36,1)` per-row translate, the View Transitions
 /// equivalent.
@@ -62,25 +48,13 @@ fn sidebar_key_order_changed(old: &[(String, f32)], new: &[(String, f32)]) -> bo
             .any(|((old_key, _), (new_key, _))| old_key != new_key)
 }
 
-/// Exact active-session row height. Harness identity lives on the title line
+/// Exact height of the palette's session row. Harness identity lives on the title line
 /// and the Working glyph lives in the status corner, so neither adds a third
-/// line. Compact rows omit the metadata line and its preceding gap entirely;
-/// branch / pull-request rows add the exact height of their tallest child.
+/// line; a branch adds its line, 14 pt, and the gap before it.
 /// Keeping this calculation beside the renderer's metrics prevents disclosure
 /// clips when view options alter the row structure.
-fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
-    let mut metadata_height: f32 = 0.0;
-    if shows_branch {
-        metadata_height = metadata_height.max(14.0);
-    }
-    if shows_pull_request {
-        metadata_height = metadata_height.max(16.0);
-    }
-    if metadata_height == 0.0 {
-        45.0
-    } else {
-        47.0 + metadata_height
-    }
+fn chat_row_height(shows_branch: bool) -> f32 {
+    if shows_branch { 47.0 + 14.0 } else { 45.0 }
 }
 // One sidebar row of one line (`docs/decisions/layout.md`, "The session list is stable"
 // and "A state is a glyph"): the program's icon, the title and its quiet hint, and the state's
@@ -428,7 +402,7 @@ impl Shell {
     /// the agent gave, and the state's mark (`marks`), with `title_hint`, quiet, after the title
     /// only when something tells the row from those beside it (`sidebar_status`). A row whose
     /// machine is out of reach dims and wears the cached glyph in its mark's place. The palette's
-    /// copy spells out where the chat runs, its status or time, its branch and its pull request.
+    /// copy spells out where the chat runs, its status or time, and its branch.
     /// Click selects; right-click opens the context menu.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn render_chat_row(
@@ -441,7 +415,6 @@ impl Shell {
         time_ago: SharedString,
         space_name: SharedString,
         branch: Option<SharedString>,
-        change_request: Option<slopty_view_proto::ChangeRequestSummary>,
         harness: Option<slopty_view_proto::HarnessId>,
         status: slopty_view_proto::ChatIndicator,
         selected: bool,
@@ -468,7 +441,7 @@ impl Shell {
         } else {
             format!("chat-{id}")
         };
-        let pr_device = self
+        let row_device = self
             .state
             .read(cx)
             .chats
@@ -476,13 +449,8 @@ impl Shell {
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
         // The sidebar draws one row (`SIDEBAR_ROW_HEIGHT`); the palette's copy spells out
-        // where the chat runs, its branch and its pull request.
+        // where the chat runs and its branch.
         let compact = search_query.is_none();
-        let pr_surface = if search_query.is_some() {
-            crate::change_requests::ChangeRequestBadgeSurface::Sidebar
-        } else {
-            crate::change_requests::ChangeRequestBadgeSurface::SessionRow
-        };
         let corner_hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let content_id = id.clone();
@@ -497,17 +465,17 @@ impl Shell {
         let mark = super::marks::Mark::of(status, self.state.read(cx).session_for(&id), now);
         let status_label = mark.word();
         let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
-        let shows_metadata = branch.is_some() || change_request.is_some();
+        let shows_metadata = branch.is_some();
         let unread = mark.heavy() && !archived;
         // A sidebar row whose machine is out of reach shows the last word from there
         // (`sidebar_status::Row::cached`).
         let cached = compact
-            && pr_device
+            && row_device
                 .as_deref()
                 .is_some_and(|device| super::sidebar_status::out_of_reach(self.state.read(cx), device, now));
         // A machine that turns this device away wears the login badge in the row's mark
         // slot: why, and a press dials it again (`turned_away_badge`).
-        let turned_away = pr_device.as_deref().filter(|_| cached).and_then(|device| {
+        let turned_away = row_device.as_deref().filter(|_| cached).and_then(|device| {
             let why = super::sidebar_status::turned_away(self.state.read(cx), device)?;
             Some((device.to_owned(), SharedString::from(why.to_owned())))
         });
@@ -746,7 +714,7 @@ impl Shell {
             .h(px(if compact {
                 SIDEBAR_ROW_HEIGHT
             } else {
-                chat_row_height(branch.is_some(), change_request.is_some())
+                chat_row_height(branch.is_some())
             }))
             .flex()
             .flex_col()
@@ -1080,8 +1048,8 @@ impl Shell {
                         }
                     }),
             )
-            // Line 3 is structural, not reserved whitespace: compact states
-            // omit it completely when both Branch and Pull request are hidden.
+            // Line 3 is structural, not reserved whitespace: a row without a branch
+            // omits it completely.
             .when(!compact && shows_metadata, |row| {
                 row.child(
                     div()
@@ -1106,53 +1074,20 @@ impl Shell {
                                     .text_color(subline)
                                     .child(popover::search_highlight(branch, search_query, theme)),
                             ))
-                        })
-                        // Stable invisible spring keeps the optional PR badge
-                        // pinned right without changing no-PR paint.
-                        .child(div().flex_1().min_w_0())
-                        .when_some(change_request, |el, summary| {
-                            el.child(crate::change_requests::pull_request_badge_with_query(
-                                format!("{row_id}-pr").into(),
-                                summary,
-                                pr_surface,
-                                search_query,
-                                pr_device.clone(),
-                                theme,
-                            ))
                         }),
                 )
             })
             .into_any_element()
     }
 
-    /// The connection pill: the link's health, with the selected chat's queue and a failure to
-    /// save. A failure to save takes precedence even while the network is offline. No surface
-    /// and no border: a bare spinner and a faint caption while reconnecting, an amber dot only
-    /// when the OS says offline. The transport's error belongs in the logs, not the sidebar.
+    /// The connection pill: the link's health, shown only while it is down. No surface and no
+    /// border: a bare spinner and a faint caption while reconnecting, an amber dot only when the
+    /// OS says offline. The transport's error belongs in the logs, not the sidebar.
     fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         use slopty_view_proto::ConnectivityState as S;
-        let conn = self.state.read(cx).connectivity.clone();
-        let selected = self.state.read(cx).selected_chat.as_deref();
-        let chat = conn.chats.iter()
-            .find(|c| Some(c.chat_id.as_str()) == selected);
-        let chat_state = chat.map(|c| c.sync_state);
-        let (label, glyph): (SharedString, AnyElement) = match conn.state {
-            _ if chat_state == Some(slopty_view_proto::ChatSyncState::StorageError) => (
-                // Work may be lost: the failure's red, not the waiting amber.
-                "Couldn\u{2019}t save changes".into(),
-                div().size(px(5.0)).rounded_full().bg(theme.danger).into_any_element(),
-            ),
-            S::Disabled => return None,
-            S::Connected => {
-                let caption = chat_sync_pill_caption(chat?)?;
-                (
-                    caption.into(),
-                    loaders::mini_mono_spinner(
-                        "chat-sync-spinner", 2.0, theme.text_muted,
-                        self.sidebar_pane.entity_id(), cx,
-                    ).into_any_element(),
-                )
-            }
+        let state = self.state.read(cx).connectivity.state;
+        let (label, glyph): (SharedString, AnyElement) = match state {
+            S::Disabled | S::Connected => return None,
             S::Offline => (
                 "Offline — sends are saved".into(),
                 div()
@@ -1693,43 +1628,6 @@ mod tests {
     use super::super::retention_tests::{DESKTOP, draw, find, find_starting, launch, session_row, space, tree};
 
     #[test]
-    fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
-        use slopty_view_proto::{ChatConnectivity, ChatSyncState as S};
-
-        let mut chat = ChatConnectivity {
-            chat_id: "remote".into(),
-            sync_state: S::Local,
-            connected: false,
-            delivery_live: false,
-            pending_pushes: 0,
-        };
-        assert_eq!(chat_sync_pill_caption(&chat), None);
-
-        for state in [S::Waiting, S::Connecting, S::Offline] {
-            chat.sync_state = state;
-            chat.connected = true;
-            assert_eq!(chat_sync_pill_caption(&chat), None, "transient {state:?}");
-        }
-
-        chat.sync_state = S::Waiting;
-        chat.connected = false;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-        chat.sync_state = S::Offline;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Offline — changes are saved"));
-
-        // Real pending pushes remain visible even with a live room.
-        chat.connected = true;
-        chat.pending_pushes = 1;
-        chat.sync_state = S::Waiting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Sync queued — changes are saved"));
-        chat.sync_state = S::Connecting;
-        assert_eq!(chat_sync_pill_caption(&chat), Some("Syncing…"));
-    }
-
-    // The foot names the server this client follows.
-    #[test]
     fn sidebar_footer_names_the_server_and_its_link() {
         let server = |online| slopty_view_proto::ServerPresence { name: "studio".into(), online, actions: Vec::new(), invite: None };
         let up = server(true);
@@ -1753,10 +1651,8 @@ mod tests {
 
     #[test]
     fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 45.0);
-        assert_eq!(chat_row_height(true, false), 61.0);
-        assert_eq!(chat_row_height(false, true), 63.0);
-        assert_eq!(chat_row_height(true, true), 63.0);
+        assert_eq!(chat_row_height(false), 45.0);
+        assert_eq!(chat_row_height(true), 61.0);
     }
 
     #[test]

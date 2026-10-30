@@ -62,14 +62,11 @@ fn long_by_design(method: &str) -> bool {
             method,
             methods::CLONE_REPO
                 | methods::INSTALL_HARNESS
-                | methods::APPLY_UPDATE
-                | methods::FETCH_ALL
                 | methods::READ_ATTACHMENT_CHUNK
                 | methods::ADD_DEVICE
                 | methods::ANSWER_ADD_DEVICE
                 | methods::LOOK_ON_TAILNET
                 | methods::DEVICE_ACTION
-                | methods::STOP_ENGINE
         )
 }
 
@@ -249,7 +246,7 @@ mod tests {
         runtime().block_on(async {
             let after = Duration::from_millis(10);
             let (held, mut events) = SlowCallWatch::wrap(Arc::new(Held(Duration::from_secs(60))), after);
-            let call = held.handle(methods::LIST_REFS, serde_json::json!({}));
+            let call = held.handle(methods::LIST_BRANCHES, serde_json::json!({}));
             let _timed_out = tokio::time::timeout(after * 5, call).await;
             assert!(matches!(events.next().await, Some(SlowCall::Slow { id: 1, .. })));
             assert_eq!(events.next().await, Some(SlowCall::Answered(1)));

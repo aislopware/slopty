@@ -1206,11 +1206,12 @@ pub struct Shell {
     /// Keys that just appeared in a live list (fade in, no glide).
     sidebar_new_keys: std::collections::HashSet<String>,
     resort_epoch: usize,
-    /// Last observed `window.is_window_active()` — rising edge fires a
-    /// ProbeSync so a broadcast-deaf room heals as the user looks at the app.
+    /// Whether the person looked at the window last frame (`presence::looking`), so the state
+    /// hears only when that changes.
     was_window_active: bool,
-    /// Dev/testing knobs (`SLOPTY_OPEN_DIALOG`, `SLOPTY_FORCE_GATE`) — see [`Shell::new`].
+    /// Dev/testing knob (`SLOPTY_OPEN_DIALOG`) — see [`Shell::new`].
     debug_dialog: Option<String>,
+    /// The gate a test forces in place of the state's ([`AppState::gate`]).
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
     /// The last tracked frame: the window fit, the sidebar's painted width and the width its
@@ -1361,16 +1362,8 @@ impl Shell {
         };
         // More capture knobs of the same kind: `SLOPTY_OPEN_DIALOG=rename`
         // opens that dialog for the first chat once chats land (`add-space` the
-        // add-project palette);
-        // `SLOPTY_FORCE_GATE=signin|org|failed` renders that gate regardless of
-        // real auth state (display-only — for styling passes).
+        // add-project palette).
         let debug_dialog = std::env::var("SLOPTY_OPEN_DIALOG").ok();
-        let debug_gate = match std::env::var("SLOPTY_FORCE_GATE").ok().as_deref() {
-            Some("failed") => Some(GatePhase::Failed(
-                "Couldn\u{2019}t reach the Slopty engine on port 27901. Restart Slopty.".into(),
-            )),
-            _ => None,
-        };
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
             Route::Settings(section) => NavEntry::Settings(section),
@@ -1498,7 +1491,7 @@ impl Shell {
             resort_epoch: 0,
             was_window_active: false,
             debug_dialog,
-            debug_gate,
+            debug_gate: None,
             sidebar_tween: None,
             painted_sidebar: None,
             fit_exit: None,
@@ -5613,17 +5606,8 @@ impl Render for Shell {
         let mut shown_ground = None;
         let root = match &gate {
             GatePhase::Ready => 'ready: {
-                // Focus is a sync signal: on the rising edge of window
-                // activation, nudge every open room to verify liveness — a
-                // broadcast-deaf socket (accepted writes, runtime pongs,
-                // nothing delivered; 2026-08-04 incident) then heals within
-                // seconds of the user looking at the app rather than waiting
-                // out the background probe cadence.
                 // Whether the person looks, as the OS says or the e2e socket holds.
                 let window_active = crate::presence::looking(window, cx);
-                if window_active && !self.was_window_active {
-                    self.state.update(cx, |s, cx| s.probe_sync(cx));
-                }
                 if window_active != self.was_window_active {
                     // The invariants' watch reads whether anybody looks.
                     self.state.update(cx, |s, _| s.window_active = window_active);

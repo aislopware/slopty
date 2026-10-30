@@ -1208,11 +1208,7 @@ impl Shell {
                     (Some(project), None) => project.to_string(),
                     (None, device) => device.unwrap_or_default().to_string(),
                 };
-                let branch = crate::change_requests::conversation_branch(chat, &state.spaces)
-                    .map(str::trim)
-                    .filter(|branch| !branch.is_empty())
-                    .map(SharedString::from);
-                let pr = state.change_request_for_chat(chat).cloned();
+                let branch = super::sidebar_status::branch_of(chat).map(SharedString::from);
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 self.render_chat_row(
                     id.clone(),
@@ -1222,7 +1218,6 @@ impl Shell {
                         .into(),
                     folder.into(),
                     branch,
-                    pr,
                     harness,
                     state.display_status_for(chat, crate::clock::utc(cx)),
                     active,

@@ -19,7 +19,6 @@ pub mod app_menus;
 pub mod appearance;
 pub mod attachments;
 pub mod browser;
-pub mod change_requests;
 pub mod catalog;
 pub mod changes;
 pub mod clock; // the frame's moment, the shell's one clock

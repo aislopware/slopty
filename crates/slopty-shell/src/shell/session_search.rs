@@ -1,4 +1,4 @@
-//! Finding sessions: by their titles, projects, branches, machines and pull requests
+//! Finding sessions: by their titles, projects, branches and machines
 //! ([`Shell::thread_matches`]), and by what was said in them (`SearchChats`, [`ChatWordsQuery`]).
 //! The palette lists both today; the session picker is to take them up.
 
@@ -191,25 +191,14 @@ impl Shell {
             .iter()
             .filter(|chat| chat.is_top_level())
             .filter_map(|chat| {
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
-                    })
-                    .unwrap_or_default();
                 let fields = thread_search::ThreadFields {
                     title: chat.title.as_deref().unwrap_or("New session"),
                     project: state
                         .space_for_chat(chat)
                         .map(|s| s.display_name())
                         .unwrap_or(""),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces)
-                        .unwrap_or(""),
+                    branch: super::sidebar_status::branch_of(chat).unwrap_or(""),
                     device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
                     archived: chat.archived,
                 };
                 let score = thread_search::score_thread(&fields, &terms)?;

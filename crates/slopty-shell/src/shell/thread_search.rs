@@ -10,7 +10,6 @@ const TITLE: u32 = 100;
 const PROJECT: u32 = 40;
 const BRANCH: u32 = 30;
 const DEVICE: u32 = 20;
-const PULL_REQUEST: u32 = 20;
 /// A session's state in a word ("needs you", "working", "failed", "done"), the picker's
 /// filter by state.
 const STATE: u32 = 30;
@@ -22,8 +21,6 @@ pub(super) struct ThreadFields<'a> {
     pub project: &'a str,
     pub branch: &'a str,
     pub device: &'a str,
-    /// Number, title and refs of the thread's pull request.
-    pub pull_request: &'a str,
     pub archived: bool,
 }
 
@@ -47,7 +44,6 @@ pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]
         (fields.project.to_lowercase(), PROJECT),
         (fields.branch.to_lowercase(), BRANCH),
         (fields.device.to_lowercase(), DEVICE),
-        (fields.pull_request.to_lowercase(), PULL_REQUEST),
         (state.to_lowercase(), STATE),
     ];
     let mut total = 0;
@@ -128,15 +124,15 @@ mod tests {
             &terms,
         )
         .unwrap();
-        let in_pr = score_thread(
+        let in_device = score_thread(
             &ThreadFields {
-                pull_request: "#12 search",
+                device: "search",
                 ..Default::default()
             },
             &terms,
         )
         .unwrap();
-        assert!(in_title > in_project && in_project > in_branch && in_branch > in_pr);
+        assert!(in_title > in_project && in_project > in_branch && in_branch > in_device);
     }
 
     #[test]

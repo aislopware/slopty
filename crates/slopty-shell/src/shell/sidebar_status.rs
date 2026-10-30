@@ -265,7 +265,7 @@ fn touched(chat: &Chat) -> DateTime<Utc> {
 /// (`projects`, a shelf's or Inactive's, while they are not all one), its machine while the list
 /// spans machines, and its branch while the group's rows stand on more than one.
 fn hints(state: &AppState, rows: &mut [Row], spans_machines: bool, projects: Option<&[SharedString]>) {
-    let mut branches: Vec<&str> = rows.iter().filter_map(|row| branch_of(state, &row.chat)).collect();
+    let mut branches: Vec<&str> = rows.iter().filter_map(|row| branch_of(&row.chat)).collect();
     branches.sort_unstable();
     branches.dedup();
     let spans_branches = branches.len() > 1;
@@ -281,7 +281,7 @@ fn hints(state: &AppState, rows: &mut [Row], spans_machines: bool, projects: Opt
             if spans_machines && let Some(machine) = state.device_name(&row.chat.device_id) {
                 parts.push(machine);
             }
-            if spans_branches && let Some(branch) = branch_of(state, &row.chat) {
+            if spans_branches && let Some(branch) = branch_of(&row.chat) {
                 parts.push(branch);
             }
             (!parts.is_empty()).then(|| SharedString::from(parts.join(" \u{b7} ")))
@@ -292,9 +292,13 @@ fn hints(state: &AppState, rows: &mut [Row], spans_machines: bool, projects: Opt
     }
 }
 
-/// The branch `chat` stands on, as Slopty's own git read says.
-fn branch_of<'a>(state: &'a AppState, chat: &'a Chat) -> Option<&'a str> {
-    crate::change_requests::conversation_branch(chat, &state.spaces).map(str::trim)
+/// The branch `chat` stands on, as Slopty's own git read of its checkout says, trimmed and never
+/// empty. The chat's own `branch` is never read: it may tell an older state of the checkout.
+pub(super) fn branch_of(chat: &Chat) -> Option<&str> {
+    chat.source_context
+        .as_ref()
+        .map(|source| source.branch.trim())
+        .filter(|branch| !branch.is_empty())
 }
 
 /// The sessions the "Next session that needs you" key walks, by chat id: every one that waits
