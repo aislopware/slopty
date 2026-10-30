@@ -74,14 +74,20 @@ const OWN_SIGNALS: &[&str] = &["slopty-crash"];
 const TSAN_COUNTS_INSTRUCTIONS: &[(&str, &str)] =
     &[("slopty-testkit", "bench::tests::a_series_reports_per_operation_and_as_json")];
 
-/// Simulations that run on the test's one thread, so `ThreadSanitizer` has no second thread to
-/// race them with, and which its instrumentation of every access holds past their limit. The
-/// codec's clock-drift test plays eight minutes of audio through the ring, and the codec's tests
-/// get a minute on a runner (a stopped encoder hangs them): it timed out at 60 s (Deep run
-/// 40989163091). The ring's threads are `ThreadSanitizer`'s in the player's own tests and
-/// loom's in its models. Only these two reasons put a test in a list here.
-const TSAN_ONE_THREAD: &[(&str, &str)] =
-    &[("slopty-codec", "audio::latency_tests::clock_drift_is_absorbed_by_slices")];
+/// Tests whose work runs on the test's one thread, so `ThreadSanitizer` has no second thread to
+/// race it with, and which its instrumentation holds past their limit. The codec's clock-drift
+/// test plays eight minutes of audio through the ring, and the codec's tests get a minute on a
+/// runner (a stopped encoder hangs them): it timed out at 60 s (Deep run 40989163091). The
+/// ring's threads are `ThreadSanitizer`'s in the player's own tests and loom's in its models.
+/// The PTY's process-state test forks 300 children in a row, each the other half of a spawn in a
+/// process the runtime does not follow, and a child costs it about 0.45 s on a Mac: 137 s alone,
+/// past a runner's 180 s beside the other tests (Deep run 41018723691). Its one step with a
+/// second thread hands that thread a spawn and shares only atomics with it. The PTY's spawns
+/// from many threads at once stay instrumented. Only these two reasons put a test in a list here.
+const TSAN_ONE_THREAD: &[(&str, &str)] = &[
+    ("slopty-codec", "audio::latency_tests::clock_drift_is_absorbed_by_slices"),
+    ("slopty-pty", "process_state::spawns_hold_up_in_a_process_in_a_bad_state"),
+];
 
 /// The nextest filterset that leaves out [`TSAN_COUNTS_INSTRUCTIONS`] and [`TSAN_ONE_THREAD`].
 fn tsan_filter() -> String {
