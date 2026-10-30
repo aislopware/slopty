@@ -242,6 +242,8 @@ enum Say {
     Ran(Ran, WallMs),
     /// Its record says its name now.
     Named(String),
+    /// Word of its start names the version of the Claude Code that runs it.
+    Version(String),
     /// Its record says it waits on the person for this (`None`: no longer), since this time.
     Waits(Option<Wait>, WallMs),
     /// Slopty's mod says its prompt box holds `text`, its pasted pictures under the temporary
@@ -273,10 +275,11 @@ impl Watch {
                     let since = Some(WallMs::now());
                     term.since = since;
                     // Its first hook can come before word of the start: the session is
-                    // followed already, by the path the hook named.
+                    // followed already, by the path the hook named, and takes the version.
                     if term.session.as_ref().is_some_and(|f| f.native == native) {
                         if !version.is_empty() {
-                            term.version = version;
+                            term.version.clone_from(&version);
+                            self.say(terminal, Say::Version(version));
                         }
                         continue;
                     }
@@ -871,6 +874,7 @@ impl Reader {
             Say::Ran(ran, at) => self.history.ran(&ran, at),
             Say::Waits(wait, at) => self.waits(wait, at),
             Say::Named(name) => self.history.named(&name),
+            Say::Version(version) => self.history.version(&version),
             Say::Draft { text, tmpdir, at } => {
                 self.draft(host, text, tmpdir, at, RELOOKS);
                 Vec::new()
