@@ -6,9 +6,12 @@
 //! finishes launching, asks APNs for the device token a pushed note is addressed to, and hands
 //! it on (`slopty_platform::notify::pushed`); the scene delegate starts the tokio runtime and GPUI,
 //! embedded in UIKit's run loop, once the window scene connects, and forwards the scene's lifecycle
-//! to `gpui_ios`. Everything the app does lives in `slopty-app`, shared with the macOS app.
+//! to `gpui_ios`. The keyboard's doors into the shell's key row are `keyboard`'s. Everything the
+//! app does lives in `slopty-app`, shared with the macOS app.
 
 #![cfg(target_os = "ios")]
+
+mod keyboard;
 
 use std::ffi::{c_char, c_int, c_void};
 
@@ -154,6 +157,7 @@ define_class!(
 
         #[unsafe(method(sceneWillEnterForeground:))]
         fn will_enter_foreground(&self, scene: &UIScene) {
+            keyboard::reread();
             ffi::gpui_ios_will_enter_foreground(object_ptr(scene));
         }
 
@@ -218,6 +222,7 @@ fn run() {
     let handle = Box::leak(Box::new(runtime)).handle().clone();
     ffi::set_app_callback(Box::new(move |cx| {
         gpui_kit::init(cx);
+        keyboard::start(cx);
         slopty_app::open_workspace(cx, handle);
     }));
     // The shell's icons and fonts.
