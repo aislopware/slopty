@@ -3108,9 +3108,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       the projects studied does it.
   - Tests (`slopty-worker`, `screen::holder::tests`, a fake factory in the holder and a real
     Unix socket): `a_held_display_outlives_its_worker_and_its_client_takes_it_back`,
-    `a_new_holder_makes_the_kept_displays_again`, and
-    `a_holder_ends_alone_or_when_asked_to_quit`. On a Mac, with real displays and the worker's
-    binary as the holder (`slopty-workerd`, `holder`):
+    `a_holder_asked_to_quit_ends_at_once`, and on tokio's paused clock, each wait exact,
+    `a_new_holder_makes_the_kept_displays_again` (its tries a second apart, and given up past
+    them) and `a_holder_ends_a_minute_after_its_last_worker_went`. On a Mac, with real displays
+    and the worker's binary as the holder (`slopty-workerd`, `holder`):
     `a_display_the_holder_made_outlives_the_worker_that_asked_for_it`, and, with a stand-in
     app's window on the display (`slopty-stub-window`),
     `a_window_on_a_held_display_stays_put_while_its_worker_is_replaced` and

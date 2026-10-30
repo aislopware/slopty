@@ -2459,10 +2459,11 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     chat's folder as soon as it is followed; that asks no worker anything.
   - Numbers in MEASUREMENTS.md, 2026-10-16, "Watches wait on the worker's events". Tests:
     worker `repowatch` unit tests (git's rules, what in the git directory counts, a status's
-    paths, the burst pacing, and a second of steady changes on tokio's paused clock,
-    `a_second_of_steady_changes_is_a_report_each_hold`) and `tests/repowatch.rs` on the real
-    file system and a real git:
-    `a_repository_is_reported_on_each_change_git_sees_and_never_while_idle`,
+    paths, the burst pacing, and on tokio's paused clock a second of steady changes,
+    `a_second_of_steady_changes_is_a_report_each_hold`, and the quiet of an idle repository
+    and of what git ignores, `an_idle_repository_and_what_git_ignores_say_nothing`) and
+    `tests/repowatch.rs` on the real file system and a real git:
+    `a_repository_is_reported_on_each_change_git_sees`,
     `a_repository_made_in_a_folder_is_noticed`, `a_repository_left_out_of_the_list_is_let_go`,
     `a_burst_of_a_thousand_writes_is_reported`,
     `a_repository_deleted_is_said_and_one_made_in_its_place_followed`,
