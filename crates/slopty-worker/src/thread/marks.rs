@@ -82,7 +82,8 @@ mod tests {
         (outcome, state)
     }
 
-    /// The seen mark moves up to the turn named, never back and never past the last turn.
+    /// The seen mark moves up to the turn named, never back and never past the last turn, and
+    /// a mark where it stands already is no change to send.
     #[test]
     fn the_seen_mark_moves_only_up_to_the_last_turn() {
         let (outcome, seen) = after(state(3), &Intent::Seen { turn: TurnId(2) });
@@ -90,6 +91,7 @@ mod tests {
         let (_, back) = after(seen.clone(), &Intent::Seen { turn: TurnId(1) });
         assert_eq!(back.seen, TurnId(2), "never back");
         assert_eq!(act(&seen, &Intent::Seen { turn: TurnId(1) }).1, []);
+        assert_eq!(act(&seen, &Intent::Seen { turn: TurnId(2) }).1, [], "where it stands");
         let (_, past) = after(seen, &Intent::Seen { turn: TurnId(9) });
         assert_eq!(past.seen, TurnId(3), "not past the last turn");
     }
