@@ -1707,6 +1707,7 @@ mod progress_tests {
                         exit: None,
                         progress: *reported.borrow(),
                         drop: None,
+                        ground: None,
                     })
                 },
                 |_, _| None,

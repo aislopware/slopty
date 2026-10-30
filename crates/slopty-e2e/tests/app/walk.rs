@@ -341,7 +341,7 @@ async fn the_files_and_changes_keep_up_with_a_person() {
         .unwrap();
 
     // The palette, a file found by name and opened.
-    drv.keys("cmd-k").await.unwrap();
+    drv.keys("cmd-shift-p").await.unwrap();
     drv.type_text("READ").await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let palette = drv.dump().await.unwrap();

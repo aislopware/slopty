@@ -90,6 +90,7 @@ mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
+mod session_search; // finding sessions by title and by what was said in them
 mod tabs;
 mod live_surfaces; // slopty: remote window and desktop surfaces
 mod pane_offers; // slopty: what a side pane offers to open, one list
@@ -336,13 +337,6 @@ fn titlebar_new_session_alpha(route: &Route, has_selected_chat: bool) -> f32 {
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
-/// Show the command palette's tab at this (zero-based) position. Bound to
-/// mod-1…4 inside the palette's key context only, where it outranks the
-/// session jumps on the same keys while the palette is open.
-#[derive(Clone, PartialEq, Action)]
-#[action(namespace = shell, no_json)]
-pub struct SelectPaletteTab(pub usize);
-
 // ---------------------------------------------------------------------------
 // Traffic-light-aware titlebar layout (feature-inventory §1.1)
 // ---------------------------------------------------------------------------
@@ -518,9 +512,11 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             None,
             cx,
         ),
-        // Fixed: ⌘K summons the command palette.
-        // Pressing it again dismisses.
+        // Fixed: ⇧⌘P summons the command palette (Ghostty's and VS Code's key), and pressing it
+        // again dismisses it. ⌘K opens it too until the session picker takes that key; bound
+        // last, ⇧⌘P is the key the palette and the menu show.
         crate::keys::binding(&platform_combo("mod-k"), ToggleCommandPalette, None, cx),
+        crate::keys::binding(&platform_combo("mod-shift-p"), ToggleCommandPalette, None, cx),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // slopty: the files surface's and the diff's fixed keys, in their own contexts.
@@ -545,23 +541,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         ))
     }).collect();
     cx.bind_keys(jumps);
-    // Context-free bindings (the jumps above) match at the full focus depth,
-    // so a palette binding must too: one for the palette's focused search
-    // input, one for the card itself. Bound after the jumps, they win the tie.
-    let palette_input = format!("{} > PaletteSearch", command_palette::KEY_CONTEXT);
-    let tabs: Vec<_> = (0..command_palette::Tab::ALL.len()).flat_map(|ix| { // slopty: as jumps
-        let combo = platform_combo(&format!("mod-{}", ix + 1));
-        [
-            crate::keys::binding(&combo, SelectPaletteTab(ix), Some(&palette_input), cx),
-            crate::keys::binding(
-                &combo,
-                SelectPaletteTab(ix),
-                Some(command_palette::KEY_CONTEXT),
-                cx,
-            ),
-        ]
-    }).collect();
-    cx.bind_keys(tabs);
     // slopty: Slopty's views' own keys, last, so they hold in their contexts.
     crate::live::bind_keys(cx);
     // slopty: in an agent's session ⌘K opens the palette over its terminal's own Clear: the
@@ -3139,6 +3118,26 @@ impl Shell {
         {
             file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
         }
+    }
+
+    /// A web link a terminal of chat `chat_id` handed over (quick select): in the session's
+    /// Browser when the person keeps web links in Slopty and the chat is the one shown, as a
+    /// transcript's link opens; else in their browser.
+    pub(crate) fn open_session_web_link(
+        &mut self,
+        chat_id: &str,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let shown = !self.active_chat.is_empty() && self.active_chat == chat_id;
+        if shown && crate::settings::current(cx).open_web_links_in_slopty {
+            self.set_surfaces_open(true, cx);
+            self.add_browser_surface(Some(url.to_owned()), window, cx);
+        } else {
+            cx.open_url(url);
+        }
+        true
     }
 
     /// Open a transcript's file link in the linking chat's own checkout: a

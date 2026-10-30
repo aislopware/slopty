@@ -1144,6 +1144,7 @@ mod install_tests {
                         exit,
                         progress: None,
                         drop: None,
+                        ground: None,
                     })
                 },
                 |_, _| None,

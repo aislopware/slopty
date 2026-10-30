@@ -130,16 +130,15 @@ async fn rest_on(
     }
 }
 
-/// The palette's Threads tab finds a thread by its agent's words, which no title holds: its row
-/// says who said them.
+/// The palette finds a session by its agent's words, which no title holds, under "In sessions":
+/// its row says who said them.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_palette_finds_a_thread_by_what_its_agent_said() {
     let mut stack = agent_stack().await;
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    drv.keys("cmd-k").await.unwrap();
-    drv.keys("cmd-2").await.unwrap();
+    drv.keys("cmd-shift-p").await.unwrap();
     drv.type_text("Done:").await.unwrap();
     let found = drv
         .wait_for("the thread by its agent's words", STEP, |d| {
@@ -153,7 +152,7 @@ async fn the_palette_finds_a_thread_by_what_its_agent_said() {
     stack.shutdown().await;
 }
 
-/// ⌘K over a thread lists its workspace's recently changed files on the palette's first paint,
+/// ⇧⌘P over a thread lists its workspace's recently changed files on the palette's first paint,
 /// or within a few frames of it; the time is a measurement (`docs/MEASUREMENTS.md`).
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -167,12 +166,12 @@ async fn the_palette_lists_recent_files_at_once() {
     let mut took = Vec::new();
     for _ in 0..10 {
         let since = std::time::Instant::now();
-        drv.keys("cmd-k").await.unwrap();
+        drv.keys("cmd-shift-p").await.unwrap();
         let first = drv.dump().await.unwrap();
         let at_once = labelled(&first, "NOTES.md").is_some();
         drv.wait_for("Recent Files", STEP, |d| labelled(d, "NOTES.md").is_some()).await.unwrap();
         took.push((since.elapsed(), at_once));
-        // Closed again before the next ⌘K, which would otherwise close it.
+        // Closed again before the next ⇧⌘P, which would otherwise close it.
         drv.keys("escape").await.unwrap();
         drv.wait_for("the palette closed", STEP, |d| labelled(d, "NOTES.md").is_none())
             .await

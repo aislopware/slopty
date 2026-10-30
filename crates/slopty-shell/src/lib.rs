@@ -507,6 +507,18 @@ fn open_main_window(
                     .and_then(Result::ok)
                     .unwrap_or(false)
                 });
+                // A web link one hands over (quick select) opens as a transcript's does.
+                let (linker, here) = (shell.downgrade(), window.window_handle());
+                live::serve_links(cx, move |chat, url, cx| {
+                    here.update(cx, |_, window, cx| {
+                        linker.update(cx, |shell, cx| {
+                            shell.open_session_web_link(chat, url, window, cx)
+                        })
+                    })
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                });
                 let weak_shell = shell.downgrade();
                 window.on_window_should_close(cx, move |window, cx| {
                     let should_close = weak_shell

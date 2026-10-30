@@ -8,7 +8,8 @@
 //! in the shell's own places: the terminal panel's body, a right-pane surface.
 //!
 //! The other way round, a path a person ⌘-clicks in a shell opens where a transcript's file link
-//! opens, in its chat's Files pane ([`open_file`]): the shell serves that once its window is up.
+//! opens, in its chat's Files pane ([`open_file`]), and a web link one hands over opens where a
+//! transcript's web link opens ([`open_link`]): the shell serves both once its window is up.
 
 pub mod chrome;
 pub mod menu;
@@ -38,6 +39,10 @@ pub struct Hosted {
     /// What a drop of files on it does, in its words ("Drop to paste paths"); `None` when it
     /// takes no files.
     pub drop: Option<SharedString>,
+    /// The background its program paints the pane with (OSC 11, else the theme's), while it is a
+    /// terminal: what the titlebar row wears (`docs/decisions/layout.md`, "One row of chrome").
+    /// Its watch ([`watch`]) fires when the program sets another.
+    pub ground: Option<Hsla>,
 }
 
 /// How far a program says it has got: a terminal's `OSC 9;4` report, which its tab shows.
@@ -376,6 +381,48 @@ pub(crate) fn serve_files(cx: &mut App, open: impl Fn(&str, &str, &mut App) -> b
 pub fn open_file(chat: &str, target: &str, cx: &mut App) -> bool {
     let Some(Files(open)) = cx.try_global::<Files>().cloned() else { return false };
     open(chat, target, cx)
+}
+
+type OpenLinkFn = dyn Fn(&str, &str, &mut App) -> bool;
+
+/// How the shell opens a web link a terminal of a chat handed over, once its window is up.
+#[derive(Clone)]
+struct Links(Rc<OpenLinkFn>);
+
+impl Global for Links {}
+
+/// The shell opens web links Slopty's views hand over for a chat by `open`: chat, then the URL.
+pub(crate) fn serve_links(cx: &mut App, open: impl Fn(&str, &str, &mut App) -> bool + 'static) {
+    cx.set_global(Links(Rc::new(open)));
+}
+
+/// Open `url` for chat `chat` where a transcript's web link opens: the session's Browser when the
+/// person keeps web links in Slopty, else their browser. Whether the shell took it.
+pub fn open_link(chat: &str, url: &str, cx: &mut App) -> bool {
+    let Some(Links(open)) = cx.try_global::<Links>().cloned() else { return false };
+    open(chat, url, cx)
+}
+
+type DimFn = dyn Fn(&AnyView, bool, &mut App);
+
+/// How the app dims one of its terminals.
+#[derive(Clone)]
+struct Dim(Rc<DimFn>);
+
+impl Global for Dim {}
+
+/// Serve [`dim`] with `dim`: the terminal's view, and whether it is dimmed.
+pub fn serve_dim(cx: &mut App, dim: impl Fn(&AnyView, bool, &mut App) + 'static) {
+    cx.set_global(Dim(Rc::new(dim)));
+}
+
+/// Dim the terminal drawn as `view`, or bring it back: while a view holds more than one pane,
+/// each pane without the keyboard is dimmed by brightness alone, in its own element
+/// (`docs/decisions/layout.md`, "One session per view, splits on demand"). The split calls this
+/// for every terminal pane it holds as the keyboard moves; nothing with no host.
+pub fn dim(view: &AnyView, dimmed: bool, cx: &mut App) {
+    let Some(Dim(dim)) = cx.try_global::<Dim>().cloned() else { return };
+    dim(view, dimmed, cx);
 }
 
 type RunLineFn = dyn Fn(&str, &str, bool, &mut App) -> bool;

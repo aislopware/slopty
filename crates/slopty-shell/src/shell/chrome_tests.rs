@@ -328,8 +328,8 @@ fn before_any_project_the_sidebar_says_so_and_offers_only_what_works(cx: &mut Te
     assert!(cx.debug_bounds("sidebar-empty-key").is_some(), "⌘N makes one now");
 }
 
-/// The command palette stands pinned by its top where a centred palette at its tallest would
-/// start (opencode's), and between 280 and 480 tall, wherever its results leave its foot.
+/// The command palette stands pinned by its top, Ghostty's 5 % down, and between 280 and 480
+/// tall, wherever its results leave its foot.
 #[gpui::test]
 fn the_palette_keeps_its_top_as_its_results_change(cx: &mut TestAppContext) {
     let (shell, cx) = launch(cx, DESKTOP);
@@ -345,8 +345,11 @@ fn the_palette_keeps_its_top_as_its_results_change(cx: &mut TestAppContext) {
         let height = f32::from(card.size.height);
         assert!((279.5..=480.5).contains(&height), "between 280 and 480: {card:?}");
     }
+    // Ghostty's: 5 % down the terminal under the title row, at most 500 wide.
     let window = DESKTOP.size.1;
-    assert!((f32::from(full.top()) - (window - 480.0) / 2.0).abs() < 1.0, "where a tallest palette starts: {full:?}");
+    let top = (window - Theme::TITLEBAR_HEIGHT).mul_add(0.05, Theme::TITLEBAR_HEIGHT);
+    assert!((f32::from(full.top()) - top).abs() < 1.0, "5 % down, under the row: {full:?}");
+    assert!((f32::from(full.size.width) - 500.0).abs() < 0.5, "Ghostty's 500 wide: {full:?}");
 }
 
 /// Every row of a chat's menu is a menu item a screen reader names, Copy saying whether its

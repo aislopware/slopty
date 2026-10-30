@@ -677,6 +677,9 @@ mod tests {
     /// from scratch read the fade too, so no frame would go unread.
     #[gpui::test]
     fn a_row_under_a_resting_pointer_paints_as_from_scratch(cx: &mut TestAppContext) {
+        // A seed runs on the thread the last one ran on, whose window GPUI never drops: its rows
+        // still hold their fades' mounts, so the row would count twice and outlive its going.
+        crate::motion::forget_for_test();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());

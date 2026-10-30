@@ -166,3 +166,24 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     what it waits on. The row's old dot hues go with them, so done unseen is green everywhere,
     no longer the accent's blue.
   - Tests: `shell::marks::tests::{every_status_reads_as_one_of_five_states, one_hue_per_state}`.
+
+- ✅ **The palette as built (2026-10-30)** (terminal-craft #7, rex §3.7). One list in sections,
+  no tabs: with nothing typed, the recent files then the commands; typed, the commands, then
+  sessions by title and by what was said in them (five each), files by name (ten) and lines in
+  files (twenty). ⌃N and ⌃P, Tab and ⇧Tab step as ↓ and ↑ (Ghostty's).
+  - Ranking: a command's runs, halved for each week since its last, kept by name in
+    `ui-settings.json`; with no runs, the table's order. The ranking is taken as the palette
+    opens, so a run with the palette held open (an appearance chosen) moves no row under the
+    pointer and counts from the next opening.
+  - Each row says where its command stands, as Rex's do: a ✓ on a toggle that is on and on the
+    appearance in use, the current value after a › (the Settings section it opens on, the
+    session Archive would take), and its key.
+  - ⇧⌘P is its key; ⌘K opens it too until the session picker takes ⌘K.
+  - A touch screen keeps a dialog's top: its field waits for a tap, and a card just under the
+    status bar sits where the system takes taps.
+  - Finding sessions by title and by words lives in `shell/session_search.rs`, for the picker
+    to take up.
+  - Tests: `shell::command_palette::tests::{commands_run_often_and_lately_lead,
+    running_a_command_counts_toward_its_rank, a_commands_row_says_where_it_stands,
+    tab_and_control_n_step_the_highlight}` and
+    `shell::chrome_tests::the_palette_keeps_its_top_as_its_results_change`.

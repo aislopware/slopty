@@ -403,6 +403,16 @@ pub enum SavedSurface {
     Inspector,
 }
 
+/// How often the person ran a palette command, and when last, as `ui-settings.json` keeps it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PaletteUse {
+    /// The times it ran.
+    pub count: u32,
+    /// When it last ran, in milliseconds since the Unix epoch.
+    pub last_ms: i64,
+}
+
 /// slopty: one chat's open panes, as `ui-settings.json` keeps them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -463,6 +473,9 @@ pub struct UiSettings {
     pub session_panels: std::collections::BTreeMap<String, SavedPanels>,
     /// slopty: what each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
+    /// How often and how lately the person ran each palette command, by its name: the palette
+    /// ranks by it (`shell::command_palette`, WezTerm's frecency).
+    pub palette_uses: std::collections::BTreeMap<String, PaletteUse>,
     /// Customizable shortcut combos (feature-inventory §1.4).
     pub keymap: KeymapConfig,
     // slopty: appshots removed.
@@ -549,6 +562,7 @@ impl Default for UiSettings {
             terminal_height: TERMINAL_DEFAULT_HEIGHT,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
+            palette_uses: std::collections::BTreeMap::new(),
             keymap: KeymapConfig::default(),
             settings_section: crate::shell::SettingsSection::default(),
             // slopty: appshots removed.
@@ -1202,6 +1216,7 @@ impl UiSettings {
             terminal_height,
             session_panels, // slopty: kept panes
             session_tabs, // slopty: kept panes
+            palette_uses,
             keymap,
             // slopty: appshots removed.
             settings_section,
@@ -1826,6 +1841,10 @@ mod tests {
             terminal_height: 320.0,
             session_panels: std::collections::BTreeMap::new(), // slopty: kept panes
             session_tabs: std::collections::BTreeMap::new(), // slopty: kept panes
+            palette_uses: std::collections::BTreeMap::from([(
+                "Toggle sidebar".into(),
+                PaletteUse { count: 3, last_ms: 1_793_000_000_000 },
+            )]),
             keymap: KeymapConfig {
                 toggle_sidebar: "mod-shift-s".into(),
                 ..KeymapConfig::default()

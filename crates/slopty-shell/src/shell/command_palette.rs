@@ -1,7 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! Global search over actions, conversations and the focused chat's
-//! workspace, using the sidebar's conversation rows. Results are grouped in
-//! sections; tabs narrow them to one kind.
+//! The command palette, in Ghostty's geometry (`docs/decisions/layout.md`, "The picker and the
+//! palette are one keyboard door to everything"): every command with its current value (a ✓ on
+//! a toggle that is on, the thing it acts on after a ›) and its key, the ones the person runs
+//! most and most lately first (WezTerm's frecency, kept in `paletteUses`); the focused chat's
+//! recently opened and changed files before anything is typed; and, as the query asks,
+//! sessions by their titles and by what was said in them (`session_search`) and the workspace's
+//! files by name and by content. Results are grouped in sections.
+use super::session_search::{ChatWordsMatch, ChatWordsQuery, chat_words_line};
 use super::*;
 use crate::appearance::AppearanceMode;
 use crate::files::client::{FilesClientError, FilesRequestContext, WorkspaceFilesClient};
@@ -10,13 +15,18 @@ use slopty_view_proto::{
     WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
 };
 
-/// Key context of the palette card: its mod-1…4 tab bindings live here.
+/// Key context of the palette card.
 pub(super) const KEY_CONTEXT: &str = "CommandPalette";
-/// Rows a section shows under All; its own tab shows the long limit.
-const ALL_TAB_LIMIT: usize = 5;
-const THREADS_TAB_LIMIT: usize = 50;
-const FILES_TAB_LIMIT: usize = 50;
-const CONTENT_TAB_LIMIT: usize = 100;
+/// The recent files shown before anything is typed.
+const RECENT_FILES_SHOWN: usize = 5;
+/// The sessions a query lists, by title and by words.
+const SESSIONS_SHOWN: usize = 5;
+/// The files a query lists by name.
+const FILES_SHOWN: usize = 10;
+/// The lines a query lists by content.
+const CONTENT_SHOWN: usize = 20;
+/// How quickly a command's runs count for less: half as much for each week since its last.
+const FRECENCY_HALF_LIFE_HOURS: f64 = 24.0 * 7.0;
 const CONTENT_MATCHES_PER_FILE: usize = 3;
 /// Shorter workspace queries match nearly everything; they are not sent.
 const MIN_WORKSPACE_QUERY_CHARS: usize = 2;
@@ -29,20 +39,10 @@ const CONTENT_INDEX_RETRY: Duration = Duration::from_millis(500);
 const CONTENT_INDEX_RETRY_MAX: Duration = Duration::from_secs(2);
 const FILE_INDEX_RETRY: Duration = Duration::from_millis(500);
 const RESULTS_FADE_BAND: f32 = 18.0;
-// slopty: what the chats said is searched once typing pauses on two characters or more
-// (`SearchChats`), below the title matches.
-/// Shorter queries match nearly every chat's words; they are not sent.
-const MIN_CHAT_WORDS_CHARS: usize = 2;
-/// The pause in typing before the chats' words are searched.
-const CHAT_WORDS_DEBOUNCE: Duration = Duration::from_millis(200);
-/// How many matches one search asks for.
-const CHAT_WORDS_LIMIT: usize = 50;
-
 pub(super) struct CommandPalette {
     search: Entity<ComposerInput>,
     focus: FocusHandle,
     previous_focus: Option<FocusHandle>,
-    tab: Tab,
     /// The highlighted row, kept by identity so results arriving around it
     /// never move it; `active_index` is where it was, for when it vanishes.
     active: Option<RowKey>,
@@ -62,114 +62,11 @@ pub(super) struct CommandPalette {
     content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
     // slopty: what the chats said that matches the query.
     chat_words: ChatWordsQuery,
+    /// How often and how lately each command ran, as of the palette's opening: its commands
+    /// rank by it, so a run (an appearance chosen with the palette held open) moves no row
+    /// under the person's eyes and counts from the next opening.
+    uses: std::collections::BTreeMap<String, settings::PaletteUse>,
     _search_events: Subscription,
-}
-
-// slopty: one place a chat's words matched (`SearchChats`): the chat, who said it, a line around
-// the match and the match's byte range in that line.
-/// A chat whose words match the query.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ChatWordsMatch {
-    chat_id: String,
-    /// The agent said it; else the person did.
-    agent: bool,
-    /// The words around the match, on one line.
-    excerpt: String,
-    /// The match's byte range in `excerpt`; empty when the answer's range did not fit it.
-    range: std::ops::Range<usize>,
-}
-
-impl ChatWordsMatch {
-    /// One answer's entry, or `None` when it names no chat. A range that is not on the
-    /// excerpt's character boundaries is dropped, not the match.
-    fn parse(value: &serde_json::Value) -> Option<Self> {
-        let chat_id = value.get("chatId")?.as_str().filter(|id| !id.is_empty())?.to_owned();
-        let agent = value.get("role").and_then(serde_json::Value::as_str) != Some("user");
-        // One line: line breaks and tabs become spaces, each one byte for one, so the range
-        // still lands.
-        let excerpt: String = value
-            .get("excerpt")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .chars()
-            .map(|c| if matches!(c, '\n' | '\r' | '\t') { ' ' } else { c })
-            .collect();
-        let offset = |key: &str| {
-            value.get(key).and_then(serde_json::Value::as_u64).and_then(|v| usize::try_from(v).ok())
-        };
-        let range = match (offset("matchStart"), offset("matchEnd")) {
-            (Some(start), Some(end))
-                if start < end
-                    && end <= excerpt.len()
-                    && excerpt.is_char_boundary(start)
-                    && excerpt.is_char_boundary(end) =>
-            {
-                start..end
-            }
-            _ => 0..0,
-        };
-        Some(Self { chat_id, agent, excerpt, range })
-    }
-
-    /// An answer's matches, first per chat, in the answer's order; anything else answers none.
-    fn parse_all(answer: &serde_json::Value) -> Vec<Self> {
-        let list = answer.as_array().or_else(|| answer.get("matches").and_then(|m| m.as_array()));
-        let mut seen = std::collections::HashSet::new();
-        list.into_iter()
-            .flatten()
-            .filter_map(Self::parse)
-            .filter(|found| seen.insert(found.chat_id.clone()))
-            .collect()
-    }
-}
-
-// slopty: the chats' words search's request state: an answer to an older query is dropped, and
-// a failure (an older view model, a server that does not search) shows no matches.
-#[derive(Default)]
-struct ChatWordsQuery {
-    /// Bumped per request; an answer to an older one is dropped.
-    generation: u64,
-    loading: bool,
-    results: Vec<ChatWordsMatch>,
-    task: Option<Task<()>>,
-}
-
-impl ChatWordsQuery {
-    /// Forget the results, cancelling any request in flight.
-    fn clear(&mut self) {
-        self.generation += 1;
-        self.loading = false;
-        self.results.clear();
-        self.task = None;
-    }
-
-    /// Start a request; the returned generation identifies its answer. Rows from the last
-    /// answer stay up meanwhile.
-    fn begin(&mut self) -> u64 {
-        self.generation += 1;
-        self.loading = true;
-        self.generation
-    }
-
-    /// Settle request `generation` with its answer; `false` when a newer one superseded it.
-    fn finish(
-        &mut self,
-        generation: u64,
-        answer: Result<serde_json::Value, slopty_view_rpc::RpcError>,
-    ) -> bool {
-        if self.generation != generation {
-            return false;
-        }
-        self.loading = false;
-        self.results = match answer {
-            Ok(answer) => ChatWordsMatch::parse_all(&answer),
-            Err(error) => {
-                tracing::debug!(%error, "palette chat words search failed");
-                Vec::new()
-            }
-        };
-        true
-    }
 }
 
 /// An asynchronous workspace section's request state. Rows from the last
@@ -303,48 +200,9 @@ impl EnterPress {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum Tab {
-    #[default]
-    All,
-    Threads,
-    Commands,
-    Files,
-}
-
-impl Tab {
-    pub(super) const ALL: [Tab; 4] = [Tab::All, Tab::Threads, Tab::Commands, Tab::Files];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Threads => "Sessions", // slopty
-            Self::Commands => "Commands",
-            Self::Files => "Files",
-        }
-    }
-
-    fn index(self) -> usize {
-        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
-    }
-
-    /// The neighbouring tab, wrapping (tab / shift-tab).
-    fn step(self, forward: bool) -> Self {
-        let count = Self::ALL.len();
-        let next = if forward {
-            self.index() + 1
-        } else {
-            self.index() + count - 1
-        };
-        Self::ALL[next % count]
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
     RecentFiles,
-    QuickActions,
-    RecentThreads,
     Threads,
     Commands,
     Files,
@@ -358,9 +216,7 @@ impl Section {
         match self {
             // slopty: sentence case, as every label in the app.
             Self::RecentFiles => "Recent files",
-            Self::QuickActions => "Quick actions",
             // slopty: one name for what an agent works in, "session" (TUI-first).
-            Self::RecentThreads => "Recent sessions",
             Self::Threads => "Sessions",
             Self::Commands => "Commands",
             Self::Files => "Files",
@@ -390,9 +246,10 @@ impl Command {
             Self::NewProject => "New project\u{2026}", // slopty: it opens a picker
             Self::ResumeSession => super::past_sessions::RESUME, // slopty
             Self::Settings => "Settings", // slopty: the name its menu and button use
-            Self::Theme(AppearanceMode::System) => "Switch to system theme",
-            Self::Theme(AppearanceMode::Light) => "Switch to light theme",
-            Self::Theme(AppearanceMode::Dark) => "Switch to dark theme",
+            // The View menu's Appearance, one row a mode, the one in use ticked.
+            Self::Theme(AppearanceMode::System) => "Appearance: System",
+            Self::Theme(AppearanceMode::Light) => "Appearance: Light",
+            Self::Theme(AppearanceMode::Dark) => "Appearance: Dark",
             Self::ArchiveThread => "Archive session", // slopty
             Self::Window(command) => command.label,
         }
@@ -410,6 +267,32 @@ impl Command {
         }
     }
 }
+
+/// What a command's row says of it now ([`Shell::command_state`]): Rex's ✓ on a toggle that is
+/// on, and the thing it acts on after a ›.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CommandState {
+    /// Nothing to say.
+    None,
+    /// A toggle that is on.
+    On,
+    /// A toggle that is off.
+    Off,
+    /// What it acts on, or the value it would change.
+    Value(SharedString),
+}
+
+impl CommandState {
+    fn value(&self) -> Option<SharedString> {
+        match self {
+            Self::Value(value) => Some(value.clone()),
+            Self::None | Self::On | Self::Off => None,
+        }
+    }
+}
+
+/// The ✓'s size, and the slot each command row keeps for it.
+const COMMAND_TICK: f32 = 14.0;
 
 #[derive(Clone, Debug, PartialEq)]
 enum RowKind {
@@ -492,29 +375,49 @@ fn matches_query(query: &str, text: &str) -> bool {
     query.split_whitespace().all(|word| text.contains(word))
 }
 
-/// `can_archive`: a focused, unarchived chat exists for Archive session. slopty: `window` adds the
-/// menu bar's commands (the Commands tab, or any search).
-fn commands_for(query: &str, is_dark: bool, can_archive: bool, window: bool) -> Vec<Command> {
+/// Every command the palette offers, in the table's order: Archive session only with a focused,
+/// unarchived chat (`can_archive`), and the menu bar's window commands.
+fn all_commands(can_archive: bool) -> impl Iterator<Item = Command> {
     [
         Command::NewChat,
         Command::NewProject,
         Command::ResumeSession, // slopty
         Command::Settings,
-        Command::Theme(if is_dark {
-            AppearanceMode::Light
-        } else {
-            AppearanceMode::Dark
-        }),
+        Command::Theme(AppearanceMode::System),
+        Command::Theme(AppearanceMode::Light),
+        Command::Theme(AppearanceMode::Dark),
     ]
     .into_iter()
     .chain(can_archive.then_some(Command::ArchiveThread))
-    .chain(
-        crate::app_menus::window_commands()
-            .filter(|_| window)
-            .map(Command::Window),
-    )
-    .filter(|command| matches_query(query, command.label()))
-    .collect()
+    .chain(crate::app_menus::window_commands().map(Command::Window))
+}
+
+/// The commands matching every word of `query`, the ones run most and most lately first, the
+/// rest in the table's order (`uses`, as of `now_ms`).
+fn commands_for(
+    query: &str,
+    can_archive: bool,
+    uses: &std::collections::BTreeMap<String, settings::PaletteUse>,
+    now_ms: i64,
+) -> Vec<Command> {
+    let mut commands: Vec<(f64, Command)> = all_commands(can_archive)
+        .filter(|command| matches_query(query, command.label()))
+        .map(|command| {
+            let score = uses.get(command.label()).map_or(0.0, |used| frecency(*used, now_ms));
+            (score, command)
+        })
+        .collect();
+    // Stable, so commands that score alike keep the table's order.
+    commands.sort_by(|(a, _), (b, _)| b.total_cmp(a));
+    commands.into_iter().map(|(_, command)| command).collect()
+}
+
+/// How much a command's runs count as of `now_ms`: WezTerm's frecency, the times it ran halved
+/// for each week since the last ([`FRECENCY_HALF_LIFE_HOURS`]).
+fn frecency(used: settings::PaletteUse, now_ms: i64) -> f64 {
+    let hours = now_ms.saturating_sub(used.last_ms).max(0) / 3_600_000;
+    let hours = u32::try_from(hours).unwrap_or(u32::MAX);
+    f64::from(used.count) * 0.5_f64.powf(f64::from(hours) / FRECENCY_HALF_LIFE_HOURS)
 }
 
 /// A path's last segment and the folder holding it (empty at the root).
@@ -597,7 +500,7 @@ impl Shell {
         self.close_add_space(cx);
         crate::live::chrome::release_held_keys(cx);
         let search = cx.new(|cx| {
-            ComposerInput::with_context("Search sessions, commands and files…", "PaletteSearch", cx)
+            ComposerInput::with_context("Search commands, sessions and files…", "PaletteSearch", cx)
         });
         let events = cx.subscribe(&search, |this, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
@@ -615,7 +518,6 @@ impl Shell {
             search,
             focus: cx.focus_handle(),
             previous_focus,
-            tab: Tab::All,
             active: None,
             active_index: 0,
             enter_press: EnterPress::default(),
@@ -625,23 +527,12 @@ impl Shell {
             files_ready: None,
             content: WorkspaceQuery::default(),
             chat_words: ChatWordsQuery::default(), // slopty
+            uses: self.settings.palette_uses.clone(),
             _search_events: events,
         });
         // Load the default Files list (recently changed files) right away.
         self.search_palette_workspace(cx);
         cx.notify();
-    }
-
-    pub(super) fn select_palette_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
-        let Some(palette) = self.command_palette.as_mut() else {
-            return;
-        };
-        if palette.tab != tab {
-            palette.tab = tab;
-            palette.reset_active();
-            palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-            cx.notify();
-        }
     }
 
     pub(super) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -676,7 +567,7 @@ impl Shell {
             target: client.target().clone(),
             query: query.clone(),
             include_ignored: false,
-            limit: Some(FILES_TAB_LIMIT as u16),
+            limit: Some(FILES_SHOWN as u16),
         };
         let names = client.clone();
         let target = client.target().clone();
@@ -743,7 +634,7 @@ impl Shell {
         let request = SearchWorkspaceContentRequest {
             target: client.target().clone(),
             query,
-            limit: Some(CONTENT_TAB_LIMIT as u16),
+            limit: Some(CONTENT_SHOWN as u16),
             per_file_limit: Some(CONTENT_MATCHES_PER_FILE as u16),
         };
         palette.content.task = Some(cx.spawn(async move |this, cx| {
@@ -781,62 +672,39 @@ impl Shell {
     // slopty: what the chats said, searched once typing pauses (`SearchChats`); a query too
     // short to send clears the matches.
     /// Look the query up in every chat's words.
+    /// Look the query up in what the chats said, once typing pauses (`session_search`).
     fn search_palette_chat_words(&mut self, cx: &mut Context<Self>) {
         let engine = self.state.read(cx).engine().cloned();
         let Some(palette) = self.command_palette.as_mut() else {
             return;
         };
         let query = palette.search.read(cx).text().trim().to_owned();
-        let Some(engine) = engine.filter(|_| query.chars().count() >= MIN_CHAT_WORDS_CHARS) else {
-            palette.chat_words.clear();
-            return;
-        };
-        let generation = palette.chat_words.begin();
-        let params = serde_json::json!({ "query": query, "limit": CHAT_WORDS_LIMIT });
-        palette.chat_words.task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(CHAT_WORDS_DEBOUNCE).await;
-            let answer = engine.client().call(methods::SEARCH_CHATS, params).await;
-            this.update(cx, |shell, cx| {
-                let Some(palette) = shell.command_palette.as_mut() else {
-                    return;
-                };
-                if palette.chat_words.finish(generation, answer) {
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
+        palette.chat_words.search(
+            engine,
+            query,
+            |shell| shell.command_palette.as_mut().map(|palette| &mut palette.chat_words),
+            cx,
+        );
     }
 
-    /// The open palette's sections for its tab and query.
+    /// The open palette's sections for its query.
     fn palette_sections(&self, cx: &App) -> Vec<PaletteSection> {
         let Some(palette) = &self.command_palette else {
             return Vec::new();
         };
         let query = palette.search.read(cx).text().trim().to_lowercase();
         let can_archive = self.state.read(cx).archivable_selected_chat().is_some();
-        let commands = |section| {
-            // slopty: the short list leads an empty All tab; Commands and a search hold them all.
-            let window = section == Section::Commands || !query.is_empty();
-            PaletteSection::new(
-                section,
-                commands_for(&query, Theme::of(cx).appearance.is_dark(), can_archive, window)
-                    .into_iter()
-                    .map(RowKind::Command),
-            )
-        };
+        let now_ms = crate::clock::utc(cx).timestamp_millis();
+        let commands = PaletteSection::new(
+            Section::Commands,
+            commands_for(&query, can_archive, &palette.uses, now_ms)
+                .into_iter()
+                .map(RowKind::Command),
+        );
         let threads = |limit| {
             PaletteSection::new(
                 Section::Threads,
                 self.thread_matches(&query, limit, cx)
-                    .into_iter()
-                    .map(RowKind::Chat),
-            )
-        };
-        let recent_threads = |limit| {
-            PaletteSection::new(
-                Section::RecentThreads,
-                self.recent_threads(limit, cx)
                     .into_iter()
                     .map(RowKind::Chat),
             )
@@ -925,98 +793,17 @@ impl Shell {
                 })
                 .collect()
         };
-        let sections = match (palette.tab, query.is_empty()) {
-            (Tab::All, true) => vec![
-                recent_files(ALL_TAB_LIMIT),
-                commands(Section::QuickActions),
-                recent_threads(ALL_TAB_LIMIT),
-            ],
-            (Tab::All, false) => {
-                let threads = threads(ALL_TAB_LIMIT);
-                let words = in_threads(ALL_TAB_LIMIT, &titled(&threads));
-                vec![
-                    threads,
-                    words, // slopty
-                    commands(Section::Commands),
-                    files(ALL_TAB_LIMIT),
-                    in_files(ALL_TAB_LIMIT),
-                ]
-            }
-            (Tab::Threads, true) => vec![recent_threads(THREADS_TAB_LIMIT)],
-            (Tab::Threads, false) => {
-                let threads = threads(THREADS_TAB_LIMIT);
-                // slopty: then the chats whose words match.
-                let words = in_threads(THREADS_TAB_LIMIT, &titled(&threads));
-                vec![threads, words]
-            }
-            (Tab::Commands, true) => vec![commands(Section::Commands)], // slopty: all of them
-            (Tab::Commands, false) => vec![commands(Section::Commands)],
-            (Tab::Files, true) => vec![recent_files(FILES_TAB_LIMIT)],
-            (Tab::Files, false) => vec![files(FILES_TAB_LIMIT), in_files(CONTENT_TAB_LIMIT)],
+        let sections = if query.is_empty() {
+            vec![recent_files(RECENT_FILES_SHOWN), commands]
+        } else {
+            let threads = threads(SESSIONS_SHOWN);
+            let words = in_threads(SESSIONS_SHOWN, &titled(&threads));
+            vec![commands, threads, words, files(FILES_SHOWN), in_files(CONTENT_SHOWN)]
         };
         sections
             .into_iter()
             .filter(|section| !section.is_empty())
             .collect()
-    }
-
-    /// Unarchived top-level chats by latest activity, the focused one aside.
-    fn recent_threads(&self, limit: usize, cx: &App) -> Vec<String> {
-        let state = self.state.read(cx);
-        let mut chats: Vec<_> = state
-            .chats
-            .iter()
-            .filter(|chat| chat.is_top_level() && !chat.archived && chat.id != self.active_chat)
-            .collect();
-        chats
-            .sort_by_key(|chat| std::cmp::Reverse(chat.last_message_at.unwrap_or(chat.created_at)));
-        chats
-            .into_iter()
-            .take(limit)
-            .map(|chat| chat.id.clone())
-            .collect()
-    }
-
-    /// Top-level chats matching every word of `query`, best match first
-    /// (see `thread_search`).
-    fn thread_matches(&self, query: &str, limit: usize, cx: &App) -> Vec<String> {
-        let state = self.state.read(cx);
-        let terms = thread_search::search_terms(query);
-        // Global history deliberately ignores the sidebar's project filter and
-        // collapsed groups. Archived conversations remain searchable too.
-        // Like the sidebar, only list top-level sessions, not side chats or MCP workers.
-        let scored = state
-            .chats
-            .iter()
-            .filter(|chat| chat.is_top_level())
-            .filter_map(|chat| {
-                let pull_request = state
-                    .change_request_for_chat(chat)
-                    .map(|pr| {
-                        format!(
-                            "#{} {} {} {}",
-                            pr.number, pr.title, pr.head_ref, pr.base_ref
-                        )
-                    })
-                    .unwrap_or_default();
-                let fields = thread_search::ThreadFields {
-                    title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state
-                        .space_for_chat(chat)
-                        .map(|s| s.display_name())
-                        .unwrap_or(""),
-                    branch: crate::change_requests::conversation_branch(chat, &state.spaces)
-                        .unwrap_or(""),
-                    device: state.device_name(&chat.device_id).unwrap_or(""),
-                    pull_request: &pull_request,
-                    archived: chat.archived,
-                };
-                let score = thread_search::score_thread(&fields, &terms)?;
-                let active = chat.last_message_at.unwrap_or(chat.created_at);
-                Some((chat.id.clone(), score, active.timestamp_millis()))
-            })
-            .collect();
-        thread_search::rank(scored, limit)
     }
 
     /// Pointer motion moves the highlight, so hover and keyboard never light
@@ -1081,8 +868,11 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let RowKind::Command(command) = &row.kind {
+            self.record_palette_use(command, cx);
+        }
         if let RowKind::Command(Command::Theme(mode)) = row.kind {
-            // Keep the palette open so this ordinary action updates to its next state.
+            // Keep the palette open, so the ✓ moves to the mode chosen.
             crate::appearance::set_mode(mode, cx);
             cx.notify();
             return;
@@ -1143,6 +933,56 @@ impl Shell {
         self.add_file_surface_at(owner, path, location, window, cx);
     }
 
+    /// What a command's row says of it now: a toggle on or off, or what it acts on.
+    fn command_state(&self, command: &Command, cx: &App) -> CommandState {
+        let on = |on: bool| if on { CommandState::On } else { CommandState::Off };
+        match command {
+            Command::Theme(mode) => on(crate::appearance::mode(cx) == *mode),
+            Command::Settings => CommandState::Value(self.settings.settings_section.label().into()),
+            Command::ArchiveThread => self
+                .state
+                .read(cx)
+                .selected_chat_row()
+                .map_or(CommandState::None, |chat| {
+                    let title = chat.title.as_deref().unwrap_or("New session");
+                    CommandState::Value(transcript::single_line(title).into())
+                }),
+            Command::Window(command) => {
+                let action = (command.action)();
+                let is = |of: &dyn Action| action.partial_eq(of);
+                if is(&ToggleSidebar) {
+                    on(!self.settings.sidebar_collapsed)
+                } else if is(&ToggleChanges) {
+                    on(self.right_pane_open(cx))
+                } else if is(&chrome_keys::ToggleExpandPane) {
+                    on(self.right_pane_expanded)
+                } else if is(&ToggleFiles) {
+                    on(self.files_panel_open(cx))
+                } else if is(&ToggleTerminal) {
+                    on(self.terminal_open(cx))
+                } else if is(&chrome_keys::ToggleInspector) {
+                    on(self.inspector_shown(cx))
+                } else {
+                    CommandState::None
+                }
+            }
+            Command::NewChat | Command::NewProject | Command::ResumeSession => CommandState::None,
+        }
+    }
+
+    /// The person ran `command` from the palette: it counts toward its rank from now on
+    /// ([`frecency`]), and what no command is called any more is forgotten.
+    fn record_palette_use(&mut self, command: &Command, cx: &mut Context<Self>) {
+        let now_ms = crate::clock::utc(cx).timestamp_millis();
+        let used = self.settings.palette_uses.entry(command.label().to_owned()).or_default();
+        used.count = used.count.saturating_add(1);
+        used.last_ms = now_ms;
+        let known: std::collections::HashSet<&str> =
+            all_commands(true).map(|command| command.label()).collect();
+        self.settings.palette_uses.retain(|label, _| known.contains(label.as_str()));
+        self.schedule_save(cx);
+    }
+
     fn command_shortcut(&self, command: &Command, cx: &App) -> Option<String> {
         let id = match command {
             Command::NewChat => ShortcutId::NewSession,
@@ -1177,6 +1017,7 @@ impl Shell {
             RowKind::Command(command) => {
                 let label = command.label();
                 let shortcut = self.command_shortcut(command, cx);
+                let state = self.command_state(command, cx);
                 let target = row.clone();
                 popover::menu_row(theme, active, format!("command-action-{ix}"))
                     .id(("command-action", ix))
@@ -1184,7 +1025,7 @@ impl Shell {
                     .role(gpui::Role::Button)
                     .aria_label(label)
                     .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
-                    .py(px(4.0))
+                    .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
                     }))
@@ -1194,14 +1035,44 @@ impl Shell {
                             .flex_none()
                             .text_color(theme.text_muted),
                     )
-                    .child(div().flex_1().min_w_0().child(popover::search_highlight(
-                        label.into(),
-                        Some(query),
-                        theme,
-                    )))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(div().flex_none().child(popover::search_highlight(
+                                label.into(),
+                                Some(query),
+                                theme,
+                            )))
+                            // What it acts on, or the value it would change, after a ›.
+                            .when_some(state.value(), |row, value| {
+                                row.child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(format!("\u{203A} {value}"))),
+                                )
+                            }),
+                    )
                     .when_some(shortcut, |row, shortcut| {
                         row.child(popover::kbd_hint(theme, &shortcut))
                     })
+                    // A toggle that is on wears a ✓ after its key, in a slot every row keeps so
+                    // the keys stand in one column.
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(COMMAND_TICK))
+                            .when(state == CommandState::On, |slot| {
+                                slot.child(
+                                    icon(icons::CHECK).size(px(COMMAND_TICK)).text_color(theme.text),
+                                )
+                            }),
+                    )
                     .into_any_element()
             }
             RowKind::File { path, is_dir } => {
@@ -1218,7 +1089,7 @@ impl Shell {
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(path.clone()))
                     .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
-                    .py(px(4.0))
+                    .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
                     }))
@@ -1264,7 +1135,7 @@ impl Shell {
                         found.path, found.line, found.preview
                     )))
                     .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
-                    .py(px(4.0))
+                    .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
                     }))
@@ -1318,7 +1189,7 @@ impl Shell {
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(format!("{title}, {who} {}", found.excerpt)))
                     .min_h(px(44.0))
-                    .py(px(5.0))
+                    .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
                     }))
@@ -1401,7 +1272,6 @@ impl Shell {
         let query = search.read(cx).text().to_string();
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
-        let current_tab = palette.tab;
         let theme = Theme::of(cx).for_popup();
         let mut children = Vec::new();
         let mut ix = 0;
@@ -1464,41 +1334,18 @@ impl Shell {
                 ))
             });
         let body = palette_results_fade(body, &scroll);
-        let tabs = div()
-            .flex_none()
-            .px(px(12.0))
-            .py(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .border_b_1()
-            .border_color(crate::theme::hairline(0.06))
-            .children(Tab::ALL.into_iter().map(|tab| {
-                let combo = crate::keys::combo_text(&format!("mod-{}", tab.index() + 1));
-                // The app's tab chip (right-pane surfaces, PR board), not a
-                // menu row: its height, type and washes.
-                crate::surface_chrome::tab(("command-tab", tab.index()), tab == current_tab, &theme)
-                    .px(px(8.0))
-                    .role(gpui::Role::Tab)
-                    .aria_label(tab.label())
-                    .gap(px(6.0))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_palette_tab(tab, cx)))
-                    .child(tab.label())
-                    .child(popover::kbd_hint(&theme, &combo))
-            }));
         let card = palette_card("command-palette", &focus, viewport, &theme)
             .key_context(KEY_CONTEXT)
-            .on_action(cx.listener(|this, action: &SelectPaletteTab, _, cx| {
-                if let Some(tab) = Tab::ALL.get(action.0) {
-                    this.select_palette_tab(*tab, cx);
-                }
-            }))
             .on_key_down(
                 cx.listener(move |this, event: &gpui::KeyDownEvent, window, cx| {
-                    match event.keystroke.key.as_str() {
-                        "up" | "down" => {
-                            this.move_palette_selection(event.keystroke.key == "down", cx)
+                    let keys = &event.keystroke;
+                    match keys.key.as_str() {
+                        "up" | "down" => this.move_palette_selection(keys.key == "down", cx),
+                        // Ghostty's ⌃N and ⌃P, and Tab and ⇧Tab, step as ↓ and ↑ do.
+                        "n" | "p" if keys.modifiers.control && !keys.modifiers.platform => {
+                            this.move_palette_selection(keys.key == "n", cx)
                         }
+                        "tab" => this.move_palette_selection(!keys.modifiers.shift, cx),
                         "enter" => {
                             let activate = this
                                 .command_palette
@@ -1509,16 +1356,6 @@ impl Shell {
                                 return;
                             }
                             this.activate_palette_selection(window, cx);
-                        }
-                        "tab" => {
-                            let forward = !event.keystroke.modifiers.shift;
-                            if let Some(tab) = this
-                                .command_palette
-                                .as_ref()
-                                .map(|palette| palette.tab.step(forward))
-                            {
-                                this.select_palette_tab(tab, cx);
-                            }
                         }
                         "escape" => this.close_command_palette(window, cx),
                         _ => return,
@@ -1540,9 +1377,10 @@ impl Shell {
             .child(palette_header(
                 &theme,
                 search.into_any_element(),
-                popover::kbd_hint(&theme, &crate::keys::combo_text("mod-k")),
+                // The key that opens it, and closes it again.
+                crate::keys::for_action_anywhere(&ToggleCommandPalette, cx)
+                    .map_or_else(div, |keys| popover::kbd_hint(&theme, keys.as_ref())),
             ))
-            .child(tabs)
             .child(body)
             // slopty: the keys, where there are keys.
             .when(!crate::shell::touch_screen(), |card| {
@@ -1555,34 +1393,6 @@ impl Shell {
             });
         Some(palette_overlay(viewport, card))
     }
-}
-
-// slopty: a chat words match's second line: who said it, then the words in `text_faint` with
-// the match in `text`, one line, cut at the row's end.
-/// "Agent: …the words…", the match lit.
-fn chat_words_line(who: &'static str, found: &ChatWordsMatch, theme: &Theme) -> gpui::Div {
-    let lead = who.len() + 1;
-    let line: SharedString = format!("{who} {}", found.excerpt).into();
-    let mut highlights = vec![(
-        0..who.len(),
-        gpui::HighlightStyle { color: Some(theme.text_muted), ..Default::default() },
-    )];
-    if !found.range.is_empty() {
-        highlights.push((
-            found.range.start + lead..found.range.end + lead,
-            gpui::HighlightStyle {
-                color: Some(theme.text),
-                font_weight: Some(gpui::FontWeight::MEDIUM),
-                ..Default::default()
-            },
-        ));
-    }
-    div()
-        .min_w_0()
-        .truncate()
-        .text_size(crate::typography::ui_rems(12.0))
-        .text_color(theme.text_faint)
-        .child(gpui::StyledText::new(line).with_highlights(highlights))
 }
 
 /// A section's title, in the sidebar's secondary text style, with its
@@ -1650,7 +1460,7 @@ pub(super) fn palette_card(
     crate::live::chrome::track_held_keys(div().id(id))
         .debug_selector(move || id.to_owned()) // slopty: for the tests
         .track_focus(focus)
-        .w(px(560.0_f32.min(f32::from(viewport.width) - 32.0)))
+        .w(px(PALETTE_WIDTH.min(f32::from(viewport.width) - 32.0)))
         // slopty: between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
         // top, its footer at its foot. A touch screen has no footer of keys to hold there: the
         // card hugs its rows.
@@ -1669,12 +1479,13 @@ pub(super) fn palette_card(
         .text_color(theme.text)
 }
 
+/// The search field's row: Ghostty's 48 pt field, the glyph, the words typed and the key that
+/// opened it.
 pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div) -> gpui::Div {
     div()
-        .min_h(px(44.0))
+        .h(px(PALETTE_FIELD_HEIGHT))
         .flex_none()
         .px(px(16.0))
-        .py(px(8.0))
         .flex()
         .items_center()
         .gap(px(10.0))
@@ -1710,16 +1521,32 @@ pub(super) fn palette_footer() -> gpui::Div {
 /// rows stand (`popover::PICKER_ROW_HEIGHT`).
 const PALETTE_ROW_HEIGHT: f32 = popover::PICKER_ROW_HEIGHT;
 
+/// A palette at its widest: Ghostty's 500 (`docs/decisions/layout.md`, "The picker and the
+/// palette are one keyboard door to everything"), 16 in from each edge of a narrower window.
+pub(super) const PALETTE_WIDTH: f32 = 500.0;
+/// The search field's height: Ghostty's 48.
+pub(super) const PALETTE_FIELD_HEIGHT: f32 = 48.0;
+/// The padding round a row's contents, above and below as at its sides: Ghostty's 8.
+const PALETTE_ROW_PAD: f32 = 8.0;
+/// How far down the window a palette's top edge stands, of the height under the title row:
+/// Ghostty's 5 %.
+const PALETTE_TOP_SHARE: f32 = 0.05;
+
 /// The tallest a palette stands, and the least: opencode's command dialog's 480 and 280, so its
 /// results grow down inside a card whose foot moves little.
 pub(super) const PALETTE_MAX_HEIGHT: f32 = popover::MODAL_MAX_HEIGHT;
 pub(super) const PALETTE_MIN_HEIGHT: f32 = 280.0;
 
-/// Where a palette's top edge stands in a window `height` tall: where a centred palette at its
-/// tallest would start, 48 at the least (opencode's `max(48px, (100vh − 480px) / 2)`), so its
-/// search field stays put however many rows answer.
+/// Where a palette's top edge stands in a window `height` tall: Ghostty's 5 % down the terminal
+/// under the title row, pinned there so its search field stays put however many rows answer. A
+/// touch screen keeps a dialog's top (`popover::modal_top_edge`): there the field waits for a
+/// tap and a card just under the status bar would sit where taps reach the system's.
 pub(super) fn palette_top(height: Pixels) -> Pixels {
-    popover::modal_top_edge(height)
+    if crate::shell::touch_screen() {
+        return popover::modal_top_edge(height);
+    }
+    let row = Theme::TITLEBAR_HEIGHT;
+    px((f32::from(height) - row).max(0.0).mul_add(PALETTE_TOP_SHARE, row))
 }
 
 /// Mount a palette card over the scrimmed window, frosted like the composer.
@@ -1800,6 +1627,8 @@ pub(super) fn command_key_hint(
 
 #[cfg(test)]
 mod tests {
+    use super::super::session_search::tests::words;
+    use super::super::session_search::{CHAT_WORDS_DEBOUNCE, CHAT_WORDS_LIMIT};
     use super::*;
     use crate::appearance::AppearanceMode;
     use gpui::{AppContext, TestAppContext};
@@ -1934,8 +1763,8 @@ mod tests {
                     ]);
                 });
                 shell.toggle_command_palette(window, cx);
-                // Recent Threads leaves archived threads to search.
-                assert_eq!(search_chats(shell, "", cx), ["main-session"]);
+                // Sessions are found by typing; nothing lists them before.
+                assert!(search_chats(shell, "", cx).is_empty());
                 for query in [
                     "manual-sidechat",
                     "mcp-worker",
@@ -1957,31 +1786,24 @@ mod tests {
     }
 
     #[gpui::test]
-    fn child_chats_do_not_consume_history_result_slots(cx: &mut TestAppContext) {
+    fn child_chats_do_not_consume_session_result_slots(cx: &mut TestAppContext) {
         let (window, _dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
                 shell.state.update(cx, |state, _| {
-                    let children = (0..THREADS_TAB_LIMIT).map(|ix| {
-                        chat(&format!("child-{ix}"), Some("session-0"), false, ix as i64)
+                    let children = (0..SESSIONS_SHOWN).map(|ix| {
+                        chat(&format!("task-child-{ix}"), Some("task-0"), false, ix as i64)
                     });
-                    let sessions = (0..=THREADS_TAB_LIMIT).map(|ix| {
-                        chat(
-                            &format!("session-{ix}"),
-                            None,
-                            false,
-                            (THREADS_TAB_LIMIT + ix) as i64,
-                        )
+                    let sessions = (0..=SESSIONS_SHOWN).map(|ix| {
+                        chat(&format!("task-{ix}"), None, false, (SESSIONS_SHOWN + ix) as i64)
                     });
                     state.apply_chats(children.chain(sessions).collect());
                 });
                 shell.toggle_command_palette(window, cx);
-                shell.select_palette_tab(Tab::Threads, cx);
-                let expected: Vec<_> = (0..THREADS_TAB_LIMIT)
-                    .map(|ix| format!("session-{ix}"))
-                    .collect();
-                assert_eq!(search_chats(shell, "", cx), expected);
-                let oldest = format!("session-{THREADS_TAB_LIMIT}");
+                let expected: Vec<_> =
+                    (0..SESSIONS_SHOWN).map(|ix| format!("task-{ix}")).collect();
+                assert_eq!(search_chats(shell, "task", cx), expected);
+                let oldest = format!("task-{SESSIONS_SHOWN}");
                 assert_eq!(search_chats(shell, &oldest, cx), [oldest]);
             })
             .unwrap();
@@ -2025,14 +1847,14 @@ mod tests {
                     search_chats(shell, "deploy", cx),
                     ["newer", "older", "mid-word", "archived"]
                 );
-                shell.select_palette_tab(Tab::Threads, cx);
                 assert_eq!(search_chats(shell, "deploy staging", cx), ["older"]);
             })
             .unwrap();
     }
 
+    /// A query lists the commands first, then a few sessions, then the files.
     #[gpui::test]
-    fn all_tab_lists_threads_before_commands_and_caps_them(cx: &mut TestAppContext) {
+    fn a_query_lists_commands_before_sessions_and_caps_them(cx: &mut TestAppContext) {
         let (window, _dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -2051,11 +1873,9 @@ mod tests {
                     .search
                     .update(cx, |input, cx| input.set_text("new", cx));
                 let sections = sections(shell, cx);
-                assert_eq!(sections[0].0, Section::Threads);
-                assert_eq!(sections[0].1.len(), ALL_TAB_LIMIT);
-                assert_eq!(sections[1].0, Section::Commands);
-                shell.select_palette_tab(Tab::Threads, cx);
-                assert_eq!(search_chats(shell, "new", cx).len(), 8);
+                assert_eq!(sections[0].0, Section::Commands);
+                assert_eq!(sections[1].0, Section::Threads);
+                assert_eq!(sections[1].1.len(), SESSIONS_SHOWN);
             })
             .unwrap();
     }
@@ -2075,7 +1895,7 @@ mod tests {
                         .iter()
                         .map(|(section, _)| *section)
                         .collect::<Vec<_>>(),
-                    [Section::QuickActions, Section::RecentThreads]
+                    [Section::Commands]
                 );
                 assert!(
                     !sections[0]
@@ -2087,7 +1907,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn empty_state_lists_recent_files_actions_and_threads(cx: &mut TestAppContext) {
+    fn empty_state_lists_recent_files_then_commands(cx: &mut TestAppContext) {
         let (window, _dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -2117,17 +1937,13 @@ mod tests {
                     sections[0].1,
                     [file("docs/b.md"), file("src/a.rs"), file("README.md")]
                 );
-                assert_eq!(sections[1].0, Section::QuickActions);
+                assert_eq!(sections[1].0, Section::Commands);
                 assert!(
                     sections[1]
                         .1
                         .contains(&RowKind::Command(Command::ArchiveThread))
                 );
-                assert_eq!(sections[2].0, Section::RecentThreads);
-                assert_eq!(
-                    sections[2].1,
-                    [RowKind::Chat("newer".into()), RowKind::Chat("older".into())]
-                );
+                assert_eq!(sections.len(), 2, "sessions are the picker's: none listed untyped");
             })
             .unwrap();
     }
@@ -2138,8 +1954,6 @@ mod tests {
     fn the_palette_speaks_as_the_app_does() {
         for section in [
             Section::RecentFiles,
-            Section::QuickActions,
-            Section::RecentThreads,
             Section::Threads,
             Section::Commands,
             Section::Files,
@@ -2156,11 +1970,9 @@ mod tests {
 
     #[test]
     fn archive_is_offered_only_with_a_focused_chat() {
-        assert!(!commands_for("archive", true, false, false).contains(&Command::ArchiveThread));
-        assert_eq!(
-            commands_for("archive", true, true, false),
-            vec![Command::ArchiveThread]
-        );
+        let none = std::collections::BTreeMap::new();
+        assert!(!commands_for("archive", false, &none, 0).contains(&Command::ArchiveThread));
+        assert_eq!(commands_for("archive", true, &none, 0), vec![Command::ArchiveThread]);
     }
 
     #[test]
@@ -2368,40 +2180,10 @@ mod tests {
         }
     }
 
-    // slopty: the chats' words: a match each, after the pause, from the answer's shape.
-    fn words(chat: &str, role: &str, excerpt: &str, start: usize, end: usize) -> serde_json::Value {
-        serde_json::json!({
-            "chatId": chat, "role": role, "excerpt": excerpt,
-            "matchStart": start, "matchEnd": end,
-        })
-    }
-
     /// The `SearchChats` requests sent once typing paused.
     fn chat_word_requests(engine: &mut FakeEngine, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
         cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE);
         engine.take(methods::SEARCH_CHATS, cx)
-    }
-
-    #[test]
-    fn a_chat_words_answer_is_read_defensively() {
-        let found = ChatWordsMatch::parse_all(&serde_json::json!([
-            words("a", "agent", "both tests\npass now", 11, 15),
-            words("a", "user", "a second match of a", 0, 1),
-            words("b", "user", "naïve pass", 3, 5),
-            { "role": "agent", "excerpt": "no chat" },
-            words("c", "agent", "short", 2, 99),
-        ]));
-        assert_eq!(found.len(), 3, "one per chat, none without a chat: {found:?}");
-        assert!(found[0].agent);
-        assert_eq!(found[0].excerpt, "both tests pass now", "one line");
-        assert_eq!(&found[0].excerpt[found[0].range.clone()], "pass");
-        assert!(!found[1].agent);
-        assert!(found[1].range.is_empty(), "inside a character: no highlight, still a match");
-        assert!(found[2].range.is_empty(), "past the excerpt");
-        let wrapped =
-            ChatWordsMatch::parse_all(&serde_json::json!({ "matches": [words("d", "agent", "x", 0, 1)] }));
-        assert_eq!(wrapped.len(), 1);
-        assert!(ChatWordsMatch::parse_all(&serde_json::json!({})).is_empty());
     }
 
     // slopty: chats whose words match come after the title matches, a title match never twice,
@@ -2418,7 +2200,6 @@ mod tests {
                         chat("side", Some("quiet"), false, 3),
                     ]);
                 });
-                shell.select_palette_tab(Tab::Threads, cx);
             })
             .unwrap();
         type_query(window, "d", cx);
@@ -2482,7 +2263,6 @@ mod tests {
                 shell.state.update(cx, |state, _| {
                     state.apply_chats(vec![titled("quiet", "Fix the composer", false, 2)]);
                 });
-                shell.select_palette_tab(Tab::Threads, cx);
             })
             .unwrap();
         type_query(window, "old", cx);
@@ -2517,9 +2297,6 @@ mod tests {
             ]),
         );
         cx.run_until_parked();
-        window
-            .update(cx, |shell, _, cx| shell.select_palette_tab(Tab::Files, cx))
-            .unwrap();
         let recent = palette_section(window, Section::RecentFiles, cx).expect("a default list");
         let paths: Vec<_> = recent
             .rows
@@ -2620,8 +2397,7 @@ mod tests {
         assert_eq!(partial.status.as_deref(), Some("Indexing…"));
         let selected = partial.rows[0].key();
         window
-            .update(cx, |shell, _, cx| {
-                shell.select_palette_tab(Tab::Files, cx);
+            .update(cx, |shell, _, _| {
                 shell.command_palette.as_mut().unwrap().active = Some(selected.clone());
             })
             .unwrap();
@@ -2899,7 +2675,7 @@ mod tests {
         let params = &requests[0]["params"];
         assert_eq!(params["chatId"], "focused");
         assert_eq!(params["query"], "needle");
-        assert_eq!(params["limit"], CONTENT_TAB_LIMIT);
+        assert_eq!(params["limit"], CONTENT_SHOWN);
         assert_eq!(params["perFileLimit"], CONTENT_MATCHES_PER_FILE);
 
         let matches = (1..=8)
@@ -2909,21 +2685,11 @@ mod tests {
         cx.run_until_parked();
         let in_files = palette_section(window, Section::InFiles, cx).unwrap();
         assert_eq!(in_files.status, None);
-        assert_eq!(in_files.rows.len(), ALL_TAB_LIMIT);
+        assert_eq!(in_files.rows.len(), 8);
         let RowKind::Content(first) = &in_files.rows[0].kind else {
             panic!("content row expected");
         };
         assert_eq!((first.line, first.ranges.as_slice()), (1, &[(4, 10)][..]));
-        window
-            .update(cx, |shell, _, cx| shell.select_palette_tab(Tab::Files, cx))
-            .unwrap();
-        assert_eq!(
-            palette_section(window, Section::InFiles, cx)
-                .unwrap()
-                .rows
-                .len(),
-            8
-        );
     }
 
     #[gpui::test]
@@ -2975,8 +2741,7 @@ mod tests {
         assert_eq!(partial.status.as_deref(), Some("Indexing…"));
         let selected = partial.rows[0].key();
         window
-            .update(cx, |shell, _, cx| {
-                shell.select_palette_tab(Tab::Files, cx);
+            .update(cx, |shell, _, _| {
                 shell.command_palette.as_mut().unwrap().active = Some(selected.clone());
             })
             .unwrap();
@@ -3184,9 +2949,18 @@ mod tests {
         (window, dir)
     }
 
-    fn palette_tab(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Option<Tab> {
+    fn palette_open(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> bool {
+        window.read_with(cx, |shell, _| shell.command_palette.is_some()).unwrap()
+    }
+
+    /// Where the palette's highlight stands among its rows.
+    fn highlighted(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> usize {
         window
-            .read_with(cx, |shell, _| shell.command_palette.as_ref().map(|p| p.tab))
+            .read_with(cx, |shell, cx| {
+                let sections = shell.palette_sections(cx);
+                let rows = flat_rows(&sections);
+                shell.command_palette.as_ref().unwrap().active_position(&rows)
+            })
             .unwrap()
     }
 
@@ -3194,27 +2968,6 @@ mod tests {
         window
             .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
             .unwrap()
-    }
-
-    #[gpui::test]
-    fn digit_shortcuts_switch_tabs_while_the_palette_is_open(cx: &mut TestAppContext) {
-        let (window, _dir) = keyed_palette_window(cx);
-        window
-            .update(cx, |shell, window, cx| {
-                shell.toggle_command_palette(window, cx)
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
-
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::Threads));
-        assert_eq!(selected_chat(window, cx).as_deref(), Some("first"));
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-4"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::Files));
-        cx.simulate_keystrokes(window.into(), &platform_combo("mod-1"));
-        assert_eq!(palette_tab(window, cx), Some(Tab::All));
     }
 
     #[gpui::test]
@@ -3231,12 +2984,14 @@ mod tests {
             .unwrap();
 
         cx.simulate_keystrokes(window.into(), &platform_combo("mod-2"));
-        assert_eq!(palette_tab(window, cx), None);
+        assert!(!palette_open(window, cx));
         assert_eq!(selected_chat(window, cx).as_deref(), Some("second"));
     }
 
+    /// Tab and ⌃N step down the rows as ↓ does, ⇧Tab and ⌃P up as ↑ does (Ghostty's), each
+    /// wrapping at the ends.
     #[gpui::test]
-    fn tab_rotates_the_palette_tabs(cx: &mut TestAppContext) {
+    fn tab_and_control_n_step_the_highlight(cx: &mut TestAppContext) {
         let (window, _dir) = keyed_palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -3247,12 +3002,14 @@ mod tests {
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
 
-        for expected in [Tab::Threads, Tab::Commands, Tab::Files, Tab::All] {
-            cx.simulate_keystrokes(window.into(), "tab");
-            assert_eq!(palette_tab(window, cx), Some(expected));
-        }
-        cx.simulate_keystrokes(window.into(), "shift-tab");
-        assert_eq!(palette_tab(window, cx), Some(Tab::Files));
+        assert_eq!(highlighted(window, cx), 0);
+        cx.simulate_keystrokes(window.into(), "tab");
+        assert_eq!(highlighted(window, cx), 1);
+        cx.simulate_keystrokes(window.into(), "ctrl-n");
+        assert_eq!(highlighted(window, cx), 2);
+        cx.simulate_keystrokes(window.into(), "shift-tab ctrl-p ctrl-p");
+        assert!(highlighted(window, cx) > 2, "up from the first row wraps to the last");
+        assert!(palette_open(window, cx), "none of them closes it");
     }
 
     #[test]
@@ -3306,64 +3063,127 @@ mod tests {
         assert!(!enter.press(true));
     }
 
+    fn labels(query: &str, uses: &std::collections::BTreeMap<String, settings::PaletteUse>) -> Vec<&'static str> {
+        commands_for(query, false, uses, DAY_MS * 30).iter().map(Command::label).collect()
+    }
+
+    const DAY_MS: i64 = 24 * 3_600_000;
+
+    /// With nothing run yet the commands stand in the table's order, all of them, the menu
+    /// bar's included; a query keeps the ones matching every word.
     #[test]
-    fn action_search_hides_empty_section_and_preserves_order() {
+    fn commands_stand_in_the_tables_order_until_one_runs() {
+        let none = std::collections::BTreeMap::new();
+        let all = labels("", &none);
         assert_eq!(
-            commands_for("", true, false, false),
-            vec![
-                Command::NewChat,
-                Command::NewProject,
-                Command::ResumeSession, // slopty
-                Command::Settings,
-                Command::Theme(AppearanceMode::Light)
+            all[..7],
+            [
+                "New session",
+                "New project\u{2026}",
+                super::super::past_sessions::RESUME,
+                "Settings",
+                "Appearance: System",
+                "Appearance: Light",
+                "Appearance: Dark",
             ]
         );
-        assert_eq!(
-            commands_for("new", true, false, false),
-            vec![Command::NewChat, Command::NewProject]
-        );
-        assert_eq!(
-            commands_for("settings", true, false, false),
-            vec![Command::Settings]
-        );
-        assert_eq!(
-            commands_for("theme", true, false, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert!(commands_for("deployment", true, false, false).is_empty());
+        assert!(all.contains(&"Reopen closed tab"), "the menu bar's commands: {all:?}");
+        assert_eq!(labels("new", &none), ["New session", "New project\u{2026}", "New tab"]);
+        assert_eq!(labels("appearance dark", &none), ["Appearance: Dark"]);
+        assert!(labels("deployment", &none).is_empty());
+    }
+
+    /// WezTerm's frecency: a command run often and lately leads, one run as often a month ago
+    /// stands behind one run less but this week, and the rest keep the table's order.
+    #[test]
+    fn commands_run_often_and_lately_lead() {
+        let now = DAY_MS * 30;
+        let used = |count, days_ago: i64| settings::PaletteUse { count, last_ms: now - days_ago * DAY_MS };
+        let uses = std::collections::BTreeMap::from([
+            ("Settings".to_owned(), used(4, 28)),
+            ("Toggle sidebar".to_owned(), used(2, 1)),
+            ("Appearance: Dark".to_owned(), used(1, 0)),
+        ]);
+        let ranked = labels("", &uses);
+        assert_eq!(ranked[..3], ["Toggle sidebar", "Appearance: Dark", "Settings"], "{ranked:?}");
+        assert_eq!(ranked[3], "New session", "then the table's order");
+        assert!(frecency(used(4, 28), now) < frecency(used(1, 0), now));
+        assert!((frecency(used(2, 7), now) - 1.0).abs() < 0.01, "two runs a week back count as one");
+        assert!(frecency(used(1, -1), now) <= 1.0, "a clock that went back counts as now");
     }
 
     #[test]
     fn the_palette_holds_the_menu_bars_commands() {
-        let labels = |query| {
-            commands_for(query, true, false, true)
-                .iter()
-                .map(Command::label)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(labels("side pane"), ["Toggle side pane", "Expand side pane"]);
-        assert_eq!(labels("reopen"), ["Reopen closed tab"]);
-        assert!(commands_for("side pane", true, false, false).is_empty());
+        let none = std::collections::BTreeMap::new();
+        assert_eq!(labels("side pane", &none), ["Toggle side pane", "Expand side pane"]);
+        assert_eq!(labels("reopen", &none), ["Reopen closed tab"]);
     }
 
-    #[test]
-    fn theme_action_targets_the_opposite_resolved_appearance() {
-        assert_eq!(
-            commands_for("theme", true, false, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("theme", false, false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
-        assert_eq!(
-            commands_for("light", true, false, false),
-            vec![Command::Theme(AppearanceMode::Light)]
-        );
-        assert_eq!(
-            commands_for("dark", false, false, false),
-            vec![Command::Theme(AppearanceMode::Dark)]
-        );
+    /// A command run from the palette counts from its next opening, no row moving while it is
+    /// open, and one no command is called any more is forgotten.
+    #[gpui::test]
+    fn running_a_command_counts_toward_its_rank(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.settings.palette_uses.insert(
+                    "Switch to dark theme".into(),
+                    settings::PaletteUse { count: 9, last_ms: 0 },
+                );
+                shell.toggle_command_palette(window, cx);
+                let row = PaletteRow::new(
+                    Section::Commands,
+                    RowKind::Command(Command::Theme(AppearanceMode::Dark)),
+                );
+                let first = |shell: &Shell, cx: &App| {
+                    sections(shell, cx)
+                        .into_iter()
+                        .find(|(section, _)| *section == Section::Commands)
+                        .map(|(_, rows)| rows[0].clone())
+                };
+                let before = first(shell, cx);
+                shell.activate_palette_row(row.clone(), window, cx);
+                shell.activate_palette_row(row, window, cx);
+                let uses = &shell.settings.palette_uses;
+                assert_eq!(uses.keys().collect::<Vec<_>>(), ["Appearance: Dark"]);
+                assert_eq!(uses["Appearance: Dark"].count, 2);
+                assert_eq!(first(shell, cx), before, "no row moves while the palette is open");
+                shell.toggle_command_palette(window, cx);
+                shell.toggle_command_palette(window, cx);
+                let dark = Some(RowKind::Command(Command::Theme(AppearanceMode::Dark)));
+                assert_eq!(first(shell, cx), dark, "the next opening ranks it first");
+            })
+            .unwrap();
+    }
+
+    /// A toggle wears a ✓ while it is on, the mode in use is the one ticked, and Settings says
+    /// which section it opens on.
+    #[gpui::test]
+    fn a_commands_row_says_where_it_stands(cx: &mut TestAppContext) {
+        let (window, _dir) = palette_window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                let current = crate::appearance::mode(cx);
+                for mode in [AppearanceMode::System, AppearanceMode::Light, AppearanceMode::Dark] {
+                    let ticked = if mode == current { CommandState::On } else { CommandState::Off };
+                    assert_eq!(shell.command_state(&Command::Theme(mode), cx), ticked, "{mode:?}");
+                }
+                let sidebar = crate::app_menus::window_commands()
+                    .find(|command| command.label == "Toggle sidebar")
+                    .map(Command::Window)
+                    .unwrap();
+                shell.settings.sidebar_collapsed = false;
+                assert_eq!(shell.command_state(&sidebar, cx), CommandState::On);
+                shell.settings.sidebar_collapsed = true;
+                assert_eq!(shell.command_state(&sidebar, cx), CommandState::Off);
+                let section = shell.settings.settings_section.label();
+                assert_eq!(
+                    shell.command_state(&Command::Settings, cx),
+                    CommandState::Value(section.into())
+                );
+                assert_eq!(shell.command_state(&Command::NewChat, cx), CommandState::None);
+            })
+            .unwrap();
     }
 
     #[test]
