@@ -1,71 +1,100 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! `ui.canvas` drawing: the draw function gets a `g` object whose methods
-//! record vector commands in design pixels, origin top-left. The desktop
+//! `ui.canvas` drawing.
+//!
+//! The draw function gets a `g` object whose methods record vector commands
+//! in design pixels, origin top-left. The desktop
 //! paints them with GPUI paths and shaped text, so a canvas is as crisp and
 //! as theme-bound as the rest of the reply.
 
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
+
 use mlua::{Table, UserData, UserDataFields, UserDataMethods, Value};
 
-use crate::VisualError;
 use crate::node::{parse_color, value_text};
+use crate::num::{count, narrow, whole};
 use crate::style::{Align, Color, TextSize, Token, Weight};
+use crate::{CanvasDrawing, VisualError};
 
-pub const MAX_COMMANDS: usize = 40_000;
+const MAX_COMMANDS: usize = 40_000;
 const MAX_POINTS: usize = 200_000;
 
+/// One thing a canvas draws, in design pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DrawCmd {
     /// An open or closed stroked path.
     Stroke {
+        /// The path's points, in order.
         points: Vec<[f32; 2]>,
+        /// The last point joins the first.
         closed: bool,
+        /// The line's color.
         color: Color,
+        /// The line's width.
         width: f32,
+        /// Dash length, with gaps as long; `None` draws it solid.
         dash: Option<f32>,
     },
     /// A filled polygon (any simple polygon, convex or not).
     Fill {
+        /// The outline's points, in order.
         points: Vec<[f32; 2]>,
+        /// The fill's color.
         color: Color,
     },
+    /// A line of text.
     Text(DrawText),
 }
 
+/// A line of text a canvas draws, in the interface font.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawText {
+    /// Where the text is anchored, across.
     pub x: f32,
+    /// Where the text is anchored, down.
     pub y: f32,
+    /// The text, on one line.
     pub text: String,
+    /// Its step on the type scale.
     pub size: TextSize,
+    /// Its weight.
     pub weight: Weight,
+    /// Its color.
     pub color: Color,
+    /// Set in the monospace font.
     pub mono: bool,
+    /// Which side of the text sits at `x`.
     pub align: Align,
+    /// Which side of the text sits at `y`: its top, middle, or bottom.
     pub baseline: Align,
 }
 
 /// The pointer, in canvas pixels, while it is over the canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Pointer {
+    /// Across, from the canvas's left.
     pub x: f32,
+    /// Down, from the canvas's top.
     pub y: f32,
+    /// A button or finger is down.
     pub down: bool,
 }
 
-pub struct Graphics {
-    pub width: f32,
-    pub height: f32,
-    pub time: f64,
-    pub pointer: Option<Pointer>,
-    pub commands: Vec<DrawCmd>,
+/// The `g` a canvas's draw function draws with: it records what is drawn.
+#[derive(Debug)]
+pub(crate) struct Graphics {
+    width: f32,
+    height: f32,
+    time: f64,
+    pointer: Option<Pointer>,
+    commands: Vec<DrawCmd>,
     /// The draw function looked at `pointer`: a touch host lets such a
     /// canvas take drags instead of scrolling past it.
-    pub read_pointer: std::cell::Cell<bool>,
+    read_pointer: std::cell::Cell<bool>,
     points: usize,
 }
 
 impl Graphics {
-    pub fn new(width: f32, height: f32, time: f64, pointer: Option<Pointer>) -> Self {
+    pub(crate) const fn new(width: f32, height: f32, time: f64, pointer: Option<Pointer>) -> Self {
         Self {
             width,
             height,
@@ -77,16 +106,21 @@ impl Graphics {
         }
     }
 
+    /// What the draw function drew, and whether it read the pointer.
+    pub(crate) fn into_drawing(self) -> CanvasDrawing {
+        CanvasDrawing { reads_pointer: self.read_pointer.get(), commands: self.commands }
+    }
+
     fn push(&mut self, command: DrawCmd) -> mlua::Result<()> {
         if self.commands.len() >= MAX_COMMANDS {
             return Err(lua_error(format!(
                 "a canvas draws at most {MAX_COMMANDS} shapes per frame"
             )));
         }
-        self.points += match &command {
+        self.points = self.points.saturating_add(match &command {
             DrawCmd::Stroke { points, .. } | DrawCmd::Fill { points, .. } => points.len(),
             DrawCmd::Text(_) => 1,
-        };
+        });
         if self.points > MAX_POINTS {
             return Err(lua_error(format!("a canvas draws at most {MAX_POINTS} points per frame")));
         }
@@ -100,7 +134,7 @@ pub(crate) fn lua_error(message: impl Into<String>) -> mlua::Error {
 }
 
 fn to_lua(error: VisualError) -> mlua::Error {
-    lua_error(error.to_string())
+    lua_error(error.message)
 }
 
 /// Shape options: `{ color = ..., fill = ..., stroke = ..., width = ...,
@@ -116,8 +150,8 @@ pub(crate) struct Paint {
 impl Paint {
     /// `default_fill` decides what a bare `color` means: a fill for shapes,
     /// a stroke for lines.
-    pub fn parse(options: Option<Table>, default_fill: bool) -> mlua::Result<Self> {
-        let mut paint = Paint { width: 1.0, ..Default::default() };
+    pub(crate) fn parse(options: Option<Table>, default_fill: bool) -> mlua::Result<Self> {
+        let mut paint = Self { width: 1.0, ..Default::default() };
         let Some(options) = options else {
             let color = Color::token(Token::Text);
             if default_fill {
@@ -146,30 +180,38 @@ impl Paint {
             }
         }
         if let Some(alpha) = options.raw_get::<Option<f64>>("alpha")? {
-            paint.fill = paint.fill.map(|c| c.with_alpha(alpha as f32));
-            paint.stroke = paint.stroke.map(|c| c.with_alpha(alpha as f32));
+            paint.fill = paint.fill.map(|c| c.with_alpha(narrow(alpha)));
+            paint.stroke = paint.stroke.map(|c| c.with_alpha(narrow(alpha)));
         }
         paint.width =
-            options.raw_get::<Option<f64>>("width")?.unwrap_or(1.0).clamp(0.25, 32.0) as f32;
-        paint.dash = options.raw_get::<Option<f64>>("dash")?.map(|d| d.clamp(1.0, 64.0) as f32);
+            narrow(options.raw_get::<Option<f64>>("width")?.unwrap_or(1.0).clamp(0.25, 32.0));
+        paint.dash = options.raw_get::<Option<f64>>("dash")?.map(|d| narrow(d.clamp(1.0, 64.0)));
         Ok(paint)
+    }
+
+    /// A line's color: the stroke, else the fill. [`Self::parse`] always
+    /// sets one, so the text color never stands in.
+    fn line_color(&self) -> Color {
+        self.stroke.or(self.fill).unwrap_or(Color::token(Token::Text))
     }
 }
 
 /// Points as a flat `{x1, y1, x2, y2, ...}` list or `{{x, y}, ...}` pairs.
 pub(crate) fn points(table: &Table) -> mlua::Result<Vec<[f32; 2]>> {
     let len = table.raw_len();
-    let mut out = Vec::with_capacity(len / 2 + 1);
+    let mut out = Vec::with_capacity((len / 2).saturating_add(1));
     match table.raw_get::<Value>(1)? {
         Value::Table(_) => {
             for pair in table.sequence_values::<Table>() {
                 let pair = pair?;
-                out.push([pair.raw_get::<f64>(1)? as f32, pair.raw_get::<f64>(2)? as f32]);
+                out.push([narrow(pair.raw_get::<f64>(1)?), narrow(pair.raw_get::<f64>(2)?)]);
             }
         }
         _ => {
             for ix in (1..len).step_by(2) {
-                out.push([table.raw_get::<f64>(ix)? as f32, table.raw_get::<f64>(ix + 1)? as f32]);
+                let (x, y) =
+                    (table.raw_get::<f64>(ix)?, table.raw_get::<f64>(ix.saturating_add(1))?);
+                out.push([narrow(x), narrow(y)]);
             }
         }
     }
@@ -183,11 +225,11 @@ pub(crate) fn points(table: &Table) -> mlua::Result<Vec<[f32; 2]>> {
 /// clockwise from 3 o'clock, since y points down).
 pub(crate) fn arc_points(cx: f32, cy: f32, r: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
     let sweep = a1 - a0;
-    let segments = ((sweep.abs() * r.max(1.0)).sqrt() * 2.5).clamp(6.0, 160.0) as usize;
+    let segments = whole(((sweep.abs() * r.max(1.0)).sqrt() * 2.5).clamp(6.0, 160.0));
     (0..=segments)
         .map(|i| {
-            let a = a0 + sweep * i as f32 / segments as f32;
-            [cx + r * a.cos(), cy + r * a.sin()]
+            let a = a0 + sweep * count(i) / count(segments);
+            [r.mul_add(a.cos(), cx), r.mul_add(a.sin(), cy)]
         })
         .collect()
 }
@@ -210,19 +252,19 @@ impl Graphics {
     }
 }
 
-fn rect_points(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Vec<[f32; 2]> {
-    let (x, w) = if w < 0.0 { (x + w, -w) } else { (x, w) };
-    let (y, h) = if h < 0.0 { (y + h, -h) } else { (y, h) };
-    let r = radius.clamp(0.0, w.min(h) / 2.0);
-    if r < 0.25 {
-        return vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+fn rect_points(left: f32, top: f32, width: f32, height: f32, radius: f32) -> Vec<[f32; 2]> {
+    let (left, width) = if width < 0.0 { (left + width, -width) } else { (left, width) };
+    let (top, height) = if height < 0.0 { (top + height, -height) } else { (top, height) };
+    let (right, bottom) = (left + width, top + height);
+    let round = radius.clamp(0.0, width.min(height) / 2.0);
+    if round < 0.25 {
+        return vec![[left, top], [right, top], [right, bottom], [left, bottom]];
     }
-    use std::f32::consts::{FRAC_PI_2, PI};
     let mut out = Vec::new();
-    out.extend(arc_points(x + w - r, y + r, r, -FRAC_PI_2, 0.0));
-    out.extend(arc_points(x + w - r, y + h - r, r, 0.0, FRAC_PI_2));
-    out.extend(arc_points(x + r, y + h - r, r, FRAC_PI_2, PI));
-    out.extend(arc_points(x + r, y + r, r, PI, PI + FRAC_PI_2));
+    out.extend(arc_points(right - round, top + round, round, -FRAC_PI_2, 0.0));
+    out.extend(arc_points(right - round, bottom - round, round, 0.0, FRAC_PI_2));
+    out.extend(arc_points(left + round, bottom - round, round, FRAC_PI_2, PI));
+    out.extend(arc_points(left + round, top + round, round, PI, PI + FRAC_PI_2));
     out
 }
 
@@ -254,7 +296,7 @@ impl UserData for Graphics {
                 g.push(DrawCmd::Stroke {
                     points: vec![[x1, y1], [x2, y2]],
                     closed: false,
-                    color: paint.stroke.or(paint.fill).unwrap(),
+                    color: paint.line_color(),
                     width: paint.width,
                     dash: paint.dash,
                 })
@@ -269,7 +311,7 @@ impl UserData for Graphics {
             g.push(DrawCmd::Stroke {
                 points,
                 closed: false,
-                color: paint.stroke.or(paint.fill).unwrap(),
+                color: paint.line_color(),
                 width: paint.width,
                 dash: paint.dash,
             })
@@ -297,7 +339,7 @@ impl UserData for Graphics {
             "circle",
             |_, g, (x, y, r, options): (f32, f32, f32, Option<Table>)| {
                 let paint = Paint::parse(options, true)?;
-                let mut pts = arc_points(x, y, r.abs(), 0.0, std::f32::consts::TAU);
+                let mut pts = arc_points(x, y, r.abs(), 0.0, TAU);
                 pts.pop();
                 g.shape(pts, &paint)
             },
@@ -321,7 +363,7 @@ impl UserData for Graphics {
                     return g.push(DrawCmd::Stroke {
                         points: outer,
                         closed: false,
-                        color: paint.stroke.or(paint.fill).unwrap(),
+                        color: paint.line_color(),
                         width: paint.width,
                         dash: paint.dash,
                     });
@@ -357,10 +399,10 @@ impl UserData for Graphics {
                         draw.size = TextSize::parse(&size).map_err(to_lua)?;
                     }
                     match o.raw_get::<Value>("weight")? {
-                        Value::Integer(n) => draw.weight = Weight::from_number(n as f64),
+                        Value::Integer(n) => draw.weight = Weight::from_integer(n),
                         Value::Number(n) => draw.weight = Weight::from_number(n),
                         Value::String(s) => {
-                            draw.weight = Weight::parse(&s.to_string_lossy()).map_err(to_lua)?
+                            draw.weight = Weight::parse(&s.to_string_lossy()).map_err(to_lua)?;
                         }
                         _ => {}
                     }

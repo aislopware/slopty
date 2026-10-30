@@ -18,11 +18,18 @@
 //! app. `math.random` is seeded from the visual's id before every call, so a
 //! script's random data is the same on every render and every device.
 
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
+
 pub mod assets;
 mod draw;
 pub mod image;
 mod model;
 mod node;
+mod num;
 mod raster;
 mod scene;
 pub mod shader;
@@ -37,7 +44,7 @@ pub use draw::{DrawCmd, DrawText, Pointer};
 use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 pub use node::{
     Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
-    Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
+    Series, ShaderNode, Span, Stack, TableNode, Text,
 };
 pub use raster::{Quality, Raster, RasterLabel};
 pub use scene::{
@@ -54,13 +61,17 @@ const CALL_BUDGET: Duration = Duration::from_millis(250);
 /// A canvas or scene draw runs per frame while animating.
 const DRAW_BUDGET: Duration = Duration::from_millis(60);
 
+/// Why a script failed: its own error, or a limit it ran into, worded for
+/// the agent that wrote it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct VisualError {
+    /// The message, with the script line it came from when there is one.
     pub message: String,
 }
 
 impl VisualError {
+    /// An error saying `message`.
     pub fn script(message: impl Into<String>) -> Self {
         Self { message: message.into() }
     }
@@ -89,8 +100,9 @@ fn describe(error: &mlua::Error) -> String {
                 None => message,
             }
         }
-        mlua::Error::RuntimeError(message) => message.clone(),
-        mlua::Error::SyntaxError { message, .. } => message.clone(),
+        mlua::Error::RuntimeError(message) | mlua::Error::SyntaxError { message, .. } => {
+            message.clone()
+        }
         mlua::Error::MemoryError(_) => {
             format!("the script used more than {} MB", MEMORY_LIMIT >> 20)
         }
@@ -102,16 +114,22 @@ fn describe(error: &mlua::Error) -> String {
 /// Arguments a node passes to its handler.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HandlerArg {
+    /// Nothing: a button press, a row or canvas click.
     None,
+    /// The tab chosen.
     Text(String),
+    /// A toggle's new state.
     Bool(bool),
+    /// A slider's new value.
     Number(f64),
+    /// A point in a canvas, in design pixels.
     Point(f32, f32),
 }
 
 /// One run of a canvas's draw function.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasDrawing {
+    /// What it drew, in paint order.
     pub commands: Vec<DrawCmd>,
     /// The drawing read `g.pointer`, so it responds to where the pointer is.
     pub reads_pointer: bool,
@@ -127,6 +145,16 @@ pub struct Visual {
     deadline: Rc<Cell<Option<Instant>>>,
     logs: Rc<RefCell<Vec<String>>>,
     assets: Assets,
+}
+
+impl std::fmt::Debug for Visual {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Visual")
+            .field("handlers", &self.handlers.len())
+            .field("seed", &self.seed)
+            .field("assets", &self.assets)
+            .finish_non_exhaustive()
+    }
 }
 
 const MAX_LOG_LINES: usize = 200;
@@ -148,8 +176,8 @@ impl Visual {
         lua.set_memory_limit(MEMORY_LIMIT)?;
 
         let deadline: Rc<Cell<Option<Instant>>> = Rc::default();
-        let ticks = Cell::new(0u32);
-        let watched = deadline.clone();
+        let ticks = Cell::new(0_u32);
+        let watched = Rc::clone(&deadline);
         lua.set_interrupt(move |_| {
             // Reading the clock on every safepoint is measurable; every 256th
             // is plenty to stop a runaway loop within a few milliseconds.
@@ -170,7 +198,7 @@ impl Visual {
 
         let globals = lua.globals();
         let logs: Rc<RefCell<Vec<String>>> = Rc::default();
-        let sink = logs.clone();
+        let sink = Rc::clone(&logs);
         globals.set(
             "print",
             lua.create_function(move |_, args: mlua::Variadic<Value>| {
@@ -191,7 +219,7 @@ impl Visual {
                     format.prefix = o.get::<Option<String>>("prefix")?.unwrap_or_default();
                     format.unit = o.get::<Option<String>>("unit")?.unwrap_or_default();
                     format.decimals =
-                        o.get::<Option<f64>>("decimals")?.map(|d| d.clamp(0.0, 6.0) as u8);
+                        o.get::<Option<f64>>("decimals")?.map(|d| num::small(d.clamp(0.0, 6.0)));
                 }
                 Ok(format.format(value))
             })?,
@@ -207,10 +235,11 @@ impl Visual {
         let randomseed: Function = math.get("randomseed")?;
         lua.sandbox(true)?;
 
-        let seed = (seed & 0x7fff_ffff) as i64;
-        let visual_deadline = deadline.clone();
+        // Masked to 31 bits, so it fits an `i64` whole.
+        let seed = i64::try_from(seed & 0x7fff_ffff).unwrap_or_default();
+        let visual_deadline = Rc::clone(&deadline);
         let call = |f: &dyn Fn() -> mlua::Result<Value>| {
-            visual_deadline.set(Some(Instant::now() + CALL_BUDGET));
+            visual_deadline.set(Instant::now().checked_add(CALL_BUDGET));
             let result = f();
             visual_deadline.set(None);
             result
@@ -254,12 +283,14 @@ impl Visual {
     }
 
     /// Give the script its asset files (textures, models).
+    #[must_use]
     pub fn with_assets(mut self, assets: Assets) -> Self {
         self.assets = assets;
         self
     }
 
-    pub fn assets(&self) -> &Assets {
+    /// The asset files the script was given.
+    pub const fn assets(&self) -> &Assets {
         &self.assets
     }
 
@@ -269,7 +300,7 @@ impl Visual {
         f: impl FnOnce() -> mlua::Result<R>,
     ) -> Result<R, VisualError> {
         self.randomseed.call::<()>(self.seed)?;
-        self.deadline.set(Some(Instant::now() + budget));
+        self.deadline.set(Instant::now().checked_add(budget));
         let result = f();
         self.deadline.set(None);
         Ok(result?)
@@ -280,21 +311,23 @@ impl Visual {
     pub fn render(&mut self) -> Result<Node, VisualError> {
         let value = self.budgeted(CALL_BUDGET, || self.view.call::<Value>(()))?;
         let mut parser = node::Parser::new();
-        let deadline = Instant::now() + CALL_BUDGET;
-        self.deadline.set(Some(deadline));
+        self.deadline.set(Instant::now().checked_add(CALL_BUDGET));
         let tree = parser.root(value);
         self.deadline.set(None);
         let tree = tree?;
-        self.handlers = parser.handlers;
+        self.handlers = parser.into_handlers();
         Ok(tree)
     }
 
     fn handler(&self, id: HandlerId) -> Result<&Function, VisualError> {
-        self.handlers.get(id.0 as usize).ok_or_else(|| VisualError::script("stale handler"))
+        usize::try_from(id.0)
+            .ok()
+            .and_then(|ix| self.handlers.get(ix))
+            .ok_or_else(|| VisualError::script("stale handler"))
     }
 
     /// Call an event handler. The caller renders again afterwards.
-    pub fn call(&mut self, id: HandlerId, arg: HandlerArg) -> Result<(), VisualError> {
+    pub fn call(&self, id: HandlerId, arg: HandlerArg) -> Result<(), VisualError> {
         let handler = self.handler(id)?.clone();
         self.budgeted(CALL_BUDGET, || match arg {
             HandlerArg::None => handler.call::<()>(()),
@@ -307,7 +340,7 @@ impl Visual {
 
     /// Run a canvas's draw function at a size, in design pixels.
     pub fn draw_canvas(
-        &mut self,
+        &self,
         id: HandlerId,
         width: f32,
         height: f32,
@@ -320,7 +353,7 @@ impl Visual {
     /// [`Visual::draw_canvas`], also reporting whether the drawing read the
     /// pointer.
     pub fn draw_canvas_traced(
-        &mut self,
+        &self,
         id: HandlerId,
         width: f32,
         height: f32,
@@ -331,15 +364,11 @@ impl Visual {
         let graphics =
             self.lua.create_userdata(draw::Graphics::new(width, height, time, pointer))?;
         self.budgeted(DRAW_BUDGET, || draw.call::<()>((&graphics, width, height, time)))?;
-        let graphics = graphics.take::<draw::Graphics>()?;
-        Ok(CanvasDrawing {
-            reads_pointer: graphics.read_pointer.get(),
-            commands: graphics.commands,
-        })
+        Ok(graphics.take::<draw::Graphics>()?.into_drawing())
     }
 
     /// Run a scene's draw function.
-    pub fn draw_scene(&mut self, id: HandlerId, time: f64) -> Result<Scene, VisualError> {
+    pub fn draw_scene(&self, id: HandlerId, time: f64) -> Result<Scene, VisualError> {
         let draw = self.handler(id)?.clone();
         let scene = self.lua.create_userdata(Scene::with_assets(time, self.assets.clone()))?;
         self.budgeted(DRAW_BUDGET, || draw.call::<()>((&scene, time)))?;
@@ -361,8 +390,9 @@ pub fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     if (hi - lo).abs() < f64::EPSILON {
         return vec![lo];
     }
-    let raw = (hi - lo) / count.max(1) as f64;
-    let magnitude = 10f64.powf(raw.log10().floor());
+    // A tick count is a handful, far below where `f64` stops being exact.
+    let raw = (hi - lo) / f64::from(u32::try_from(count.max(1)).unwrap_or(u32::MAX));
+    let magnitude = 10_f64.powf(raw.log10().floor());
     let normalized = raw / magnitude;
     let step = magnitude
         * if normalized < 1.5 {
@@ -377,8 +407,8 @@ pub fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
     let mut out = Vec::new();
     let mut v = (lo / step).ceil() * step;
     // Snap away float noise (0.6000000000000001) at the step's precision.
-    let digits = 10f64.powi((-step.log10().floor()).max(0.0) as i32);
-    while v <= hi + step * 1e-9 && out.len() < 100 {
+    let digits = 10_f64.powf((-step.log10().floor()).max(0.0));
+    while v <= step.mul_add(1e-9, hi) && out.len() < 100 {
         out.push(((v / step).round() * step * digits).round() / digits);
         v += step;
     }
@@ -386,17 +416,22 @@ pub fn nice_ticks(lo: f64, hi: f64, count: usize) -> Vec<f64> {
 }
 
 /// What `show_visual` learned by running a script before showing it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
+    /// Nodes in the first render's tree.
     pub nodes: usize,
+    /// Controls exercised, each followed by a render.
     pub interactions: usize,
+    /// Lines the script printed.
     pub logs: Vec<String>,
 }
 
-/// Run a script the way the desktop will: setup, the first render, every
-/// canvas and scene draw, and then each tab, toggle, slider end, and button
-/// once with a render after each. The first failure comes back with where
-/// it happened, so the agent can fix the script before the reader sees it.
+/// Run a script the way the desktop will, so the agent can fix it before the
+/// reader sees it.
+///
+/// That is setup, the first render, every canvas and scene draw, and then each
+/// tab, toggle, slider end, and button once with a render after each. The
+/// first failure comes back with where it happened.
 pub fn check(source: &str, seed: u64) -> Result<Report, VisualError> {
     check_with_assets(source, seed, Assets::default())
 }
@@ -406,7 +441,7 @@ pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Repo
     let mut visual = Visual::load(source, seed)?.with_assets(assets);
     let tree = visual.render()?;
     let mut report = Report::default();
-    exercise_draws(&mut visual, &tree, &mut report)?;
+    exercise_draws(&visual, &tree, &mut report)?;
 
     let mut interactions = Vec::new();
     collect_interactions(&tree, &mut interactions);
@@ -420,21 +455,17 @@ pub fn check_with_assets(source: &str, seed: u64, assets: Assets) -> Result<Repo
             .call(id, arg)
             .and_then(|()| {
                 let tree = visual.render()?;
-                exercise_draws(&mut visual, &tree, &mut Report::default())
+                exercise_draws(&visual, &tree, &mut Report::default())
             })
             .map_err(|e| VisualError::script(format!("after {describe}: {}", e.message)))?;
-        report.interactions += 1;
+        report.interactions = report.interactions.saturating_add(1);
     }
     report.logs = visual.logs();
     Ok(report)
 }
 
-fn exercise_draws(
-    visual: &mut Visual,
-    node: &Node,
-    report: &mut Report,
-) -> Result<(), VisualError> {
-    report.nodes += 1;
+fn exercise_draws(visual: &Visual, node: &Node, report: &mut Report) -> Result<(), VisualError> {
+    report.nodes = report.nodes.saturating_add(1);
     match &node.kind {
         NodeKind::Canvas(canvas) => {
             let frames: &[f64] = if canvas.animate { &[0.0, 1.5] } else { &[0.0] };
@@ -471,7 +502,7 @@ fn exercise_draws(
             }
             for texture in drawn.textures() {
                 if let TextureData::Encoded(bytes) = &texture.data {
-                    crate::image::dimensions(bytes).map_err(|e| {
+                    image::dimensions(bytes).map_err(|e| {
                         VisualError::script(format!(
                             "in a scene draw: {}: {e}",
                             texture.key.trim_start_matches("asset:")
@@ -482,17 +513,17 @@ fn exercise_draws(
         }
         NodeKind::Shader(shader) => {
             let names: Vec<String> = shader.inputs.iter().map(|(n, _)| n.clone()).collect();
-            for (i, buffer) in shader.buffers.iter().enumerate() {
-                crate::shader::validate(buffer, &names)
-                    .map_err(|e| VisualError::script(format!("in shader buffer {}: {e}", i + 1)))?;
+            for (n, buffer) in (1_usize..).zip(&shader.buffers) {
+                shader::validate(buffer, &names)
+                    .map_err(|e| VisualError::script(format!("in shader buffer {n}: {e}")))?;
             }
-            crate::shader::validate(&shader.code, &names).map_err(VisualError::script)?;
+            shader::validate(&shader.code, &names).map_err(VisualError::script)?;
             for name in &shader.textures {
                 visual
                     .assets
                     .require(name)
                     .and_then(|bytes| {
-                        crate::image::dimensions(&bytes).map_err(|e| format!("'{name}': {e}"))
+                        image::dimensions(&bytes).map_err(|e| format!("'{name}': {e}"))
                     })
                     .map_err(|e| VisualError::script(format!("shader textures: {e}")))?;
             }
@@ -584,7 +615,7 @@ fn handler_at(node: &Node, path: &[usize]) -> Option<HandlerId> {
 
 /// A stable seed from a visual's id.
 pub fn seed_for(id: &str) -> u64 {
-    id.bytes().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+    id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
     })
 }

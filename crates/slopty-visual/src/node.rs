@@ -1,21 +1,30 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! The element tree a visual's view function returns, parsed from the tagged
-//! tables `ui.*` constructors build. The tree is plain data: the desktop
+//! The element tree a visual's view function returns.
+//!
+//! It is parsed from the tagged tables `ui.*` constructors build. The tree is
+//! plain data: the desktop
 //! renders it with native elements, and handlers are indexes into the
 //! render's handler list.
 
 use mlua::{Function, Table, Value};
 
 use crate::VisualError;
+use crate::num::{narrow, small};
+use crate::shader::{Blend, MAX_BUFFERS, MAX_INPUTS, MAX_TEXTURES, valid_input_name};
 use crate::style::{Align, Color, Justify, TextSize, Token, Weight};
 
 /// A Lua function a node calls back (an event handler or a draw function),
 /// valid until the next render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HandlerId(pub u32);
+pub struct HandlerId(
+    /// Its index in the render's handler list.
+    pub u32,
+);
 
+/// One element of a visual's tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Node {
+    /// What the element is.
     pub kind: NodeKind,
     /// Fixed width in design pixels, inside a row or grid.
     pub width: Option<f32>,
@@ -26,138 +35,217 @@ pub struct Node {
     pub key: Option<String>,
 }
 
+/// Which way a stack runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Axis {
+    /// Top to bottom: a column.
     #[default]
     Vertical,
+    /// Left to right: a row.
     Horizontal,
 }
 
+/// The elements a view builds.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeKind {
+    /// `ui.column` or `ui.row`.
     Stack(Stack),
+    /// `ui.grid`: children in equal columns, row by row.
     Grid {
+        /// How many columns, 1 to 12.
         columns: u16,
+        /// Space between cells, in design pixels.
         gap: f32,
+        /// The cells, in reading order.
         children: Vec<Node>,
     },
+    /// `ui.text` or a bare string.
     Text(Text),
     /// A hairline divider.
     Rule,
+    /// Empty space, in design pixels.
     Space(f32),
     /// A headline figure over a short label.
     Stat {
+        /// The figure.
         value: String,
+        /// What it counts.
         label: String,
         /// A short change note beside the figure ("+12%").
         delta: Option<String>,
+        /// The delta's color.
         tone: Option<Color>,
     },
-    Table(Table_),
+    /// `ui.table`.
+    Table(TableNode),
+    /// `ui.chart`.
     Chart(Box<Chart>),
+    /// `ui.canvas`.
     Canvas(Canvas),
+    /// `ui.scene`.
     Scene(SceneNode),
+    /// `ui.shader`.
     Shader(ShaderNode),
+    /// `ui.button`.
     Button {
+        /// Its text.
         label: String,
+        /// Called on a press.
         on_click: HandlerId,
+        /// Drawn as the main action.
         primary: bool,
     },
+    /// `ui.tabs`: one choice of a few, shown as a segmented control.
     Tabs {
+        /// The choices, in order.
         options: Vec<String>,
+        /// The chosen one.
         value: String,
+        /// Called with the choice made.
         on_change: HandlerId,
     },
+    /// `ui.toggle`: a labeled switch.
     Toggle {
+        /// Its text.
         label: String,
+        /// Whether it is on.
         value: bool,
+        /// Called with the new state.
         on_change: HandlerId,
     },
+    /// `ui.slider`.
     Slider {
+        /// Its text, if any.
         label: Option<String>,
+        /// The value now, within `min..=max`.
         value: f64,
+        /// The low end.
         min: f64,
+        /// The high end.
         max: f64,
+        /// The increment it snaps to; 0 moves freely.
         step: f64,
+        /// Called with the new value.
         on_change: HandlerId,
+        /// How the value reads beside it.
         format: NumberFormat,
     },
+    /// `ui.link`: a web page, opened outside.
     Link {
+        /// Its text.
         label: String,
+        /// The http(s) address.
         url: String,
     },
 }
 
+/// `ui.column` or `ui.row`: children in a line.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Stack {
+    /// Which way it runs.
     pub axis: Axis,
+    /// Space between children, in design pixels.
     pub gap: f32,
+    /// Where children sit across it.
     pub align: Align,
+    /// How children share its length.
     pub justify: Justify,
+    /// A row wraps onto more lines when it runs out of width.
     pub wrap: bool,
     /// The hover wash, the only fill a visual has: for rows the reader can
     /// click or scan.
     pub hover: bool,
+    /// Called when the stack is clicked.
     pub on_click: Option<HandlerId>,
+    /// What it holds, in order.
     pub children: Vec<Node>,
 }
 
+/// `ui.text`: a paragraph of spans.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Text {
+    /// The runs of text, in order.
     pub spans: Vec<Span>,
+    /// Its step on the type scale.
     pub size: TextSize,
+    /// The weight spans take unless they say.
     pub weight: Weight,
+    /// The color spans take unless they say; `None` is the text color.
     pub color: Option<Color>,
+    /// Set in the monospace font.
     pub mono: bool,
+    /// Set in italics.
     pub italic: bool,
+    /// Where its lines sit.
     pub align: Align,
+    /// One line, cut off with an ellipsis.
     pub truncate: bool,
 }
 
+/// A run of text within a [`Text`], styled on its own.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Span {
+    /// The text.
     pub text: String,
+    /// Its weight, else the paragraph's.
     pub weight: Option<Weight>,
+    /// Its color, else the paragraph's.
     pub color: Option<Color>,
+    /// Set in the monospace font.
     pub mono: bool,
+    /// Set in italics.
     pub italic: bool,
 }
 
-#[allow(non_camel_case_types)]
+/// `ui.table`: labeled columns over rows of cells.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct Table_ {
+pub struct TableNode {
+    /// The columns, in order.
     pub columns: Vec<Column>,
+    /// The rows, each a cell per column.
     pub rows: Vec<Vec<Node>>,
     /// Rows take the hover wash.
     pub hover: bool,
 }
 
+/// A table column.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Column {
+    /// Its heading.
     pub label: String,
+    /// Where its cells sit; numbers right-align unless the script says.
     pub align: Align,
+    /// A fixed width in design pixels, else a share of the spare width.
     pub width: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+/// How a number reads: grouped digits, with a prefix and a unit.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NumberFormat {
+    /// Before the number (`$`).
     pub prefix: String,
+    /// After the number (`ms`, `%`).
     pub unit: String,
+    /// Digits after the point; `None` picks by magnitude.
     pub decimals: Option<u8>,
 }
 
 impl NumberFormat {
+    /// `value` as this format reads it (`$1,234.50`, `12 ms`, `4.26%`).
     pub fn format(&self, value: f64) -> String {
-        let decimals = self.decimals.map(usize::from).unwrap_or_else(|| {
-            let magnitude = value.abs();
-            if magnitude == 0.0 || magnitude >= 100.0 || value.fract() == 0.0 {
-                0
-            } else if magnitude >= 10.0 {
-                1
-            } else {
-                2
-            }
-        });
+        let decimals = self.decimals.map_or_else(
+            || {
+                let magnitude = value.abs();
+                if magnitude == 0.0 || magnitude >= 100.0 || value.fract() == 0.0 {
+                    0
+                } else if magnitude >= 10.0 {
+                    1
+                } else {
+                    2
+                }
+            },
+            usize::from,
+        );
         let text = format!("{value:.decimals$}");
         let (sign, digits) = match text.strip_prefix('-') {
             Some(rest) => ("-", rest),
@@ -166,7 +254,7 @@ impl NumberFormat {
         let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
         let mut grouped = String::new();
         for (ix, ch) in int.chars().enumerate() {
-            if ix > 0 && (int.len() - ix) % 3 == 0 {
+            if ix > 0 && int.len().saturating_sub(ix) % 3 == 0 {
                 grouped.push(',');
             }
             grouped.push(ch);
@@ -177,34 +265,52 @@ impl NumberFormat {
     }
 }
 
+/// The kinds of chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartKind {
+    /// Bars, one group per category.
     Bar,
+    /// Lines through each series' values.
     Line,
+    /// Lines with the area under them filled.
     Area,
+    /// Points at each series' (x, y) pairs.
     Scatter,
 }
 
+/// `ui.chart`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chart {
+    /// Which kind.
     pub kind: ChartKind,
+    /// Its height in design pixels.
     pub height: f32,
     /// Category labels (bar, line, area), one per value.
     pub x: Vec<String>,
+    /// The data.
     pub series: Vec<Series>,
+    /// Series stack on one another instead of sitting side by side.
     pub stacked: bool,
+    /// Bars run left to right.
     pub horizontal: bool,
+    /// The value axis's low end, else the data's.
     pub y_min: Option<f64>,
+    /// The value axis's high end, else the data's.
     pub y_max: Option<f64>,
+    /// How values read.
     pub format: NumberFormat,
     /// Scatter x axis format.
     pub x_format: NumberFormat,
+    /// Show the series names.
     pub legend: bool,
 }
 
+/// One series of a chart.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Series {
+    /// Its name, in the legend.
     pub name: String,
+    /// Its color.
     pub color: Color,
     /// One value per category; `nil` leaves a gap.
     pub values: Vec<Option<f64>>,
@@ -212,30 +318,44 @@ pub struct Series {
     pub points: Vec<(f64, f64)>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// `ui.canvas`: vector drawing in the reply's width.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Canvas {
+    /// Its height in design pixels.
     pub height: f32,
+    /// The draw function.
     pub draw: HandlerId,
+    /// Drawn again every frame, with the time.
     pub animate: bool,
+    /// Called with where it was clicked.
     pub on_click: Option<HandlerId>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// `ui.scene`: a lit 3D scene the reader can orbit.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneNode {
+    /// Its height in design pixels.
     pub height: f32,
+    /// The draw function.
     pub draw: HandlerId,
+    /// Drawn again every frame, with the time.
     pub animate: bool,
+    /// Dragging turns the camera.
     pub orbit: bool,
     /// Turntable speed in radians per second while the reader isn't dragging.
     pub spin: f32,
+    /// The camera's starting turn about the vertical axis, in radians.
     pub yaw: f32,
+    /// The camera's starting tilt, in radians.
     pub pitch: f32,
+    /// The camera's starting zoom (1 frames the scene).
     pub zoom: f32,
 }
 
 /// A fragment shader the desktop runs on the GPU (see [`crate::shader`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShaderNode {
+    /// Its height in design pixels.
     pub height: f32,
     /// GLSL defining `mainImage`: the image pass.
     pub code: String,
@@ -247,28 +367,33 @@ pub struct ShaderNode {
     pub animate: bool,
     /// Dragging orbits `iCamera` (otherwise it only moves `iMouse`).
     pub orbit: bool,
+    /// Turntable speed in radians per second while the reader isn't dragging.
     pub spin: f32,
+    /// `iCamera`'s starting yaw, in radians.
     pub yaw: f32,
+    /// `iCamera`'s starting pitch, in radians.
     pub pitch: f32,
+    /// `iCamera`'s starting zoom.
     pub zoom: f32,
     /// How the output sits on the chat.
-    pub blend: crate::shader::Blend,
+    pub blend: Blend,
     /// Bloom strength on bright output (0 off).
     pub bloom: f32,
     /// Image assets every pass samples as `iTexture0`-`3`.
     pub textures: Vec<String>,
 }
 
-pub const MIN_HEIGHT: f32 = 40.0;
-pub const MAX_HEIGHT: f32 = 720.0;
+const MIN_HEIGHT: f32 = 40.0;
+const MAX_HEIGHT: f32 = 720.0;
 const MAX_NODES: usize = 4000;
 const MAX_DEPTH: usize = 48;
 const MAX_TEXT: usize = 8000;
 
 /// Builds a [`Node`] tree from a view's return value, collecting the
 /// functions it references.
+#[derive(Debug)]
 pub(crate) struct Parser {
-    pub handlers: Vec<Function>,
+    handlers: Vec<Function>,
     nodes: usize,
 }
 
@@ -293,27 +418,33 @@ fn forbidden(prop: &str) -> Option<&'static str> {
 }
 
 impl Parser {
-    pub fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { handlers: Vec::new(), nodes: 0 }
     }
 
-    fn handler(&mut self, function: Function) -> HandlerId {
-        self.handlers.push(function);
-        HandlerId(self.handlers.len() as u32 - 1)
+    /// The functions the tree's handler ids index.
+    pub(crate) fn into_handlers(self) -> Vec<Function> {
+        self.handlers
     }
 
-    pub fn root(&mut self, value: Value) -> Result<Node, VisualError> {
+    fn handler(&mut self, function: Function) -> HandlerId {
+        // Ids index the handlers, which the node cap keeps far below `u32::MAX`.
+        let id = u32::try_from(self.handlers.len()).unwrap_or(u32::MAX);
+        self.handlers.push(function);
+        HandlerId(id)
+    }
+
+    /// The tree a view returned: its one node, or its nodes in a column.
+    pub(crate) fn root(&mut self, value: Value) -> Result<Node, VisualError> {
         let mut children = Vec::new();
         self.children_into(value, &mut children, 0)?;
-        Ok(match children.len() {
-            1 => children.pop().unwrap(),
-            _ => Node {
-                kind: NodeKind::Stack(Stack { gap: 16.0, children, ..Default::default() }),
-                width: None,
-                grow: false,
-                key: None,
-            },
-        })
+        let only = if children.len() == 1 { children.pop() } else { None };
+        Ok(only.unwrap_or_else(|| Node {
+            kind: NodeKind::Stack(Stack { gap: 16.0, children, ..Default::default() }),
+            width: None,
+            grow: false,
+            key: None,
+        }))
     }
 
     /// Children may be nodes, strings (plain text), nested lists of either
@@ -336,7 +467,7 @@ impl Parser {
                     out.push(self.node(&table, depth)?);
                 } else {
                     for child in table.sequence_values::<Value>() {
-                        self.children_into(child?, out, depth + 1)?;
+                        self.children_into(child?, out, depth.saturating_add(1))?;
                     }
                 }
             }
@@ -351,7 +482,7 @@ impl Parser {
     }
 
     fn count(&mut self) -> Result<(), VisualError> {
-        self.nodes += 1;
+        self.nodes = self.nodes.saturating_add(1);
         if self.nodes > MAX_NODES {
             return Err(VisualError::script(format!(
                 "the view has more than {MAX_NODES} nodes; summarize or paginate the data"
@@ -382,14 +513,16 @@ impl Parser {
                 props.allow(&["gap", "align", "justify", "wrap", "hover", "on_click"])?;
                 let mut children = Vec::new();
                 for child in table.sequence_values::<Value>() {
-                    self.children_into(child?, &mut children, depth + 1)?;
+                    self.children_into(child?, &mut children, depth.saturating_add(1))?;
                 }
                 NodeKind::Stack(Stack {
                     axis: if kind == "row" { Axis::Horizontal } else { Axis::Vertical },
-                    gap: props
-                        .number("gap")?
-                        .unwrap_or(if kind == "row" { 12.0 } else { 8.0 })
-                        .clamp(0.0, 96.0) as f32,
+                    gap: narrow(
+                        props
+                            .number("gap")?
+                            .unwrap_or(if kind == "row" { 12.0 } else { 8.0 })
+                            .clamp(0.0, 96.0),
+                    ),
                     align: props.parsed("align", Align::parse)?.unwrap_or_default(),
                     justify: props.parsed("justify", Justify::parse)?.unwrap_or_default(),
                     wrap: props.bool("wrap")?.unwrap_or(false),
@@ -402,22 +535,24 @@ impl Parser {
                 props.allow(&["columns", "gap"])?;
                 let mut children = Vec::new();
                 for child in table.sequence_values::<Value>() {
-                    self.children_into(child?, &mut children, depth + 1)?;
+                    self.children_into(child?, &mut children, depth.saturating_add(1))?;
                 }
                 NodeKind::Grid {
-                    columns: props.number("columns")?.unwrap_or(3.0).clamp(1.0, 12.0) as u16,
-                    gap: props.number("gap")?.unwrap_or(16.0).clamp(0.0, 96.0) as f32,
+                    columns: u16::from(small(
+                        props.number("columns")?.unwrap_or(3.0).clamp(1.0, 12.0),
+                    )),
+                    gap: narrow(props.number("gap")?.unwrap_or(16.0).clamp(0.0, 96.0)),
                     children,
                 }
             }
-            "text" => NodeKind::Text(self.text(&props)?),
+            "text" => NodeKind::Text(text(&props)?),
             "rule" => {
                 props.allow(&[])?;
                 NodeKind::Rule
             }
             "space" => {
                 props.allow(&["size"])?;
-                NodeKind::Space(props.number("size")?.unwrap_or(16.0).clamp(0.0, 200.0) as f32)
+                NodeKind::Space(narrow(props.number("size")?.unwrap_or(16.0).clamp(0.0, 200.0)))
             }
             "stat" => {
                 props.allow(&["value", "label", "delta", "tone"])?;
@@ -453,10 +588,10 @@ impl Parser {
                     draw: self.required_function(&props, "draw")?,
                     animate: props.bool("animate")?.unwrap_or(false),
                     orbit: props.bool("orbit")?.unwrap_or(true),
-                    spin: props.number("spin")?.unwrap_or(0.0).clamp(-3.0, 3.0) as f32,
-                    yaw: yaw as f32,
-                    pitch: (pitch as f32).clamp(-1.5, 1.5),
-                    zoom: (zoom as f32).clamp(0.2, 5.0),
+                    spin: narrow(props.number("spin")?.unwrap_or(0.0).clamp(-3.0, 3.0)),
+                    yaw: narrow(yaw),
+                    pitch: narrow(pitch).clamp(-1.5, 1.5),
+                    zoom: narrow(zoom).clamp(0.2, 5.0),
                 })
             }
             "shader" => {
@@ -494,9 +629,8 @@ impl Parser {
                         }
                     }
                 }
-                if buffers.len() > crate::shader::MAX_BUFFERS {
-                    return Err(props
-                        .error(&format!("takes at most {} buffers", crate::shader::MAX_BUFFERS)));
+                if buffers.len() > MAX_BUFFERS {
+                    return Err(props.error(&format!("takes at most {MAX_BUFFERS} buffers")));
                 }
                 let mut textures = Vec::new();
                 if let Some(table) = props.get::<Option<Table>>("textures")? {
@@ -507,37 +641,36 @@ impl Parser {
                         }
                     }
                 }
-                if textures.len() > crate::shader::MAX_TEXTURES {
-                    return Err(props.error(&format!(
-                        "takes at most {} textures",
-                        crate::shader::MAX_TEXTURES
-                    )));
+                if textures.len() > MAX_TEXTURES {
+                    return Err(props.error(&format!("takes at most {MAX_TEXTURES} textures")));
                 }
                 let blend = match (props.string("blend")?, props.bool("transparent")?) {
-                    (Some(name), _) => crate::shader::Blend::parse(&name).ok_or_else(|| {
+                    (Some(name), _) => Blend::parse(&name).ok_or_else(|| {
                         props.error("'blend' is \"alpha\", \"light\", or \"opaque\"")
                     })?,
-                    (None, Some(true)) => crate::shader::Blend::Alpha,
-                    (None, Some(false)) => crate::shader::Blend::Opaque,
-                    (None, None) => crate::shader::Blend::default(),
+                    (None, Some(true)) => Blend::Alpha,
+                    (None, Some(false)) => Blend::Opaque,
+                    (None, None) => Blend::default(),
                 };
                 let mut inputs = Vec::new();
                 if let Some(table) = props.get::<Option<Table>>("inputs")? {
                     for pair in table.pairs::<String, f64>() {
-                        let (name, value) =
-                            pair.map_err(|_| props.error("'inputs' maps names to numbers"))?;
-                        if !crate::shader::valid_input_name(&name) {
+                        let (name, value) = pair.map_err(|e| {
+                            props.error(&format!(
+                                "'inputs' maps names to numbers ({})",
+                                short_error(&e)
+                            ))
+                        })?;
+                        if !valid_input_name(&name) {
                             return Err(
                                 props.error(&format!("input '{name}' is not a usable GLSL name"))
                             );
                         }
-                        inputs.push((name, value as f32));
+                        inputs.push((name, narrow(value)));
                     }
                 }
-                if inputs.len() > crate::shader::MAX_INPUTS {
-                    return Err(
-                        props.error(&format!("takes at most {} inputs", crate::shader::MAX_INPUTS))
-                    );
+                if inputs.len() > MAX_INPUTS {
+                    return Err(props.error(&format!("takes at most {MAX_INPUTS} inputs")));
                 }
                 // Slots follow the names, so a shader compiled for one set of
                 // values serves every other.
@@ -556,12 +689,12 @@ impl Parser {
                     inputs,
                     animate: props.bool("animate")?.unwrap_or(true),
                     orbit: props.bool("orbit")?.unwrap_or(false),
-                    spin: props.number("spin")?.unwrap_or(0.0).clamp(-3.0, 3.0) as f32,
-                    yaw: yaw as f32,
-                    pitch: (pitch as f32).clamp(-1.5, 1.5),
-                    zoom: (zoom as f32).clamp(0.2, 5.0),
+                    spin: narrow(props.number("spin")?.unwrap_or(0.0).clamp(-3.0, 3.0)),
+                    yaw: narrow(yaw),
+                    pitch: narrow(pitch).clamp(-1.5, 1.5),
+                    zoom: narrow(zoom).clamp(0.2, 5.0),
                     blend,
-                    bloom: props.number("bloom")?.unwrap_or(0.0).clamp(0.0, 3.0) as f32,
+                    bloom: narrow(props.number("bloom")?.unwrap_or(0.0).clamp(0.0, 3.0)),
                     textures,
                 })
             }
@@ -584,7 +717,8 @@ impl Parser {
                 if options.is_empty() {
                     return Err(props.error("needs options = { ... }"));
                 }
-                let value = props.text_value("value")?.unwrap_or_else(|| options[0].clone());
+                let first = || options.first().cloned().unwrap_or_default();
+                let value = props.text_value("value")?.unwrap_or_else(first);
                 NodeKind::Tabs {
                     options,
                     value,
@@ -640,7 +774,7 @@ impl Parser {
         };
         Ok(Node {
             kind: node_kind,
-            width: props.number("width")?.map(|w| w.clamp(0.0, 2000.0) as f32),
+            width: props.number("width")?.map(|w| narrow(w.clamp(0.0, 2000.0))),
             grow: props.bool("grow")?.unwrap_or(false),
             key: props.string("key")?,
         })
@@ -653,55 +787,7 @@ impl Parser {
         }
     }
 
-    fn text(&mut self, props: &Props) -> Result<Text, VisualError> {
-        props.allow(&["size", "weight", "color", "mono", "italic", "align", "truncate"])?;
-        let mut spans = Vec::new();
-        let mut len = 0usize;
-        for child in props.table.sequence_values::<Value>() {
-            let span = match child? {
-                Value::Table(table)
-                    if table.raw_get::<Option<String>>("__kind")?.as_deref() == Some("span") =>
-                {
-                    let span_props = Props { table: &table, kind: "span" };
-                    span_props.allow(&["weight", "color", "mono", "italic"])?;
-                    let text: String = table
-                        .sequence_values::<Value>()
-                        .map(|v| v.map(|v| value_text(&v)))
-                        .collect::<Result<Vec<_>, _>>()?
-                        .concat();
-                    Span {
-                        text,
-                        weight: span_props.weight()?,
-                        color: span_props.color("color")?,
-                        mono: span_props.bool("mono")?.unwrap_or(false),
-                        italic: span_props.bool("italic")?.unwrap_or(false),
-                    }
-                }
-                Value::Table(_) => {
-                    return Err(props.error("children must be strings or ui.span { ... }"));
-                }
-                Value::Nil | Value::Boolean(false) => continue,
-                value => Span { text: value_text(&value), ..Default::default() },
-            };
-            len += span.text.len();
-            spans.push(span);
-        }
-        if len > MAX_TEXT {
-            return Err(props.error(&format!("is over {MAX_TEXT} characters")));
-        }
-        Ok(Text {
-            spans,
-            size: props.parsed("size", TextSize::parse)?.unwrap_or_default(),
-            weight: props.weight()?.unwrap_or_default(),
-            color: props.color("color")?,
-            mono: props.bool("mono")?.unwrap_or(false),
-            italic: props.bool("italic")?.unwrap_or(false),
-            align: props.parsed("align", Align::parse)?.unwrap_or_default(),
-            truncate: props.bool("truncate")?.unwrap_or(false),
-        })
-    }
-
-    fn table(&mut self, props: &Props, depth: usize) -> Result<Table_, VisualError> {
+    fn table(&mut self, props: &Props, depth: usize) -> Result<TableNode, VisualError> {
         props.allow(&["columns", "rows", "hover"])?;
         let mut columns = Vec::new();
         for column in props.get::<Option<Vec<Value>>>("columns")?.unwrap_or_default() {
@@ -712,7 +798,7 @@ impl Parser {
                         Some(a) => Align::parse(&a)?,
                         None => Align::Start,
                     },
-                    width: t.get::<Option<f64>>("width")?.map(|w| w as f32),
+                    width: t.get::<Option<f64>>("width")?.map(narrow),
                 },
                 other => Column { label: value_text(&other), ..Default::default() },
             });
@@ -724,11 +810,9 @@ impl Parser {
                 let cell = cell?;
                 let numeric = matches!(cell, Value::Integer(_) | Value::Number(_));
                 let mut out = Vec::new();
-                self.children_into(cell, &mut out, depth + 1)?;
-                let node = match out.len() {
-                    0 => self.plain_text(String::new())?,
-                    1 => out.pop().unwrap(),
-                    _ => Node {
+                self.children_into(cell, &mut out, depth.saturating_add(1))?;
+                let node = if out.len() > 1 {
+                    Node {
                         kind: NodeKind::Stack(Stack {
                             axis: Axis::Horizontal,
                             gap: 6.0,
@@ -738,7 +822,11 @@ impl Parser {
                         width: None,
                         grow: false,
                         key: None,
-                    },
+                    }
+                } else if let Some(only) = out.pop() {
+                    only
+                } else {
+                    self.plain_text(String::new())?
                 };
                 // Numbers right-align when the script didn't say otherwise.
                 if numeric
@@ -754,8 +842,57 @@ impl Parser {
         if rows.len() > 500 {
             return Err(props.error("has more than 500 rows; summarize or paginate"));
         }
-        Ok(Table_ { columns, rows, hover: props.bool("hover")?.unwrap_or(true) })
+        Ok(TableNode { columns, rows, hover: props.bool("hover")?.unwrap_or(true) })
     }
+}
+
+/// `ui.text`: its spans and style.
+fn text(props: &Props) -> Result<Text, VisualError> {
+    props.allow(&["size", "weight", "color", "mono", "italic", "align", "truncate"])?;
+    let mut spans = Vec::new();
+    let mut len = 0_usize;
+    for child in props.table.sequence_values::<Value>() {
+        let span = match child? {
+            Value::Table(table)
+                if table.raw_get::<Option<String>>("__kind")?.as_deref() == Some("span") =>
+            {
+                let span_props = Props { table: &table, kind: "span" };
+                span_props.allow(&["weight", "color", "mono", "italic"])?;
+                let text: String = table
+                    .sequence_values::<Value>()
+                    .map(|v| v.map(|v| value_text(&v)))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .concat();
+                Span {
+                    text,
+                    weight: span_props.weight()?,
+                    color: span_props.color("color")?,
+                    mono: span_props.bool("mono")?.unwrap_or(false),
+                    italic: span_props.bool("italic")?.unwrap_or(false),
+                }
+            }
+            Value::Table(_) => {
+                return Err(props.error("children must be strings or ui.span { ... }"));
+            }
+            Value::Nil | Value::Boolean(false) => continue,
+            value => Span { text: value_text(&value), ..Default::default() },
+        };
+        len = len.saturating_add(span.text.len());
+        spans.push(span);
+    }
+    if len > MAX_TEXT {
+        return Err(props.error(&format!("is over {MAX_TEXT} characters")));
+    }
+    Ok(Text {
+        spans,
+        size: props.parsed("size", TextSize::parse)?.unwrap_or_default(),
+        weight: props.weight()?.unwrap_or_default(),
+        color: props.color("color")?,
+        mono: props.bool("mono")?.unwrap_or(false),
+        italic: props.bool("italic")?.unwrap_or(false),
+        align: props.parsed("align", Align::parse)?.unwrap_or_default(),
+        truncate: props.bool("truncate")?.unwrap_or(false),
+    })
 }
 
 fn chart(props: &Props) -> Result<Chart, VisualError> {
@@ -810,12 +947,12 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
             let py: f64 = point.raw_get(2).or_else(|_| point.get("y"))?;
             points.push((px, py));
         }
-        if values.len() + points.len() > 20_000 {
+        if values.len().saturating_add(points.len()) > 20_000 {
             return Err(props.error("has more than 20,000 values in a series"));
         }
         series.push(Series {
             name: s_props.string("name")?.unwrap_or_default(),
-            color: s_props.color("color")?.unwrap_or(Color::token(Token::series(ix))),
+            color: s_props.color("color")?.unwrap_or_else(|| Color::token(Token::series(ix))),
             values,
             points,
         });
@@ -838,7 +975,7 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
     let format = props.format()?;
     Ok(Chart {
         kind,
-        height: props.number("height")?.unwrap_or(220.0).clamp(80.0, 600.0) as f32,
+        height: narrow(props.number("height")?.unwrap_or(220.0).clamp(80.0, 600.0)),
         x,
         series,
         stacked: props.bool("stacked")?.unwrap_or(false),
@@ -849,7 +986,7 @@ fn chart(props: &Props) -> Result<Chart, VisualError> {
         x_format: NumberFormat {
             prefix: String::new(),
             unit: props.string("x_unit")?.unwrap_or_default(),
-            decimals: props.number("x_decimals")?.map(|d| d.clamp(0.0, 6.0) as u8),
+            decimals: props.number("x_decimals")?.map(|d| small(d.clamp(0.0, 6.0))),
         },
         legend: props.bool("legend")?.unwrap_or(true),
     })
@@ -875,13 +1012,16 @@ impl Props<'_> {
             if COMMON.contains(&key.as_str()) || known.contains(&key.as_str()) {
                 continue;
             }
-            let reason = forbidden(&key).map(|r| format!(": {r}")).unwrap_or_else(|| {
-                if known.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (it takes {})", known.join(", "))
-                }
-            });
+            let reason = forbidden(&key).map_or_else(
+                || {
+                    if known.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (it takes {})", known.join(", "))
+                    }
+                },
+                |r| format!(": {r}"),
+            );
             return Err(self.error(&format!("has no '{key}'{reason}")));
         }
         Ok(())
@@ -941,7 +1081,7 @@ impl Props<'_> {
     fn weight(&self) -> Result<Option<Weight>, VisualError> {
         Ok(match self.table.raw_get::<Value>("weight")? {
             Value::Nil => None,
-            Value::Integer(n) => Some(Weight::from_number(n as f64)),
+            Value::Integer(n) => Some(Weight::from_integer(n)),
             Value::Number(n) => Some(Weight::from_number(n)),
             Value::String(s) => Some(Weight::parse(&s.to_string_lossy())?),
             _ => return Err(self.error("'weight' must be a number or a name")),
@@ -954,7 +1094,7 @@ impl Props<'_> {
 
     fn height(&self) -> Result<f32, VisualError> {
         match self.number("height")? {
-            Some(h) => Ok((h as f32).clamp(MIN_HEIGHT, MAX_HEIGHT)),
+            Some(h) => Ok(narrow(h).clamp(MIN_HEIGHT, MAX_HEIGHT)),
             None => Err(self.error(&format!(
                 "needs height (in pixels, {MIN_HEIGHT}-{MAX_HEIGHT}); its width is the reply \
                  column's"
@@ -966,7 +1106,7 @@ impl Props<'_> {
         Ok(NumberFormat {
             prefix: self.string("prefix")?.unwrap_or_default(),
             unit: self.string("unit")?.unwrap_or_default(),
-            decimals: self.number("decimals")?.map(|d| d.clamp(0.0, 6.0) as u8),
+            decimals: self.number("decimals")?.map(|d| small(d.clamp(0.0, 6.0))),
         })
     }
 }
@@ -981,14 +1121,14 @@ pub(crate) fn parse_color(value: Value) -> Result<Option<Color>, VisualError> {
             let mix = match t.raw_get::<Option<String>>("mix")? {
                 Some(other) => Some((
                     Token::parse(&other)?,
-                    t.raw_get::<Option<f64>>("t")?.unwrap_or(0.5).clamp(0.0, 1.0) as f32,
+                    narrow(t.raw_get::<Option<f64>>("t")?.unwrap_or(0.5).clamp(0.0, 1.0)),
                 )),
                 None => None,
             };
             Some(Color {
                 token,
                 mix,
-                alpha: t.raw_get::<Option<f64>>("alpha")?.unwrap_or(1.0).clamp(0.0, 1.0) as f32,
+                alpha: narrow(t.raw_get::<Option<f64>>("alpha")?.unwrap_or(1.0).clamp(0.0, 1.0)),
             })
         }
         other => {
@@ -1010,6 +1150,10 @@ pub(crate) fn value_text(value: &Value) -> String {
     }
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a whole number under 1e15 is exact in an `i64`"
+)]
 fn number_text(value: &Value) -> String {
     match value {
         Value::Integer(n) => n.to_string(),
@@ -1024,11 +1168,7 @@ fn number_text(value: &Value) -> String {
 
 fn clip(mut text: String) -> String {
     if text.len() > MAX_TEXT {
-        let mut end = MAX_TEXT;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
+        text.truncate(text.floor_char_boundary(MAX_TEXT));
     }
     text
 }
@@ -1052,7 +1192,7 @@ mod tests {
         assert_eq!(f.format(1234.0), "1,234 ms");
         assert_eq!(f.format(-12.5), "-12.5 ms");
         let money = NumberFormat { prefix: "$".into(), decimals: Some(2), ..Default::default() };
-        assert_eq!(money.format(1234567.891), "$1,234,567.89");
+        assert_eq!(money.format(1_234_567.891), "$1,234,567.89");
         let pct = NumberFormat { unit: "%".into(), ..Default::default() };
         assert_eq!(pct.format(4.256), "4.26%");
     }

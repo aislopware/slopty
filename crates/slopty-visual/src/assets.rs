@@ -1,12 +1,18 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Files an agent ships with a visual (images, glTF models, environment
-//! maps), by name. The agent passes them to `show_visual`; the engine stores
-//! them beside the script, and every runtime that loads the script gets them.
+//! maps), by name.
+//!
+//! The agent passes them to `show_visual`; the engine stores them beside the
+//! script, and every runtime that loads the script gets them.
 //! Scripts refer to them by name (`texture = "wood.jpg"`,
 //! `s:model { asset = "prism.glb" }`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
+use crate::model::Model;
 
 /// At most this many assets per visual.
 pub const MAX_ASSETS: usize = 16;
@@ -20,7 +26,7 @@ pub const MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
 pub struct Assets {
     files: Arc<HashMap<String, Arc<[u8]>>>,
     /// Parsed models, so a scene redrawing every frame parses each once.
-    pub(crate) models: Arc<Mutex<HashMap<String, Arc<crate::model::Model>>>>,
+    models: Arc<Mutex<HashMap<String, Arc<Model>>>>,
 }
 
 impl std::fmt::Debug for Assets {
@@ -36,20 +42,44 @@ impl PartialEq for Assets {
 }
 
 impl Assets {
+    /// A visual's files, by name.
     pub fn new(files: HashMap<String, Arc<[u8]>>) -> Self {
         Self { files: Arc::new(files), models: Arc::default() }
     }
 
+    /// The file `name`, if the visual has it.
     pub fn get(&self, name: &str) -> Option<Arc<[u8]>> {
         self.files.get(name).cloned()
     }
 
+    /// The files' names, in no order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.files.keys().map(String::as_str)
     }
 
+    /// Whether the visual has no files.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+
+    /// The glTF model in the file `name`, parsed on first use and shared
+    /// after. It parses outside the lock, so scenes using other models never
+    /// wait on it; two first uses at once both parse and keep the first.
+    pub(crate) fn model(&self, name: &str) -> Result<Arc<Model>, String> {
+        let bytes = self.require(name)?;
+        let cached = self.models.lock().get(name).map(Arc::clone);
+        if let Some(model) = cached {
+            return Ok(model);
+        }
+        let model =
+            crate::model::parse_shared(&bytes).map_err(|e| format!("model '{name}': {e}"))?;
+        Ok(Arc::clone(self.models.lock().entry(name.to_owned()).or_insert(model)))
+    }
+
+    /// How many models have been parsed.
+    #[cfg(test)]
+    pub(crate) fn parsed_models(&self) -> usize {
+        self.models.lock().len()
     }
 
     /// The file `name`, or an error naming what the visual does have.

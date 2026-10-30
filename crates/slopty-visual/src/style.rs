@@ -1,8 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! The style vocabulary a visual may use. Every value names something in the
-//! active Slopty theme (a color token, a step on the transcript's type scale),
-//! so a script can't paint a background, pick a font, or hard-code a color:
-//! the renderer resolves tokens against whatever theme, surface (glass or
+//! The style vocabulary a visual may use.
+//!
+//! Every value names something in the active Slopty theme (a color token, a step on the
+//! transcript's type scale), so a script can't paint a background, pick a font, or hard-code a
+//! color: the renderer resolves tokens against whatever theme, surface (glass or
 //! opaque), appearance, and text size the reader has.
 
 use crate::VisualError;
@@ -20,8 +21,11 @@ pub enum Token {
     Accent,
     /// Text drawn on an accent mark.
     OnAccent,
+    /// Good news: a passing check, a gain.
     Success,
+    /// Something to watch.
     Warning,
+    /// A failure or a loss.
     Danger,
     /// Hairlines: rules, gridlines, axes.
     Border,
@@ -32,6 +36,7 @@ pub enum Token {
     Rgb(u32),
 }
 
+/// How many categorical series colors the theme has.
 pub const CHART_SERIES: u8 = 6;
 
 /// Every token name a script may write, for error messages and the agent
@@ -55,19 +60,20 @@ pub const TOKEN_NAMES: [&str; 15] = [
 ];
 
 impl Token {
+    /// The token a script names (one of [`TOKEN_NAMES`]), or an error listing them.
     pub fn parse(name: &str) -> Result<Self, VisualError> {
         Ok(match name {
-            "text" => Token::Text,
-            "muted" => Token::Muted,
-            "faint" => Token::Faint,
-            "accent" => Token::Accent,
-            "on-accent" => Token::OnAccent,
-            "success" => Token::Success,
-            "warning" => Token::Warning,
-            "danger" => Token::Danger,
-            "border" => Token::Border,
+            "text" => Self::Text,
+            "muted" => Self::Muted,
+            "faint" => Self::Faint,
+            "accent" => Self::Accent,
+            "on-accent" => Self::OnAccent,
+            "success" => Self::Success,
+            "warning" => Self::Warning,
+            "danger" => Self::Danger,
+            "border" => Self::Border,
             other => match other.strip_prefix("chart").and_then(|n| n.parse::<u8>().ok()) {
-                Some(n @ 1..=CHART_SERIES) => Token::Chart(n - 1),
+                Some(n @ 1..=CHART_SERIES) => Self::Chart(n.saturating_sub(1)),
                 _ => {
                     return Err(VisualError::script(format!(
                         "unknown color '{other}': colors are theme tokens ({}), so a visual \
@@ -81,7 +87,9 @@ impl Token {
 
     /// The `index`th categorical series color (0-based, cycling).
     pub fn series(index: usize) -> Self {
-        Token::Chart((index % CHART_SERIES as usize) as u8)
+        // The remainder is below `CHART_SERIES`, so it fits a `u8`.
+        let slot = index.checked_rem(usize::from(CHART_SERIES)).map(u8::try_from);
+        Self::Chart(slot.and_then(Result::ok).unwrap_or_default())
     }
 }
 
@@ -89,16 +97,22 @@ impl Token {
 /// token, at an opacity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Color {
+    /// The base color.
     pub token: Token,
+    /// A second token mixed in, and how much of it (0 none, 1 all).
     pub mix: Option<(Token, f32)>,
+    /// Opacity, 0 to 1.
     pub alpha: f32,
 }
 
 impl Color {
+    /// `token` as it is, opaque.
     pub const fn token(token: Token) -> Self {
         Self { token, mix: None, alpha: 1.0 }
     }
 
+    /// This color with its opacity scaled by `alpha` (clamped to 0..=1).
+    #[must_use]
     pub fn with_alpha(self, alpha: f32) -> Self {
         Self { alpha: self.alpha * alpha.clamp(0.0, 1.0), ..self }
     }
@@ -108,24 +122,31 @@ impl Color {
 /// 16px interface base; the renderer scales them with the reader's text size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextSize {
+    /// `xs`: 11px on 16px lines.
     Xs,
+    /// `sm`: 12px on 18px lines.
     Sm,
+    /// `body`: 14px on 22px lines, the transcript's own.
     #[default]
     Body,
+    /// `lg`: 15px on 22px lines.
     Lg,
+    /// `xl`: 16px on 24px lines.
     Xl,
+    /// `2xl`: 19px on 27px lines.
     Xxl,
 }
 
 impl TextSize {
+    /// The step a script names (`xs`, `sm`, `body`, `lg`, `xl`, `2xl`), or an error.
     pub fn parse(name: &str) -> Result<Self, VisualError> {
         Ok(match name {
-            "xs" => TextSize::Xs,
-            "sm" => TextSize::Sm,
-            "body" | "md" | "base" => TextSize::Body,
-            "lg" => TextSize::Lg,
-            "xl" => TextSize::Xl,
-            "2xl" => TextSize::Xxl,
+            "xs" => Self::Xs,
+            "sm" => Self::Sm,
+            "body" | "md" | "base" => Self::Body,
+            "lg" => Self::Lg,
+            "xl" => Self::Xl,
+            "2xl" => Self::Xxl,
             other => {
                 return Err(VisualError::script(format!(
                     "unknown text size '{other}': use xs, sm, body, lg, xl, or 2xl (the \
@@ -137,14 +158,14 @@ impl TextSize {
 
     /// (font size, line height) in design pixels at the 16px base, the same
     /// steps the transcript's markdown uses.
-    pub fn metrics(self) -> (f32, f32) {
+    pub const fn metrics(self) -> (f32, f32) {
         match self {
-            TextSize::Xs => (11.0, 16.0),
-            TextSize::Sm => (12.0, 18.0),
-            TextSize::Body => (14.0, 22.0),
-            TextSize::Lg => (15.0, 22.0),
-            TextSize::Xl => (16.0, 24.0),
-            TextSize::Xxl => (19.0, 27.0),
+            Self::Xs => (11.0, 16.0),
+            Self::Sm => (12.0, 18.0),
+            Self::Body => (14.0, 22.0),
+            Self::Lg => (15.0, 22.0),
+            Self::Xl => (16.0, 24.0),
+            Self::Xxl => (19.0, 27.0),
         }
     }
 }
@@ -152,29 +173,49 @@ impl TextSize {
 /// Weights the interface font carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Weight {
+    /// 400.
     #[default]
     Regular,
+    /// 500.
     Medium,
+    /// 600.
     Semibold,
+    /// 700.
     Bold,
 }
 
 impl Weight {
-    pub fn from_number(weight: f64) -> Self {
-        match weight as i64 {
-            ..=449 => Weight::Regular,
-            450..=549 => Weight::Medium,
-            550..=649 => Weight::Semibold,
-            _ => Weight::Bold,
+    /// The weight a CSS number (400 regular … 700 bold) rounds to.
+    pub const fn from_integer(weight: i64) -> Self {
+        match weight {
+            ..=449 => Self::Regular,
+            450..=549 => Self::Medium,
+            550..=649 => Self::Semibold,
+            _ => Self::Bold,
         }
     }
 
+    /// [`Self::from_integer`] for a fractional number, its fraction dropped;
+    /// NaN reads as regular.
+    pub const fn from_number(weight: f64) -> Self {
+        if weight.is_nan() || weight < 450.0 {
+            Self::Regular
+        } else if weight < 550.0 {
+            Self::Medium
+        } else if weight < 650.0 {
+            Self::Semibold
+        } else {
+            Self::Bold
+        }
+    }
+
+    /// The weight a script names (`regular`, `medium`, `semibold`, `bold`), or an error.
     pub fn parse(name: &str) -> Result<Self, VisualError> {
         Ok(match name {
-            "regular" | "normal" => Weight::Regular,
-            "medium" => Weight::Medium,
-            "semibold" => Weight::Semibold,
-            "bold" => Weight::Bold,
+            "regular" | "normal" => Self::Regular,
+            "medium" => Self::Medium,
+            "semibold" => Self::Semibold,
+            "bold" => Self::Bold,
             other => {
                 return Err(VisualError::script(format!(
                     "unknown weight '{other}': use 400-700 or regular, medium, semibold, bold"
@@ -184,20 +225,25 @@ impl Weight {
     }
 }
 
+/// Where children sit across a stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
+    /// At the left, or the top.
     #[default]
     Start,
+    /// In the middle.
     Center,
+    /// At the right, or the bottom.
     End,
 }
 
 impl Align {
+    /// The alignment a script names (`start`, `center`, `end`, or a side), or an error.
     pub fn parse(name: &str) -> Result<Self, VisualError> {
         Ok(match name {
-            "start" | "left" | "top" => Align::Start,
-            "center" | "middle" => Align::Center,
-            "end" | "right" | "bottom" => Align::End,
+            "start" | "left" | "top" => Self::Start,
+            "center" | "middle" => Self::Center,
+            "end" | "right" | "bottom" => Self::End,
             other => {
                 return Err(VisualError::script(format!(
                     "unknown alignment '{other}': use start, center, or end"
@@ -207,23 +253,29 @@ impl Align {
     }
 }
 
+/// How children share a stack's length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Justify {
+    /// Packed at the start.
     #[default]
     Start,
+    /// Packed in the middle.
     Center,
+    /// Packed at the end.
     End,
+    /// Spread out, the space between them equal.
     Between,
 }
 
 impl Justify {
+    /// The justification a script names (an [`Align`] or `between`), or an error.
     pub fn parse(name: &str) -> Result<Self, VisualError> {
         Ok(match name {
-            "between" | "space-between" => Justify::Between,
+            "between" | "space-between" => Self::Between,
             other => match Align::parse(other)? {
-                Align::Start => Justify::Start,
-                Align::Center => Justify::Center,
-                Align::End => Justify::End,
+                Align::Start => Self::Start,
+                Align::Center => Self::Center,
+                Align::End => Self::End,
             },
         })
     }
@@ -248,7 +300,7 @@ mod tests {
     fn sizes_follow_the_transcript_scale() {
         assert_eq!(TextSize::parse("body").unwrap().metrics(), (14.0, 22.0));
         assert_eq!(TextSize::parse("2xl").unwrap().metrics(), (19.0, 27.0));
-        assert!(TextSize::parse("40px").is_err());
+        TextSize::parse("40px").unwrap_err();
         assert_eq!(Weight::from_number(600.0), Weight::Semibold);
     }
 }

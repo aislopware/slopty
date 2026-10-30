@@ -13,11 +13,15 @@ pub const MAX_HDR_PIXELS: u64 = 4096 * 2048;
 /// A decoded image, top row first.
 #[derive(Debug, Clone)]
 pub struct Image {
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// Its pixels, four channels each.
     pub pixels: Pixels,
 }
 
+/// A decoded image's pixels, rows packed top first.
 #[derive(Debug, Clone)]
 pub enum Pixels {
     /// sRGB-encoded RGBA, straight alpha.
@@ -44,13 +48,13 @@ pub fn dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     Ok((width, height))
 }
 
-/// Sides within 1..=MAX_IMAGE_SIDE and pixels within the decode budget.
+/// Sides within `1..=MAX_IMAGE_SIDE` and pixels within the decode budget.
 fn check_size(width: u32, height: u32, hdr: bool) -> Result<(), String> {
     if width == 0 || height == 0 || width.max(height) > MAX_IMAGE_SIDE {
         return Err(format!("a {width}x{height} image; sides run 1 to {MAX_IMAGE_SIDE} pixels"));
     }
     let budget = if hdr { MAX_HDR_PIXELS } else { MAX_IMAGE_PIXELS };
-    if u64::from(width) * u64::from(height) > budget {
+    if u64::from(width).saturating_mul(u64::from(height)) > budget {
         return Err(format!(
             "a {width}x{height} image; at most {budget} pixels{}",
             if hdr { " for HDR" } else { "" }
@@ -80,7 +84,8 @@ pub fn decode_texture(data: &TextureData) -> Result<Image, String> {
         TextureData::Encoded(bytes) => decode(bytes),
         TextureData::Rgba { width, height, pixels } => {
             check_size(*width, *height, false)?;
-            if pixels.len() != *width as usize * *height as usize * 4 {
+            if pixels.len() != (*width as usize).saturating_mul(*height as usize).saturating_mul(4)
+            {
                 return Err("image pixels don't match its size".into());
             }
             Ok(Image { width: *width, height: *height, pixels: Pixels::Rgba8(pixels.to_vec()) })

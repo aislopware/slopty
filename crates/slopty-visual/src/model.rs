@@ -1,39 +1,44 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! glTF models for `s:model`: the default scene's meshes flattened to
-//! world-space triangles with their normals, texture coordinates, and PBR
-//! materials, plus the images those materials use.
+//! glTF models for `s:model`.
+//!
+//! The default scene's meshes are flattened to world-space triangles with their normals, texture
+//! coordinates, and PBR materials, plus the images those materials use.
 
 use std::sync::Arc;
 
+use gltf::accessor::{DataType, Dimensions};
+use gltf::mesh::Semantic;
+
+use crate::num::byte;
 use crate::scene::{Material, TextureData, V3};
 
 /// A parsed model, ready to place into a scene.
 #[derive(Debug)]
-pub struct Model {
-    pub(crate) triangles: Vec<Triangle>,
-    pub(crate) materials: Vec<ModelMaterial>,
+pub(crate) struct Model {
+    pub triangles: Vec<Triangle>,
+    pub materials: Vec<ModelMaterial>,
     /// Encoded images (decoded, size-checked, only when drawn), indexed by
     /// `ModelMaterial::texture`.
-    pub(crate) images: Vec<TextureData>,
-    pub(crate) bounds: (V3, V3),
+    pub images: Vec<TextureData>,
+    pub bounds: (V3, V3),
 }
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Triangle {
-    pub(crate) positions: [V3; 3],
-    pub(crate) normals: Option<[V3; 3]>,
-    pub(crate) uvs: Option<[[f32; 2]; 3]>,
-    pub(crate) material: usize,
+    pub positions: [V3; 3],
+    pub normals: Option<[V3; 3]>,
+    pub uvs: Option<[[f32; 2]; 3]>,
+    pub material: usize,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct ModelMaterial {
     /// sRGB `0xRRGGBB` and alpha.
-    pub(crate) rgb: u32,
-    pub(crate) alpha: f32,
-    pub(crate) texture: Option<usize>,
-    pub(crate) material: Material,
-    pub(crate) double_sided: bool,
+    pub rgb: u32,
+    pub alpha: f32,
+    pub texture: Option<usize>,
+    pub material: Material,
+    pub double_sided: bool,
 }
 
 /// Most triangles one model may bring.
@@ -44,51 +49,61 @@ const MAX_NODE_VISITS: usize = 100_000;
 
 fn to_srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
-    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+    if c <= 0.003_130_8 { c * 12.92 } else { 1.055_f32.mul_add(c.powf(1.0 / 2.4), -0.055) }
 }
 
-fn rgb_of(linear: [f32; 3]) -> u32 {
-    let channel = |c: f32| (to_srgb(c) * 255.0).round() as u32;
-    channel(linear[0]) << 16 | channel(linear[1]) << 8 | channel(linear[2])
+fn rgb_of([r, g, b]: [f32; 3]) -> u32 {
+    let channel = |c: f32| u32::from(byte((to_srgb(c) * 255.0).round()));
+    (channel(r) << 16) | (channel(g) << 8) | channel(b)
 }
 
 type Mat4 = [[f32; 4]; 4];
 
 fn multiply(a: &Mat4, b: &Mat4) -> Mat4 {
-    // Column-major, as glTF stores them: (a * b)[col][row].
-    let mut out = [[0.0; 4]; 4];
-    for (col, out_col) in out.iter_mut().enumerate() {
-        for (row, value) in out_col.iter_mut().enumerate() {
-            *value = (0..4).map(|k| a[k][row] * b[col][k]).sum();
+    // Column-major, as glTF stores them: each column of `a * b` is `a`'s
+    // columns weighted by that column of `b`.
+    b.map(|b_col| {
+        let mut out = [0.0; 4];
+        for (a_col, weight) in a.iter().zip(b_col) {
+            for (value, a_value) in out.iter_mut().zip(a_col) {
+                *value = a_value.mul_add(weight, *value);
+            }
         }
-    }
-    out
+        out
+    })
 }
 
-fn transform_point(m: &Mat4, p: [f32; 3]) -> V3 {
+const fn transform_point(m: &Mat4, [x, y, z]: [f32; 3]) -> V3 {
+    let [c0, c1, c2, c3] = m;
     [
-        m[0][0] * p[0] + m[1][0] * p[1] + m[2][0] * p[2] + m[3][0],
-        m[0][1] * p[0] + m[1][1] * p[1] + m[2][1] * p[2] + m[3][1],
-        m[0][2] * p[0] + m[1][2] * p[1] + m[2][2] * p[2] + m[3][2],
+        c0[0].mul_add(x, c1[0].mul_add(y, c2[0].mul_add(z, c3[0]))),
+        c0[1].mul_add(x, c1[1].mul_add(y, c2[1].mul_add(z, c3[1]))),
+        c0[2].mul_add(x, c1[2].mul_add(y, c2[2].mul_add(z, c3[2]))),
     ]
 }
 
 /// Normals transform by the matrix's linear part; uniform scales are by far
 /// the common case, and the shading normal is renormalized anyway.
-fn transform_normal(m: &Mat4, n: [f32; 3]) -> V3 {
-    let v = [
-        m[0][0] * n[0] + m[1][0] * n[1] + m[2][0] * n[2],
-        m[0][1] * n[0] + m[1][1] * n[1] + m[2][1] * n[2],
-        m[0][2] * n[0] + m[1][2] * n[1] + m[2][2] * n[2],
+fn transform_normal(m: &Mat4, [x, y, z]: [f32; 3]) -> V3 {
+    let [c0, c1, c2, _] = m;
+    let [vx, vy, vz] = [
+        c0[0].mul_add(x, c1[0].mul_add(y, c2[0] * z)),
+        c0[1].mul_add(x, c1[1].mul_add(y, c2[1] * z)),
+        c0[2].mul_add(x, c1[2].mul_add(y, c2[2] * z)),
     ];
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
-    [v[0] / len, v[1] / len, v[2] / len]
+    let len = vx.mul_add(vx, vy.mul_add(vy, vz * vz)).sqrt().max(1e-9);
+    [vx / len, vy / len, vz / len]
+}
+
+/// The three entries of `list` a triangle's indices name, if all are in it.
+fn pick<T: Copy>(list: &[T], [a, b, c]: [usize; 3]) -> Option<[T; 3]> {
+    Some([*list.get(a)?, *list.get(b)?, *list.get(c)?])
 }
 
 impl Model {
     /// Parse a `.glb` or self-contained `.gltf` (buffers and images embedded
     /// or as data URIs; no external files).
-    pub fn parse(bytes: &[u8]) -> Result<Self, String> {
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, String> {
         // The glTF reader asserts on some malformed files rather than
         // erroring; a model is untrusted, so that's an error here too.
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Self::parse_unguarded(bytes)))
@@ -133,13 +148,14 @@ impl Model {
                 let base = pbr.base_color_factor();
                 let emissive = m.emissive_factor();
                 let strength = m.emissive_strength().unwrap_or(1.0);
-                let glow = emissive.iter().copied().fold(0.0f32, f32::max) * strength;
-                let mut rgb = rgb_of([base[0], base[1], base[2]]);
+                let glow = emissive.iter().copied().fold(0.0_f32, f32::max) * strength;
                 // An emitter whose base is dark shines its emissive color.
-                if glow > 0.0 && base[0].max(base[1]).max(base[2]) < 0.05 {
-                    rgb = rgb_of(emissive);
-                }
-                let glass = m.transmission().map(|t| t.transmission_factor()).unwrap_or(0.0);
+                let rgb = if glow > 0.0 && base[0].max(base[1]).max(base[2]) < 0.05 {
+                    rgb_of(emissive)
+                } else {
+                    rgb_of([base[0], base[1], base[2]])
+                };
+                let glass = m.transmission().map_or(0.0, |t| t.transmission_factor());
                 // OPAQUE ignores alpha, and MASK cuts rather than blends:
                 // only BLEND materials are see-through.
                 let alpha = match m.alpha_mode() {
@@ -163,14 +179,14 @@ impl Model {
             })
             .chain(std::iter::once(ModelMaterial {
                 // Primitives without a material.
-                rgb: 0xcccccc,
+                rgb: 0x00cc_cccc,
                 alpha: 1.0,
                 texture: None,
                 material: Material::default(),
                 double_sided: false,
             }))
             .collect();
-        let default_material = materials.len() - 1;
+        let default_material = materials.len().saturating_sub(1);
 
         let mut model = Self {
             triangles: Vec::new(),
@@ -190,9 +206,9 @@ impl Model {
         ];
         let mut stack: Vec<(gltf::Node, Mat4)> =
             scene.nodes().map(|node| (node, identity)).collect();
-        let mut visits = 0;
+        let mut visits = 0_usize;
         while let Some((node, parent)) = stack.pop() {
-            visits += 1;
+            visits = visits.saturating_add(1);
             if visits > MAX_NODE_VISITS {
                 return Err("the model's node tree is too large (or loops)".into());
             }
@@ -203,8 +219,6 @@ impl Model {
                         continue;
                     }
                     // Only read attributes of the shape their meaning needs.
-                    use gltf::accessor::{DataType, Dimensions};
-                    use gltf::mesh::Semantic;
                     let shaped =
                         |semantic: Semantic, dimensions: Dimensions, types: &[DataType]| {
                             primitive.get(&semantic).is_some_and(|a| {
@@ -226,7 +240,8 @@ impl Model {
                         Dimensions::Vec2,
                         &[DataType::F32, DataType::U8, DataType::U16],
                     );
-                    let reader = primitive.reader(|b| buffers.get(b.index()).map(|d| &d.0[..]));
+                    let reader =
+                        primitive.reader(|b| buffers.get(b.index()).map(|d| d.0.as_slice()));
                     let Some(positions) = reader.read_positions() else {
                         continue;
                     };
@@ -248,25 +263,25 @@ impl Model {
                         None => (0..positions.len()).collect(),
                     };
                     let material = primitive.material().index().unwrap_or(default_material);
-                    for tri in indices.chunks_exact(3) {
-                        if tri.iter().any(|&i| i >= positions.len()) {
+                    for &tri in indices.as_chunks::<3>().0 {
+                        let Some(p) = pick(&positions, tri) else {
                             continue;
-                        }
+                        };
                         if model.triangles.len() >= MAX_TRIANGLES {
                             return Err(format!("the model has over {MAX_TRIANGLES} triangles"));
                         }
-                        let pick = |list: &[V3]| [list[tri[0]], list[tri[1]], list[tri[2]]];
-                        let p = pick(&positions);
+                        let (low, high) = &mut model.bounds;
                         for v in &p {
-                            for (axis, value) in v.iter().enumerate() {
-                                model.bounds.0[axis] = model.bounds.0[axis].min(*value);
-                                model.bounds.1[axis] = model.bounds.1[axis].max(*value);
+                            for ((low, high), value) in low.iter_mut().zip(high.iter_mut()).zip(v) {
+                                *low = low.min(*value);
+                                *high = high.max(*value);
                             }
                         }
+                        // Both cover every vertex, so their picks are whole.
                         model.triangles.push(Triangle {
                             positions: p,
-                            normals: normals.as_deref().map(pick),
-                            uvs: uvs.as_ref().map(|uv| [uv[tri[0]], uv[tri[1]], uv[tri[2]]]),
+                            normals: normals.as_deref().and_then(|n| pick(n, tri)),
+                            uvs: uvs.as_deref().and_then(|uv| pick(uv, tri)),
                             material,
                         });
                     }
@@ -319,15 +334,16 @@ pub(crate) mod tests {
         while !json.len().is_multiple_of(4) {
             json.push(b' ');
         }
-        let total = 12 + 8 + json.len() + 8 + bin.len();
+        let total: usize = [12, 8, json.len(), 8, bin.len()].iter().sum();
+        let length = |n: usize| u32::try_from(n).unwrap().to_le_bytes();
         let mut glb = Vec::with_capacity(total);
         glb.extend_from_slice(b"glTF");
-        glb.extend_from_slice(&2u32.to_le_bytes());
-        glb.extend_from_slice(&(total as u32).to_le_bytes());
-        glb.extend_from_slice(&(json.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&2_u32.to_le_bytes());
+        glb.extend_from_slice(&length(total));
+        glb.extend_from_slice(&length(json.len()));
         glb.extend_from_slice(b"JSON");
         glb.extend_from_slice(&json);
-        glb.extend_from_slice(&(bin.len() as u32).to_le_bytes());
+        glb.extend_from_slice(&length(bin.len()));
         glb.extend_from_slice(b"BIN\0");
         glb.extend_from_slice(bin);
         glb
@@ -363,7 +379,7 @@ pub(crate) mod tests {
     #[test]
     fn attributes_shorter_than_the_positions_are_dropped() {
         // POSITION has 3 vertices, NORMAL only 1.
-        let normal: Vec<u8> = [0.0f32, 0.0, 1.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+        let normal: Vec<u8> = [0.0_f32, 0.0, 1.0].iter().flat_map(|f| f.to_le_bytes()).collect();
         let model = Model::parse(&triangle_with(
             &normal,
             r#""nodes":[{"mesh":0}],
@@ -422,7 +438,7 @@ pub(crate) mod tests {
         assert_eq!(tri.positions, [[0.0, 2.0, 0.0], [2.0, 2.0, 0.0], [0.0, 4.0, 0.0]]);
         assert_eq!(model.bounds, ([0.0, 2.0, 0.0], [2.0, 4.0, 0.0]));
         let material = &model.materials[tri.material];
-        assert_eq!(material.rgb, 0xff0000);
+        assert_eq!(material.rgb, 0x00ff_0000);
         assert!(material.double_sided);
         assert_eq!(material.material.metalness, 0.5);
         assert_eq!(material.material.roughness, 0.25);
@@ -430,7 +446,7 @@ pub(crate) mod tests {
 
     #[test]
     fn garbage_is_an_error_not_a_panic() {
-        assert!(Model::parse(b"not a model").is_err());
-        assert!(Model::parse(b"glTF\x02\0\0\0\x0c\0\0\0").is_err());
+        Model::parse(b"not a model").unwrap_err();
+        Model::parse(b"glTF\x02\0\0\0\x0c\0\0\0").unwrap_err();
     }
 }

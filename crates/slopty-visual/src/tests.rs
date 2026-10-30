@@ -33,7 +33,7 @@ fn a_view_renders_and_handlers_change_state() {
     let tree = visual.render().unwrap();
     assert_eq!(text_of(&tree), "Latency p95|");
     let tabs = find(&tree, &|n| matches!(n.kind, NodeKind::Tabs { .. })).unwrap();
-    let NodeKind::Tabs { on_change, .. } = tabs.kind else { unreachable!() };
+    let NodeKind::Tabs { on_change, .. } = tabs.kind else { panic!("not tabs") };
     visual.call(on_change, HandlerArg::Text("p99".into())).unwrap();
     assert_eq!(text_of(&visual.render().unwrap()), "Latency p99|");
 }
@@ -53,7 +53,7 @@ fn style_rules_are_enforced_with_reasons() {
         (r#"return ui.text { "x", size = "40px" }"#, "type scale"),
         (r#"return ui.row { colour = "x" }"#, "has no 'colour'"),
         (r#"return ui.chart { type = "pie", series = {} }"#, "ui.canvas"),
-        (r#"return ui.canvas { draw = function() end }"#, "needs height"),
+        ("return ui.canvas { draw = function() end }", "needs height"),
     ] {
         let err = Visual::load(script, 1).and_then(|mut v| v.render()).unwrap_err();
         assert!(err.message.contains(needle), "{script}: {}", err.message);
@@ -78,7 +78,7 @@ fn the_sandbox_has_no_io_and_bounds_time_and_memory() {
             .unwrap();
     assert!(err.message.contains("MB") || err.message.contains("time budget"), "{}", err.message);
     // The ui library can't be replaced by a script.
-    assert!(Visual::load("ui.text = nil return ui.text 'x'", 1).is_err());
+    Visual::load("ui.text = nil return ui.text 'x'", 1).unwrap_err();
 }
 
 /// A script is source: one that Luau would read as bytecode is refused, never run. Luau checks
@@ -93,9 +93,9 @@ fn a_script_is_never_loaded_as_bytecode() {
 
 #[test]
 fn random_data_is_stable_across_renders() {
-    let script = r#"
+    let script = "
         return function() return ui.text { tostring(math.random(1, 1000000)) } end
-    "#;
+    ";
     let mut a = Visual::load(script, 7).unwrap();
     let first = text_of(&a.render().unwrap());
     assert_eq!(first, text_of(&a.render().unwrap()));
@@ -124,7 +124,9 @@ fn canvases_record_theme_colored_commands() {
     let commands = visual.draw_canvas(canvas.draw, 300.0, 120.0, 0.0, None).unwrap();
     assert_eq!(commands.len(), 5);
     assert!(matches!(&commands[0], DrawCmd::Stroke { color, .. } if color.token == Token::Border));
-    assert!(matches!(&commands[2], DrawCmd::Fill { color, .. } if color.alpha == 0.5));
+    assert!(
+        matches!(&commands[2], DrawCmd::Fill { color, .. } if (color.alpha - 0.5).abs() < f32::EPSILON)
+    );
     let DrawCmd::Text(text) = &commands[4] else { panic!() };
     assert_eq!((text.x, text.align), (300.0, Align::End));
 }
@@ -180,11 +182,11 @@ fn charts_and_tables_parse() {
     .unwrap();
     let tree = visual.render().unwrap();
     let chart = find(&tree, &|n| matches!(n.kind, NodeKind::Chart(_))).unwrap();
-    let NodeKind::Chart(chart) = &chart.kind else { unreachable!() };
+    let NodeKind::Chart(chart) = &chart.kind else { panic!("not a chart") };
     assert_eq!(chart.series[1].values, [Some(200.0), None, Some(260.0)]);
     assert_eq!(chart.series[1].color, Color::token(Token::Chart(1)));
     let table = find(&tree, &|n| matches!(n.kind, NodeKind::Table(_))).unwrap();
-    let NodeKind::Table(table) = &table.kind else { unreachable!() };
+    let NodeKind::Table(table) = &table.kind else { panic!("not a table") };
     // Numeric columns right-align.
     assert_eq!(table.columns[1].align, Align::End);
 }
@@ -256,7 +258,7 @@ fn shaders_bind_state_as_inputs_and_fail_with_their_line() {
     assert!(report.interactions >= 1);
 
     let err = check(
-        r#"
+        "
         return function()
           return ui.shader { height = 200, code = [[
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -264,7 +266,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
           ]] }
         end
-        "#,
+        ",
         1,
     )
     .unwrap_err();
@@ -285,7 +287,7 @@ fn shaders_default_to_light_and_keep_the_old_transparent_flag() {
         .unwrap();
         match visual.render().unwrap().kind {
             NodeKind::Shader(shader) => shader.blend,
-            _ => unreachable!(),
+            other => panic!("not a shader: {other:?}"),
         }
     };
     assert_eq!(blend_of(""), Blend::Light);
@@ -297,7 +299,8 @@ fn shaders_default_to_light_and_keep_the_old_transparent_flag() {
 fn png(width: u32, height: u32) -> Vec<u8> {
     let mut out = Vec::new();
     ::image::RgbaImage::from_fn(width, height, |x, y| {
-        ::image::Rgba([(x * 30) as u8, (y * 30) as u8, 200, 255])
+        let channel = |n: u32| u8::try_from(n.saturating_mul(30)).unwrap_or(u8::MAX);
+        ::image::Rgba([channel(x), channel(y), 200, 255])
     })
     .write_to(&mut std::io::Cursor::new(&mut out), ::image::ImageFormat::Png)
     .unwrap();
@@ -308,7 +311,7 @@ fn png(width: u32, height: u32) -> Vec<u8> {
 fn scenes_place_models_textures_environments_and_sprites_from_assets() {
     let assets = Assets::new(
         [
-            ("tri.glb".to_owned(), crate::model::tests::triangle_glb().into()),
+            ("tri.glb".to_owned(), model::tests::triangle_glb().into()),
             ("wood.png".to_owned(), png(4, 4).into()),
             ("sky.png".to_owned(), png(8, 4).into()),
         ]
@@ -340,17 +343,17 @@ fn scenes_place_models_textures_environments_and_sprites_from_assets() {
         assert!(corner[0].abs() < 1e-5, "{corner:?}");
         assert!(corner[1].abs() <= 0.5 + 1e-5 && corner[2].abs() <= 0.5 + 1e-5);
     }
-    assert_eq!(fitted.color.token, Token::Rgb(0xff0000));
+    assert_eq!(fitted.color.token, Token::Rgb(0x00ff_0000));
     assert!(fitted.two_sided);
-    assert_eq!(faces[1].color.token, Token::Rgb(0x00ff00));
+    assert_eq!(faces[1].color.token, Token::Rgb(0x0000_ff00));
     assert_eq!(faces[1].material.metalness, 1.0);
     assert_eq!(faces[1].material.roughness, 0.25);
     let boxed = &faces[2];
     assert_eq!(boxed.texture, Some(1));
-    assert_eq!(boxed.uvs.map(|uv| uv.len()), Some(4));
+    assert_eq!(boxed.uvs.map(<[_]>::len), Some(4));
     // The model is parsed once per visual, however often the scene draws.
     visual.draw_scene(node.draw, 1.0).unwrap();
-    assert_eq!(assets.models.lock().unwrap().len(), 1);
+    assert_eq!(assets.parsed_models(), 1);
     check_with_assets(source, 1, assets).unwrap();
 }
 

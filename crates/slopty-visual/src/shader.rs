@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! `ui.shader`: a fragment shader the desktop runs on the GPU, in the
-//! convention agents already know from Shadertoy. The script supplies
-//! `void mainImage(out vec4 fragColor, in vec2 fragCoord)`; Slopty wraps it in
+//! convention agents already know from Shadertoy.
+//!
+//! The script supplies `void mainImage(out vec4 fragColor, in vec2 fragCoord)`; Slopty wraps it in
 //! a complete GLSL program with the usual inputs and validates it here, so a
 //! compile error reaches the agent (with its line) before the reader sees it.
 //!
@@ -48,6 +49,8 @@ pub enum Blend {
 }
 
 impl Blend {
+    /// The blend a script names: `alpha`, `light` (or `add`, `additive`), or
+    /// `opaque`.
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "alpha" => Self::Alpha,
@@ -64,24 +67,26 @@ impl Blend {
 pub struct ShaderUniforms {
     /// Width, height, pixel ratio, unused.
     pub resolution: [f32; 4],
+    /// Shadertoy's `iMouse`: xy while the button is down, zw where it went
+    /// down, z and w negative once released.
     pub mouse: [f32; 4],
     /// Yaw, pitch, zoom, unused.
     pub camera: [f32; 4],
     /// Time, time delta, frame, unused.
     pub time: [f32; 4],
+    /// The named inputs' values, four to a slot, in the order named.
     pub inputs: [[f32; 4]; MAX_INPUTS / 4],
     /// Each channel's width, height, 1, unused.
     pub channels: [[f32; 4]; 4],
 }
 
 impl ShaderUniforms {
-    pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: plain `f32` arrays with no padding.
+    /// The block's bytes, as the GPU's uniform buffer takes them.
+    pub const fn as_bytes(&self) -> &[u8] {
+        // SAFETY: plain `f32` arrays with no padding, all of it initialized,
+        // read for no longer than `self` is borrowed.
         unsafe {
-            std::slice::from_raw_parts(
-                (self as *const Self).cast::<u8>(),
-                std::mem::size_of::<Self>(),
-            )
+            std::slice::from_raw_parts(std::ptr::from_ref(self).cast::<u8>(), size_of::<Self>())
         }
     }
 }
@@ -129,10 +134,16 @@ pub fn program(code: &str, inputs: &[String]) -> (String, usize) {
          #define iTimeDelta (slopty_time.y)\n\
          #define iFrame (int(slopty_time.z))\n",
     );
-    for (i, name) in inputs.iter().enumerate().take(MAX_INPUTS) {
-        let lane = ["x", "y", "z", "w"][i % 4];
-        header.push_str(&format!("#define {name} (slopty_inputs[{}].{lane})\n", i / 4));
-    }
+    // Four inputs to a `vec4` slot.
+    let lanes = ["x", "y", "z", "w"].into_iter().cycle();
+    header.extend(
+        inputs
+            .iter()
+            .enumerate()
+            .take(MAX_INPUTS)
+            .zip(lanes)
+            .map(|((i, name), lane)| format!("#define {name} (slopty_inputs[{}].{lane})\n", i / 4)),
+    );
     let lines = header.lines().count();
     // Shadertoy sources often carry an ES precision statement; GLSL 4.50
     // has no use for it.
@@ -210,10 +221,9 @@ fn describe(errors: &[naga::front::glsl::Error], source: &str, offset: usize) ->
         return "shader: failed to compile".into();
     };
     let line = error.meta.location(source).line_number as usize;
-    if line > offset {
-        format!("shader line {}: {}", line - offset, error.kind)
-    } else {
-        format!("shader: {}", error.kind)
+    match line.checked_sub(offset).filter(|&own| own > 0) {
+        Some(own) => format!("shader line {own}: {}", error.kind),
+        None => format!("shader: {}", error.kind),
     }
 }
 
@@ -241,7 +251,7 @@ mod tests {
         let error = validate(broken, &[]).unwrap_err();
         assert!(error.starts_with("shader line 3:"), "{error}");
         // An undeclared input is the same mistake.
-        assert!(validate(RINGS, &[]).is_err());
+        validate(RINGS, &[]).unwrap_err();
     }
 
     #[test]
