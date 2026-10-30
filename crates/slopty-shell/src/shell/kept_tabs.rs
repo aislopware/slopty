@@ -5,6 +5,13 @@
 //! dock again at the session's right and the shells split beside it. A session's panes come back
 //! the first time it is shown, once the app is connected; a terminal that ended meanwhile does
 //! not.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{App, AppContext as _, Context, Window};
 
@@ -92,7 +99,7 @@ impl Shell {
             self.settings.session_tabs.remove(&key);
         }
         cx.spawn(async move |this, cx| {
-            this.update(cx, |shell, cx| shell.schedule_save(cx)).ok();
+            this.update(cx, Self::schedule_save).ok();
         })
         .detach();
     }

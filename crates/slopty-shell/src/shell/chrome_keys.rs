@@ -22,6 +22,14 @@
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
 //! reads), and the browser keeps its own ⌘[ and ⌘]: those bind in their contexts, and this
 //! module's handlers let a key go on when a terminal has focus.
+#![allow(
+    missing_docs,
+    trivial_casts,
+    clippy::derive_partial_eq_without_eq,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::time::Duration;
 
@@ -278,7 +286,7 @@ impl Shell {
 
     /// Whether a view's key works now: on a session's page, under no overlay that holds the
     /// keyboard.
-    fn view_keys_live(&self) -> bool {
+    const fn view_keys_live(&self) -> bool {
         matches!(self.route, Route::Chat)
             && !self.active_chat.is_empty()
             && !self.overlay_owns_keyboard()

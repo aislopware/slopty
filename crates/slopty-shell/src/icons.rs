@@ -2,7 +2,7 @@
 //! Embedded icon assets + the gpui [`AssetSource`] that serves them.
 //!
 //! - Most glyphs come from the **Solar Icons** set (Linear weight) by 480 Design.
-//!   Solar Icons is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/);
+//!   Solar Icons is licensed under CC BY 4.0 (<https://creativecommons.org/licenses/by/4.0>/);
 //!   attribution: "Solar Icons by 480 Design".
 //! - The terminal tab glyphs (`terminal`, `plus`, `close`) and the stop square are hand-drawn in
 //!   the same style.
@@ -11,6 +11,17 @@
 //!   ([`CLAUDE_BRAND`]).
 //!
 //! Icons render via [`icon`]: `icon(icons::PAPERCLIP).size(px(16.)).text_color(…)`.
+#![allow(
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::assert_is_empty,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::borrow::Cow;
 
@@ -366,7 +377,7 @@ mod tests {
             let bytes = Assets.load(path).unwrap().unwrap();
             let image = renderer.render_single_frame(&bytes, 1.0).unwrap();
             assert!(
-                image.as_bytes(0).unwrap().chunks_exact(4).any(|pixel| pixel[3] != 0),
+                image.as_bytes(0).unwrap().as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0),
                 "{path} rasterizes to an empty image"
             );
         }

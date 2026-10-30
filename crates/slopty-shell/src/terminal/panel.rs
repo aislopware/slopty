@@ -8,6 +8,23 @@
 //! body is Slopty's own terminal view of it ([`crate::live`]), which owns the
 //! session's link, prediction, latency path, copy mode and scrollback. The
 //! panel hands the view the look ([`crate::live::TerminalLook`]).
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    trivial_casts,
+    clippy::arithmetic_side_effects,
+    clippy::default_trait_access,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::ref_option,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::used_underscore_binding,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::collections::HashMap;
 
@@ -155,9 +172,10 @@ impl TerminalPanel {
     /// mark is left on a line of its own. A body not drawn within [`FIT_WAIT`] (a panel not
     /// shown) gives [`UNFITTED`].
     pub(crate) async fn grid(panel: &WeakEntity<Self>, cx: &mut AsyncApp) -> (u16, u16) {
-        let waiting = panel.update(cx, |panel, _| match &panel.fitted {
-            Some((.., grid)) => Ok(*grid),
-            None => {
+        let waiting = panel.update(cx, |panel, _| {
+            if let Some((.., grid)) = &panel.fitted {
+                Ok(*grid)
+            } else {
                 let (tx, rx) = oneshot::channel();
                 panel.awaiting_fit.push(tx);
                 Err(rx)
@@ -294,7 +312,7 @@ impl TerminalPanel {
     /// "Terminal N".
     fn display_title(tab: &TerminalTab) -> SharedString {
         match tab.shown_title.as_ref().map(|title| title.trim()) {
-            Some(title) if !title.is_empty() => title.to_string().into(),
+            Some(title) if !title.is_empty() => title.to_owned().into(),
             _ => tab.title.clone(),
         }
     }
@@ -344,7 +362,7 @@ impl TerminalPanel {
             return false;
         };
         let run = Self::spawn_session(
-            chat.to_string(),
+            chat.to_owned(),
             key,
             engine,
             target_device_id,
@@ -496,7 +514,7 @@ impl TerminalPanel {
         tabs.tabs.iter().find(|tab| tab.key == key)?.terminal_id.as_deref()
     }
 
-    /// OpenTerminal, then show the session's view. The view streams
+    /// `OpenTerminal`, then show the session's view. The view streams
     /// its own session; nothing is subscribed here. `again` names a terminal
     /// the tab showed when the app last ran, which it shows again, or closes
     /// when it has ended.
@@ -517,72 +535,69 @@ impl TerminalPanel {
         // A session's terminal is the agent's, never the tab's to end.
         let own = matches!(open, Open::Session(_));
         cx.spawn(async move |this, cx| {
-            let session = match existing_session {
-                Some(session) => session,
-                None => {
-                    // A session shown before keeps its grid; a new one starts at the
-                    // body's.
-                    let (cols, rows) = if matches!(open, Open::Fresh) {
-                        Self::grid(&this, cx).await
-                    } else {
-                        UNFITTED
-                    };
-                    let mut params =
-                        serde_json::json!({ "chatId": chat, "cols": cols, "rows": rows });
-                    if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
-                        object.insert("cwd".into(), serde_json::Value::String(cwd));
+            let session = if let Some(session) = existing_session {
+                session
+            } else {
+                // A session shown before keeps its grid; a new one starts at the
+                // body's.
+                let (cols, rows) = if matches!(open, Open::Fresh) {
+                    Self::grid(&this, cx).await
+                } else {
+                    UNFITTED
+                };
+                let mut params = serde_json::json!({ "chatId": chat, "cols": cols, "rows": rows });
+                if let (Some(cwd), Some(object)) = (cwd, params.as_object_mut()) {
+                    object.insert("cwd".into(), serde_json::Value::String(cwd));
+                }
+                let again = match (open, params.as_object_mut()) {
+                    (Open::Again(id), Some(object)) => {
+                        object.insert("terminalId".into(), serde_json::Value::String(id));
+                        true
                     }
-                    let again = match (open, params.as_object_mut()) {
-                        (Open::Again(id), Some(object)) => {
-                            object.insert("terminalId".into(), serde_json::Value::String(id));
-                            true
-                        }
-                        (Open::Session(id), Some(object)) => {
-                            let chat_id = format!("{}{id}", crate::inspector::TERMINAL_CHAT);
-                            object.insert("chatId".into(), serde_json::Value::String(chat_id));
-                            object.insert("terminalId".into(), serde_json::Value::String(id));
-                            object.insert("session".into(), serde_json::Value::Bool(true));
-                            true
-                        }
-                        _ => false,
-                    };
-                    match engine
-                        .client()
-                        .call_as::<TerminalSession>(
-                            methods::OPEN_TERMINAL,
-                            with_target(params, &target),
-                        )
-                        .await
-                    {
-                        Ok(session) => session,
-                        // A terminal shown before that has ended goes with its tab.
-                        Err(_) if again => {
-                            let _ = this.update(cx, |panel, cx| {
-                                // A session's terminal is asked for again as it next moves.
-                                if own {
-                                    panel.session_asked.remove(&chat);
-                                }
-                                if let Some(tabs) = panel.chats.get_mut(&chat) {
-                                    tabs.tabs.retain(|tab| tab.key != key);
-                                    tabs.active =
-                                        tabs.active.min(tabs.tabs.len().saturating_sub(1));
-                                }
+                    (Open::Session(id), Some(object)) => {
+                        let chat_id = format!("{}{id}", crate::inspector::TERMINAL_CHAT);
+                        object.insert("chatId".into(), serde_json::Value::String(chat_id));
+                        object.insert("terminalId".into(), serde_json::Value::String(id));
+                        object.insert("session".into(), serde_json::Value::Bool(true));
+                        true
+                    }
+                    _ => false,
+                };
+                match engine
+                    .client()
+                    .call_as::<TerminalSession>(
+                        methods::OPEN_TERMINAL,
+                        with_target(params, &target),
+                    )
+                    .await
+                {
+                    Ok(session) => session,
+                    // A terminal shown before that has ended goes with its tab.
+                    Err(_) if again => {
+                        let _ = this.update(cx, |panel, cx| {
+                            // A session's terminal is asked for again as it next moves.
+                            if own {
+                                panel.session_asked.remove(&chat);
+                            }
+                            if let Some(tabs) = panel.chats.get_mut(&chat) {
+                                tabs.tabs.retain(|tab| tab.key != key);
+                                tabs.active = tabs.active.min(tabs.tabs.len().saturating_sub(1));
+                            }
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    Err(err) => {
+                        tracing::warn!(error = %err, "OpenTerminal failed");
+                        let _ = this.update(cx, |panel, cx| {
+                            if let Some(tab) = panel.tab_mut(&chat, key) {
+                                tab.failure =
+                                    Some(format!("failed to open terminal: {err}").into());
+                                tab.exited = Some(-1);
                                 cx.notify();
-                            });
-                            return;
-                        }
-                        Err(err) => {
-                            tracing::warn!(error = %err, "OpenTerminal failed");
-                            let _ = this.update(cx, |panel, cx| {
-                                if let Some(tab) = panel.tab_mut(&chat, key) {
-                                    tab.failure =
-                                        Some(format!("failed to open terminal: {err}").into());
-                                    tab.exited = Some(-1);
-                                    cx.notify();
-                                }
-                            });
-                            return;
-                        }
+                            }
+                        });
+                        return;
                     }
                 }
             };
@@ -710,7 +725,7 @@ impl TerminalPanel {
         let tab = tabs.tabs.remove(ix);
         let target = tab.target_device_id.clone();
         tabs.active = active_after_close(tabs.active, ix, tabs.tabs.len());
-        if let (Some(engine), Some(id)) = (engine, tab.terminal_id.clone()) {
+        if let (Some(engine), Some(id)) = (engine, tab.terminal_id) {
             cx.spawn(async move |_, _| {
                 let _ = engine
                     .client()
@@ -857,12 +872,11 @@ fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -
         live::Progress::Paused(share) => (theme.warning, Some(share.unwrap_or(1.0))),
         live::Progress::Failed(share) => (theme.danger, Some(share.unwrap_or(1.0))),
     };
-    let (left, width) = match share {
-        Some(share) => (0.0, share.clamp(0.0, 1.0)),
-        None => {
-            let leg = if sweep < 0.5 { sweep * 2.0 } else { 2.0 - sweep * 2.0 };
-            (0.75 * crate::motion::EASE_IN_OUT.eval(leg), 0.25)
-        }
+    let (left, width) = if let Some(share) = share {
+        (0.0, share.clamp(0.0, 1.0))
+    } else {
+        let leg = if sweep < 0.5 { sweep * 2.0 } else { 2.0 - sweep * 2.0 };
+        (0.75 * crate::motion::EASE_IN_OUT.eval(leg), 0.25)
     };
     let fill = div()
         .absolute()
@@ -1073,7 +1087,7 @@ mod progress_tests {
         *painted.borrow_mut() = Some(dark);
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| panel.read_with(cx, |panel, cx| panel.shown_ground(cx).is_some()));
-        assert_eq!(panel.read_with(cx, |panel, cx| panel.shown_ground(cx)), Some(dark));
+        assert_eq!(panel.read_with(cx, TerminalPanel::shown_ground), Some(dark));
         assert_eq!(told.get(), 1, "told once");
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         cx.run_until_parked();
@@ -1081,7 +1095,7 @@ mod progress_tests {
     }
 
     /// A machine that opens terminal 7 and keeps what each open asked.
-    struct Asked(Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+    struct Asked(Arc<parking_lot::Mutex<Vec<serde_json::Value>>>);
 
     #[async_trait::async_trait]
     impl slopty_view_rpc::RpcService for Asked {
@@ -1091,7 +1105,7 @@ mod progress_tests {
             params: serde_json::Value,
         ) -> Result<RpcReply, RpcError> {
             if method == methods::OPEN_TERMINAL {
-                self.0.lock().unwrap().push(params.clone());
+                self.0.lock().push(params.clone());
             }
             Machine.handle(method, params).await
         }
@@ -1116,7 +1130,7 @@ mod progress_tests {
                 ((f32::from(size.width) / 8.0) as u16, (f32::from(size.height) / 16.0) as u16)
             });
         });
-        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let asked = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
             Arc::new(Asked(Arc::clone(&asked))) as Arc<dyn slopty_view_rpc::RpcService>,
         ));
@@ -1140,7 +1154,7 @@ mod progress_tests {
                     tokio::task::yield_now().await;
                 }
             });
-            opened = asked.lock().unwrap().first().cloned();
+            opened = asked.lock().first().cloned();
             if opened.is_some() {
                 break;
             }
@@ -1158,7 +1172,7 @@ mod progress_tests {
         cx.update(|_, cx| {
             let (panel, grid) = (unshown.downgrade(), Rc::clone(&grid));
             cx.spawn(async move |cx| {
-                *grid.borrow_mut() = Some(TerminalPanel::grid(&panel, cx).await)
+                *grid.borrow_mut() = Some(TerminalPanel::grid(&panel, cx).await);
             })
             .detach();
         });

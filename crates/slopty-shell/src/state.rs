@@ -2,7 +2,7 @@
 //! App state: the engine connection, entity lists, and the selected chat's
 //! transcript — one gpui [`Entity`] the whole shell renders from.
 //!
-//! ## EngineHandle
+//! ## `EngineHandle`
 //! The UI talks the same typed RPC whether the engine is in-process or a separate
 //! daemon (ARCHITECTURE §1). [`EngineHandle::bootstrap`] probes the localhost IPC
 //! port, mirroring slopty: if an engine is listening it connects over WebSocket
@@ -17,6 +17,27 @@
 //!
 //! Pure logic (sort order, staleness, gate phase) lives in free functions with
 //! unit tests; rendering reads them.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::indexing_slicing,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_ref_mut,
+    clippy::partial_pub_fields,
+    clippy::question_mark,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    clippy::unwrap_used,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -142,7 +163,7 @@ pub struct EngineHandle {
     engine_info: EngineInfo,
     // What the service's slow-call watch says, taken once by the state that attaches it.
     slow_calls: Arc<
-        std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<slow_calls::SlowCall>>>,
+        parking_lot::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<slow_calls::SlowCall>>>,
     >,
 }
 
@@ -156,16 +177,16 @@ impl EngineHandle {
     pub async fn bootstrap(
         _config: EngineBootConfig,
         service: Option<Arc<dyn RpcService>>,
-    ) -> anyhow::Result<EngineHandle> {
+    ) -> anyhow::Result<Self> {
         let service = service.ok_or_else(|| anyhow::anyhow!("no engine service is installed"))?;
         // Every call passes the slow-call watch.
         let (service, slow) = slow_calls::SlowCallWatch::wrap(service, slow_calls::SLOW_AFTER);
         let client = memory_client(service.clone());
         let engine_info = client.call_as(methods::ENGINE_INFO, serde_json::json!({})).await?;
-        Ok(EngineHandle {
+        Ok(Self {
             inner: Arc::new(ServiceEngine { client }),
             engine_info,
-            slow_calls: Arc::new(std::sync::Mutex::new(Some(slow))),
+            slow_calls: Arc::new(parking_lot::Mutex::new(Some(slow))),
         })
     }
 
@@ -190,7 +211,7 @@ impl EngineHandle {
         self.inner.mode()
     }
 
-    pub fn engine_info(&self) -> &EngineInfo {
+    pub const fn engine_info(&self) -> &EngineInfo {
         &self.engine_info
     }
 
@@ -215,10 +236,7 @@ pub use slopty_view_proto::view::{
 
 /// When `format_time_ago(then, …)`, read at `now`, next says something else: the next
 /// whole minute, hour, day, week, month or year of its age. `None` past what it can say.
-pub fn time_ago_changes(
-    then: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+pub fn time_ago_changes(then: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
     const DAY: i64 = 24 * HOUR;
@@ -442,7 +460,7 @@ pub(crate) struct TranscriptTextChanged {
 
 impl gpui::EventEmitter<TranscriptTextChanged> for AppState {}
 
-fn is_text_append(frame: &TranscriptFrame) -> bool {
+const fn is_text_append(frame: &TranscriptFrame) -> bool {
     matches!(frame, TranscriptFrame::Delta { upsert, append, remove, .. }
         if upsert.is_empty() && remove.is_empty() && !append.is_empty())
 }
@@ -551,7 +569,7 @@ impl AppState {
     /// Optional `OpenTerminal` cwd. Existing chats leave this unset so the
     /// engine reads the chat row. The canvas has no row yet — pass the
     /// selected project's folder. When the project id is known but the
-    /// WatchSpaces row has not landed, leave cwd unset: `chatId` is
+    /// `WatchSpaces` row has not landed, leave cwd unset: `chatId` is
     /// `space-canvas:{spaceId}` and the engine resolves the folder. Only
     /// a deliberate project-less canvas sends `~`.
     pub fn terminal_open_cwd(&self) -> Option<String> {
@@ -565,7 +583,7 @@ impl AppState {
             return None;
         };
         if space_id.is_empty() || self.no_project {
-            return Some("~".to_string());
+            return Some("~".to_owned());
         }
         self.spaces
             .iter()
@@ -789,7 +807,7 @@ impl AppState {
             && let Some(device) = devices.iter_mut().find(|device| device.id == local_id)
             && device.name == "unknown-device"
         {
-            device.name = "Local".to_string();
+            device.name = "Local".to_owned();
         }
         let presentation = device_presentation_at(&devices, now);
         let session_presence = session_presence_at(&self.sessions, now);
@@ -923,7 +941,7 @@ impl AppState {
     /// A subagent doc's current transcript copy (empty until its watch's
     /// replay frame lands, or its frozen snapshot is set).
     pub fn sub_transcript(&self, doc_id: &str) -> &[SessionMessageEntry] {
-        self.sub_transcripts.get(doc_id).map(|v| v.as_slice()).unwrap_or(&[])
+        self.sub_transcripts.get(doc_id).map(Vec::as_slice).unwrap_or(&[])
     }
 
     /// Watch a SUBAGENT doc (`WatchDocMessages` works for any doc id).
@@ -1311,8 +1329,7 @@ impl AppState {
     /// one-shot timer for the next deadline, so idle state never polls.
     pub fn watch_clock_transitions(&mut self, cx: &mut Context<Self>) {
         if self.clock.observation.is_none() {
-            self.clock.observation =
-                Some(cx.observe_self(|state, cx| state.arm_clock_transition(cx)));
+            self.clock.observation = Some(cx.observe_self(Self::arm_clock_transition));
         }
         self.arm_clock_transition(cx);
     }
@@ -1380,7 +1397,7 @@ impl AppState {
         gate_phase(&self.connection)
     }
 
-    pub fn engine(&self) -> Option<&EngineHandle> {
+    pub const fn engine(&self) -> Option<&EngineHandle> {
         self.engine.as_ref()
     }
 
@@ -1434,7 +1451,7 @@ impl AppState {
 
     /// Kick off (or retry) the engine bootstrap: probe → connect-or-embed on
     /// tokio, then attach subscriptions. Safe to call again after `Failed`.
-    pub fn bootstrap(state: Entity<AppState>, config: EngineBootConfig, cx: &mut App) {
+    pub fn bootstrap(state: Entity<Self>, config: EngineBootConfig, cx: &mut App) {
         let data_dir = config.data_dir.clone();
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
@@ -1475,7 +1492,7 @@ impl AppState {
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.engine = Some(handle.clone());
         // A call that runs long says so in a toast, until it answers.
-        let slow = handle.slow_calls.lock().ok().and_then(|mut slow| slow.take());
+        let slow = handle.slow_calls.lock().take();
         if let Some(mut slow) = slow {
             cx.spawn(async move |this, cx| {
                 use futures::StreamExt as _;
@@ -1491,23 +1508,18 @@ impl AppState {
         }
         let mut watch_tasks = Vec::with_capacity(10);
         watch_tasks.extend([
-            spawn_watch(cx, handle.clone(), methods::WATCH_SESSIONS, AppState::apply_sessions),
+            spawn_watch(cx, handle.clone(), methods::WATCH_SESSIONS, Self::apply_sessions),
             spawn_chats_watch(cx, handle.clone()),
             // The terminal each session is.
             spawn_watch(
                 cx,
                 handle.clone(),
                 slopty_view_doc::calls::WATCH_SESSION_TERMINALS,
-                AppState::apply_session_terminals,
+                Self::apply_session_terminals,
             ),
-            spawn_watch(cx, handle.clone(), methods::WATCH_DEVICES, AppState::apply_devices),
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::WATCH_CONNECTIVITY,
-                AppState::apply_connectivity,
-            ),
-            spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, AppState::apply_spaces),
+            spawn_watch(cx, handle.clone(), methods::WATCH_DEVICES, Self::apply_devices),
+            spawn_watch(cx, handle.clone(), methods::WATCH_CONNECTIVITY, Self::apply_connectivity),
+            spawn_watch(cx, handle.clone(), methods::WATCH_SPACES, Self::apply_spaces),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
@@ -1527,7 +1539,7 @@ impl AppState {
                 self.pending_deep_link = Some(link);
                 self.apply_pending_deep_link(cx);
             }
-            Err(error) => self.deep_link_notice = Some(error.to_string()),
+            Err(error) => self.deep_link_notice = Some(error.to_owned()),
         }
         cx.notify();
     }
@@ -1561,7 +1573,7 @@ impl AppState {
         }
     }
 
-    pub fn take_deep_link_notice(&mut self) -> Option<String> {
+    pub const fn take_deep_link_notice(&mut self) -> Option<String> {
         self.deep_link_notice.take()
     }
 
@@ -1604,13 +1616,13 @@ impl AppState {
                         entries
                             .iter()
                             .map(|entry| {
-                                std::mem::size_of::<SessionMessageEntry>()
+                                size_of::<SessionMessageEntry>()
                                     + entry.id.len()
                                     + entry
                                         .parts
                                         .iter()
                                         .map(|part| {
-                                            std::mem::size_of::<slopty_view_doc::MessagePart>()
+                                            size_of::<slopty_view_doc::MessagePart>()
                                                 + part.byte_len()
                                         })
                                         .sum::<usize>()
@@ -1646,8 +1658,9 @@ impl AppState {
         if let Some(cached) = cached {
             self.transcript_baselines.insert(
                 cached.chat_id.clone(),
-                cached.prepared.as_ref().map(|p| p.navigation_baseline.clone()).unwrap_or_else(
+                cached.prepared.as_ref().map_or_else(
                     || Arc::new(slopty_view_doc::TranscriptBaseline::capture(&cached.entries)),
+                    |p| p.navigation_baseline.clone(),
                 ),
             );
             if let Some(prepared) = cached.prepared {
@@ -1661,16 +1674,13 @@ impl AppState {
             // A chat implies its project (or the lack of one); `select_chat(None)`
             // (the new-session canvas) restores the pick set aside above.
             if let Some(chat) = self.chats.iter().find(|c| c.id == id) {
-                match chat.space_id.clone() {
-                    Some(space_id) => {
-                        self.selected_space = Some(space_id);
-                        self.no_project = false;
-                    }
-                    None => {
-                        self.selected_space = None;
-                        self.no_project = true;
-                        self.selected_device = Some(chat.device_id.clone());
-                    }
+                if let Some(space_id) = chat.space_id.clone() {
+                    self.selected_space = Some(space_id);
+                    self.no_project = false;
+                } else {
+                    self.selected_space = None;
+                    self.no_project = true;
+                    self.selected_device = Some(chat.device_id.clone());
                 }
             }
             self.mark_chat_seen(id, cx);
@@ -1685,17 +1695,14 @@ impl AppState {
     /// `Some` clears a "Don't work in a project" opt-out and re-aims the
     /// device pick at the project's host; `None` IS that opt-out.
     pub fn select_space(&mut self, space_id: Option<String>, cx: &mut Context<Self>) {
-        match &space_id {
-            Some(id) => {
-                self.no_project = false;
-                if let Some(device) = self.space_row(id).map(|s| s.device_id.clone()) {
-                    self.selected_device = Some(device);
-                }
+        if let Some(id) = &space_id {
+            self.no_project = false;
+            if let Some(device) = self.space_row(id).map(|s| s.device_id.clone()) {
+                self.selected_device = Some(device);
             }
-            None => {
-                self.selected_device = self.effective_device_id();
-                self.no_project = true;
-            }
+        } else {
+            self.selected_device = self.effective_device_id();
+            self.no_project = true;
         }
         if self.selected_space == space_id && space_id.is_some() {
             cx.notify();
@@ -1723,7 +1730,7 @@ impl AppState {
         let Some(handle) = self.engine.clone() else {
             return;
         };
-        let chat_id = chat_id.to_string();
+        let chat_id = chat_id.to_owned();
         cx.spawn(async move |_, _| {
             let params = serde_json::json!({ "op": "markChatSeen", "chatId": chat_id });
             if let Err(err) = handle.client().call(methods::MUTATE, params).await {
@@ -1857,7 +1864,7 @@ fn spawn_local_device_probe(cx: &mut Context<AppState>, handle: EngineHandle) ->
             .get("id")
             .or_else(|| value.get("deviceId"))
             .and_then(|v| v.as_str())
-            .map(str::to_string);
+            .map(str::to_owned);
         if let Some(id) = id {
             this.update(cx, |state, cx| {
                 state.local_device_id = Some(id);
@@ -1906,8 +1913,10 @@ fn spawn_transcript_watch(
             };
             let mut preparation = WatchPreparation::new(cx.background_executor().clone());
             while let Some(value) = rx.recv().await {
-                let history_pending =
-                    value.get("historyPending").and_then(|v| v.as_bool()).unwrap_or(false);
+                let history_pending = value
+                    .get("historyPending")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
                 let decoded = cx
                     .background_executor()
                     .spawn(async move {
@@ -2055,7 +2064,7 @@ fn spawn_subagent_watch(
 #[cfg(test)]
 mod tests {
     use chrono::TimeDelta;
-    use gpui::AppContext;
+    use gpui::AppContext as _;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `slopty_view_proto::view`.
     use slopty_view_proto::SessionStatus;
@@ -2795,7 +2804,7 @@ mod tests {
                 .iter()
                 .map(|(_, c)| c.id.as_str())
                 .collect();
-            ids.sort();
+            ids.sort_unstable();
             assert_eq!(ids, ["on-local", "on-remote"], "filter {filter}");
         }
         let other_only: Vec<&str> = state
@@ -3158,7 +3167,7 @@ mod tests {
 
     fn chat_with_cwd(id: &str, created_min: i64, cwd: Option<&str>) -> Chat {
         let mut c = chat(id, created_min, None);
-        c.cwd = cwd.map(str::to_string);
+        c.cwd = cwd.map(str::to_owned);
         c
     }
 

@@ -4,6 +4,11 @@
 //! pay for the scan. The host evicts the index after it sits unused (15 min)
 //! or for capacity; refocusing the chat warms it again. Hosts that predate
 //! `WarmWorkspaceSearch` are skipped silently.
+#![allow(
+    clippy::assert_is_empty,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::Context;
 
@@ -86,7 +91,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The chat ids of every WarmWorkspaceSearch sent so far, answering each.
+    /// The chat ids of every `WarmWorkspaceSearch` sent so far, answering each.
     fn drain_warms(
         cx: &mut gpui::TestAppContext,
         runtime: &tokio::runtime::Runtime,
@@ -114,9 +119,7 @@ mod tests {
         let _guard = runtime.enter();
         let (out, mut requests) = tokio::sync::mpsc::channel(16);
         let (replies, inbound) = tokio::sync::mpsc::channel(16);
-        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
-            out, inbound,
-        ));
+        let engine = EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(out, inbound));
         let dir = tempfile::tempdir().unwrap();
         let window = test_shell(cx, dir.path());
         window

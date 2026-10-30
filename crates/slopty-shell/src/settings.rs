@@ -7,6 +7,22 @@
 //! immediately through that same writer. Corrupt or missing files fall back to
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::float_cmp,
+    clippy::float_cmp_const,
+    clippy::fn_params_excessive_bools,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::option_option,
+    clippy::return_self_not_must_use,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -429,7 +445,7 @@ pub struct UiSettings {
     /// What each chat's pane showed, kept across launches (`shell::kept_tabs`).
     pub session_tabs: std::collections::BTreeMap<String, SavedTabs>,
     /// How often and how lately the person ran each palette command, by its name: the palette
-    /// ranks by it (`shell::command_palette`, WezTerm's frecency).
+    /// ranks by it (`shell::command_palette`, `WezTerm`'s frecency).
     pub palette_uses: std::collections::BTreeMap<String, PaletteUse>,
     /// How the inspector shows each kind of step's output, by the kind's name, as the
     /// person last chose it in a step's format menu (`transcript::detail`): `text`, `json` or
@@ -584,50 +600,50 @@ pub enum ShortcutId {
 }
 
 impl ShortcutId {
-    pub const ALL: [ShortcutId; 13 + JUMP_SLOTS] = [
-        ShortcutId::SaveFile,
-        ShortcutId::BrowserReload,
-        ShortcutId::ToggleSidebar,
-        ShortcutId::ToggleChanges,
-        ShortcutId::ToggleFiles,
-        ShortcutId::NewSession,
-        ShortcutId::NewProject,
-        ShortcutId::NextSession,
-        ShortcutId::PrevSession,
-        ShortcutId::ArchiveSession,
-        ShortcutId::ReopenClosedTab,
-        ShortcutId::NextNeedsYou,
-        ShortcutId::Inbox,
-        ShortcutId::JumpSession(0),
-        ShortcutId::JumpSession(1),
-        ShortcutId::JumpSession(2),
-        ShortcutId::JumpSession(3),
-        ShortcutId::JumpSession(4),
-        ShortcutId::JumpSession(5),
-        ShortcutId::JumpSession(6),
-        ShortcutId::JumpSession(7),
-        ShortcutId::JumpSession(8),
+    pub const ALL: [Self; 13 + JUMP_SLOTS] = [
+        Self::SaveFile,
+        Self::BrowserReload,
+        Self::ToggleSidebar,
+        Self::ToggleChanges,
+        Self::ToggleFiles,
+        Self::NewSession,
+        Self::NewProject,
+        Self::NextSession,
+        Self::PrevSession,
+        Self::ArchiveSession,
+        Self::ReopenClosedTab,
+        Self::NextNeedsYou,
+        Self::Inbox,
+        Self::JumpSession(0),
+        Self::JumpSession(1),
+        Self::JumpSession(2),
+        Self::JumpSession(3),
+        Self::JumpSession(4),
+        Self::JumpSession(5),
+        Self::JumpSession(6),
+        Self::JumpSession(7),
+        Self::JumpSession(8),
     ];
 
     /// The shortcut's name on its Settings row.
     pub fn label(self) -> &'static str {
         match self {
-            ShortcutId::SaveFile => "Save file",
+            Self::SaveFile => "Save file",
             // Each name is the one its button, menu and palette row use.
-            ShortcutId::BrowserReload => "Reload page",
-            ShortcutId::ToggleSidebar => "Toggle sidebar",
+            Self::BrowserReload => "Reload page",
+            Self::ToggleSidebar => "Toggle sidebar",
             // The views a key summons beside the session, by the View menu's names.
-            ShortcutId::ToggleChanges => "Changes",
-            ShortcutId::ToggleFiles => "Files",
-            ShortcutId::NewSession => "New session",
-            ShortcutId::NewProject => "New project",
-            ShortcutId::NextSession => "Next session",
-            ShortcutId::PrevSession => "Previous session",
-            ShortcutId::ArchiveSession => "Archive session",
-            ShortcutId::ReopenClosedTab => "Reopen closed view",
-            ShortcutId::NextNeedsYou => "Next session that needs you",
-            ShortcutId::Inbox => "Inbox", // the titlebar eye's name
-            ShortcutId::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
+            Self::ToggleChanges => "Changes",
+            Self::ToggleFiles => "Files",
+            Self::NewSession => "New session",
+            Self::NewProject => "New project",
+            Self::NextSession => "Next session",
+            Self::PrevSession => "Previous session",
+            Self::ArchiveSession => "Archive session",
+            Self::ReopenClosedTab => "Reopen closed view",
+            Self::NextNeedsYou => "Next session that needs you",
+            Self::Inbox => "Inbox", // the titlebar eye's name
+            Self::JumpSession(slot) => JUMP_LABELS.get(slot).copied().unwrap_or(""),
         }
     }
 
@@ -640,13 +656,13 @@ impl ShortcutId {
     /// this guards against only exists off macOS).
     pub fn default_combo_on(self, mac: bool) -> &'static str {
         match self {
-            ShortcutId::SaveFile => "mod-s",
-            ShortcutId::BrowserReload => "mod-shift-r",
-            ShortcutId::ToggleSidebar => "mod-b",
-            ShortcutId::ToggleChanges => "mod-r",
-            ShortcutId::ToggleFiles => "mod-e",
-            ShortcutId::NewSession => "mod-n",
-            ShortcutId::NewProject => "mod-shift-n",
+            Self::SaveFile => "mod-s",
+            Self::BrowserReload => "mod-shift-r",
+            Self::ToggleSidebar => "mod-b",
+            Self::ToggleChanges => "mod-r",
+            Self::ToggleFiles => "mod-e",
+            Self::NewSession => "mod-n",
+            Self::NewProject => "mod-shift-n",
             // Ctrl+Tab on every platform — but spelled the way THAT platform's
             // recorder spells ctrl (see `combo_from_keystroke`). Off macOS
             // ctrl IS the primary and stores as "mod"; on macOS it is its own
@@ -658,48 +674,48 @@ impl ShortcutId {
             // STORED spelling — so a default the recorder cannot reproduce
             // would let a rebind onto that same physical key pass as
             // conflict-free, bind twice, and silently kill one shortcut.
-            ShortcutId::NextSession if mac => "ctrl-tab",
-            ShortcutId::NextSession => "mod-tab",
-            ShortcutId::PrevSession if mac => "ctrl-shift-tab",
-            ShortcutId::PrevSession => "mod-shift-tab",
+            Self::NextSession if mac => "ctrl-tab",
+            Self::NextSession => "mod-tab",
+            Self::PrevSession if mac => "ctrl-shift-tab",
+            Self::PrevSession => "mod-shift-tab",
             // Mod+A is the composer's Select all, so archiving takes the
             // shifted combo.
-            ShortcutId::ArchiveSession => "mod-shift-a",
-            ShortcutId::ReopenClosedTab => "mod-shift-t",
+            Self::ArchiveSession => "mod-shift-a",
+            Self::ReopenClosedTab => "mod-shift-t",
             // ⌘J is the jump, in the bottom panel's toggle's place, and the inbox it
             // walks sits beside it on ⇧⌘J (`docs/decisions/layout.md`).
-            ShortcutId::NextNeedsYou => "mod-j",
-            ShortcutId::Inbox => "mod-shift-j",
-            ShortcutId::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
+            Self::NextNeedsYou => "mod-j",
+            Self::Inbox => "mod-shift-j",
+            Self::JumpSession(slot) => JUMP_DEFAULTS.get(slot).copied().unwrap_or(""),
         }
     }
 
     /// The sidebar row this id jumps to, if it is a jump shortcut.
-    pub fn jump_slot(self) -> Option<usize> {
+    pub const fn jump_slot(self) -> Option<usize> {
         match self {
-            ShortcutId::JumpSession(slot) if slot < JUMP_SLOTS => Some(slot),
+            Self::JumpSession(slot) if slot < JUMP_SLOTS => Some(slot),
             _ => None,
         }
     }
 
     /// Its name in `ui-settings.json`'s `shortcuts` ([`StoredKeymap`]); a jump slot is
     /// counted from 1, as its key.
-    pub fn stored_key(self) -> std::borrow::Cow<'static, str> {
+    pub fn stored_key(self) -> Cow<'static, str> {
         let name = match self {
-            ShortcutId::SaveFile => "saveFile",
-            ShortcutId::BrowserReload => "browserReload",
-            ShortcutId::ToggleSidebar => "toggleSidebar",
-            ShortcutId::ToggleChanges => "toggleChanges",
-            ShortcutId::ToggleFiles => "toggleFiles",
-            ShortcutId::NewSession => "newSession",
-            ShortcutId::NewProject => "newProject",
-            ShortcutId::NextSession => "nextSession",
-            ShortcutId::PrevSession => "prevSession",
-            ShortcutId::ArchiveSession => "archiveSession",
-            ShortcutId::ReopenClosedTab => "reopenClosedTab",
-            ShortcutId::NextNeedsYou => "nextNeedsYou",
-            ShortcutId::Inbox => "inbox",
-            ShortcutId::JumpSession(slot) => return format!("jumpSession{}", slot + 1).into(),
+            Self::SaveFile => "saveFile",
+            Self::BrowserReload => "browserReload",
+            Self::ToggleSidebar => "toggleSidebar",
+            Self::ToggleChanges => "toggleChanges",
+            Self::ToggleFiles => "toggleFiles",
+            Self::NewSession => "newSession",
+            Self::NewProject => "newProject",
+            Self::NextSession => "nextSession",
+            Self::PrevSession => "prevSession",
+            Self::ArchiveSession => "archiveSession",
+            Self::ReopenClosedTab => "reopenClosedTab",
+            Self::NextNeedsYou => "nextNeedsYou",
+            Self::Inbox => "inbox",
+            Self::JumpSession(slot) => return format!("jumpSession{}", slot + 1).into(),
         };
         name.into()
     }
@@ -708,7 +724,7 @@ impl ShortcutId {
 /// Persisted shortcut combos. Stored platform-neutral ("mod-s"); translated to
 /// "cmd-s"/"ctrl-s" at bind time by [`platform_combo`]. The file keeps only what the
 /// person changed ([`StoredKeymap`]), so a default that moves reaches everyone who left it be.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "StoredKeymap", into = "StoredKeymap")]
 pub struct KeymapConfig {
     pub save_file: String,
@@ -746,7 +762,7 @@ impl From<StoredKeymap> for KeymapConfig {
         let mut keymap = Self::default();
         for id in ShortcutId::ALL {
             if let Some(combo) = chosen(id) {
-                keymap.set(id, combo.to_string());
+                keymap.set(id, combo.to_owned());
             } else {
                 let default = platform_combo(id.default_combo());
                 let taken = ShortcutId::ALL.into_iter().any(|other| {
@@ -798,7 +814,7 @@ impl Default for KeymapConfig {
             reopen_closed_tab: ShortcutId::ReopenClosedTab.default_combo().into(),
             next_needs_you: ShortcutId::NextNeedsYou.default_combo().into(),
             inbox: ShortcutId::Inbox.default_combo().into(),
-            jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_string()).collect(),
+            jump_session: JUMP_DEFAULTS.iter().map(|c| (*c).to_owned()).collect(),
         }
     }
 }
@@ -819,9 +835,7 @@ impl KeymapConfig {
             ShortcutId::ReopenClosedTab => &self.reopen_closed_tab,
             ShortcutId::NextNeedsYou => &self.next_needs_you,
             ShortcutId::Inbox => &self.inbox,
-            ShortcutId::JumpSession(slot) => {
-                self.jump_session.get(slot).map(String::as_str).unwrap_or("")
-            }
+            ShortcutId::JumpSession(slot) => self.jump_session.get(slot).map_or("", String::as_str),
         }
     }
 
@@ -852,7 +866,7 @@ impl KeymapConfig {
     }
 
     pub fn reset(&mut self, id: ShortcutId) {
-        self.set(id, id.default_combo().to_string());
+        self.set(id, id.default_combo().to_owned());
     }
 
     /// Restore the jump list to exactly [`JUMP_SLOTS`] entries: a hand-edited
@@ -861,7 +875,7 @@ impl KeymapConfig {
     pub fn heal_jump_slots(&mut self) {
         self.jump_session.truncate(JUMP_SLOTS);
         while self.jump_session.len() < JUMP_SLOTS {
-            self.jump_session.push(JUMP_DEFAULTS[self.jump_session.len()].to_string());
+            self.jump_session.push(JUMP_DEFAULTS[self.jump_session.len()].to_owned());
         }
     }
 }
@@ -1025,14 +1039,14 @@ pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, s
 pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> {
     let mut chars = key.chars();
     let (Some(here), None) = (chars.next(), chars.next()) else {
-        return Some(key.to_string());
+        return Some(key.to_owned());
     };
     if let Some(us) =
         equivalents.iter().filter(|&(_, &target)| target == here).map(|(&us, _)| us).min()
     {
         return Some(us.to_string());
     }
-    (!equivalents.contains_key(&here)).then(|| key.to_string())
+    (!equivalents.contains_key(&here)).then(|| key.to_owned())
 }
 
 /// Split a combo into its modifier prefix and key: ("mod-shift-", "/").
@@ -1059,7 +1073,7 @@ pub fn canonical_combo(combo: &str, equivalents: &KeyEquivalents) -> Option<Stri
     canonical_key(key, equivalents).map(|key| format!("{modifiers}{key}"))
 }
 
-/// macOS French (AZERTY), as gpui_macos `keyboard.rs` lists it for
+/// macOS French (AZERTY), as `gpui_macos` `keyboard.rs` lists it for
 /// `com.apple.keylayout.French` — the test platform has no layout table.
 #[cfg(test)]
 pub(crate) fn azerty_key_equivalents() -> KeyEquivalents {
@@ -1214,7 +1228,7 @@ impl UiSettings {
                             settings.entry("codeFontSize").or_insert(legacy);
                         }
                     }
-                    serde_json::from_value::<UiSettings>(value)
+                    serde_json::from_value::<Self>(value)
                 }) {
                     Ok(settings) => settings.clamped(),
                     Err(err) => {
@@ -1256,8 +1270,8 @@ impl UiSettings {
 /// Settings files [`UiSettings::load`] could not read, by the data directory they were in, with
 /// where each was moved (`None` when the move failed too), until [`init`] for that directory
 /// takes them.
-static SET_ASIDE: std::sync::Mutex<Vec<(PathBuf, Option<PathBuf>)>> =
-    std::sync::Mutex::new(Vec::new());
+static SET_ASIDE: parking_lot::Mutex<Vec<(PathBuf, Option<PathBuf>)>> =
+    parking_lot::Mutex::new(Vec::new());
 
 /// Where a settings file that could not be read goes: beside it, so nothing writes over it.
 pub fn backup_path(data_dir: &Path) -> PathBuf {
@@ -1275,14 +1289,12 @@ fn set_aside(data_dir: &Path) {
             None
         }
     };
-    if let Ok(mut noted) = SET_ASIDE.lock() {
-        noted.push((data_dir.to_path_buf(), moved));
-    }
+    SET_ASIDE.lock().push((data_dir.to_path_buf(), moved));
 }
 
 /// The note [`set_aside`] left for `data_dir`, taken.
 fn take_set_aside(data_dir: &Path) -> Option<Option<PathBuf>> {
-    let mut noted = SET_ASIDE.lock().ok()?;
+    let mut noted = SET_ASIDE.lock();
     let at = noted.iter().position(|(dir, _)| dir == data_dir)?;
     Some(noted.remove(at).1)
 }
@@ -1314,11 +1326,11 @@ pub fn announce_set_aside(cx: &mut App) -> bool {
     true
 }
 
-fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
+const fn clamp_or(value: f32, min: f32, max: f32, default: f32) -> f32 {
     if value.is_finite() { value.clamp(min, max) } else { default }
 }
 
-fn min_or(value: f32, min: f32, default: f32) -> f32 {
+const fn min_or(value: f32, min: f32, default: f32) -> f32 {
     if value.is_finite() { value.max(min) } else { default }
 }
 
@@ -1981,11 +1993,7 @@ mod tests {
         // its default must parse on this platform.
         assert!(conflicted_shortcuts(&KeymapConfig::default()).is_empty());
         for id in ShortcutId::ALL {
-            assert!(
-                parse_combo(id.default_combo()).is_ok(),
-                "{:?} default combo does not parse",
-                id
-            );
+            assert!(parse_combo(id.default_combo()).is_ok(), "{id:?} default combo does not parse");
         }
     }
 

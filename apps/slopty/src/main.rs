@@ -27,8 +27,8 @@ pub fn main() -> Result<()> {
     // window is covered and the direct path would be abandoned.
     let _activity = slopty_platform::Activity::latency_critical("Slopty remote session");
 
-    // The shell's application: its icons and fonts, its image fetches and its Dock-icon reopen.
-    let app = slopty_shell::application(handle.clone());
+    // The shell's application: its icons and fonts and its Dock-icon reopen.
+    let app = slopty_shell::application();
     // A `slopty://` link the system opened the app with goes to the workspace, held until it
     // listens (`slopty_app::open_link`): a server to connect to.
     app.on_open_urls(|urls| urls.into_iter().for_each(slopty_app::open_link));

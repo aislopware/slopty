@@ -7,6 +7,16 @@
 //! [`crate::settings::widgets`] and [`floating_pill`]. What zeron keeps to the
 //! crate (the surface toolbars' control metrics) is handed out here, unchanged, so nothing is
 //! drawn twice.
+#![allow(
+    missing_debug_implementations,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -119,7 +129,7 @@ pub fn button(
         .tab_index(0)
         .flex_none()
         .whitespace_nowrap()
-        .map(|el| crate::surface_chrome::focus_ring(el, theme))
+        .map(|el| focus_ring(el, theme))
         // Pressed reads a step deeper (M22).
         .map(|el| match tone {
             Tone::Ghost => el.active(|style| style.bg(crate::theme::pressed_wash())),
@@ -256,7 +266,7 @@ pub fn floating_pill(
     hover_key: Option<SharedString>,
     theme: &Theme,
     content: impl FnOnce(&Theme) -> (Option<AnyElement>, AnyElement),
-    interact: impl FnOnce(gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div>,
+    interact: impl FnOnce(gpui::Stateful<Div>) -> gpui::Stateful<Div>,
 ) -> AnyElement {
     let theme = theme.for_popup();
     let (glyph, words) = content(&theme);
@@ -283,7 +293,7 @@ pub fn floating_pill(
         .rounded_full()
         .border_1()
         .border_color(theme.border)
-        .when(!glass, |el| el.shadow_md())
+        .when(!glass, gpui::Styled::shadow_md)
         .bg(base);
     if let Some(key) = hover_key {
         pill = pill.hover_fade(key);
@@ -374,7 +384,7 @@ pub fn tooltip_frame(
         .bg(crate::popover::surface_bg(theme))
         .text_size(crate::typography::ui_rems(TOOLTIP_TEXT_SIZE))
         .text_color(theme.text)
-        .when_some(value, |card, value| card.aria_value(value))
+        .when_some(value, gpui::StatefulInteractiveElement::aria_value)
         .child(content);
     crate::frost::frosted(
         TOOLTIP_RADIUS,

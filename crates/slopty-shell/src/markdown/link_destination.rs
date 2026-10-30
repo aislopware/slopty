@@ -1,5 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Destination disclosure is local text only. Never fetch link previews.
+#![allow(clippy::clone_on_ref_ptr, reason = "shell lint migration: slice C")]
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Render, SharedString, Window, div, px};
 
@@ -20,7 +21,7 @@ fn viewport_limits(width: f32, height: f32) -> (f32, f32) {
 /// Invisible break opportunities let even a single long path segment wrap.
 /// This presentation string never replaces the original link destination.
 fn breakable_url(url: &str) -> String {
-    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_segmentation::UnicodeSegmentation as _;
     url.graphemes(true).collect::<Vec<_>>().join("\u{200b}")
 }
 pub fn destination_card(
@@ -44,7 +45,7 @@ pub fn destination_card(
         .id("web-destination-card")
         .relative()
         .child(
-            gpui::canvas(|_, _, _| (), move |rect, _, _, _| bounds.set(Some(rect)))
+            gpui::canvas(|_, _, _| (), move |rect, (), _, _| bounds.set(Some(rect)))
                 .absolute()
                 .size_full(),
         )

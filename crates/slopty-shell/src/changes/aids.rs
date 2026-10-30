@@ -1,4 +1,14 @@
 //! The Changes pane's find bar, whitespace toggle and file tree.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::ops::Range;
 

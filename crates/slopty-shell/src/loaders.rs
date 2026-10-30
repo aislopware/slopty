@@ -10,11 +10,29 @@
 //! cell to its rest state automatically (gpui `reduce_motion`). Activity grids
 //! retain a gentle brightness pulse with system reduced motion; explicit On
 //! and background pause keep them still.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::missing_assert_message,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, EntityId, InteractiveElement as _, IntoElement,
-    ParentElement, PathBuilder, Render, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, canvas, div, point, px,
+    AnyElement, App, AppContext as _, Context, Entity, EntityId, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathBuilder, Render, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, px,
 };
 
 pub mod copy_glyph;
@@ -373,7 +391,7 @@ fn progress_arc(
     let frac = f32::from(percent.min(100)) / 100.0;
     canvas(
         |_, _, _| (),
-        move |bounds, _, window, _| {
+        move |bounds, (), window, _| {
             let center = bounds.center();
             let radius = diameter / 2.0 - RING_STROKE;
             let mut paint_arc = |sweep: f32, color: gpui::Hsla| {
@@ -448,7 +466,7 @@ const _: () = {
 
 // One loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
 
-/// How long a load runs before it says so: a fast one never flashes "Loading…" (HextaUI's
+/// How long a load runs before it says so: a fast one never flashes "Loading…" (`HextaUI`'s
 /// `useDelayedLoading`, 150 ms; design-inspiration item 10).
 pub const PENDING_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
 /// How long a loader, once shown, stays: it never blinks on and straight off.
@@ -470,7 +488,7 @@ pub struct Pending {
 impl Pending {
     /// Shown at once: [`delayed`] has waited already.
     #[must_use]
-    pub fn at_once(mut self) -> Self {
+    pub const fn at_once(mut self) -> Self {
         self.wait = false;
         self
     }

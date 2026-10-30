@@ -2,11 +2,18 @@
 //! "Open in pane" asks through [`PagePaneAsk`], and the view docks beside the session with the
 //! keyboard; "Bring back" (or closing the view) puts the page back in its card. Each piece is a
 //! call from the shell's own match on the view.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString,
+    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement as _,
+    SharedString,
 };
 
 use super::{RightSurface, Shell};

@@ -6,6 +6,7 @@
 //! and the folds the person changed: a container shows its count open and a preview of its first
 //! fields folded, as a browser's console does, one fixed-height line each so the step's height
 //! stays analytic.
+#![allow(unnameable_types, reason = "shell lint migration: slice B")]
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -266,7 +267,7 @@ impl Doc {
 
     /// The whole document's values, for a test's size.
     #[cfg(test)]
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         self.values.len()
     }
 }

@@ -2,6 +2,13 @@
 //! Session navigation: the sidebar is the session list, and the titlebar row names the session
 //! shown (its program's icon, its title, its machine and branch, its mark), with the palette and a
 //! new session at its trailing end.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice A"
+)]
 
 use super::*;
 
@@ -54,7 +61,7 @@ impl Shell {
 
     /// Navigation gives the session's terminal the keyboard once it renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
-        self.session_terminal.update(cx, |panel, cx| panel.request_focus(cx));
+        self.session_terminal.update(cx, TerminalPanel::request_focus);
     }
 
     /// The session's terminal takes the keyboard now (Esc from a view, a pane closing),
@@ -69,7 +76,7 @@ impl Shell {
     /// keyboard over the session: there it comes when the person taps it
     /// ([`super::touch_screen`]).
     pub(super) fn focus_composer_on_landing(&mut self, cx: &mut Context<Self>) {
-        if !super::touch_screen() {
+        if !touch_screen() {
             self.focus_composer(cx);
         }
     }
@@ -166,9 +173,9 @@ impl Shell {
         let right_pad = TITLEBAR_ACTION_EDGE_INSET.max(crate::surface_chrome::touch_reach(24.0));
         // Inked for the ground under it: the terminal's over the session, the window's own over
         // the canvas.
-        let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };
+        let ink = if on_canvas { theme } else { ink_for(self.shown_ground(cx), &theme) };
         // The picker hangs under the identity (`picker`).
-        let identity = super::picker::identity_anchor(
+        let identity = picker::identity_anchor(
             (!on_canvas)
                 .then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx)),
             window,
@@ -209,7 +216,7 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(super::titlebar_top_pad())) // a finger's presses inside the window
+            .pt(px(titlebar_top_pad())) // a finger's presses inside the window
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
@@ -241,7 +248,7 @@ impl Shell {
             let title = transcript::single_line(chat.title.as_deref().unwrap_or("New session"));
             let machine_branch =
                 machine_and_branch(state.device_name(&chat.device_id), chat.branch.as_deref());
-            let mark = super::marks::Mark::of(
+            let mark = marks::Mark::of(
                 state.display_status_for(chat, now),
                 state.session_for(&chat.id),
                 now,
@@ -258,7 +265,7 @@ impl Shell {
         let rolling_title = crate::roll_text::rolling(
             format!("titlebar-title-{chat_id}"),
             title.clone(),
-            crate::motion::reduced_motion(cx),
+            motion::reduced_motion(cx),
             crate::clock::now(cx),
         );
         // An agent's mark in its brand's colour; a plain terminal's the terminal glyph.
@@ -266,14 +273,14 @@ impl Shell {
             harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
         let title_ink = if key { ink.text } else { ink.text_muted };
         let ground = self.shown_ground(cx);
-        let mark = super::marks::mark_element(
+        let mark = marks::mark_element(
             SharedString::from(format!("titlebar-mark-{chat_id}")),
             "titlebar-mark".to_owned(),
             &mark,
-            crate::loaders::status_mark::MARK_SMALL,
+            loaders::status_mark::MARK_SMALL,
             ground,
         );
-        let menu_chat = chat_id.clone();
+        let menu_chat = chat_id;
         let spoken = title.clone();
         div()
             .id("titlebar-identity")
@@ -282,7 +289,7 @@ impl Shell {
             // button: a press opens the session picker.
             .role(gpui::Role::Button)
             .aria_label(spoken)
-            .when_some(machine_branch.clone(), |el, words| el.aria_description(words))
+            .when_some(machine_branch.clone(), StatefulInteractiveElement::aria_description)
             .min_w_0()
             .overflow_hidden()
             .flex()
@@ -297,12 +304,12 @@ impl Shell {
             .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_click(cx.listener(|this, _, window, cx| {
                 cx.stop_propagation();
-                this.toggle_picker(super::picker::Mode::Sessions, window, cx);
+                this.toggle_picker(picker::Mode::Sessions, window, cx);
             }))
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                    this.chat_menu.open(super::ChatMenuState::for_row(
+                    this.chat_menu.open(ChatMenuState::for_row(
                         menu_chat.clone(),
                         gpui::point(event.position.x, px(Theme::TITLEBAR_HEIGHT)),
                     ));
@@ -324,11 +331,8 @@ impl Shell {
                             .overflow_hidden()
                             .child(rolling)
                             .into_any_element(),
-                        None => crate::settings::widgets::truncate_with_tip(
-                            "chat-titlebar-title",
-                            title,
-                        )
-                        .into_any_element(),
+                        None => settings::widgets::truncate_with_tip("chat-titlebar-title", title)
+                            .into_any_element(),
                     }),
             )
             .children(machine_branch.map(|words| {
@@ -421,7 +425,7 @@ mod cycle_tests {
     use super::*;
 
     fn order(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|id| id.to_string()).collect()
+        ids.iter().map(ToString::to_string).collect()
     }
 
     #[test]

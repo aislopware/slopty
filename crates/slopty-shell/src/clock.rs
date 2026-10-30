@@ -4,6 +4,12 @@
 //! fuzzer's `wall clock` oracle) and a headless test's clock is the dispatcher's, which moves only
 //! when the test moves it. The wall clock is read here alone; clippy refuses it elsewhere in the
 //! shell (`clippy.toml`, `disallowed-methods`).
+#![allow(
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::cell::Cell;
 use std::time::Instant;
@@ -60,13 +66,12 @@ pub fn event_now() -> Instant {
 
 /// A stopwatch's start, for what measures work (a log line's milliseconds, a frame's cost, a
 /// deadline a task waits out): never what a frame draws.
-#[allow(clippy::disallowed_methods)] // a measure of work, not a moment drawn
+#[expect(clippy::disallowed_methods)] // a measure of work, not a moment drawn
 pub fn stopwatch() -> Instant {
     Instant::now()
 }
 
 /// The time since a [`stopwatch`] started.
-#[allow(clippy::disallowed_methods)] // a measure of work, not a moment drawn
 pub fn spent(since: Instant) -> std::time::Duration {
     since.elapsed()
 }
@@ -82,7 +87,7 @@ thread_local! {
 
 /// The wall date at the monotonic moment `at`: the date read once with a moment, moved by the
 /// time between, and read again only when the two clocks drift apart.
-#[allow(clippy::disallowed_methods)] // the shell's one wall-clock read
+#[expect(clippy::disallowed_methods)] // the shell's one wall-clock read
 pub fn utc_at(at: Instant) -> DateTime<Utc> {
     let (mono, wall) = (Instant::now(), Utc::now());
     let (mono, wall) = ANCHOR.with(|anchor| match anchor.get() {

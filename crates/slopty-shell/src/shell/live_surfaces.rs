@@ -1,11 +1,18 @@
 //! The remote window and desktop views ([`RightSurface::Screen`]), summoned beside a
 //! session as the browser is: the palette's command, the title, the body and the close, each a
 //! call from the shell's own match on the view.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement, SharedString,
+    AnyElement, App, AppContext as _, Context, Empty, Entity, Global, IntoElement as _,
+    SharedString,
 };
 
 use super::{RightSurface, Shell};
@@ -72,7 +79,7 @@ impl Shell {
     /// The view came forward: it takes the keyboard.
     pub(super) fn focus_screen_surface(&mut self, id: u64, cx: &mut Context<Self>) {
         if let Some(surface) = cx.try_global::<Screens>().and_then(|s| s.tabs.get(&id)).cloned() {
-            surface.update(cx, |surface, cx| surface.focus(cx));
+            surface.update(cx, ScreenSurface::focus);
         }
     }
 
@@ -84,7 +91,7 @@ impl Shell {
             .then(|| cx.global_mut::<Screens>().tabs.remove(&id))
             .flatten();
         if let Some(surface) = surface {
-            surface.update(cx, |surface, cx| surface.close(cx));
+            surface.update(cx, ScreenSurface::close);
         }
     }
 }

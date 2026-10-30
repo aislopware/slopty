@@ -1,5 +1,15 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 1bb6259), see THIRD_PARTY_NOTICES.md
 //! Per-range hit targets share the text's shaped geometry, including wrapped links.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::renamed_function_params,
+    clippy::type_complexity,
+    clippy::unwrap_used,
+    clippy::wildcard_imports,
+    reason = "shell lint migration: slice C"
+)]
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
@@ -75,7 +85,7 @@ impl Element for LinkRanges {
         id: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
@@ -213,55 +223,52 @@ impl Element for LinkRanges {
                     overlays.push(hit);
                 }
             }
-            if state.menu.borrow().is_none() && !state.dismissed.get() {
-                if let Some(index) = focused {
-                    if let Some(rect) =
-                        range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
-                    {
-                        let shown = self
-                            .ui
-                            .as_ref()
-                            .and_then(|ui| ui.file_link(&state.targets[index].original))
-                            .map(|file| file.path)
-                            .unwrap_or_else(|| state.targets[index].original.clone());
-                        let card = super::link_destination::destination_card(
-                            &shown,
-                            state.tooltip_bounds.clone(),
-                            window,
-                            cx,
-                        );
-                        let dismissed = state.dismissed.clone();
-                        // This disclosure is not a menu: menu_at consumes every
-                        // outside press, preventing other controls from receiving it.
-                        // An outside press only hides it; the links keep their
-                        // ids, so a press on one of them still clicks it.
-                        let mut popup = gpui::deferred(
-                            gpui::anchored()
-                                .position(rect.bottom_left())
-                                .anchor(gpui::Anchor::TopLeft)
-                                .snap_to_window_with_margin(px(8.))
-                                .child(
-                                    div()
-                                        .id("focused-link-destination")
-                                        .occlude()
-                                        .on_mouse_down_out(move |_, window, _| {
-                                            dismissed.set(true);
-                                            window.refresh();
-                                        })
-                                        .child(card),
-                                ),
-                        )
-                        .priority(1)
-                        .into_any_element();
-                        popup.prepaint_as_root(
-                            bounds.origin,
-                            window.viewport_size().map(AvailableSpace::Definite),
-                            window,
-                            cx,
-                        );
-                        overlays.push(popup);
-                    }
-                }
+            if state.menu.borrow().is_none()
+                && !state.dismissed.get()
+                && let Some(index) = focused
+                && let Some(rect) = range_rects(&self.layout, &self.links[index].0, 0., 0.).first()
+            {
+                let shown = self
+                    .ui
+                    .as_ref()
+                    .and_then(|ui| ui.file_link(&state.targets[index].original))
+                    .map_or_else(|| state.targets[index].original.clone(), |file| file.path);
+                let card = super::link_destination::destination_card(
+                    &shown,
+                    state.tooltip_bounds.clone(),
+                    window,
+                    cx,
+                );
+                let dismissed = state.dismissed.clone();
+                // This disclosure is not a menu: menu_at consumes every
+                // outside press, preventing other controls from receiving it.
+                // An outside press only hides it; the links keep their
+                // ids, so a press on one of them still clicks it.
+                let mut popup = gpui::deferred(
+                    gpui::anchored()
+                        .position(rect.bottom_left())
+                        .anchor(gpui::Anchor::TopLeft)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .id("focused-link-destination")
+                                .occlude()
+                                .on_mouse_down_out(move |_, window, _| {
+                                    dismissed.set(true);
+                                    window.refresh();
+                                })
+                                .child(card),
+                        ),
+                )
+                .priority(1)
+                .into_any_element();
+                popup.prepaint_as_root(
+                    bounds.origin,
+                    window.viewport_size().map(AvailableSpace::Definite),
+                    window,
+                    cx,
+                );
+                overlays.push(popup);
             }
             if let Some((index, position)) = *state.menu.borrow() {
                 let theme = theme.for_popup();
@@ -284,7 +291,7 @@ impl Element for LinkRanges {
                     None => &[0, 4, 5, 6],
                 };
                 let file_resolved = file.is_some();
-                let mut card = crate::popover::popover_card(&theme)
+                let mut card = popover::popover_card(&theme)
                     .child(
                         gpui::canvas(
                             move |_, window, cx| {
@@ -294,7 +301,7 @@ impl Element for LinkRanges {
                                     window.focus(&initial_focus, cx);
                                 }
                             },
-                            |_, _, _, _| {},
+                            |_, (), _, _| {},
                         )
                         .absolute()
                         .w(px(0.))
@@ -488,7 +495,7 @@ impl Element for LinkRanges {
                         }),
                     );
                 }
-                let mut popup = crate::popover::menu_at(
+                let mut popup = popover::menu_at(
                     "transcript-link-actions",
                     position,
                     card.into_any_element(),
@@ -520,7 +527,7 @@ impl Element for LinkRanges {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         paint: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,

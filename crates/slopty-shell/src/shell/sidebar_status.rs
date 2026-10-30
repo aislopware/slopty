@@ -24,10 +24,25 @@
 //! - **The jump.** The key to the next session that needs the person walks every session that waits
 //!   on them, then each that failed, then each finished unseen, across every project and machine,
 //!   each kind oldest first ([`needing_you`]).
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::clone_on_ref_ptr,
+    clippy::doc_paragraphs_missing_punctuation,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::mem_forget,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::suspicious_operation_groupings,
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use chrono::{DateTime, Local, Utc};
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, IntoElement, SharedString, div, px};
+use gpui::{AnyElement, Context, SharedString, div, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
 use super::marks::Mark;
@@ -546,7 +561,7 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
 
 /// When `at` was, in the person's time on the system's clock: "2:05 PM" today, "Oct 16,
 /// 2:05 PM" before, the year too past this one.
-pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+pub fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let (at, now) = (at.with_timezone(&Local), now.with_timezone(&Local));
     // The system's clock, as the transcript's times read.
     let clock = crate::transcript::clock_format();
@@ -633,7 +648,7 @@ mod tests {
     #[test]
     fn a_time_says_when() {
         let now = Local::now();
-        let local = |at: chrono::DateTime<Local>| at.with_timezone(&Utc);
+        let local = |at: DateTime<Local>| at.with_timezone(&Utc);
         let clock = crate::transcript::clock_format();
         assert_eq!(absolute_time(local(now), local(now)), now.format(clock).to_string());
         let before = now - TimeDelta::days(400);
@@ -1001,7 +1016,7 @@ mod tests {
     /// A sidebar alone, drawn from a shell with no engine.
     struct SidebarHost(gpui::Entity<super::super::Shell>);
 
-    impl gpui::Render for SidebarHost {
+    impl Render for SidebarHost {
         fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |shell, cx| {
                 div()

@@ -3,6 +3,11 @@
 //!
 //! The grid is Slopty's own terminal view ([`crate::live`]); what lives here is the look the
 //! panel hands that view: the font metrics, the padding and the fill behind the grid.
+#![allow(
+    missing_docs,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use gpui::Hsla;
 

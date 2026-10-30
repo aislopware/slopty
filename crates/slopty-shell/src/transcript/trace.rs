@@ -11,6 +11,12 @@
 //!   cursor is on or goes up to its group, → opens it, Enter opens it or drills into a subagent,
 //!   and E goes to the next failure (⇧E the one before) in the whole trace, opening what hides it
 //!   (the depth, its group) to land on it. Esc is the inspector's: it goes back.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::or_fun_call,
+    reason = "shell lint migration: slice B"
+)]
 
 use gpui::{Context, KeyDownEvent, SharedString, Window};
 
@@ -85,7 +91,7 @@ pub(super) fn prompts_only(rows: Vec<Row>, depth_of: impl Fn(&Row) -> usize) -> 
 
 /// Where the keyboard's cursor stands: a row, or a step of an open group by its part id.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Cursor {
+pub struct Cursor {
     pub row: SharedString,
     pub step: Option<String>,
 }
@@ -221,14 +227,12 @@ impl Transcript {
         }
         let at =
             self.cursor.as_ref().and_then(|cursor| stops.iter().position(|stop| stop == cursor));
-        let to = match at {
-            Some(at) => at.saturating_add_signed(delta).min(stops.len() - 1),
-            None => {
-                let top =
-                    self.list.logical_scroll_top().item_ix.min(self.rows.len().saturating_sub(1));
-                let first = self.rows.get(top).map(|row| row.id.clone());
-                stops.iter().position(|stop| Some(&stop.row) == first.as_ref()).unwrap_or(0)
-            }
+        let to = if let Some(at) = at {
+            at.saturating_add_signed(delta).min(stops.len() - 1)
+        } else {
+            let top = self.list.logical_scroll_top().item_ix.min(self.rows.len().saturating_sub(1));
+            let first = self.rows.get(top).map(|row| row.id.clone());
+            stops.iter().position(|stop| Some(&stop.row) == first.as_ref()).unwrap_or(0)
         };
         self.land(stops[to].clone());
     }
@@ -273,7 +277,7 @@ impl Transcript {
                         }
                     }
                     None if self.group_shows_steps(&row) != open => {
-                        self.toggle_fold(row.id.clone(), 0.0, cx)
+                        self.toggle_fold(row.id.clone(), 0.0, cx);
                     }
                     None => {}
                 }
@@ -407,7 +411,7 @@ impl Transcript {
     }
 
     /// How much of the trace shows.
-    pub(crate) fn depth(&self) -> Depth {
+    pub(crate) const fn depth(&self) -> Depth {
         self.depth
     }
 

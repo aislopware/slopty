@@ -5,6 +5,20 @@
 //! gradient, unlike whole-row opacity). Built for the GLASS sidebar's scroll
 //! fade: over a see-through blurred backdrop no painted overlay can fade
 //! content out, because "what is behind the window" is not a paintable color.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::return_self_not_must_use,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::type_complexity,
+    clippy::unreachable,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::RefCell;
 
@@ -126,12 +140,12 @@ pub struct EdgeFaded {
 }
 
 impl EdgeFaded {
-    pub fn fade_left(mut self, on: bool) -> Self {
+    pub const fn fade_left(mut self, on: bool) -> Self {
         self.left = on;
         self
     }
 
-    pub fn fade_right(mut self, on: bool) -> Self {
+    pub const fn fade_right(mut self, on: bool) -> Self {
         self.right = on;
         self
     }
@@ -139,13 +153,13 @@ impl EdgeFaded {
     /// Override the ramp height at the TOP edge only. Asymmetric bands let
     /// content fade across chrome of different heights — a short titlebar
     /// above vs a tall composer stack below.
-    pub fn band_top(mut self, px: f32) -> Self {
+    pub const fn band_top(mut self, px: f32) -> Self {
         self.band_top = Some(px);
         self
     }
 
     /// [`Self::band_top`], for the bottom edge.
-    pub fn band_bottom(mut self, px: f32) -> Self {
+    pub const fn band_bottom(mut self, px: f32) -> Self {
         self.band_bottom = Some(px);
         self
     }
@@ -163,7 +177,7 @@ impl EdgeFaded {
     }
 
     /// Paint-time overflow for custom scrollable elements that do not use a
-    /// ScrollHandle. Called after the child's prepaint has clamped scrolling.
+    /// `ScrollHandle`. Called after the child's prepaint has clamped scrolling.
     pub fn fade_overflow_y_with(
         mut self,
         overflow: impl Fn(&App) -> (bool, bool) + 'static,
@@ -192,7 +206,7 @@ impl EdgeFaded {
 
     /// [`Self::fade_scroll_x`] for the vertical edges: each ramp is as tall as the
     /// content hidden past it, up to its band, so a list scrolled by 4 px dims 4 px at its top
-    /// rather than snapping a whole band on (HextaUI's scroll area; design-inspiration item 4).
+    /// rather than snapping a whole band on (`HextaUI`'s scroll area; design-inspiration item 4).
     pub fn fade_scroll_y(self, handle: &ScrollHandle) -> Self {
         let handle = handle.clone();
         self.fade_scroll_y_with(move |_| {
@@ -221,7 +235,7 @@ impl EdgeFaded {
     /// to 0 past an active edge, so content between the wrapper's real top
     /// and the inset edge paints fully transparent — content under opaque-ish
     /// chrome (titlebar TEXT) vanishes before it can overlap.
-    pub fn inset_top(mut self, px: f32) -> Self {
+    pub const fn inset_top(mut self, px: f32) -> Self {
         self.inset_top = px;
         self
     }
@@ -229,12 +243,12 @@ impl EdgeFaded {
     /// [`Self::inset_top`], for the BOTTOM edge: content between the inset edge and
     /// the wrapper's real bottom paints fully transparent (the transcript under the composer's
     /// footer).
-    pub fn inset_bottom(mut self, px: f32) -> Self {
+    pub const fn inset_bottom(mut self, px: f32) -> Self {
         self.inset_bottom = px;
         self
     }
 
-    pub fn outset_bottom(mut self, px: f32) -> Self {
+    pub const fn outset_bottom(mut self, px: f32) -> Self {
         self.outset_bottom = px;
         self
     }
@@ -242,7 +256,7 @@ impl EdgeFaded {
     /// Keep the last `px` of the child clear, fading out over [`CLEAR_BAND`] before it,
     /// so something laid over the right end (a row's hover pill) reads alone without the child
     /// re-laying out under it.
-    pub fn clear_right(mut self, px: f32) -> Self {
+    pub const fn clear_right(mut self, px: f32) -> Self {
         self.clear_right = px.max(0.0);
         self
     }
@@ -413,12 +427,20 @@ fn label_fade_outset(overflow: f32, band: f32) -> f32 {
     band * (1.0 - eased)
 }
 
+impl IntoElement for EdgeFaded {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
 
     use gpui::prelude::*;
-    use gpui::{AppContext, Context, Render, Styled, div};
+    use gpui::{Context, Render, div};
 
     use super::*;
 
@@ -435,7 +457,7 @@ mod tests {
                     let observed = self.observed.clone();
                     gpui::canvas(
                         |_, _, _| (),
-                        move |_, _, window, cx| {
+                        move |_, (), window, cx| {
                             observed.borrow_mut().push((inside, active_fade(window, cx)));
                         },
                     )
@@ -510,7 +532,7 @@ mod tests {
                 let observed = self.observed.clone();
                 let probe = gpui::canvas(
                     |_, _, _| (),
-                    move |_, _, window, cx| observed.borrow_mut().push(active_fade(window, cx)),
+                    move |_, (), window, cx| observed.borrow_mut().push(active_fade(window, cx)),
                 )
                 .w(px(100.0))
                 .h(px(100.0));
@@ -562,7 +584,7 @@ mod tests {
                     let observed = self.observed.clone();
                     gpui::canvas(
                         |_, _, _| (),
-                        move |_, _, window, cx| {
+                        move |_, (), window, cx| {
                             observed.borrow_mut().push(active_fade(window, cx));
                         },
                     )
@@ -670,13 +692,5 @@ mod tests {
             assert!(previous - edge_alpha < 0.02);
             previous = edge_alpha;
         }
-    }
-}
-
-impl IntoElement for EdgeFaded {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }

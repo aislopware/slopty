@@ -1,5 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Lifecycle and optimistic-concurrency state for an open workspace file.
+#![allow(
+    clippy::assigning_clones,
+    clippy::rc_buffer,
+    clippy::ref_patterns,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::sync::Arc;
 
@@ -17,7 +23,6 @@ pub(super) struct DocumentKey {
     pub path: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum DocumentPhase {
     Loading,
@@ -41,7 +46,6 @@ pub(super) struct PendingSave {
     pub line_ending: WorkspaceWritableLineEnding,
 }
 
-#[allow(dead_code)]
 pub(super) struct FileDocument {
     pub image: Option<Entity<super::image_preview::ImagePreview>>,
     pub markdown: Option<Entity<super::markdown_preview::MarkdownPreview>>,
@@ -70,7 +74,6 @@ pub(super) struct FileDocument {
     pub reconcile_after_save: bool,
 }
 
-#[allow(dead_code)]
 impl FileDocument {
     pub fn loading(key: DocumentKey) -> Self {
         Self {
@@ -132,11 +135,10 @@ impl FileDocument {
                 .as_deref()
                 .unwrap_or_default()
                 .split('\n')
-                .map(|line| SharedString::from(line.to_string()))
+                .map(|line| SharedString::from(line.to_owned()))
                 .collect(),
         );
-        self.phase =
-            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
+        self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
         self.revision = 0;
@@ -151,7 +153,7 @@ impl FileDocument {
         self.phase = DocumentPhase::Error(error.into());
     }
 
-    pub fn is_dirty(&self) -> bool {
+    pub const fn is_dirty(&self) -> bool {
         self.revision != self.saved_revision
     }
 
@@ -257,8 +259,7 @@ impl FileDocument {
         self.line_ending = writable_line_ending(file.line_ending);
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
-        self.phase =
-            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
+        self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
         self.file = Some(file);
     }
 
@@ -276,14 +277,13 @@ impl FileDocument {
                 .as_deref()
                 .unwrap_or_default()
                 .split('\n')
-                .map(|line| SharedString::from(line.to_string()))
+                .map(|line| SharedString::from(line.to_owned()))
                 .collect(),
         );
         self.loaded_hash = hash.clone();
         self.saved_hash = hash;
         self.saved_revision = self.revision;
-        self.phase =
-            read_only_reason(&file).map(DocumentPhase::ReadOnly).unwrap_or(DocumentPhase::Ready);
+        self.phase = read_only_reason(&file).map_or(DocumentPhase::Ready, DocumentPhase::ReadOnly);
         self.pending_external_reload = None;
         self.file = Some(file);
     }
@@ -309,17 +309,14 @@ impl FileDocument {
             .as_ref()
             .and_then(|file| file.text.as_ref())
             .map_or(0, String::capacity);
-        let line_bytes = self
-            .lines
-            .capacity()
-            .saturating_mul(std::mem::size_of::<SharedString>())
-            .saturating_add(
-                self.lines.iter().fold(0usize, |total, line| total.saturating_add(line.len())),
+        let line_bytes =
+            self.lines.capacity().saturating_mul(size_of::<SharedString>()).saturating_add(
+                self.lines.iter().fold(0_usize, |total, line| total.saturating_add(line.len())),
             );
         let pending_save_bytes = self.pending_save.as_ref().map_or(0, |save| save.text.capacity());
-        let editor_text_bytes = self.editor.is_some().then_some(file_text_bytes).unwrap_or(0);
+        let editor_text_bytes = if self.editor.is_some() { file_text_bytes } else { 0 };
 
-        std::mem::size_of::<Self>()
+        size_of::<Self>()
             .saturating_add(file_text_bytes)
             .saturating_add(pending_reload_bytes)
             .saturating_add(line_bytes)
@@ -339,7 +336,7 @@ fn read_only_reason(file: &WorkspaceFileText) -> Option<WorkspaceReadOnlyReason>
     })
 }
 
-fn writable_encoding(encoding: WorkspaceTextEncoding) -> Option<WorkspaceWritableEncoding> {
+const fn writable_encoding(encoding: WorkspaceTextEncoding) -> Option<WorkspaceWritableEncoding> {
     match encoding {
         WorkspaceTextEncoding::Utf8 => Some(WorkspaceWritableEncoding::Utf8),
         WorkspaceTextEncoding::Utf8Bom => Some(WorkspaceWritableEncoding::Utf8Bom),
@@ -347,7 +344,7 @@ fn writable_encoding(encoding: WorkspaceTextEncoding) -> Option<WorkspaceWritabl
     }
 }
 
-fn writable_line_ending(
+const fn writable_line_ending(
     line_ending: Option<WorkspaceLineEnding>,
 ) -> Option<WorkspaceWritableLineEnding> {
     match line_ending {

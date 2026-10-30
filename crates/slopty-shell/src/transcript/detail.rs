@@ -9,6 +9,16 @@
 //! - Its exit code on a line of its own.
 //! - Two sections fetched when opened: the text the model read where the step shows something else
 //!   ("Details for Claude", Claude Code desktop's), and its raw record, as a tree.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::float_cmp_const,
+    clippy::format_collect,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_ref_mut,
+    clippy::option_option,
+    clippy::unused_self,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -678,7 +688,7 @@ impl Transcript {
 }
 
 /// How a run of a JSON line is coloured, in the theme's syntax hues.
-fn tone_colour(tone: Tone, theme: &Theme) -> gpui::Hsla {
+const fn tone_colour(tone: Tone, theme: &Theme) -> gpui::Hsla {
     match tone {
         Tone::Key => theme.syntax.property,
         Tone::Punctuation | Tone::Quiet => theme.text_faint,
@@ -725,7 +735,7 @@ mod tests {
             panic!("an output");
         };
         assert_eq!((lines.len(), truncated_by, stderr_from), (41, 0, Some(40)));
-        assert_eq!(lines.first().map(|l| l.as_ref()), Some("line 1"));
+        assert_eq!(lines.first().map(AsRef::as_ref), Some("line 1"));
         let boxed = StepOutput {
             body: Some(Arc::new(ToolDetail::Output { lines, truncated_by, stderr_from })),
             menu: None,

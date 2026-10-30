@@ -1,6 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Inline chat renames on the sidebar row, without booting an engine.
-use gpui::{AppContext, Modifiers, TestAppContext, VisualTestContext};
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_wrap,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
+use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
 
@@ -39,7 +45,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 },
                 cx,
             );
-            crate::motion::set_reduced_motion(cx, true);
+            motion::set_reduced_motion(cx, true);
             shell.state.update(cx, |state, _| {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
@@ -141,7 +147,7 @@ fn double_click_edits_a_sidebar_title_in_place(cx: &mut TestAppContext) {
     double_click(cx, row.center());
     cx.simulate_input("Renamed");
     let input = shell.read_with(cx, |shell, _| shell.chat_rename.as_ref().unwrap().input.clone());
-    assert_eq!(input.read_with(cx, |input, _| input.text().to_string()), "Renamed");
+    assert_eq!(input.read_with(cx, |input, _| input.text().to_owned()), "Renamed");
     cx.simulate_keystrokes("enter");
     redraw(cx);
     assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
@@ -158,7 +164,7 @@ fn menu_rename_opens_the_same_field_and_blur_commits(cx: &mut TestAppContext) {
 
     cx.simulate_input("Moved on");
     // Focus leaving the field saves the edit.
-    cx.update(|window, cx| window.blur(cx));
+    cx.update(Window::blur);
     redraw(cx);
     assert!(shell.read_with(cx, |shell, _| shell.chat_rename.is_none()));
     assert!(mutated(&shell, cx));

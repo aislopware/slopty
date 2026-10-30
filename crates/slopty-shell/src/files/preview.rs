@@ -1,4 +1,25 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ daf047b), see THIRD_PARTY_NOTICES.md
+#![allow(
+    let_underscore_drop,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp_const,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    clippy::unwrap_in_result,
+    clippy::unwrap_used,
+    reason = "shell lint migration: slice C"
+)]
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -103,17 +124,17 @@ impl FilePreviewState {
         self.close_requested = false;
     }
 
-    pub(super) fn has_active(&self) -> bool {
+    pub(super) const fn has_active(&self) -> bool {
         self.active.is_some()
     }
 
     fn touch_document(&mut self, path: &str) {
         self.document_recency.retain(|candidate| candidate != path);
-        self.document_recency.push_back(path.to_string());
+        self.document_recency.push_back(path.to_owned());
     }
 
     fn retained_document_bytes(&self) -> usize {
-        let documents = self.documents.values().fold(0usize, |total, document| {
+        let documents = self.documents.values().fold(0_usize, |total, document| {
             total.saturating_add(document.estimated_retained_bytes())
         });
         self.highlights.values().fold(documents, |total, highlight| {
@@ -194,7 +215,7 @@ impl FilePreviewState {
         evicted
     }
 
-    fn word_wrap(&self) -> bool {
+    const fn word_wrap(&self) -> bool {
         self.word_wrap
     }
 
@@ -207,11 +228,11 @@ impl FilePreviewState {
     }
 
     /// Text size of the editable editor and the plain (non-editable) preview rows alike.
-    fn code_text_size(&self) -> f32 {
+    const fn code_text_size(&self) -> f32 {
         crate::typography::clamp_font_size(self.editor_font_size)
     }
 
-    pub(super) fn set_editor_font_size(&mut self, editor_font_size: f32) {
+    pub(super) const fn set_editor_font_size(&mut self, editor_font_size: f32) {
         self.editor_font_size = editor_font_size;
     }
 
@@ -269,7 +290,7 @@ impl FilePreviewState {
         // A destructive reload must remain pending until the user explicitly
         // confirms it. Pause delayed autosave so it cannot race the choice.
         document.autosave_task = None;
-        self.reload_confirmation = Some(path.to_string());
+        self.reload_confirmation = Some(path.to_owned());
         ReloadDecision::AwaitDiscardConfirmation
     }
 
@@ -280,17 +301,17 @@ impl FilePreviewState {
 
 fn estimated_highlighted_file_bytes(highlight: &HighlightedFile) -> usize {
     let document = &highlight.document;
-    std::mem::size_of::<HighlightedFile>()
+    size_of::<HighlightedFile>()
         .saturating_add(highlight.content_hash.capacity())
         .saturating_add(
             document
                 .lines
                 .capacity()
-                .saturating_mul(std::mem::size_of::<Vec<slopty_syntax::HighlightSpan>>()),
+                .saturating_mul(size_of::<Vec<slopty_syntax::HighlightSpan>>()),
         )
-        .saturating_add(document.lines.iter().fold(0usize, |total, line| {
+        .saturating_add(document.lines.iter().fold(0_usize, |total, line| {
             total.saturating_add(
-                line.capacity().saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
+                line.capacity().saturating_mul(size_of::<slopty_syntax::HighlightSpan>()),
             )
         }))
 }
@@ -303,7 +324,7 @@ fn document_key(context: &FilesRequestContext, path: String) -> DocumentKey {
     }
 }
 
-fn document_blocks_lifecycle(document: &FileDocument) -> bool {
+const fn document_blocks_lifecycle(document: &FileDocument) -> bool {
     document.is_dirty()
         && matches!(
             document.phase,
@@ -328,7 +349,7 @@ fn file_highlight_result_is_current(
 
 fn renamed_document_path(path: &str, old_path: &str, new_path: &str) -> Option<String> {
     if path == old_path {
-        Some(new_path.to_string())
+        Some(new_path.to_owned())
     } else {
         path.strip_prefix(&format!("{old_path}/")).map(|suffix| format!("{new_path}/{suffix}"))
     }
@@ -346,7 +367,7 @@ impl FilesSurface {
         self.preview.images_visible = false;
         for document in self.preview.documents.values() {
             if let Some(view) = &document.image {
-                view.update(cx, |view, cx| view.suspend(cx));
+                view.update(cx, super::image_preview::ImagePreview::suspend);
             }
         }
     }
@@ -408,7 +429,7 @@ impl FilesSurface {
             if document.show_markdown {
                 document.show_markdown = false;
                 if let Some(view) = &document.markdown {
-                    view.update(cx, |view, cx| view.suspend(cx));
+                    view.update(cx, super::markdown_preview::MarkdownPreview::suspend);
                 }
             }
         }
@@ -557,10 +578,10 @@ impl FilesSurface {
         }
         if let Some(document) = self.preview.documents.get_mut(&path) {
             document.show_markdown = !document.show_markdown;
-            if !document.show_markdown {
-                if let Some(view) = &document.markdown {
-                    view.update(cx, |view, cx| view.suspend(cx));
-                }
+            if !document.show_markdown
+                && let Some(view) = &document.markdown
+            {
+                view.update(cx, super::markdown_preview::MarkdownPreview::suspend);
             }
         }
         if self.preview.documents.get(&path).is_some_and(|d| !d.show_markdown) {
@@ -634,7 +655,7 @@ impl FilesSurface {
                 .and_then(|active| self.preview.documents.get(active))
                 .and_then(|d| d.markdown.clone())
             {
-                view.update(cx, |view, cx| view.suspend(cx));
+                view.update(cx, super::markdown_preview::MarkdownPreview::suspend);
             }
         }
 
@@ -694,9 +715,9 @@ impl FilesSurface {
         let task_key = key.clone();
         let task = cx.spawn(async move |this, cx| {
             let mut result = client.read_file(request.clone()).await;
-            if result.as_ref().is_err_and(|error| error.retryable()) {
+            if result.as_ref().is_err_and(super::client::FilesClientError::retryable) {
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(250))
+                    .timer(Duration::from_millis(250))
                     .await;
                 result = client.read_file(request).await;
             }
@@ -765,7 +786,7 @@ impl FilesSurface {
         let view =
             cx.new(|cx| super::image_preview::ImagePreview::new(path.clone(), context, client, cx));
         if !self.preview.images_visible {
-            view.update(cx, |view, cx| view.suspend(cx));
+            view.update(cx, super::image_preview::ImagePreview::suspend);
         }
         if let Some(document) = self.preview.documents.get_mut(&path) {
             document.begin_load();
@@ -889,8 +910,8 @@ impl FilesSurface {
             document.mark_user_edit();
             document.revision
         };
-        self.request_editor_highlight(path.to_string(), source, revision, cx);
-        self.schedule_autosave(path.to_string(), cx);
+        self.request_editor_highlight(path.to_owned(), source, revision, cx);
+        self.schedule_autosave(path.to_owned(), cx);
         cx.emit(FilesEvent::TitleChanged);
         cx.notify();
     }
@@ -1183,7 +1204,7 @@ impl FilesSurface {
                 } else if let Some(view) =
                     self.preview.documents.get(&path).and_then(|d| d.image.clone())
                 {
-                    view.update(cx, |view, cx| view.suspend(cx));
+                    view.update(cx, super::image_preview::ImagePreview::suspend);
                 }
             }
             return;
@@ -1307,7 +1328,7 @@ impl FilesSurface {
             if path_is_same_or_descendant(document_path, path) {
                 document.mark_deleted();
                 if let Some(view) = &document.image {
-                    view.update(cx, |view, cx| view.deleted(cx));
+                    view.update(cx, super::image_preview::ImagePreview::deleted);
                 }
                 changed = true;
             }
@@ -1344,7 +1365,7 @@ impl FilesSurface {
                 continue;
             };
             if let Some(view) = document.image.take() {
-                view.update(cx, |view, cx| view.suspend(cx));
+                view.update(cx, super::image_preview::ImagePreview::suspend);
             }
             document.generation = document.generation.wrapping_add(1);
             let needs_review =
@@ -1361,7 +1382,7 @@ impl FilesSurface {
             if was_markdown != is_markdown {
                 document.show_markdown = is_markdown;
                 if let Some(view) = document.markdown.take() {
-                    view.update(cx, |view, cx| view.suspend(cx));
+                    view.update(cx, super::markdown_preview::MarkdownPreview::suspend);
                 }
             }
             if let Some(file) = document.file.as_mut() {
@@ -1444,7 +1465,7 @@ impl FilesSurface {
         }
         self.sync_preview_list();
         if let (Some(text), Some(hash)) = (text, hash) {
-            self.request_file_highlight(path.to_string(), text, hash, cx);
+            self.request_file_highlight(path.to_owned(), text, hash, cx);
         }
     }
 
@@ -1454,8 +1475,7 @@ impl FilesSurface {
             .active
             .as_deref()
             .and_then(|path| self.preview.documents.get(path))
-            .map(|document| document.lines.len())
-            .unwrap_or(0);
+            .map_or(0, |document| document.lines.len());
         self.preview.list.reset_with_uniform_height(count, self.preview.line_height());
     }
 
@@ -1576,13 +1596,13 @@ impl FilesSurface {
                                         .rounded(px(4.0))
                                         // A keyboard stop with the shell's ring (M8).
                                         .map(|el| crate::surface_chrome::key_stop(el, &theme))
-                                        .when(self.target_change_pending, |button| button.hidden())
+                                        .when(self.target_change_pending, Styled::hidden)
                                         .ml_auto()
                                         .cursor_pointer()
                                         .text_color(theme.text)
                                         .child("Try again")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.retry_pending_close(cx)
+                                            this.retry_pending_close(cx);
                                         })),
                                 )
                                 .when(!self.target_change_pending, |banner| {
@@ -1612,7 +1632,7 @@ impl FilesSurface {
                                         .text_color(theme.danger_muted)
                                         .child("Discard changes")
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.discard_changes_and_close(cx)
+                                            this.discard_changes_and_close(cx);
                                         })),
                                 )
                         }),
@@ -1663,7 +1683,7 @@ impl FilesSurface {
                                                 .text_color(theme.text_muted)
                                                 .child("Keep editing")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.keep_external_edits(cx)
+                                                    this.keep_external_edits(cx);
                                                 })),
                                         )
                                         .child(
@@ -1679,7 +1699,7 @@ impl FilesSurface {
                                                 .text_color(theme.text)
                                                 .child("Reload from disk")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.request_reload_active_document(cx)
+                                                    this.request_reload_active_document(cx);
                                                 })),
                                         )
                                 })
@@ -1698,7 +1718,7 @@ impl FilesSurface {
                                                 .text_color(theme.text_muted)
                                                 .child("Cancel")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.cancel_reload_confirmation(cx)
+                                                    this.cancel_reload_confirmation(cx);
                                                 })),
                                         )
                                         .child(
@@ -1714,7 +1734,7 @@ impl FilesSurface {
                                                 .text_color(theme.text)
                                                 .child("Discard and reload")
                                                 .on_click(cx.listener(|this, _, _, cx| {
-                                                    this.confirm_reload_active_document(cx)
+                                                    this.confirm_reload_active_document(cx);
                                                 })),
                                         )
                                 }),
@@ -1755,9 +1775,9 @@ impl FilesSurface {
         // Outside paths are absolute: the empty crumb before their leading
         // slash is not a segment.
         let parts = path.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
-        let reveal_path = path.to_string();
+        let reveal_path = path.to_owned();
         let system_path = self.system_open_path(path);
-        let tooltip_path: SharedString = path.to_string().into();
+        let tooltip_path: SharedString = path.to_owned().into();
         let can_save = !self.target_change_pending
             && self.preview.documents.get(path).is_some_and(FileDocument::can_save);
         let save_status =
@@ -1817,7 +1837,7 @@ impl FilesSurface {
                     } else {
                         theme.text_faint
                     })
-                    .child((*part).to_string()),
+                    .child((*part).to_owned()),
             );
         }
         crumbs = crumbs
@@ -1990,7 +2010,7 @@ impl FilesSurface {
                 let web_links = Self::markdown_web_link_handler(cx);
                 cx.new(|cx| {
                     let mut view = super::markdown_preview::MarkdownPreview::new(
-                        path.to_string(),
+                        path.to_owned(),
                         Rc::new(move |path, cx| {
                             let _ =
                                 owner.update(cx, |surface, cx| surface.open_tree_file(path, cx));
@@ -2017,14 +2037,14 @@ impl FilesSurface {
         );
         view.update(cx, |view, cx| {
             view.media_client = media_client;
-            view.editor = editor.map(|editor| editor.downgrade());
+            view.editor = editor.map(Entity::downgrade);
             view.activate(path, &location, cx);
         });
         if view.read(cx).version.as_ref() != Some(&version) {
-            let source =
-                editor.map(|editor| editor.read(cx).value().to_string()).unwrap_or_else(|| {
-                    document.file.as_ref().and_then(|f| f.text.clone()).unwrap_or_default()
-                });
+            let source = editor.map_or_else(
+                || document.file.as_ref().and_then(|f| f.text.clone()).unwrap_or_default(),
+                |editor| editor.read(cx).value().to_string(),
+            );
             let truncated = document.file.as_ref().is_some_and(|f| f.truncated);
             view.update(cx, |view, cx| {
                 view.version = Some(version);
@@ -2049,7 +2069,7 @@ impl FilesSurface {
         }
         self.preview.images_visible = true;
         if let Some(view) = self.preview.documents.get(path).and_then(|d| d.image.clone()) {
-            view.update(cx, |view, cx| view.activate(cx));
+            view.update(cx, super::image_preview::ImagePreview::activate);
             return view.into_any_element();
         }
         self.apply_pending_external_reload(path, window, cx);
@@ -2101,7 +2121,7 @@ impl FilesSurface {
                 .into_any_element();
         }
         if let DocumentPhase::Error(error) = &document.phase {
-            let retry_path = path.to_string();
+            let retry_path = path.to_owned();
             return super::failure_state(
                 "files-preview-error",
                 "Couldn't open this file",
@@ -2187,7 +2207,7 @@ impl FilesSurface {
         theme: &Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Entity<super::editor::FileEditorState>> {
+    ) -> Option<Entity<super::editor::FileEditorState>> {
         let document = self.preview.documents.get(path)?;
         if let Some(editor) = document.editor.clone() {
             return Some(editor);
@@ -2199,7 +2219,7 @@ impl FilesSurface {
         let focus_editor = !document.show_markdown;
         let editor =
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
-        let event_path = path.to_string();
+        let event_path = path.to_owned();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
         let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());
         if focus_editor {
@@ -2271,7 +2291,7 @@ impl FilesSurface {
             .child(
                 div()
                     .w(px(48.0))
-                    .when(!word_wrap, |element| element.h_full())
+                    .when(!word_wrap, Styled::h_full)
                     .flex_none()
                     .pr(px(10.0))
                     .border_r_1()
@@ -2291,8 +2311,8 @@ impl FilesSurface {
                     })
                     .pl(px(12.0))
                     .pr(px(18.0))
-                    .when(!word_wrap, |element| element.whitespace_nowrap())
-                    .font_family(theme.font_mono.clone())
+                    .when(!word_wrap, Styled::whitespace_nowrap)
+                    .font_family(theme.font_mono)
                     // Same source `row_height` derives from; a second reading of
                     // the code size could drift from the geometry the glyphs
                     // are measured against.
@@ -2559,7 +2579,7 @@ mod tests {
             path: path.into(),
         });
         document.phase = DocumentPhase::Ready;
-        document.lines = Arc::new(vec![SharedString::from(text.to_string())]);
+        document.lines = Arc::new(vec![SharedString::from(text.to_owned())]);
         document
     }
 
@@ -2605,7 +2625,7 @@ mod tests {
         preview.documents.get_mut("src/2.rs").unwrap().phase =
             DocumentPhase::Conflict { disk_hash: None };
         preview.documents.get_mut("src/7.rs").unwrap().phase = DocumentPhase::Loading;
-        let protected = HashSet::from(["src/4.rs".to_string()]);
+        let protected = HashSet::from(["src/4.rs".to_owned()]);
 
         let evicted = preview.trim_document_cache_to(&protected, 15, usize::MAX);
 
@@ -2757,7 +2777,7 @@ mod tests {
         preview.documents.insert(path.into(), document);
 
         assert!(preview.set_autosave_delay_ms(600).is_empty());
-        assert_eq!(preview.set_autosave_enabled(true), vec![path.to_string()]);
+        assert_eq!(preview.set_autosave_enabled(true), vec![path.to_owned()]);
         assert!(preview.set_autosave_enabled(false).is_empty());
     }
 
@@ -2852,7 +2872,7 @@ impl FilesSurface {
 
 #[cfg(test)]
 mod markdown_buffer_tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -3438,7 +3458,8 @@ mod markdown_buffer_tests {
                         received.borrow_mut().push(activation.clone());
                         // Browser selection can suspend this same preview. This
                         // must run after its owner/preview borrows have unwound.
-                        preview.update(cx, |preview, cx| preview.suspend(cx));
+                        preview
+                            .update(cx, super::super::markdown_preview::MarkdownPreview::suspend);
                     }
                 }
             })
@@ -3469,7 +3490,7 @@ mod markdown_buffer_tests {
             assert_eq!(
                 cx.read_from_clipboard().unwrap().text().as_deref(),
                 Some(target.original.as_str())
-            )
+            );
         });
         assert!(cx.opened_url().is_none(), "only the shell may open web destinations");
         for url in [
@@ -3591,7 +3612,7 @@ mod markdown_buffer_tests {
 mod reload_highlight_tests {
     use std::ops::Range;
 
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::super::editor_adapter::probe;
     use super::*;
@@ -3704,7 +3725,7 @@ mod reload_highlight_tests {
         // next render of the document body.
         window
             .update(cx, |surface, _, cx| {
-                if let ReloadHighlight::Cached = highlight {
+                if matches!(highlight, ReloadHighlight::Cached) {
                     let document = slopty_syntax::highlight(slopty_syntax::HighlightRequest {
                         source: after,
                         path: Some(path),

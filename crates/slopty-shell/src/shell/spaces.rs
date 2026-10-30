@@ -8,6 +8,28 @@
 //! the sidebar's session list (never the tab strip) and hosts space
 //! management (add via the palette; rename/delete via row context menus).
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
+#![allow(
+    rustdoc::broken_intra_doc_links,
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::indexing_slicing,
+    clippy::manual_let_else,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::or_fun_call,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::type_complexity,
+    clippy::unreachable,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::collections::HashSet;
 
@@ -28,18 +50,15 @@ use crate::pickers::{
 // The filter is let go only while every machine is reached: a project on one out of reach is
 // missing from the lists, not gone.
 /// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
-pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
+pub(super) fn every_device_reached(state: &AppState, now: DateTime<Utc>) -> bool {
     !state.devices.is_empty()
-        && state
-            .devices
-            .iter()
-            .all(|device| !super::sidebar_status::out_of_reach(state, &device.id, now))
+        && state.devices.iter().all(|device| !sidebar_status::out_of_reach(state, &device.id, now))
 }
 
 #[cfg(test)]
 mod sidebar_row_tests {
     fn ids(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_string()).collect()
+        values.iter().map(|value| (*value).to_owned()).collect()
     }
 
     #[gpui::test]
@@ -74,7 +93,7 @@ mod sidebar_row_tests {
                     },
                     cx,
                 );
-                crate::motion::set_reduced_motion(cx, true);
+                motion::set_reduced_motion(cx, true);
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(WorkspaceScope::Local);
                     state.local_device_id = Some("local".into());
@@ -94,7 +113,7 @@ mod sidebar_row_tests {
             }))
         });
         // The hover fades run on the test's clock, which the test advances.
-        crate::motion::run_on(cx.executor());
+        motion::run_on(cx.executor());
         let shell = host.read_with(cx, |host, _| host.0.clone());
         let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
         assert_eq!(order, ids(&["a", "b", "c"]));
@@ -133,13 +152,11 @@ mod sidebar_row_tests {
             });
             cx.run_until_parked();
             // The row's fade out, run to its end on the test's clock.
-            cx.executor().advance_clock(
-                crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()),
-            );
+            cx.executor().advance_clock(motion::HOVER_FADE.total().mul_f32(motion::speed_scale()));
             cx.run_until_parked();
             // Its Archived-section copy shares the row key and must not stay lit. The row's fade is
             // in its last frame here, not lit.
-            let lit = crate::motion::hover_t(&format!("chat-{archived}-hover"));
+            let lit = motion::hover_t(&format!("chat-{archived}-hover"));
             assert!(lit < 0.01, "chat-{archived} still lit at {lit}");
             let expected = next.map(|(next, _)| format!("chat-{next}"));
             shell.read_with(cx, |shell, _| {
@@ -237,7 +254,7 @@ pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
 /// one more row.
 pub(super) const SIDEBAR_HEADER_TEXT: f32 = 12.0;
 /// A heading's chevron turns over Amp's 200 ms ease-out.
-const SIDEBAR_CHEVRON_TURN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
+const SIDEBAR_CHEVRON_TURN: MotionSpec = MotionSpec::new(200, motion::EASE_OUT);
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
     SIDEBAR_SECTION_GAP + SIDEBAR_DISCLOSURE_HEADER_HEIGHT;
@@ -260,7 +277,7 @@ const ARCHIVED_PAGE_ROWS: usize = 25;
 // keyboard stop Enter or Space toggles. `id` is its element's; `key` names its fade among the
 // sidebar's; `hovered` is the caller's own hover listener, which the header calls beside its
 // fade (an element takes one).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
     id: impl Into<gpui::ElementId>,
@@ -298,7 +315,7 @@ pub(super) fn sidebar_disclosure_header(
         })
         .aria_expanded(open)
         .children(icon)
-        .child(super::sidebar::sidebar_faded_label(
+        .child(sidebar::sidebar_faded_label(
             "sidebar-disclosure-label".into(),
             false,
             div()
@@ -335,7 +352,7 @@ pub(super) fn sidebar_disclosure_header(
         .child(motion::fade_driver(fade_key))
         .on_hover(hover);
     crate::surface_chrome::focus_ring_inset(header.tab_index(0), theme)
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
 /// What a shut group's header wears at its end: how many rows it holds, and its loudest
@@ -343,7 +360,7 @@ pub(super) fn sidebar_disclosure_header(
 fn group_rollup(
     key: &str,
     count: usize,
-    loudest: Option<&super::marks::Mark>,
+    loudest: Option<&marks::Mark>,
     theme: &Theme,
 ) -> AnyElement {
     let count_id = format!("sidebar-group-count-{key}");
@@ -362,11 +379,11 @@ fn group_rollup(
                 .child(SharedString::from(count.to_string())),
         )
         .children(loudest.and_then(|mark| {
-            super::marks::mark_element(
+            marks::mark_element(
                 SharedString::from(format!("sidebar-group-mark-{key}")),
                 format!("sidebar-group-mark-{key}"),
                 mark,
-                crate::loaders::status_mark::MARK_SMALL,
+                loaders::status_mark::MARK_SMALL,
                 theme.bg,
             )
         }))
@@ -376,7 +393,7 @@ fn group_rollup(
 /// How far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
 /// a touch screen, where nothing hovers.
 pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
-    if super::compact::touch_screen() {
+    if touch_screen() {
         return 1.0;
     }
     motion::hover_t(key)
@@ -394,7 +411,7 @@ struct MenuDetail {
     row: SpacesMenuRow,
     label: SharedString,
     /// A project's row: its project, whose artwork it draws.
-    space: Option<slopty_view_proto::Space>,
+    space: Option<Space>,
     /// Out of reach: the disconnected glyph.
     offline: bool,
     selected: bool,
@@ -445,7 +462,7 @@ pub(super) struct AddSpaceFlow {
     home: Option<String>,
     /// Best-effort git seed for the CURRENT browser path (known when we
     /// descended through an entry whose `is_repo` we saw; the owning device's
-    /// SpacesSync re-verifies either way).
+    /// `SpacesSync` re-verifies either way).
     browser_repo: bool,
     /// Keyboard highlight within the current step’s filtered rows.
     active: usize,
@@ -500,7 +517,7 @@ impl AddSpaceFlow {
 /// listed until the typed path answers, so a typo never loses it.
 struct PathEdit {
     input: Entity<ComposerInput>,
-    /// ListFolders for the typed path is in flight.
+    /// `ListFolders` for the typed path is in flight.
     opening: bool,
     /// ⌘↵ asked for the open in flight to add the project too; a later ↵
     /// doesn't take that back.
@@ -518,7 +535,7 @@ struct PathEdit {
     _events: Subscription,
 }
 
-/// ListFolders on `device_id`, relayed unless it is `local`; no `path`
+/// `ListFolders` on `device_id`, relayed unless it is `local`; no `path`
 /// lists the device's home.
 async fn list_folders_on(
     engine: crate::state::EngineHandle,
@@ -563,7 +580,7 @@ fn typed_path_location(
     drives: &[DriveEntry],
 ) -> (String, Option<String>) {
     if home.is_some_and(|home| path_under(path, home)) {
-        return ("Home".to_string(), None);
+        return ("Home".to_owned(), None);
     }
     if let Some(drive) = drives
         .iter()
@@ -573,7 +590,7 @@ fn typed_path_location(
         return (drive.name.clone(), Some(drive.path.clone()));
     }
     let root =
-        breadcrumbs(path).into_iter().next().map_or_else(|| "/".to_string(), |(_, root)| root);
+        breadcrumbs(path).into_iter().next().map_or_else(|| "/".to_owned(), |(_, root)| root);
     (root.clone(), Some(root))
 }
 
@@ -742,7 +759,7 @@ fn add_space_target(
 
 // A clone may take a while: its notice stays up until the answer takes it down.
 /// How long the clone's notice may stay up, at most.
-const CLONE_NOTICE_LASTS: Duration = Duration::from_secs(20 * 60);
+const CLONE_NOTICE_LASTS: Duration = Duration::from_mins(20);
 
 // What passes for a repository's address in "Clone repository…": a URL git takes
 // (`https://`, `ssh://`, `git://`) or scp-like `user@host:path`, with no spaces. A path on the
@@ -975,8 +992,8 @@ impl FirstStep {
     /// The glyph of what the step adds.
     pub(super) const fn glyph(self) -> &'static str {
         match self {
-            Self::AddDevice => crate::icons::LAPTOP,
-            Self::AddProject => crate::icons::FOLDER,
+            Self::AddDevice => icons::LAPTOP,
+            Self::AddProject => icons::FOLDER,
         }
     }
 
@@ -1000,8 +1017,7 @@ impl Shell {
         let previous = self.sidebar_disclosure_motion.get(key).copied();
         let from = previous
             .filter(|motion| motion.animating(now))
-            .map(|motion| motion.current(now))
-            .unwrap_or(resting_height);
+            .map_or(resting_height, |motion| motion.current(now));
         let epoch = previous.map_or(1, |motion| motion.epoch + 1);
         self.sidebar_disclosure_motion
             .insert(key.to_owned(), SidebarDisclosureMotion::new(epoch, from, target_height, now));
@@ -1154,13 +1170,13 @@ impl Shell {
         let query = self
             .spaces_menu
             .get()
-            .map(|menu| menu.search.read(cx).text().to_string())
+            .map(|menu| menu.search.read(cx).text().to_owned())
             .unwrap_or_default();
         let state = self.state.read(cx);
         let projects = state.projects();
         let names: Vec<String> = projects
             .iter()
-            .map(|members| state.representative_space(members[0]).display_name().to_string())
+            .map(|members| state.representative_space(members[0]).display_name().to_owned())
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
         if query.trim().is_empty() {
@@ -1219,7 +1235,7 @@ impl Shell {
         // to the card's key handler.
         let search =
             cx.new(|cx| ComposerInput::with_context("Search projects…", "PaletteSearch", cx));
-        let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
+        let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 if let Some(menu) = this.spaces_menu.open_mut() {
                     menu.active = 0;
@@ -1310,7 +1326,7 @@ impl Shell {
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let active = self.spaces_menu.get().map(|m| m.active).unwrap_or(0);
+                let active = self.spaces_menu.get().map_or(0, |m| m.active);
                 let rows = self.spaces_menu_rows(cx);
                 // One past the scrollable rows is the pinned footer.
                 let row = if active < rows.len() {
@@ -1340,14 +1356,14 @@ impl Shell {
         let filter = self.settings.space_filter.clone();
         // The filtered project's artwork and name, as its dropdown row
         // draws them, plus the offline glyph when no host is reachable.
-        let (label, space, offline): (SharedString, Option<slopty_view_proto::Space>, bool) = {
+        let (label, space, offline): (SharedString, Option<Space>, bool) = {
             let state = self.state.read(cx);
             match filter.as_deref().and_then(|id| state.space_row(id)) {
                 Some(space) => {
                     let members = state.project_members(space);
                     let (_, offline) = state.project_device_tag(&members, crate::clock::utc(cx));
                     (
-                        state.representative_space(space).display_name().to_string().into(),
+                        state.representative_space(space).display_name().to_owned().into(),
                         Some(space.clone()),
                         offline,
                     )
@@ -1360,8 +1376,7 @@ impl Shell {
             Some(id) => {
                 let state = self.state.read(cx);
                 let name = state.device_name(id).unwrap_or("?");
-                let reached =
-                    !super::sidebar_status::out_of_reach(state, id, crate::clock::utc(cx));
+                let reached = !sidebar_status::out_of_reach(state, id, crate::clock::utc(cx));
                 (SharedString::from(format!("{label} \u{b7} {name}")), offline || !reached)
             }
             None => (label, offline),
@@ -1425,7 +1440,7 @@ impl Shell {
             .hover_fade("spaces-filter")
             .cursor_pointer()
             .on_mouse_down(
-                gpui::MouseButton::Left,
+                MouseButton::Left,
                 cx.listener(|this, _, _, _| this.spaces_menu.note_trigger_press()),
             )
             .on_click(cx.listener(|this, _, window, cx| {
@@ -1447,11 +1462,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(super::sidebar::sidebar_faded_label(
-                        "spaces-filter-label".into(),
-                        false,
-                        label,
-                    ))
+                    .child(sidebar::sidebar_faded_label("spaces-filter-label".into(), false, label))
                     // Disconnected glyph, not the word (user request).
                     .when(offline, |el| {
                         el.child(
@@ -1493,7 +1504,7 @@ impl Shell {
     pub(super) fn sidebar_row_key(
         &mut self,
         chat: &str,
-        key: &gpui::Keystroke,
+        key: &Keystroke,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -1575,12 +1586,12 @@ impl Shell {
                             label: SharedString::from(
                                 device.map_or("?", |device| device.name.as_str()).to_owned(),
                             ),
-                            offline: super::sidebar_status::out_of_reach(state, &id, now),
+                            offline: sidebar_status::out_of_reach(state, &id, now),
                             selected: machine.as_deref() == Some(id.as_str()),
                             glyph: Some(device_glyph(
                                 device.map_or("", |device| device.platform.as_str()),
                             )),
-                            turned_away: super::sidebar_status::turned_away(state, &id)
+                            turned_away: sidebar_status::turned_away(state, &id)
                                 .map(|why| SharedString::from(why.to_owned())),
                             row: SpacesMenuRow::Machine(id),
                             ..MenuDetail::default()
@@ -1596,7 +1607,7 @@ impl Shell {
                                 label: state
                                     .representative_space(space)
                                     .display_name()
-                                    .to_string()
+                                    .to_owned()
                                     .into(),
                                 space: Some(space.clone()),
                                 offline,
@@ -1719,7 +1730,7 @@ impl Shell {
             .w(px(self.sidebar_content_width() - 2.0 * Theme::SPACE_SM))
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                this.spaces_menu_key(event, cx)
+                this.spaces_menu_key(event, cx);
             }))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.close_spaces_menu(cx);
@@ -1744,7 +1755,7 @@ impl Shell {
                             theme,
                             false,
                             active == add_index,
-                            "spaces-menu-add".to_string(),
+                            "spaces-menu-add".to_owned(),
                         )
                         .id("spaces-menu-add")
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -1769,8 +1780,8 @@ impl Shell {
     }
 
     /// What the sidebar narrows its list to: the project filter and the machine filter.
-    pub(super) fn sidebar_filter(&self) -> super::sidebar_status::Filter<'_> {
-        super::sidebar_status::Filter {
+    pub(super) fn sidebar_filter(&self) -> sidebar_status::Filter<'_> {
+        sidebar_status::Filter {
             project: self.settings.space_filter.as_deref(),
             machine: self.settings.machine_filter.as_deref(),
         }
@@ -1779,9 +1790,9 @@ impl Shell {
     /// The list as the sidebar draws it (`sidebar_status::list`) under the sidebar's filter, by
     /// the sidebar's clock, Inactive paged behind its "Show more"; notes when it next reads
     /// otherwise, for the clock's tick.
-    pub(super) fn sidebar_list(&self, cx: &App) -> Vec<super::sidebar_status::Group> {
+    pub(super) fn sidebar_list(&self, cx: &App) -> Vec<sidebar_status::Group> {
         let state = self.state.read(cx);
-        let (mut groups, next) = super::sidebar_status::list(
+        let (mut groups, next) = sidebar_status::list(
             state,
             self.sidebar_filter(),
             self.sidebar_clock, // the sidebar's clock
@@ -1790,14 +1801,13 @@ impl Shell {
             self.note_sidebar_change(next);
         }
         let selected = state.selected_chat.as_deref();
-        for group in groups.iter_mut().filter(|group| group.key == super::sidebar_status::INACTIVE)
-        {
+        for group in groups.iter_mut().filter(|group| group.key == sidebar_status::INACTIVE) {
             let shown = self
                 .sidebar_group_shown
                 .get(&group.key)
                 .copied()
-                .unwrap_or(super::sidebar_status::INACTIVE_FIRST);
-            super::sidebar_status::page(group, shown, selected);
+                .unwrap_or(sidebar_status::INACTIVE_FIRST);
+            sidebar_status::page(group, shown, selected);
         }
         groups
     }
@@ -1836,7 +1846,7 @@ impl Shell {
         let group = {
             let state = self.state.read(cx);
             let (groups, _) =
-                super::sidebar_status::list(state, self.sidebar_filter(), self.sidebar_clock);
+                sidebar_status::list(state, self.sidebar_filter(), self.sidebar_clock);
             groups
                 .into_iter()
                 .find(|group| group.rows.iter().any(|row| row.chat.id == chat_id))
@@ -1897,7 +1907,7 @@ impl Shell {
 
     /// Something read by the sidebar's clock next reads differently at `at`; its tick
     /// comes no later.
-    pub(super) fn note_sidebar_change(&self, at: chrono::DateTime<Utc>) {
+    pub(super) fn note_sidebar_change(&self, at: DateTime<Utc>) {
         let next = self.sidebar_clock_next.get();
         if next.is_none_or(|next| at < next) {
             self.sidebar_clock_next.set(Some(at));
@@ -1916,8 +1926,8 @@ impl Shell {
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
         }
-        let wait = (at - crate::clock::utc(cx)).to_std().unwrap_or_default()
-            + std::time::Duration::from_millis(5);
+        let wait =
+            (at - crate::clock::utc(cx)).to_std().unwrap_or_default() + Duration::from_millis(5);
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
             this.update(cx, |this, cx| {
@@ -1970,12 +1980,11 @@ impl Shell {
             .collect();
         let mut rendered = Vec::new();
         for group in groups {
-            let super::sidebar_status::Group { key, label, rows, hidden } = group;
+            let sidebar_status::Group { key, label, rows, hidden } = group;
             // A shut group speaks for its rows with the loudest mark among those still
             // heard (a cached row's is the last word from a machine out of reach).
             let loudest =
-                super::marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark))
-                    .cloned();
+                marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
             let row_count = rows.len() + hidden;
             let shown_rows = rows.len();
             let motion_key = format!("group:{key}");
@@ -1989,7 +1998,7 @@ impl Shell {
                     .is_some_and(|motion| motion.animating(self.now()));
             let mut rendered_rows = Vec::with_capacity(rows.len());
             for row in rows.into_iter().filter(|_| draws) {
-                let super::sidebar_status::Row { chat, status, hint, .. } = row;
+                let sidebar_status::Row { chat, status, hint, .. } = row;
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 let height = SIDEBAR_ROW_HEIGHT;
@@ -2069,7 +2078,7 @@ impl Shell {
             })
             // Shut, a screen reader hears what the header wears.
             .when(collapsed, |header| {
-                let words = match loudest.as_ref().and_then(super::marks::Mark::word) {
+                let words = match loudest.as_ref().and_then(marks::Mark::word) {
                     Some(word) => format!("{label}, {row_count}, {word}"),
                     None => format!("{label}, {row_count}"),
                 };
@@ -2125,7 +2134,7 @@ impl Shell {
             .filter(|chat| in_filter(chat) && filter.on_machine(chat))
             .cloned()
             .collect();
-        rows.sort_by(|left, right| compare_sidebar_chats(left, right));
+        rows.sort_by(compare_sidebar_chats);
         rows
     }
 
@@ -2144,7 +2153,7 @@ impl Shell {
             return None;
         }
         // Each says its project while the shelf holds more than one (`sidebar_status::shelf`).
-        let rows = super::sidebar_status::shelf(self.state.read(cx), rows, now);
+        let rows = sidebar_status::shelf(self.state.read(cx), rows, now);
         let total = rows.len();
         let open = self.archived_open;
         let shown = self.archived_shown.max(INITIAL);
@@ -2242,7 +2251,7 @@ impl Shell {
                             this.archived_shown = this.archived_shown.max(INITIAL) + PAGE;
                             cx.notify();
                         }))
-                        .child(crate::icons::icon(crate::icons::PLUS).size(px(14.0)).flex_none())
+                        .child(icon(icons::PLUS).size(px(14.0)).flex_none())
                         .child(SharedString::from(format!("Show {remaining} more"))),
                 );
             }
@@ -2266,7 +2275,7 @@ impl Shell {
         // text caret — Enter and ⌘Enter are both handled there.
         let search =
             cx.new(|cx| ComposerInput::with_context("Search devices…", "PaletteSearch", cx));
-        let search_events = cx.subscribe(&search, |this: &mut Shell, _, event, cx| {
+        let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Edited) {
                 // Typing `/` after a query that names a folder descends into
                 // it — the query reads as a path segment, so the slash IS the
@@ -2277,7 +2286,7 @@ impl Shell {
                 }
                 if let Some(flow) = this.add_space.as_mut() {
                     flow.active = 0;
-                    flow.list_scroll.set_offset(gpui::Point::default());
+                    flow.list_scroll.set_offset(Point::default());
                 }
                 this.search_home_folders(cx);
                 cx.notify();
@@ -2421,7 +2430,7 @@ impl Shell {
         flow.location = None;
         flow.load_task = None;
         flow.drives_task = None;
-        flow.list_scroll.set_offset(gpui::Point::default());
+        flow.list_scroll.set_offset(Point::default());
         flow.device = Some(device);
         flow.browser = Loadable::Idle;
         flow.drives = Loadable::Idle;
@@ -2482,7 +2491,7 @@ impl Shell {
         flow.active = 0;
         flow.error = None;
         flow.path_edit = None;
-        flow.list_scroll.set_offset(gpui::Point::default());
+        flow.list_scroll.set_offset(Point::default());
         if step == ProjectStep::Devices {
             flow.drives_task = None;
             flow.device = None;
@@ -2520,7 +2529,7 @@ impl Shell {
         let Some(flow) = &self.add_space else {
             return Vec::new();
         };
-        let locations: Vec<_> = std::iter::once(("Home".to_string(), None))
+        let locations: Vec<_> = std::iter::once(("Home".to_owned(), None))
             .chain(
                 flow.drives
                     .ready()
@@ -2536,7 +2545,7 @@ impl Shell {
             .collect()
     }
 
-    /// ListDrives on the flow's device (relay-forwarded when remote).
+    /// `ListDrives` on the flow's device (relay-forwarded when remote).
     /// Failures stay silent — the section just shows Home; the folder
     /// browser's own error row already covers "device didn't respond".
     fn load_space_drives(&mut self, cx: &mut Context<Self>) {
@@ -2588,7 +2597,7 @@ impl Shell {
             return Vec::new();
         };
         let dirs = browser_rows(listing);
-        let query = flow.search.read(cx).text().to_string();
+        let query = flow.search.read(cx).text().to_owned();
         let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
         popover::filter_indices(&query, &names).into_iter().map(|ix| dirs[ix].clone()).collect()
     }
@@ -2676,7 +2685,7 @@ impl Shell {
             return;
         };
         if rows.is_empty() {
-            let text = flow.search.read(cx).text().to_string();
+            let text = flow.search.read(cx).text().to_owned();
             if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref()) {
                 self.add_space_descend(target, false, cx);
                 return; // else the clone row, the only one
@@ -2733,7 +2742,7 @@ impl Shell {
             let Some(flow) = self.add_space.as_ref() else {
                 return false;
             };
-            let text = flow.search.read(cx).text().to_string();
+            let text = flow.search.read(cx).text().to_owned();
             if crate::pickers::is_typed_path(&text) && text.ends_with(['/', '\\']) {
                 let target = crate::pickers::typed_path_target(&text, flow.home.as_deref());
                 let Some(target) = target else {
@@ -2749,7 +2758,7 @@ impl Shell {
             let Some(flow) = self.add_space.as_ref() else {
                 return false;
             };
-            let text = flow.search.read(cx).text().to_string();
+            let text = flow.search.read(cx).text().to_owned();
             let Some(query) = text.strip_suffix('/') else {
                 return false;
             };
@@ -2778,7 +2787,7 @@ impl Shell {
     /// match is already complete.
     fn add_space_completion(&self, cx: &App) -> Option<(String, String)> {
         let flow = self.add_space.as_ref()?;
-        let query = flow.search.read(cx).text().to_string();
+        let query = flow.search.read(cx).text().to_owned();
         if query.is_empty() {
             return None;
         }
@@ -2817,7 +2826,7 @@ impl Shell {
         self.load_space_folders(Some(full), cx);
     }
 
-    /// ListFolders on the flow's device (relay-forwarded when remote).
+    /// `ListFolders` on the flow's device (relay-forwarded when remote).
     pub(super) fn load_space_folders(&mut self, path: Option<String>, cx: &mut Context<Self>) {
         let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
@@ -2831,7 +2840,7 @@ impl Shell {
         flow.browser_path = path.clone();
         flow.browser = Loadable::Loading;
         flow.active = 0;
-        flow.list_scroll.set_offset(gpui::Point::default());
+        flow.list_scroll.set_offset(Point::default());
         let Some(engine) = engine else {
             flow.browser = Loadable::Error("Device is not connected".into());
             cx.notify();
@@ -2928,7 +2937,7 @@ impl Shell {
             "path": path,
             "gitDetected": git_detected,
         });
-        let submit_id = space_id.clone();
+        let submit_id = space_id;
         let task = cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
             this.update(cx, |shell, cx| {
@@ -2970,7 +2979,7 @@ impl Shell {
         flow.active = 0;
         flow.error = None;
         flow.focus_pending = true;
-        flow.list_scroll.set_offset(gpui::Point::default());
+        flow.list_scroll.set_offset(Point::default());
         let search = flow.search.clone();
         let keep = looks_like_repo_url(search.read(cx).text().trim());
         search.update(cx, |input, cx| {
@@ -3116,7 +3125,7 @@ impl Shell {
             return;
         };
         match flow.step {
-            ProjectStep::Devices => return,
+            ProjectStep::Devices => (),
             ProjectStep::Locations => self.add_space_back_to(ProjectStep::Devices, cx),
             ProjectStep::Folders => {
                 let listing = flow.browser.ready();
@@ -3174,7 +3183,7 @@ impl Shell {
             return;
         }
         if let Some(edit) = flow.path_edit.as_mut() {
-            edit.input.update(cx, |input, cx| input.select_all_text(cx));
+            edit.input.update(cx, ComposerInput::select_all_text);
             edit.focus_pending = true;
             cx.notify();
             return;
@@ -3182,7 +3191,7 @@ impl Shell {
         // The open folder, spelled from `~` under home and ending in a
         // separator so a name typed after it (→ first) goes inside.
         let mut text = flow.open_folder().map_or_else(
-            || "~".to_string(),
+            || "~".to_owned(),
             |path| escape_typed_path(&tilde_path(&path, flow.home.as_deref()), windows),
         );
         if !text.ends_with(['/', '\\']) {
@@ -3201,7 +3210,7 @@ impl Shell {
             input.set_text(text, cx);
             input.select_all_text(cx);
         });
-        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| match event {
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.add_space_path_edited(cx),
             ComposerInputEvent::Submitted => this.add_space_open_typed_path(false, cx),
             // The field takes no pasted files (Slopty's input pastes text only).
@@ -3525,7 +3534,7 @@ impl Shell {
         flow.load_task = None;
         flow.active = 0;
         flow.error = None;
-        flow.list_scroll.set_offset(gpui::Point::default());
+        flow.list_scroll.set_offset(Point::default());
         let search = flow.search.clone();
         if leaves_home {
             self.release_home_folder_search(cx);
@@ -3563,7 +3572,7 @@ impl Shell {
         if self.add_space.as_ref().is_some_and(|flow| flow.path_edit.is_some()) {
             match keystroke.key.as_str() {
                 "tab" if !keystroke.modifiers.modified() => {
-                    self.add_space_accept_path_completion(cx)
+                    self.add_space_accept_path_completion(cx);
                 }
                 // Not the Shell's focus walk: the keyboard stays in the field.
                 "tab" if keystroke.modifiers.shift => {}
@@ -3572,7 +3581,7 @@ impl Shell {
                     self.add_space_cancel_path_edit(cx);
                 }
                 "enter" if keystroke.modifiers == gpui::Modifiers::secondary_key(cx) => {
-                    self.add_space_open_typed_path(true, cx)
+                    self.add_space_open_typed_path(true, cx);
                 }
                 _ => return,
             }
@@ -3637,7 +3646,7 @@ impl Shell {
             popover::MenuKey::Enter => self.add_space_open_active(cx),
             // While an address is typed, ⌘⏎ clones it as ⏎ does.
             popover::MenuKey::ModEnter if self.add_space.as_ref().is_some_and(|f| f.cloning) => {
-                self.add_space_clone(cx)
+                self.add_space_clone(cx);
             }
             popover::MenuKey::ModEnter => self.submit_add_space(cx),
             popover::MenuKey::Backspace => {
@@ -3661,7 +3670,7 @@ impl Shell {
     fn render_project_crumb_menu(
         &self,
         hidden: &[(String, String)],
-        closing: Option<crate::popover::Closing>,
+        closing: Option<popover::Closing>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -3733,7 +3742,7 @@ impl Shell {
         let location = flow.location.clone();
         let home = flow.home.clone();
         let browser_path = flow.browser_path.clone();
-        let load_error = flow.browser.error().map(str::to_string);
+        let load_error = flow.browser.error().map(str::to_owned);
         let error = flow.error.clone();
         let busy = flow.submit_busy;
         let active = flow.active;
@@ -3761,7 +3770,7 @@ impl Shell {
             input.update(cx, |input, cx| input.set_ghost(ghost, cx));
         }
         let can_edit_path = matches!(step, ProjectStep::Locations | ProjectStep::Folders);
-        let query = search.read(cx).text().to_string();
+        let query = search.read(cx).text().to_owned();
         // Cmd+K's row rhythm: 30px rows, 16px muted glyphs, 8px list gutters.
         let row = |ix: usize| {
             popover::menu_row(&theme, ix == active, format!("project-result-{ix}"))
@@ -3815,7 +3824,7 @@ impl Shell {
                                 theme.text_faint
                             }))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_pick_device(device.clone(), cx)
+                                this.add_space_pick_device(device.clone(), cx);
                             }))
                             .into_any_element(),
                     );
@@ -3832,7 +3841,7 @@ impl Shell {
                             .child(glyph_el(glyph))
                             .child(label_el(label))
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.add_space_goto_location(name.clone(), path.clone(), cx)
+                                this.add_space_goto_location(name.clone(), path.clone(), cx);
                             }))
                             .into_any_element(),
                     );
@@ -3889,7 +3898,7 @@ impl Shell {
             }
             ProjectStep::Folders => {
                 if !loading && load_error.is_none() {
-                    let base = listing.as_ref().map(|l| l.path.as_str()).unwrap_or("");
+                    let base = listing.as_ref().map_or("", |l| l.path.as_str());
                     let mut first_home = true;
                     for (ix, folder) in self.add_space_folder_rows(cx).into_iter().enumerate() {
                         let entry = match folder {
@@ -3927,7 +3936,7 @@ impl Shell {
                                     )
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.add_space_descend(full.clone(), is_repo, cx)
+                                    this.add_space_descend(full.clone(), is_repo, cx);
                                 }))
                                 .into_any_element(),
                         );
@@ -4006,7 +4015,7 @@ impl Shell {
                 // In the path field ⌘↵ adds the TYPED path and ← moves the caret.
                 ProjectStep::Folders if query.is_empty() && path_field.is_some() => (
                     "No folders here",
-                    "Type another path, or press Esc for the folder trail.".to_string(),
+                    "Type another path, or press Esc for the folder trail.".to_owned(),
                 ),
                 ProjectStep::Folders if query.is_empty() => (
                     "No folders here",
@@ -4017,15 +4026,15 @@ impl Shell {
                 ),
                 ProjectStep::Folders if home_loading => (
                     "Searching Home…",
-                    "Looking for matching folders anywhere under Home.".to_string(),
+                    "Looking for matching folders anywhere under Home.".to_owned(),
                 ),
                 ProjectStep::Folders if home_status == Some("Indexing…") => (
                     "No folders match yet",
-                    "Home is still being indexed — keep typing or try again.".to_string(),
+                    "Home is still being indexed — keep typing or try again.".to_owned(),
                 ),
                 ProjectStep::Folders => (
                     "No folders match",
-                    "Type a path like ~/code or /mnt to jump there.".to_string(),
+                    "Type a path like ~/code or /mnt to jump there.".to_owned(),
                 ),
             };
             results = results.child(command_palette::palette_empty(&theme, title, hint));
@@ -4065,7 +4074,7 @@ impl Shell {
         // While the path is typed, the field stands in for the location and
         // folder crumbs; the device crumb stays to say where it is typed.
         if let Some((name, path)) = location.filter(|_| path_field.is_none()) {
-            let root = path.clone().or(home.clone());
+            let root = path.clone().or(home);
             // While a descend loads, keep showing the REQUESTED path so the
             // trail doesn't collapse to the location and pop back.
             let open_path =
@@ -4154,7 +4163,7 @@ impl Shell {
                 })
                 .child(div().max_w(px(180.0)).truncate().child(spec.name.clone()))
                 .when(more || long, |el| {
-                    el.tooltip(crate::settings::widgets::text_tooltip(if more {
+                    el.tooltip(settings::widgets::text_tooltip(if more {
                         SharedString::from("Show hidden folders")
                     } else {
                         spec.name.clone()
@@ -4173,24 +4182,24 @@ impl Shell {
                     .hover(|s| s.bg(theme.element_hover).text_color(theme.text));
                 el = match spec.target {
                     CrumbTarget::Devices => el.on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space_back_to(ProjectStep::Devices, cx)
+                        this.add_space_back_to(ProjectStep::Devices, cx);
                     })),
                     CrumbTarget::Locations => el.on_click(cx.listener(|this, _, _, cx| {
-                        this.add_space_back_to(ProjectStep::Locations, cx)
+                        this.add_space_back_to(ProjectStep::Locations, cx);
                     })),
                     CrumbTarget::Location(name, path) => {
                         el.on_click(cx.listener(move |this, _, _, cx| {
-                            this.add_space_goto_location(name.clone(), path.clone(), cx)
+                            this.add_space_goto_location(name.clone(), path.clone(), cx);
                         }))
                     }
                     CrumbTarget::Folder(full) => el.on_click(cx.listener(move |this, _, _, cx| {
-                        this.add_space_descend(full.clone(), false, cx)
+                        this.add_space_descend(full.clone(), false, cx);
                     })),
                     CrumbTarget::More => el
                         .on_mouse_down(
-                            gpui::MouseButton::Left,
+                            MouseButton::Left,
                             cx.listener(|this, _, _, _| {
-                                this.project_crumb_menu.note_trigger_press()
+                                this.project_crumb_menu.note_trigger_press();
                             }),
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -4299,7 +4308,7 @@ impl Shell {
                                 // of a double-click on the pen isn't a request.
                                 .on_click(cx.listener(|this, event: &gpui::ClickEvent, _, cx| {
                                     if event.click_count() < 2 {
-                                        this.add_space_open_typed_path(false, cx)
+                                        this.add_space_open_typed_path(false, cx);
                                     }
                                 }))
                                 .child(
@@ -4424,7 +4433,7 @@ impl Shell {
         let shortcut = {
             let id = ShortcutId::NewProject;
             let combo = self.settings.keymap.get(id);
-            let valid = crate::settings::parse_combo(combo).is_ok();
+            let valid = settings::parse_combo(combo).is_ok();
             crate::keys::combo_text(if valid { combo } else { id.default_combo() })
         };
         // While the path is typed, ⌘↵ and the button add the TYPED path.
@@ -4435,7 +4444,7 @@ impl Shell {
                 None => listing.is_some(),
             };
         // Its keys where there are keys; a touch screen keeps only the button that adds.
-        let keys = !crate::shell::touch_screen();
+        let keys = !touch_screen();
         let adds = (step == ProjectStep::Folders && !cloning) || editing;
         let footer = if !keys {
             command_palette::palette_footer()
@@ -4499,9 +4508,9 @@ impl Shell {
                             .active(|s| s.opacity(0.8))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if editing {
-                                    this.add_space_open_typed_path(true, cx)
+                                    this.add_space_open_typed_path(true, cx);
                                 } else {
-                                    this.submit_add_space(cx)
+                                    this.submit_add_space(cx);
                                 }
                             }))
                     })
@@ -4518,51 +4527,50 @@ impl Shell {
                     ),
             )
         });
-        let card =
-            command_palette::palette_card("add-space-palette", &focus, viewport, &theme)
-                .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                    this.add_space_key(event, cx)
-                }))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    // The crumb menu floats outside the card; its own
-                    // mouse-down-out dismisses it without closing the palette.
-                    if this.project_crumb_menu.get().is_some() {
-                        return;
-                    }
-                    this.close_add_space(cx);
-                }))
-                .child(command_palette::palette_header(
-                    &theme,
-                    search.into_any_element(),
-                    popover::kbd_hint(&theme, &shortcut),
-                ))
-                .child(crumbs)
-                // Why the typed path didn't open, right under the field; the
-                // listing below is still the folder that was open.
-                .when_some(path_error, |el, error| {
-                    el.child(
-                        div()
-                            .id("project-path-error")
-                            .px(px(16.0))
-                            .pt(px(8.0))
-                            .pb(px(2.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .child(results)
-                .when_some(error, |el, error| {
-                    el.child(
-                        div()
-                            .px(px(16.0))
-                            .pb(px(8.0))
-                            .text_size(crate::typography::ui_rems(12.0))
-                            .text_color(theme.danger)
-                            .child(error),
-                    )
-                })
-                .when(keys || adds, |el| el.child(footer));
+        let card = command_palette::palette_card("add-space-palette", &focus, viewport, &theme)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                this.add_space_key(event, cx);
+            }))
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                // The crumb menu floats outside the card; its own
+                // mouse-down-out dismisses it without closing the palette.
+                if this.project_crumb_menu.get().is_some() {
+                    return;
+                }
+                this.close_add_space(cx);
+            }))
+            .child(command_palette::palette_header(
+                &theme,
+                search.into_any_element(),
+                popover::kbd_hint(&theme, &shortcut),
+            ))
+            .child(crumbs)
+            // Why the typed path didn't open, right under the field; the
+            // listing below is still the folder that was open.
+            .when_some(path_error, |el, error| {
+                el.child(
+                    div()
+                        .id("project-path-error")
+                        .px(px(16.0))
+                        .pt(px(8.0))
+                        .pb(px(2.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .child(results)
+            .when_some(error, |el, error| {
+                el.child(
+                    div()
+                        .px(px(16.0))
+                        .pb(px(8.0))
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
+            .when(keys || adds, |el| el.child(footer));
         Some(command_palette::palette_overlay(viewport, card))
     }
 
@@ -4581,11 +4589,11 @@ impl Shell {
             .state
             .read(cx)
             .space_row(&space_id)
-            .map(|s| s.display_name().to_string())
+            .map(|s| s.display_name().to_owned())
             .unwrap_or_default();
         let input = cx.new(|cx| ComposerInput::new("Project name", cx));
         input.update(cx, |input, cx| input.set_text(current, cx));
-        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.submit_rename_space(cx);
             }
@@ -4599,7 +4607,7 @@ impl Shell {
         let Some(dialog) = self.rename_space_dialog.take() else {
             return;
         };
-        let name = dialog.input.read(cx).text().trim().to_string();
+        let name = dialog.input.read(cx).text().trim().to_owned();
         if !name.is_empty() {
             self.mutate(
                 serde_json::json!({ "op": "renameSpace", "spaceId": dialog.space_id, "name": name }),
@@ -4642,7 +4650,7 @@ impl Shell {
                     popover::menu_row(&theme, false, format!("space-menu-rename-{space_id}"))
                         .id("space-menu-rename")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_space(rename_id.clone(), cx)
+                            this.open_rename_space(rename_id.clone(), cx);
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename…")),
@@ -4715,13 +4723,11 @@ impl Shell {
                 let state = self.state.read(cx);
                 let space = state.space_row(&space_id);
                 (
-                    space
-                        .map(|s| s.display_name().to_string())
-                        .unwrap_or_else(|| "this project".into()),
+                    space.map_or_else(|| "this project".into(), |s| s.display_name().to_owned()),
                     space
                         .and_then(|s| state.device_name(&s.device_id))
                         .unwrap_or("its device")
-                        .to_string(),
+                        .to_owned(),
                     state.chats_in_space(&space_id).len(),
                 )
             };
@@ -4761,7 +4767,7 @@ impl Shell {
                     .child(
                         popover::btn_danger(&theme, "Remove").id("delete-space-confirm").on_click(
                             cx.listener(move |this, _, _, cx| {
-                                this.delete_space(space_id.clone(), cx)
+                                this.delete_space(space_id.clone(), cx);
                             }),
                         ),
                     ),
@@ -4941,7 +4947,7 @@ mod home_folder_search_tests {
 
     use super::*;
 
-    /// The engine side of a shell under test. ListFolders answers with
+    /// The engine side of a shell under test. `ListFolders` answers with
     /// `listing`; methods not being awaited answer `{}`.
     struct FakeEngine {
         runtime: tokio::runtime::Runtime,
@@ -5022,13 +5028,10 @@ mod home_folder_search_tests {
         });
         let data_dir = dir.path().to_path_buf();
         let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
+            let state = cx.new(|_| AppState::new());
             Shell::new(
                 state,
-                crate::EngineBootConfig {
-                    data_dir,
-                    default_harness: slopty_view_proto::HarnessId::MOCK,
-                },
+                EngineBootConfig { data_dir, default_harness: slopty_view_proto::HarnessId::MOCK },
                 cx,
             )
         });
@@ -5072,7 +5075,7 @@ mod home_folder_search_tests {
     }
 
     fn rows(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<FolderRow> {
-        window.read_with(cx, |shell, cx| shell.add_space_folder_rows(cx)).unwrap()
+        window.read_with(cx, Shell::add_space_folder_rows).unwrap()
     }
 
     fn found(path: &str, relative: &str, is_repo: bool) -> serde_json::Value {
@@ -5208,7 +5211,8 @@ mod home_folder_search_tests {
         );
         cx.run_until_parked();
         assert!(rows(window, cx).is_empty());
-        cx.executor().advance_clock(HOME_FOLDER_INDEX_RETRY - Duration::from_millis(1));
+        cx.executor()
+            .advance_clock(HOME_FOLDER_INDEX_RETRY.checked_sub(Duration::from_millis(1)).unwrap());
         assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
         cx.executor().advance_clock(Duration::from_millis(1));
         let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5585,7 +5589,7 @@ mod home_folder_search_tests {
         // A drive location neither searches nor keeps the home index.
         window
             .update(cx, |shell, _, cx| {
-                shell.add_space_goto_location("Data".into(), Some("/mnt/data".into()), cx)
+                shell.add_space_goto_location("Data".into(), Some("/mnt/data".into()), cx);
             })
             .unwrap();
         let released = engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx);
@@ -5631,12 +5635,12 @@ mod home_folder_search_tests {
             .update(cx, |shell, _, cx| {
                 shell.add_space_key(
                     &gpui::KeyDownEvent {
-                        keystroke: gpui::Keystroke { modifiers, key: key.into(), key_char: None },
+                        keystroke: Keystroke { modifiers, key: key.into(), key_char: None },
                         is_held: false,
                         prefer_character_input: false,
                     },
                     cx,
-                )
+                );
             })
             .unwrap();
         cx.run_until_parked();
@@ -5667,7 +5671,7 @@ mod home_folder_search_tests {
         cx.run_until_parked();
     }
 
-    /// The ListFolders asking for `path`; the others (⇥ listing the typed
+    /// The `ListFolders` asking for `path`; the others (⇥ listing the typed
     /// path's parent) answer empty.
     fn listing_request(
         engine: &mut FakeEngine,
@@ -5828,7 +5832,7 @@ mod home_folder_search_tests {
     fn renderable(cx: &mut TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         dir
     }
@@ -5839,8 +5843,8 @@ mod home_folder_search_tests {
         window
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
-                    state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
-                })
+                    state.connection = ConnectionStatus::Ready;
+                });
             })
             .unwrap();
     }
@@ -5950,7 +5954,7 @@ mod home_folder_search_tests {
         press(window, "l", secondary(cx), cx);
         let completion = |text: &str, cx: &mut TestAppContext| {
             type_path(window, text, cx);
-            window.read_with(cx, |shell, cx| shell.add_space_path_completion(cx)).unwrap()
+            window.read_with(cx, Shell::add_space_path_completion).unwrap()
         };
         assert_eq!(completion("~/code", cx), Some(("~/code/".into(), None)));
         assert_eq!(completion("~/co", cx), Some(("~/Code/".into(), Some("de".into()))));

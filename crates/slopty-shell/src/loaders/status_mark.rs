@@ -16,6 +16,21 @@
 //! reduced motion each state is drawn at once and the working ring stands still with its gaps.
 //! Its hues are the one table of the session states (`shell::marks`): at work blue, waiting
 //! amber, done green and failed red, each on light in the tone of itself that clears 3:1.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    trivial_casts,
+    clippy::assertions_on_constants,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::expect_used,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::return_self_not_must_use,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
@@ -91,14 +106,14 @@ impl StatusMark {
     }
 
     /// Its size in points ([`MARK_SMALL`], [`MARK_LARGE`]).
-    pub fn size(mut self, size: f32) -> Self {
+    pub const fn size(mut self, size: f32) -> Self {
         self.size = size;
         self
     }
 
     /// The colour beneath it, which the done tick is drawn in, as if cut through the disc;
     /// the theme's page colour when unset.
-    pub fn ground(mut self, ground: Hsla) -> Self {
+    pub const fn ground(mut self, ground: Hsla) -> Self {
         self.ground = Some(ground);
         self
     }
@@ -135,7 +150,7 @@ pub(crate) struct MarkFrame {
 }
 
 /// The disc a state is drawn as, by its radius on the 24 grid, if it is one.
-fn disc_of(state: MarkState) -> Option<f32> {
+const fn disc_of(state: MarkState) -> Option<f32> {
     match state {
         MarkState::Done => Some(DISC_RADIUS),
         MarkState::Waiting => Some(DOT_RADIUS),
@@ -260,7 +275,7 @@ impl RenderOnce for StatusMark {
         div().size(px(size)).flex_none().child(
             canvas(
                 |_, _, _| (),
-                move |bounds, _, window, _| paint(frame, ground, size, bounds.center(), window),
+                move |bounds, (), window, _| paint(frame, ground, size, bounds.center(), window),
             )
             .size_full(),
         )

@@ -3,6 +3,7 @@
 //! inspector, a remote window or desktop, and a page an agent showed. Each is a pane of the
 //! session's own view ([`super::panes`]), docked at the session's right when it opens; what it
 //! shows, what it is called, where its keyboard goes and what closing it lets go of are here.
+#![allow(clippy::needless_pass_by_ref_mut, reason = "shell lint migration: slice A")]
 
 use super::panes::Pane;
 use super::*;
@@ -65,7 +66,7 @@ impl Shell {
         match view {
             RightSurface::File(id) => {
                 if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                    file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    file.update(cx, FilesSurface::ensure_loaded);
                     if let Some(path) = self.file_surface_paths.get(&id).cloned() {
                         let chat_id = file.read(cx).chat_id().to_owned();
                         self.note_recent_file(&chat_id, &path);
@@ -74,13 +75,13 @@ impl Shell {
             }
             RightSurface::Diff(id) => {
                 if let Some(changes) = self.diffs.get(&id).cloned() {
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                    changes.update(cx, Changes::ensure_content);
                 }
             }
             RightSurface::Screen(id) => self.focus_screen_surface(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
-                    files.update(cx, |files, cx| files.ensure_loaded(cx));
+                    files.update(cx, FilesSurface::ensure_loaded);
                 }
             }
             RightSurface::Browser(_) | RightSurface::Inspector | RightSurface::Page(_) => {}
@@ -145,13 +146,12 @@ impl Shell {
             .views()
             .into_iter()
             .find(|view| matches!(view, RightSurface::Diff(_)));
-        let view = match shown {
-            Some(view) => view,
-            None => {
-                let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
-                self.register_diff_surface(changes, window, cx);
-                RightSurface::Diff(self.diff_seq)
-            }
+        let view = if let Some(view) = shown {
+            view
+        } else {
+            let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
+            self.register_diff_surface(changes, window, cx);
+            RightSurface::Diff(self.diff_seq)
         };
         self.open_view(view, cx);
     }
@@ -164,7 +164,7 @@ impl Shell {
         if let RightSurface::File(id) = view
             && let Some(file) = self.file_surfaces.get(&id).cloned()
         {
-            match file.update(cx, |file, cx| file.prepare_close(cx)) {
+            match file.update(cx, FilesSurface::prepare_close) {
                 FilesCloseDisposition::Allow => self.complete_file_close(view, &key, cx),
                 FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
                     // Its question shows in its pane, which keeps the keyboard.
@@ -220,7 +220,7 @@ impl Shell {
             }
             RightSurface::Browser(id) => {
                 if let Some(browser) = self.browsers.remove(&id) {
-                    browser.update(cx, |browser, cx| browser.close(cx));
+                    browser.update(cx, super::super::browser::BrowserSurface::close);
                 }
                 self.browser_subs.remove(&id);
             }
@@ -233,7 +233,7 @@ impl Shell {
             RightSurface::Page(id) => self.close_page_pane(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(key).cloned() {
-                    files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
+                    files.update(cx, FilesSurface::suspend_tree_interactions);
                 }
             }
             RightSurface::Inspector => {}
@@ -279,7 +279,7 @@ impl Shell {
         let body = match view {
             RightSurface::File(id) => match self.file_surfaces.get(&id).cloned() {
                 Some(file) => {
-                    file.update(cx, |file, cx| file.ensure_loaded(cx));
+                    file.update(cx, FilesSurface::ensure_loaded);
                     file.into_any_element()
                 }
                 None => Empty.into_any_element(),
@@ -287,10 +287,9 @@ impl Shell {
             RightSurface::Diff(id) => match self.diffs.get(&id).cloned() {
                 Some(changes) => {
                     // Idempotent — also covers a view kept open across launches.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                    changes.update(cx, Changes::ensure_content);
                     // The diff's options (scope, base, fold all) stand over it.
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                    let controls = changes.update(cx, Changes::render_header_controls);
                     div()
                         .size_full()
                         .flex()
@@ -309,21 +308,20 @@ impl Shell {
             RightSurface::Inspector => self.inspector.clone().into_any_element(),
             RightSurface::Screen(id) => self.render_screen_surface(id, cx),
             RightSurface::Page(id) => self.render_page_pane(id, cx),
-            RightSurface::Files => match self.files.get(&self.panel_key(cx)).cloned() {
-                Some(files) => {
+            RightSurface::Files => {
+                if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
                     files.update(cx, |files, cx| {
                         files.ensure_loaded(cx);
                         files.ensure_git_status(cx);
                     });
                     self.sync_explorer_selection(cx);
                     files.into_any_element()
-                }
-                None => {
+                } else {
                     // A view kept open across launches has its place, not its explorer yet.
-                    cx.defer_in(window, |shell, window, cx| shell.ensure_explorer(window, cx));
+                    cx.defer_in(window, Self::ensure_explorer);
                     Empty.into_any_element()
                 }
-            },
+            }
         };
         div().size_full().bg(theme.panel_bg()).child(body).into_any_element()
     }
@@ -361,7 +359,7 @@ impl Shell {
             }
             RightSurface::Diff(id) => {
                 if let Some(changes) = self.diffs.get(&id).cloned() {
-                    changes.update(cx, |changes, cx| changes.take_keyboard(cx));
+                    changes.update(cx, Changes::take_keyboard);
                 }
             }
             RightSurface::Screen(id) => self.focus_screen_surface(id, cx),
@@ -482,7 +480,7 @@ impl Shell {
                         }
                     }
                     FilesEvent::ShowAllFilesChanged(show_all) => {
-                        this.set_files_show_all(*show_all, cx)
+                        this.set_files_show_all(*show_all, cx);
                     }
                     _ => cx.notify(),
                 }

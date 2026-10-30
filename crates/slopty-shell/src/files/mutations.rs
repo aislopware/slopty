@@ -1,5 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared identity and reconciliation for tree mutations and workspace references.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    reason = "shell lint migration: slice C"
+)]
 use slopty_view_proto::{WorkspaceEntry, WorkspaceEntryKind, WorkspaceMutationOutcome};
 
 use super::*;
@@ -72,7 +81,7 @@ impl FilesSurface {
         }
     }
 
-    pub(crate) fn mutation_busy(&self) -> bool {
+    pub(crate) const fn mutation_busy(&self) -> bool {
         self.pending_mutation.is_some()
     }
 
@@ -132,7 +141,7 @@ impl FilesSurface {
         destination: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.request_mutations(vec![(path.to_string(), destination)], cx);
+        self.request_mutations(vec![(path.to_owned(), destination)], cx);
     }
 
     /// Several entries become one queue that stops at its first failure.
@@ -326,14 +335,14 @@ impl FilesSurface {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::super::document::{DocumentKey, DocumentPhase, FileDocument};
     use super::*;
 
     #[gpui::test]
     fn watch_before_lost_reply_still_remaps_the_dirty_buffer(cx: &mut TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         files.update_in(cx, |files, _, cx| {
             let origin = files.interaction_origin(cx).unwrap();
             let intent = MutationIntent {
@@ -385,7 +394,7 @@ mod tests {
     }
     #[gpui::test]
     fn selection_requests_one_ordered_queue(cx: &mut TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
@@ -434,7 +443,7 @@ mod tests {
         window
             .update(cx, |files, window, cx| {
                 let theme = crate::theme::Theme::of(cx).clone();
-                let editor = super::super::editor::new_file_editor(
+                let editor = editor::new_file_editor(
                     "unsaved text",
                     "folder/a.txt",
                     false,

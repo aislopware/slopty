@@ -3,6 +3,21 @@
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
 // One page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unwrap_used,
+    reason = "shell lint migration: slice A"
+)]
 use std::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
@@ -13,19 +28,21 @@ use std::{
 use gpui::{App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel};
+use objc2::{
+    DefinedClass as _, MainThreadMarker, MainThreadOnly, class, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType, NSScreen, NSView,
 };
 use objc2_foundation::{
     NSDictionary, NSError, NSKeyValueChangeKey, NSKeyValueObservingOptions, NSObject,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSString,
+    NSObjectNSKeyValueObserverRegistration as _, NSObjectProtocol, NSString,
 };
 use objc2_web_kit::{
     WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
     WKNavigationResponse, WKNavigationResponsePolicy, WKWebView,
 };
-use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
+use wry::{WebView, WebViewBuilderExtMacos as _, WebViewExtMacOS as _};
 
 use super::model::{PageState, Presentation, allowed_navigation};
 
@@ -95,8 +112,8 @@ impl BrowserData {
     }
 }
 
-/// What Safari adds to WebKit's user agent: its version, read from the Safari on this
-/// Mac, and the WebKit build Safari has said since it froze it.
+/// What Safari adds to `WebKit`'s user agent: its version, read from the Safari on this
+/// Mac, and the `WebKit` build Safari has said since it froze it.
 fn safari_user_agent() -> String {
     const PLIST: &str = "/Applications/Safari.app/Contents/Info.plist";
     const KEY: &str = "<key>CFBundleShortVersionString</key>";
@@ -221,10 +238,10 @@ impl Observer {
     }
 
     fn changed(&self) {
-        if !self.ivars().pending.replace(true) {
-            if self.ivars().tx.try_send(NativeEvent::Changed).is_err() {
-                self.ivars().pending.set(false);
-            }
+        if !self.ivars().pending.replace(true)
+            && self.ivars().tx.try_send(NativeEvent::Changed).is_err()
+        {
+            self.ivars().pending.set(false);
         }
     }
 
@@ -316,7 +333,7 @@ impl NativePage {
         let monitor_view = view.clone();
         let monitor_tx = tx;
         let monitor_shortcuts = shortcuts.clone();
-        let callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        let callback = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
             let e = unsafe { event.as_ref() };
             if monitor_view.isHidden()
                 || !has_focus(&monitor_view)
@@ -397,7 +414,7 @@ impl NativePage {
         let wheel = Rc::new(PageGlide::default());
         let wheel_view = view.clone();
         let page_glide = wheel.clone();
-        let wheel_callback = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        let wheel_callback = block2::RcBlock::new(move |event: NonNull<NSEvent>| {
             let e = unsafe { event.as_ref() };
             if e.r#type() != NSEventType::ScrollWheel {
                 page_glide.stop();
@@ -572,13 +589,13 @@ fn has_focus(view: &NSView) -> bool {
         .is_some_and(|v| v.isDescendantOf(view))
 }
 
-/// WebKit's pixels per wheel line: a 3-line tick scrolls a page 120px.
+/// `WebKit`'s pixels per wheel line: a 3-line tick scrolls a page 120px.
 const PAGE_PX_PER_LINE: f64 = 40.0;
 
 /// A page's mouse-wheel glide. AppKit hands the page its wheel directly, so
-/// it never reaches GPUI's root (`smooth_scroll`), and WebKit applies a tick
+/// it never reaches GPUI's root (`smooth_scroll`), and `WebKit` applies a tick
 /// at once. The wheel monitor holds ticks back here; a timer replays the
-/// glide as precise pixel deltas, which WebKit routes like a trackpad's: to
+/// glide as precise pixel deltas, which `WebKit` routes like a trackpad's: to
 /// the scroller under the pointer, clamped at its edges.
 #[derive(Default)]
 struct PageGlide {
@@ -626,7 +643,7 @@ impl PageGlide {
         }
         let glide = Rc::downgrade(self);
         let view = view.clone();
-        let tick = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+        let tick = block2::RcBlock::new(move |_: NonNull<objc2_foundation::NSTimer>| {
             if let Some(glide) = glide.upgrade() {
                 glide.frame(&view);
             }
@@ -686,7 +703,7 @@ fn whole_pixels(carry: (f64, f64), lines: gpui::Point<f32>) -> (i32, i32, (f64, 
 /// A precise (trackpad-style) wheel event of whole pixels at `at`, a point
 /// in a window. A synthesized `NSEvent` has no window and reports its
 /// location, flipped by the primary screen's `height`, as `locationInWindow`,
-/// which is the point WebKit hit-tests for the scroller: so it is placed
+/// which is the point `WebKit` hit-tests for the scroller: so it is placed
 /// where `at` would be in a window at the screen's origin.
 fn precise_wheel(
     dx: i32,

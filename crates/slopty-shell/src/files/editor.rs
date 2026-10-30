@@ -1,5 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Boundary between the Files surface and the `gpui-base` editor.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::rc::Rc;
 
@@ -55,7 +61,7 @@ pub(super) fn new_file_editor(
 ) -> Entity<EditorState> {
     let editor = cx.new(|cx| {
         EditorState::new(window, cx)
-            .language(path.to_string())
+            .language(path.to_owned())
             .line_number(true)
             .line_number_gap(gpui::px(LINE_NUMBER_GAP))
             .folding(false)
@@ -199,7 +205,7 @@ mod tests {
 
 #[cfg(test)]
 mod lifetime_tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -222,7 +228,7 @@ mod lifetime_tests {
             .unwrap();
         cx.run_until_parked();
         cx.update(|_| {
-            assert!(weak.upgrade().is_none(), "closed editor retained by its own menu callback")
+            assert!(weak.upgrade().is_none(), "closed editor retained by its own menu callback");
         });
     }
 }

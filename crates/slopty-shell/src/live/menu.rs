@@ -16,6 +16,11 @@
 //!   opened the menu never chooses in it.
 //! - Esc and a press outside close it; choosing a row closes it first, then runs the row, so the
 //!   row runs with the keyboard back where it was.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -499,7 +504,7 @@ fn row(
         .when_some(ticked, |el, on| {
             el.aria_toggled(if on { Toggled::True } else { Toggled::False })
         })
-        .when(marked, |el| el.aria_active_descendant())
+        .when(marked, gpui::StatefulInteractiveElement::aria_active_descendant)
         // A row that cannot run now: zeron's disabled menu row.
         .when(disabled, |el| el.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
         .on_mouse_move(move |_ev, _window, cx| {

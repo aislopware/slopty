@@ -15,6 +15,11 @@
 //! An iPad, laid out as the Mac, has no row: its keys sit in the system keyboard's own shortcut
 //! bar, which only the app's platform layer can fill. The shell says here what the bar holds
 //! ([`set_bar`]) and the platform layer draws it and passes its taps back ([`press_bar`]).
+#![allow(
+    clippy::or_fun_call,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use gpui::{App, Global, KeyUpEvent, Keystroke, PlatformInput, Subscription};
 

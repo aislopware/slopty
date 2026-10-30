@@ -1,4 +1,4 @@
-//! The words a changed line changed, lit inside it (Hunk's and AgentCraft's intraline
+//! The words a changed line changed, lit inside it (Hunk's and `AgentCraft`'s intraline
 //! marks; `.research/design-inspiration-2026-10-19.md` item 14). In a run of deleted lines followed
 //! by a run of added ones, each at most [`MOST_PAIRED`] long, each deleted line pairs, in order,
 //! with the added line most like it: lines are split into words, spaces and single marks, and two
@@ -6,6 +6,12 @@
 //! above the edited one never takes its place. The tokens a pair does not share (their longest
 //! common subsequence left out) are the changed spans. A line with no partner that alike is
 //! rewritten or new, not edited, and lights nothing.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::ops::Range;
 
@@ -77,7 +83,7 @@ fn tokens(text: &str) -> Vec<Range<usize>> {
         let this = class(ch);
         match out.last_mut() {
             Some(run) if this != Class::Mark && last.as_ref() == Some(&this) => {
-                run.end = at + ch.len_utf8()
+                run.end = at + ch.len_utf8();
             }
             _ => out.push(at..at + ch.len_utf8()),
         }
@@ -106,7 +112,7 @@ fn changed_words(old: &str, new: &str) -> Option<Edit> {
         (a.iter().map(|r| &old[r.clone()]).collect(), b.iter().map(|r| &new[r.clone()]).collect());
     // The longest common subsequence's lengths of every pair of suffixes.
     let width = tb.len() + 1;
-    let mut table = vec![0u16; (ta.len() + 1) * width];
+    let mut table = vec![0_u16; (ta.len() + 1) * width];
     for i in (0..ta.len()).rev() {
         for j in (0..tb.len()).rev() {
             table[i * width + j] = if ta[i] == tb[j] {

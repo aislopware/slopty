@@ -1,9 +1,18 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 189115f), see THIRD_PARTY_NOTICES.md
 //! Browser state shared by the chrome and platform host. No native handles.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::map_err_ignore,
+    reason = "shell lint migration: slice A"
+)]
 use std::net::IpAddr;
 
-/// NSEvent supplies characters, while GPUI bindings name non-printing keys.
-/// Shift+Tab can arrive as NSBackTabCharacter rather than a literal tab.
+/// `NSEvent` supplies characters, while GPUI bindings name non-printing keys.
+/// Shift+Tab can arrive as `NSBackTabCharacter` rather than a literal tab.
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn native_shortcut_key(characters: &str) -> &str {
     match characters {
@@ -46,14 +55,14 @@ pub struct PageState {
 
 impl PageState {
     pub fn label(&self) -> String {
-        if !self.title.trim().is_empty() {
-            self.title.clone()
-        } else {
+        if self.title.trim().is_empty() {
             self.url
                 .as_deref()
                 .and_then(|s| url::Url::parse(s).ok())
                 .and_then(|u| u.host_str().map(str::to_owned))
                 .unwrap_or_else(|| "Browser".into())
+        } else {
+            self.title.clone()
         }
     }
 }
@@ -94,7 +103,7 @@ pub fn normalize_address(input: &str) -> Result<String, &'static str> {
     if text.is_empty() {
         return Err("Enter a website or localhost address.");
     }
-    if text.chars().any(|c| c.is_control()) {
+    if text.chars().any(char::is_control) {
         return Err("This address contains invalid characters.");
     }
     if local_file_address(text) {
@@ -177,7 +186,7 @@ pub enum Presentation {
     Passthrough,
 }
 
-pub fn presentation(active: bool, dragging: bool) -> Presentation {
+pub const fn presentation(active: bool, dragging: bool) -> Presentation {
     if !active {
         Presentation::Hidden
     } else if dragging {

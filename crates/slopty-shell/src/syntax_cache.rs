@@ -3,11 +3,18 @@
 //!
 //! Colors and GPUI runs deliberately stay outside this cache so appearance
 //! changes recolor existing spans without parsing again.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use slopty_syntax::{HighlightedDocument, LanguageId};
 
 pub const QUERY_GENERATION: u32 = 1;
@@ -117,16 +124,16 @@ impl SyntaxHighlightCache {
 }
 
 fn estimated_document_bytes(document: &HighlightedDocument) -> usize {
-    std::mem::size_of::<HighlightedDocument>()
+    size_of::<HighlightedDocument>()
         .saturating_add(
             document
                 .lines
                 .capacity()
-                .saturating_mul(std::mem::size_of::<Vec<slopty_syntax::HighlightSpan>>()),
+                .saturating_mul(size_of::<Vec<slopty_syntax::HighlightSpan>>()),
         )
-        .saturating_add(document.lines.iter().fold(0usize, |total, line| {
+        .saturating_add(document.lines.iter().fold(0_usize, |total, line| {
             total.saturating_add(
-                line.capacity().saturating_mul(std::mem::size_of::<slopty_syntax::HighlightSpan>()),
+                line.capacity().saturating_mul(size_of::<slopty_syntax::HighlightSpan>()),
             )
         }))
 }

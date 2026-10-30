@@ -1,5 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Shared metrics for sidebar surface toolbars and their controls.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::float_cmp_const,
+    clippy::needless_pass_by_ref_mut,
+    clippy::option_option,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{Div, div, px};
@@ -7,15 +15,15 @@ use gpui::{Div, div, px};
 use crate::motion::HoverFade as _;
 use crate::theme::Theme;
 
-pub(crate) const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
-pub(crate) const CONTROL_SIZE: f32 = 24.0;
-pub(crate) const CONTROL_RADIUS: f32 = Theme::CONTROL_RADIUS;
-pub(crate) const ICON_SIZE: f32 = 14.0;
-pub(crate) const CONTROL_GAP: f32 = Theme::SPACE_XS;
-pub(crate) const EDGE_INSET: f32 = 8.0;
+pub const HEADER_HEIGHT: f32 = Theme::TITLEBAR_HEIGHT;
+pub const CONTROL_SIZE: f32 = 24.0;
+pub const CONTROL_RADIUS: f32 = Theme::CONTROL_RADIUS;
+pub const ICON_SIZE: f32 = 14.0;
+pub const CONTROL_GAP: f32 = Theme::SPACE_XS;
+pub const EDGE_INSET: f32 = 8.0;
 
 /// Shared field treatment for the file search and browser address controls.
-pub(crate) fn input() -> Div {
+pub fn input() -> Div {
     div()
         .h(px(CONTROL_SIZE))
         .min_w_0()
@@ -35,7 +43,7 @@ pub(crate) fn input() -> Div {
 /// The pane's icon button: 24 square, r 6, a 14 glyph in `text_muted`, its hover wash faded in
 /// and its press a step deeper; Tab reaches it and the ring shows it. The caller names it
 /// (`hint`/`action_hint`) and gives it a click.
-pub(crate) fn icon_button(
+pub fn icon_button(
     id: impl Into<gpui::SharedString>,
     glyph: &'static str,
     theme: &Theme,
@@ -46,7 +54,7 @@ pub(crate) fn icon_button(
 
 /// [`icon_button`] for a toggle: while `on` it rests on the selected wash with its glyph in
 /// `theme.text`, hover still answering a step deeper, and a screen reader hears its state.
-pub(crate) fn icon_toggle(
+pub fn icon_toggle(
     id: impl Into<gpui::SharedString>,
     glyph: &'static str,
     on: bool,
@@ -63,7 +71,7 @@ pub(crate) fn icon_toggle(
 
 /// The frame [`icon_button`] and [`icon_toggle`] share, for a caller-drawn glyph: a keyboard
 /// stop ([`key_stop`]), so a press leaves the keyboard where it was.
-pub(crate) fn icon_button_frame(
+pub fn icon_button_frame(
     id: impl Into<gpui::SharedString>,
     on: bool,
     theme: &Theme,
@@ -93,7 +101,7 @@ pub(crate) fn icon_button_frame(
 
 /// A view's header band: [`HEADER_HEIGHT`], and on a touch screen tall enough that its buttons'
 /// finger presses ([`TOUCH_TARGET`]) fit between its two 1 pt hairlines.
-pub(crate) fn toolbar(theme: &Theme) -> Div {
+pub fn toolbar(theme: &Theme) -> Div {
     div()
         .h(px(if crate::shell::touch_screen() { TOUCH_TARGET + 2.0 } else { HEADER_HEIGHT }))
         .w_full()
@@ -118,7 +126,7 @@ pub const RING_OFFSET: f32 = 2.0;
 
 /// The shell's keyboard ring in `theme`'s accent, clear of the control by `offset`.
 #[must_use]
-pub fn ring(theme: &Theme, offset: f32) -> gpui::Outline {
+pub const fn ring(theme: &Theme, offset: f32) -> gpui::Outline {
     gpui::Outline { color: theme.accent, width: px(RING_WIDTH), offset: px(offset) }
 }
 
@@ -159,7 +167,7 @@ pub fn key_stop_inset<E: InteractiveElement + Styled>(el: E, theme: &Theme) -> E
 }
 
 /// Neutral navigation chip shared by the right-panel strip and PR navigation.
-pub(crate) fn tab_frame(
+pub fn tab_frame(
     id: impl Into<gpui::ElementId>,
     selected: bool,
     theme: &Theme,
@@ -183,11 +191,7 @@ pub(crate) fn tab_frame(
         .when(selected, |el| el.bg(crate::theme::selected_wash()))
 }
 
-pub(crate) fn tab(
-    id: impl Into<gpui::ElementId>,
-    selected: bool,
-    theme: &Theme,
-) -> gpui::Stateful<Div> {
+pub fn tab(id: impl Into<gpui::ElementId>, selected: bool, theme: &Theme) -> gpui::Stateful<Div> {
     tab_frame(id, selected, theme)
         .when(!selected, |el| el.hover(|style| style.bg(crate::theme::hover_wash())))
         // Pressed reads a step deeper (M22).
@@ -198,7 +202,7 @@ pub(crate) fn tab(
 // Tab are the dialog's and the page behind it never holds the keyboard under it.
 /// The keyboard of one modal dialog: its card tracks [`Self::handle`], and its owner calls
 /// [`Self::sync`] each render with whether the dialog shows.
-pub(crate) struct ModalFocus {
+pub struct ModalFocus {
     focus: gpui::FocusHandle,
     /// What had the keyboard when the dialog took it; `Some` while the dialog holds it.
     restore: Option<Option<gpui::FocusHandle>>,
@@ -210,7 +214,7 @@ impl ModalFocus {
     }
 
     /// The handle the dialog's card tracks.
-    pub(crate) fn handle(&self) -> &gpui::FocusHandle {
+    pub(crate) const fn handle(&self) -> &gpui::FocusHandle {
         &self.focus
     }
 
@@ -238,7 +242,7 @@ impl ModalFocus {
 
 /// A modal's card as a screen reader and the keyboard take it: a Dialog named `title` that
 /// tracks `focus` (its [`ModalFocus`]); Escape inside it runs `close`.
-pub(crate) fn modal_card(
+pub fn modal_card(
     card: Div,
     id: &'static str,
     focus: &gpui::FocusHandle,
@@ -257,30 +261,26 @@ pub(crate) fn modal_card(
 
 // A small control takes presses past what it draws (M25).
 /// The least a pointer's press target measures, either way.
-pub(crate) const POINTER_TARGET: f32 = 24.0;
+pub const POINTER_TARGET: f32 = 24.0;
 /// The least a finger's press target measures, either way.
-pub(crate) const TOUCH_TARGET: f32 = 44.0;
+pub const TOUCH_TARGET: f32 = 44.0;
 
 /// How far past each edge a control drawn `drawn` pt takes presses: nothing under a
 /// pointer, and on a touch screen what brings it to [`TOUCH_TARGET`] (#23). The control's hit
 /// area reaches that far, its negative margins giving it back, while what it draws stays.
-pub(crate) fn touch_reach(drawn: f32) -> f32 {
+pub fn touch_reach(drawn: f32) -> f32 {
     if crate::shell::touch_screen() { ((TOUCH_TARGET - drawn) / 2.0).max(0.0) } else { 0.0 }
 }
 
 /// A text row's height drawn `drawn` pt tall: on a touch screen at least
 /// [`TOUCH_TARGET`], a finger's row, where reaching past it would take its neighbours' presses.
-pub(crate) fn touch_row_height(drawn: f32) -> f32 {
+pub fn touch_row_height(drawn: f32) -> f32 {
     if crate::shell::touch_screen() { drawn.max(TOUCH_TARGET) } else { drawn }
 }
 
 /// [`focus_ring`] for a hit area reaching `reach` past the control it draws
 /// ([`touch_reach`]): the ring stands around the control, not around the hit area.
-pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(
-    el: E,
-    theme: &Theme,
-    reach: f32,
-) -> E {
+pub fn focus_ring_within<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
     let ring = ring(theme, RING_OFFSET - reach);
     el.focus_visible(move |style| style.outline_ring(ring))
 }
@@ -289,7 +289,7 @@ pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(
 /// [`TOUCH_TARGET`] on a touch screen) when it draws smaller, centred on it, its margins giving
 /// the extra back so the layout is the drawn size. The caller puts the drawn control in it and
 /// fades that one's hover with the target's group.
-pub(crate) fn press_target(id: impl Into<gpui::ElementId>, drawn: f32) -> gpui::Stateful<Div> {
+pub fn press_target(id: impl Into<gpui::ElementId>, drawn: f32) -> gpui::Stateful<Div> {
     let least = if crate::shell::touch_screen() { TOUCH_TARGET } else { POINTER_TARGET };
     let size = drawn.max(least);
     div()
@@ -411,7 +411,7 @@ mod tests {
     /// Focus the first stop from the keyboard, as Tab does.
     fn tab_in(cx: &mut VisualTestContext) {
         cx.simulate_keystrokes("a");
-        cx.update(|window, cx| window.focus_next(cx));
+        cx.update(Window::focus_next);
     }
 
     /// The keyboard ring is 2 px of the accent 2 px clear of the control, and drawing it moves

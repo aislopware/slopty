@@ -8,6 +8,12 @@
 //! guest's window is in front or not as the guest's other apps decide, so a session the test has
 //! open read as seen on one run and unread on the next, and a frame taken of it differed by its
 //! sidebar row.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{App, Global, Window};
 

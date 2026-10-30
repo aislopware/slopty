@@ -1,4 +1,16 @@
 //! Find in a diff, the whitespace filter and the changed files as a tree.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_value,
+    clippy::string_slice,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::ops::Range;
 
@@ -80,7 +92,7 @@ pub fn find_matches(files: &[FileDiff], query: &str) -> Vec<DiffMatch> {
 }
 
 /// The next match from `active` by `delta`, wrapping at either end; the first one when none was.
-pub fn step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
+pub const fn step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
     if count == 0 {
         return None;
     }
@@ -115,7 +127,7 @@ pub fn mark_runs(
     cuts.sort_unstable();
     cuts.dedup();
     let mut out = Vec::with_capacity(runs.len() + cuts.len());
-    let mut at = 0usize;
+    let mut at = 0_usize;
     for run in runs {
         let end = at + run.len;
         let mut start = at;
@@ -260,7 +272,7 @@ pub struct TreeRow {
 
 #[derive(Default)]
 struct Node {
-    dirs: std::collections::BTreeMap<String, Node>,
+    dirs: std::collections::BTreeMap<String, Self>,
     files: Vec<(String, usize)>,
 }
 

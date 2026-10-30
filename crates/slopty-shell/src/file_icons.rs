@@ -6,6 +6,16 @@
 //! syntax-language or MIME hint, and finally the generic file/folder icon. The
 //! authored SVG colors are preserved in light mode; dark mode lifts the
 //! palette's darker accents without replacing polychrome artwork with a tint.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::expect_used,
+    clippy::return_self_not_must_use,
+    clippy::same_name_method,
+    clippy::string_slice,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -101,7 +111,7 @@ pub struct FileIconIdentity<'a> {
 }
 
 impl<'a> FileIconIdentity<'a> {
-    pub fn file(path: &'a str) -> Self {
+    pub const fn file(path: &'a str) -> Self {
         Self {
             kind: FileIconKind::File,
             name: path,
@@ -111,7 +121,7 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
-    pub fn directory(path: &'a str, expanded: bool) -> Self {
+    pub const fn directory(path: &'a str, expanded: bool) -> Self {
         Self {
             kind: FileIconKind::Directory,
             name: path,
@@ -121,7 +131,7 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
-    pub fn symlink(path: &'a str) -> Self {
+    pub const fn symlink(path: &'a str) -> Self {
         Self {
             kind: FileIconKind::Symlink,
             name: path,
@@ -131,12 +141,12 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
-    pub fn with_language(mut self, language: LanguageId) -> Self {
+    pub const fn with_language(mut self, language: LanguageId) -> Self {
         self.language = Some(language);
         self
     }
 
-    pub fn with_mime_type(mut self, mime_type: &'a str) -> Self {
+    pub const fn with_mime_type(mut self, mime_type: &'a str) -> Self {
         self.mime_type = Some(mime_type);
         self
     }

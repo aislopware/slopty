@@ -1,5 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Dropdown placement within a dialog, measured after layout.
+#![allow(
+    clippy::manual_clamp,
+    clippy::renamed_function_params,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -10,14 +15,14 @@ use gpui::{
 /// Which trigger edge the menu lines up with: `End` grows leftward from the
 /// trigger's right edge, `Start` rightward from its left edge.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum MenuAlign {
+pub enum MenuAlign {
     Start,
     End,
 }
 
 /// Mount from a relative trigger. The menu uses the available side of the
 /// trigger instead of sliding over it when it approaches the dialog edge.
-pub(crate) fn contained_menu(
+pub fn contained_menu(
     id: SharedString,
     content: gpui::Div,
     closing: Option<super::Closing>,
@@ -142,7 +147,7 @@ impl Element for ContainedMenu {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut LayoutId,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -187,8 +192,8 @@ mod tests {
         background: gpui::ScrollHandle,
     }
 
-    impl gpui::Render for MenuFixture {
-        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    impl Render for MenuFixture {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = crate::theme::Theme::of(cx);
             div()
                 .size_full()
@@ -214,7 +219,7 @@ mod tests {
                             super::super::popover_card(theme).w(px(260.0)).flex().flex_col().child(
                                 crate::settings::widgets::dropdown_rows(
                                     "fixture-rows",
-                                    (0..30usize).map(|ix| {
+                                    (0..30_usize).map(|ix| {
                                         div()
                                             .id(("contained-row", ix))
                                             .when(ix == 10, |row| {

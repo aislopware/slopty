@@ -1,4 +1,17 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assertions_on_result_states,
+    clippy::clone_on_ref_ptr,
+    clippy::or_fun_call,
+    clippy::significant_drop_in_scrutinee,
+    clippy::significant_drop_tightening,
+    clippy::unreachable,
+    reason = "shell lint migration: slice C"
+)]
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -28,7 +41,7 @@ pub struct FilesRequestContext {
 impl FilesRequestContext {
     pub fn for_chat(state: &AppState, chat_id: &str) -> Option<Self> {
         let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
-        let cwd = chat.cwd.clone().or_else(|| chat.space_id.is_none().then(|| "~".to_string()))?;
+        let cwd = chat.cwd.clone().or_else(|| chat.space_id.is_none().then(|| "~".to_owned()))?;
         let target_device_id = (state.local_device_id.as_deref() != Some(&chat.device_id))
             .then(|| chat.device_id.clone());
         Some(Self {
@@ -62,7 +75,7 @@ pub enum FilesClientError {
 }
 
 impl FilesClientError {
-    pub fn retryable(&self) -> bool {
+    pub const fn retryable(&self) -> bool {
         matches!(self, Self::Transport(_))
     }
 }
@@ -125,7 +138,7 @@ impl WorkspaceFilesClient {
     }
 
     /// The workspace every request of this client addresses.
-    pub fn target(&self) -> &WorkspaceTarget {
+    pub const fn target(&self) -> &WorkspaceTarget {
         &self.context.target
     }
 
@@ -294,7 +307,7 @@ impl WorkspaceFilesClient {
         self.call(methods::DELETE_WORKSPACE_ENTRY, &request).await
     }
 
-    pub async fn watch(&self) -> Result<mpsc::Receiver<serde_json::Value>, FilesClientError> {
+    pub async fn watch(&self) -> Result<mpsc::Receiver<Value>, FilesClientError> {
         let request = WatchWorkspaceFilesRequest { target: self.context.target.clone() };
         let params = request_params(&request, self.context.target_device_id.as_deref())?;
         self.transport.subscribe(methods::WATCH_WORKSPACE_FILES, params).await.map_err(Into::into)
@@ -334,7 +347,8 @@ pub fn request_params<Request: Serialize>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+
+    use parking_lot::Mutex;
 
     use super::*;
 
@@ -349,8 +363,8 @@ mod tests {
     #[async_trait]
     impl WorkspaceFilesTransport for DeterministicTransport {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-            self.calls.lock().unwrap().push((method.into(), params));
-            if let Some(response) = self.scripted_responses.lock().unwrap().pop_front() {
+            self.calls.lock().push((method.into(), params));
+            if let Some(response) = self.scripted_responses.lock().pop_front() {
                 return response;
             }
             Ok(self.responses.get(method).cloned().unwrap())
@@ -361,7 +375,7 @@ mod tests {
             method: &str,
             params: Value,
         ) -> Result<mpsc::Receiver<Value>, RpcError> {
-            self.calls.lock().unwrap().push((method.into(), params));
+            self.calls.lock().push((method.into(), params));
             let (sender, receiver) = mpsc::channel(self.watch_values.len().max(1));
             for value in &self.watch_values {
                 sender.try_send(value.clone()).unwrap();
@@ -410,7 +424,7 @@ mod tests {
             })
             .await;
         assert!(result.is_err());
-        let calls = transport.calls.lock().unwrap();
+        let calls = transport.calls.lock();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, methods::MOVE_WORKSPACE_ENTRY);
         assert_eq!(calls[0].1["targetDeviceId"], "host");
@@ -439,7 +453,7 @@ mod tests {
                 .list_directory_snapshot(
                     ListWorkspaceDirectoryRequest {
                         target: target(),
-                        directory: "".into(),
+                        directory: String::new(),
                         include_ignored: true,
                         cursor: None,
                     },
@@ -449,7 +463,7 @@ mod tests {
                 .unwrap();
             assert_eq!(page.entries.len(), if refresh { 2 } else { 1 });
             assert_eq!(page.next_cursor.is_none(), refresh);
-            let calls = transport.calls.lock().unwrap();
+            let calls = transport.calls.lock();
             assert_eq!(calls.len(), if refresh { 2 } else { 1 });
             if refresh {
                 assert_eq!(calls[1].1["cursor"], "next");
@@ -481,7 +495,7 @@ mod tests {
                 .list_directory_snapshot(
                     ListWorkspaceDirectoryRequest {
                         target: target(),
-                        directory: "".into(),
+                        directory: String::new(),
                         include_ignored: false,
                         cursor: None,
                     },
@@ -490,7 +504,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(page.next_cursor.is_none(), missing);
-            assert_eq!(transport.calls.lock().unwrap().len(), if missing { 2 } else { 1 });
+            assert_eq!(transport.calls.lock().len(), if missing { 2 } else { 1 });
         }
     }
 
@@ -519,7 +533,7 @@ mod tests {
                     .list_directory_snapshot(
                         ListWorkspaceDirectoryRequest {
                             target: target(),
-                            directory: "".into(),
+                            directory: String::new(),
                             include_ignored: false,
                             cursor: None,
                         },
@@ -711,7 +725,7 @@ mod tests {
             WriteWorkspaceFileOutcome::Written { file } if file.content_hash == "hash-2"
         ));
         assert_eq!(watch.recv().await.unwrap()["sequence"], 1);
-        let calls = transport.calls.lock().unwrap();
+        let calls = transport.calls.lock();
         assert_eq!(calls.len(), 5);
         assert!(calls.iter().all(|(_, params)| {
             params["chatId"] == "chat-1" && params["targetDeviceId"] == "remote-device"
@@ -759,7 +773,7 @@ mod tests {
                 ..
             } if hash == "disk-hash"
         ));
-        let calls = transport.calls.lock().unwrap();
+        let calls = transport.calls.lock();
         assert_eq!(calls[0].1["expectedContentHash"], "hash");
         assert_eq!(calls[0].1["encoding"], "utf8");
         assert_eq!(calls[0].1["lineEnding"], "lf");
@@ -773,8 +787,8 @@ mod tests {
     impl WorkspaceFilesTransport for ImageTransport {
         async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
             assert_eq!(method, methods::READ_WORKSPACE_IMAGE);
-            self.calls.lock().unwrap().push(params);
-            self.responses.lock().unwrap().pop_front().expect("unexpected extra request")
+            self.calls.lock().push(params);
+            self.responses.lock().pop_front().expect("unexpected extra request")
         }
 
         async fn subscribe(&self, _: &str, _: Value) -> Result<mpsc::Receiver<Value>, RpcError> {
@@ -820,7 +834,7 @@ mod tests {
             client.read_image("docs/image.png".into(), "checkout".into()).await.unwrap(),
             ("image/png".into(), b"abcd".to_vec())
         );
-        let calls = transport.calls.lock().unwrap();
+        let calls = transport.calls.lock();
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0]["targetDeviceId"], "remote");
         assert_eq!(calls[0]["path"], "docs/image.png");
@@ -875,6 +889,6 @@ mod tests {
         assert!(client.read_image("a.png".into(), "checkout".into()).await.is_err());
         let (client, transport) = image_client(Vec::new());
         assert!(client.read_image("a.png".into(), String::new()).await.is_err());
-        assert!(transport.calls.lock().unwrap().is_empty());
+        assert!(transport.calls.lock().is_empty());
     }
 }

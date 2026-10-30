@@ -14,19 +14,29 @@
 //! before the container scrolls again; a delta larger than the band collapses
 //! it and reaches the container whole.
 //!
-//! GPUI maps NSEvent `phase` but not `momentumPhase`, so inertia is inferred:
+//! GPUI maps `NSEvent` `phase` but not `momentumPhase`, so inertia is inferred:
 //! the phase-less `Moved` events that follow `Ended` without a pause are the
 //! fling's momentum. A fling that reaches an end bounces once (an impulse
 //! sized from its velocity); the rest of it is clamped as usual. Phase-less
 //! streams that follow no touch (precise mouse wheels, synthetic input) are
 //! not momentum and never bounce. A touch that never scrolls arrives as
-//! `Started` then a zero `Moved` (NSEventPhaseCancelled is unmapped) and is
+//! `Started` then a zero `Moved` (`NSEventPhaseCancelled` is unmapped) and is
 //! treated as a cancel.
 //!
 //! Trackpad only (`ScrollDelta::Pixels`), vertical only, macOS only (other
 //! platforms don't deliver reliable touch phases), and off under reduced
 //! motion or while a drag is active (drag code maps the pointer through the
 //! container's unshifted bounds).
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::expect_used,
+    clippy::manual_midpoint,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -38,7 +48,7 @@ use gpui::{
     ScrollDelta, ScrollEvent, ScrollHandle, TouchPhase, Window, point, px,
 };
 
-/// Apple's UIScrollView coefficient: travel `x` past the end of a `d`-tall
+/// Apple's `UIScrollView` coefficient: travel `x` past the end of a `d`-tall
 /// viewport shows as `(1 - 1 / (x * c / d + 1)) * d`.
 const RUBBER_BAND_COEFFICIENT: f32 = 0.55;
 /// Angular frequency (1/s) of the critically damped return; settles in ~0.45s.
@@ -428,7 +438,7 @@ impl Element for Overscroll {
             self.child.paint(window, cx);
         } else {
             window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                self.child.paint(window, cx)
+                self.child.paint(window, cx);
             });
         }
     }
@@ -445,7 +455,7 @@ impl IntoElement for Overscroll {
 #[cfg(test)]
 mod tests {
     use gpui::prelude::*;
-    use gpui::{Context, Modifiers, Render, Styled, canvas, div};
+    use gpui::{Context, Modifiers, Render, canvas, div};
 
     use super::*;
 
@@ -631,7 +641,7 @@ mod tests {
                         .child(
                             canvas(
                                 |_, _, _| (),
-                                move |bounds, _, _, _| *top.borrow_mut() = f32::from(bounds.top()),
+                                move |bounds, (), _, _| *top.borrow_mut() = f32::from(bounds.top()),
                             )
                             .w_full()
                             .h(px(1000.0)),

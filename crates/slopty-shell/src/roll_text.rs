@@ -15,6 +15,17 @@
 //! only exists for the ~0.7s a roll takes. Glyphs are painted from the shaped
 //! lines themselves, so kerning matches the plain label and the hand-off at
 //! the end is invisible.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_value,
+    clippy::renamed_function_params,
+    clippy::string_slice,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -277,7 +288,7 @@ impl Element for RollText {
         // Glyphs of one line with their x extents and role.
         let glyphs = |line: &ShapedLine| {
             let mut out = Vec::new();
-            for run in line.runs.iter() {
+            for run in &line.runs {
                 for glyph in &run.glyphs {
                     out.push((
                         run.font_id,

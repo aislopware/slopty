@@ -8,6 +8,7 @@
 //! the blur — washes, dividers, and borders intermittently got snapshotted and
 //! blurred away (user reports). Inside one layer the blur/content relationship
 //! is structural: blur first, then shadow, tint, border, rows, text.
+#![allow(missing_debug_implementations, missing_docs, reason = "shell lint migration: slice D")]
 
 use gpui::{
     AnyElement, App, Bounds, Corners, Element, GlobalElementId, InspectorElementId, IntoElement,

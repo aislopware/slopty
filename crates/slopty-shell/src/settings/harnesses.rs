@@ -12,12 +12,29 @@
 //! for it to appear here and in the composer. A harness whose CLI is missing
 //! on the target device renders dimmed with an install hint and is never
 //! enabled (enabling an agent that can't run would only manufacture
-//! NotInstalled errors at send time); an ENABLED agent can always be turned
+//! `NotInstalled` errors at send time); an ENABLED agent can always be turned
 //! OFF except the last one standing — the composer needs something to run.
 //! Catalogs from engines predating the detection model can still stamp
 //! enabled-but-uninstalled rows; the hint covers that too. The engine
 //! enforces the same gates where the state lives, so a raced or stale toggle
 //! self-corrects from the RPC reply.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    trivial_casts,
+    clippy::arithmetic_side_effects,
+    clippy::default_trait_access,
+    clippy::empty_line_after_doc_comments,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::ref_option,
+    clippy::single_match_else,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, IntoElement, Render, SharedString, Task, Window, div, px};
@@ -391,7 +408,7 @@ impl HarnessesPage {
         let watch = crate::live::watch(
             &id,
             Box::new(move |cx| {
-                let _ = page.update(cx, |page, cx| page.follow_install(cx));
+                let _ = page.update(cx, Self::follow_install);
             }),
             cx,
         );
@@ -638,7 +655,7 @@ impl HarnessesPage {
         .into_any_element()
     }
 
-    fn rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+    fn rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = Theme::of(cx).for_settings_surface();
         let Loadable::Ready(list) = &self.harnesses else {
             return Vec::new();
@@ -682,7 +699,7 @@ impl HarnessesPage {
                     }))
                 });
 
-                let mut meta: Vec<gpui::AnyElement> = Vec::new();
+                let mut meta: Vec<AnyElement> = Vec::new();
                 // Installing REPLACES the not-installed hint in place, so the
                 // row's text never shifts while the install runs.
 
@@ -789,7 +806,7 @@ impl HarnessesPage {
                                             .when(self.installing.is_none(), |el| {
                                                 el.on_click(cx.listener(move |this, _, _, cx| {
                                                     cx.stop_propagation();
-                                                    this.install(harness, cx)
+                                                    this.install(harness, cx);
                                                 }))
                                             })
                                             .child("Install"),
@@ -808,7 +825,7 @@ impl HarnessesPage {
                                         ))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             cx.stop_propagation();
-                                            this.cancel_install(cx)
+                                            this.cancel_install(cx);
                                         }))
                                         .child("Cancel"),
                                 )
@@ -889,7 +906,7 @@ impl Render for HarnessesPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).for_settings_surface();
 
-        let body: gpui::AnyElement = match &self.harnesses {
+        let body: AnyElement = match &self.harnesses {
             Loadable::Idle | Loadable::Loading => widgets::section_card(&theme)
                 .p(px(16.0))
                 .child(popover::skeleton_rows("harnesses-skeleton", &theme, 4, cx.entity_id(), cx))
@@ -972,7 +989,8 @@ mod tests {
         assert_eq!(AUTONOMY[AUTONOMY_FULL].1, "Bypass permissions");
         assert!(AUTONOMY[AUTONOMY_FULL].2.starts_with("Asks nothing"));
         assert_eq!(
-            crate::settings::widgets::Standing::of(true, true).map(|s| s.words()),
+            crate::settings::widgets::Standing::of(true, true)
+                .map(super::super::widgets::Standing::words),
             Some("Default · Recommended")
         );
     }
@@ -1032,10 +1050,11 @@ mod row_tests {
 mod install_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
 
     use gpui::AppContext as _;
+    use parking_lot::Mutex;
     use slopty_view_proto::HarnessId;
     use slopty_view_rpc::{RpcError, RpcReply, methods};
 
@@ -1057,7 +1076,7 @@ mod install_tests {
             method: &str,
             params: serde_json::Value,
         ) -> Result<RpcReply, RpcError> {
-            self.asked.lock().unwrap().push((method.to_owned(), params.clone()));
+            self.asked.lock().push((method.to_owned(), params));
             let answer = match method {
                 methods::LIST_HARNESSES => serde_json::json!([{
                     "id": "codex", "name": "Codex", "supportsSteering": true,
@@ -1173,7 +1192,7 @@ mod install_tests {
         settle(cx, &|page| page.installing.is_none());
         page.update(cx, |page, cx| {
             let said = page.error.clone().or_else(|| {
-                crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).last()
+                crate::toast::shown(cx).into_iter().map(|(_, text)| text.to_string()).next_back()
             });
             let said = said.unwrap_or_default();
             assert!(said.contains("Couldn't install") && said.contains("out of reach"), "{said}");
@@ -1187,14 +1206,8 @@ mod install_tests {
         let terminal = cx.debug_bounds("harness-install-terminal").expect("the installer shows");
         assert!(f32::from(terminal.size.height) >= super::INSTALL_TERMINAL_HEIGHT - 1.0);
         assert!(cx.debug_bounds("harness-install-ended").is_none(), "still running");
-        let install = machine
-            .asked
-            .lock()
-            .unwrap()
-            .iter()
-            .rev()
-            .find(|(m, _)| m == methods::INSTALL_HARNESS)
-            .cloned();
+        let install =
+            machine.asked.lock().iter().rev().find(|(m, _)| m == methods::INSTALL_HARNESS).cloned();
         assert_eq!(install.map(|(_, params)| params["harness"].clone()), Some("codex".into()));
 
         // Ended: its worker sees Codex a beat later, and the row lists it installed.
@@ -1210,12 +1223,11 @@ mod install_tests {
         assert!(cx.debug_bounds("harness-install-ended").is_some(), "the end is said");
 
         // Close: the terminal ends on its machine and the row lets it go.
-        page.update(cx, |page, cx| page.cancel_install(cx));
+        page.update(cx, HarnessesPage::cancel_install);
         let closed = || {
             machine
                 .asked
                 .lock()
-                .unwrap()
                 .iter()
                 .any(|(m, params)| m == methods::CLOSE_TERMINAL && params["terminalId"] == "7")
         };
@@ -1262,7 +1274,7 @@ fn install_visibility_and_hint_follow_target_capabilities() {
 fn install_phase_copy_and_cancel_target_match_install() {
     assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
     assert_eq!(install_label("Pi"), "Installing Pi…");
-    for target in [None, Some("remote-device".to_string())] {
+    for target in [None, Some("remote-device".to_owned())] {
         let params = install_params(HarnessId::PI, &target);
         assert_eq!(params["harness"], "pi");
         assert_eq!(params["targetDeviceId"], serde_json::to_value(&target).unwrap());

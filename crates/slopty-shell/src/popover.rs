@@ -11,6 +11,26 @@
 //! Pure logic (wrap-around list navigation, ranked substring filtering, key
 //! classification) lives in free functions with unit tests; the elements only
 //! feed them measurements/events.
+#![allow(
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::float_cmp,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 mod contained;
 mod hover_intent;
@@ -33,7 +53,7 @@ use crate::theme::{Theme, hairline, ink};
 
 /// One async-loaded slot: `Idle` (never requested) → `Loading` (skeletons) →
 /// `Ready` / `Error` (inline message + Retry).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Loadable<T> {
     #[default]
     Idle,
@@ -43,20 +63,20 @@ pub enum Loadable<T> {
 }
 
 impl<T> Loadable<T> {
-    pub fn ready(&self) -> Option<&T> {
+    pub const fn ready(&self) -> Option<&T> {
         match self {
-            Loadable::Ready(value) => Some(value),
+            Self::Ready(value) => Some(value),
             _ => None,
         }
     }
 
-    pub fn is_loading(&self) -> bool {
-        matches!(self, Loadable::Loading)
+    pub const fn is_loading(&self) -> bool {
+        matches!(self, Self::Loading)
     }
 
     pub fn error(&self) -> Option<&str> {
         match self {
-            Loadable::Error(message) => Some(message),
+            Self::Error(message) => Some(message),
             _ => None,
         }
     }
@@ -76,7 +96,7 @@ impl<T> Loadable<T> {
 pub struct Popup<T> {
     /// `Some((state, closing_since))` while mounted; `closing_since` is the
     /// exit-phase start.
-    inner: Option<(T, Option<std::time::Instant>)>,
+    inner: Option<(T, Option<Instant>)>,
     /// Whether the popup was still mounted when the current trigger press
     /// began — see [`Self::note_trigger_press`].
     pressed_while_open: bool,
@@ -103,7 +123,7 @@ impl<T> Popup<T> {
         &mut self,
         value: T,
         menu_focus: &gpui::FocusHandle,
-        window: &gpui::Window,
+        window: &Window,
         cx: &gpui::App,
     ) {
         self.open(value);
@@ -114,17 +134,17 @@ impl<T> Popup<T> {
     }
 
     /// Open and interactive (not closing).
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         matches!(self.inner, Some((_, None)))
     }
 
-    pub fn is_closing(&self) -> bool {
+    pub const fn is_closing(&self) -> bool {
         matches!(self.inner, Some((_, Some(_))))
     }
 
     /// The exit phase at `now`, the moment of the frame drawing it — what the render path
     /// hands to the popover wrappers, which derive the eased exit progress from it.
-    pub fn closing_at(&self, now: std::time::Instant) -> Option<Closing> {
+    pub const fn closing_at(&self, now: Instant) -> Option<Closing> {
         match &self.inner {
             Some((_, Some(since))) => Some(Closing { since: *since, now }),
             _ => None,
@@ -139,14 +159,14 @@ impl<T> Popup<T> {
 
     /// The state only while genuinely open — `None` during the exit phase, so
     /// event handlers on a dying popup fall through.
-    pub fn as_open(&self) -> Option<&T> {
+    pub const fn as_open(&self) -> Option<&T> {
         match &self.inner {
             Some((value, None)) => Some(value),
             _ => None,
         }
     }
 
-    pub fn open_mut(&mut self) -> Option<&mut T> {
+    pub const fn open_mut(&mut self) -> Option<&mut T> {
         match &mut self.inner {
             Some((value, None)) => Some(value),
             _ => None,
@@ -156,7 +176,7 @@ impl<T> Popup<T> {
     /// Enter the exit phase. Returns `true` when this call started it (the
     /// caller then schedules [`reap_popup`]); `false` if already closing or
     /// closed.
-    pub fn begin_close(&mut self, now: std::time::Instant) -> bool {
+    pub fn begin_close(&mut self, now: Instant) -> bool {
         match &mut self.inner {
             Some((_, closing @ None)) => {
                 *closing = Some(now);
@@ -200,7 +220,7 @@ impl<T> Popup<T> {
     /// Drop the state if the exit phase has run its course. A popup reopened
     /// (or re-closed) since the matching [`begin_close`] is left alone — the
     /// newer phase's own reap handles it.
-    pub fn finish_close(&mut self, now: std::time::Instant) {
+    pub fn finish_close(&mut self, now: Instant) {
         if let Some((_, Some(since))) = &self.inner
             && now.saturating_duration_since(*since)
                 >= motion::MENU_OUT.total().mul_f32(motion::speed_scale())
@@ -224,7 +244,7 @@ pub fn give_focus_back(before: gpui::FocusHandle, menu: gpui::FocusHandle) {
 
 /// Give the keyboard back to where it was before a menu that just closed took it, when
 /// it is still on the menu or nowhere: what the window's root calls as it renders (M21).
-pub fn return_focus(window: &mut gpui::Window, cx: &mut gpui::App) {
+pub fn return_focus(window: &mut Window, cx: &mut gpui::App) {
     let Some((before, menu)) = RETURN_FOCUS.with_borrow_mut(Option::take) else {
         return;
     };
@@ -248,7 +268,7 @@ pub fn reap_popup<V: 'static, T: 'static>(
                 motion::MENU_OUT
                     .total()
                     .mul_f32(motion::speed_scale())
-                    .saturating_add(std::time::Duration::from_millis(20)),
+                    .saturating_add(Duration::from_millis(20)),
             )
             .await;
         view.update(cx, |view, cx| {
@@ -266,7 +286,7 @@ pub fn reap_popup<V: 'static, T: 'static>(
 
 /// Step the active row of a menu: wraps at both ends; `None` enters at the
 /// edge matching the direction. Empty menus stay `None`.
-pub fn menu_step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
+pub const fn menu_step(active: Option<usize>, count: usize, delta: isize) -> Option<usize> {
     if count == 0 {
         return None;
     }
@@ -375,7 +395,7 @@ pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
     }
 }
 
-pub fn popover_card(theme: &Theme) -> gpui::Div {
+pub fn popover_card(theme: &Theme) -> Div {
     div()
         .rounded(px(CARD_RADIUS))
         // Amp's floating elevation: a ring inside the edge, and the long soft shadows
@@ -391,7 +411,7 @@ pub fn popover_card(theme: &Theme) -> gpui::Div {
 
 /// [`popover_card`] without the shared inset — for popovers that manage their
 /// own internal panes (the harness/model picker's rail + list split).
-pub fn popover_card_flush(theme: &Theme) -> gpui::Div {
+pub fn popover_card_flush(theme: &Theme) -> Div {
     popover_card(theme).p(px(0.0))
 }
 
@@ -498,8 +518,8 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
 /// ([`Popup::closing_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Closing {
-    since: std::time::Instant,
-    now: std::time::Instant,
+    since: Instant,
+    now: Instant,
 }
 
 /// Eased exit progress (0..=1) for a [`Popup`] closing, at the moment of the
@@ -526,8 +546,8 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
     // on it too. The following click can reach that content normally.
     let guard = gpui::canvas(
         |_, _, _| (),
-        |bounds, _, window, _| {
-            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, _, cx| {
+        |bounds, (), window, _| {
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Bubble && !bounds.contains(&event.position) {
                     cx.stop_propagation();
                 }
@@ -551,18 +571,13 @@ fn frosted_menu(exit: Option<f32>, content: AnyElement) -> AnyElement {
 /// an occluding overlay on top — the dying menu's rows must not take clicks,
 /// and the overlay also keeps stray clicks from reaching whatever sits
 /// underneath.
-fn menu_motion(id: SharedString, exit: Option<f32>, inner: gpui::Div) -> AnyElement {
+fn menu_motion(id: SharedString, exit: Option<f32>, inner: Div) -> AnyElement {
     menu_motion_from(id, exit, inner, -2.0)
 }
 
 /// [`menu_motion`] with the entrance travelling `from` px (signed) out of
 /// the trigger's side, and the exit retreating back toward it.
-fn menu_motion_from(
-    id: SharedString,
-    exit: Option<f32>,
-    inner: gpui::Div,
-    from: f32,
-) -> AnyElement {
+fn menu_motion_from(id: SharedString, exit: Option<f32>, inner: Div, from: f32) -> AnyElement {
     if let Some(t) = exit {
         // A closing menu asks its view for every frame until its popup is reaped
         // (`reap_popup`, a beat after the fade ends), not only for the fade's own span: a frame
@@ -818,7 +833,7 @@ pub fn full_width_menu_above(
 }
 
 /// [`anchored_menu_above`] right-aligned to the trigger's right edge (t3code
-/// ComboboxPopup `align="end"` — right-side triggers like the composer's ref
+/// `ComboboxPopup` `align="end"` — right-side triggers like the composer's ref
 /// picker open leftward instead of running off the window).
 pub fn anchored_menu_above_end(
     id: impl Into<SharedString>,
@@ -884,6 +899,7 @@ pub(crate) fn scrim_alpha(alpha_dark: f32) -> gpui::Hsla {
 }
 
 /// Full-window modal: dim scrim + centered card with the `dialog-in` entrance.
+///
 /// The scrim swallows clicks; the caller wires its own dismiss/confirm.
 /// `viewport` is the window size (an `anchored` layer sizes to its children,
 /// so the scrim needs explicit dimensions). The frost radius matches
@@ -980,7 +996,7 @@ fn modal_with(
 /// per-`fade_key` [`motion::hover_blend`]. The caller adds the id/click
 /// listener — `fade_key` must be unique app-wide and stable across frames
 /// (the id string is a good choice).
-pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> gpui::Div {
+pub fn menu_row(theme: &Theme, active: bool, fade_key: impl Into<SharedString>) -> Div {
     let row = div()
         .flex()
         .flex_row()
@@ -1018,7 +1034,7 @@ pub fn menu_row_nav(
     selected: bool,
     highlighted: bool,
     fade_key: impl Into<SharedString>,
-) -> gpui::Div {
+) -> Div {
     let row = menu_row(theme, selected, fade_key);
     if !selected && highlighted {
         row.bg(crate::theme::card_selected_bg()).text_color(theme.text)
@@ -1031,7 +1047,7 @@ pub fn menu_row_nav(
 /// `MenuHeading`): `px-2 pb-1 pt-1.5 text-[10px] font-medium uppercase
 /// tracking-[0.1em] text-muted-foreground/60`, its tracking laid out exactly
 /// (`typography::tracked_caps`).
-pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
+pub fn menu_heading(theme: &Theme, label: &str) -> Div {
     let theme = &theme.for_popup();
     div()
         .px(px(8.0))
@@ -1047,7 +1063,7 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
 
 /// Hairline divider between menu sections
 /// (`mx-1 my-1 h-px bg-white/[0.07]`).
-pub fn menu_separator() -> gpui::Div {
+pub fn menu_separator() -> Div {
     // Full-bleed: negative margins cancel the card's inset so the hairline
     // runs border to border (user request).
     div().h(px(1.0)).mx(px(-CARD_INSET)).my(px(MENU_GAP)).bg(hairline(0.07))
@@ -1068,7 +1084,7 @@ pub fn band() -> gpui::Hsla {
 /// bands are supplied by callers, while this owns the glass tint, outline,
 /// radius, clipping, and shadow that make Cmd+K and its sibling flows read as
 /// one component family.
-pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::Div {
+pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> Div {
     div()
         .w(width)
         .rounded(px(corner_radius))
@@ -1083,7 +1099,7 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
 }
 
 /// A compact search glyph with the same 16px slot as palette action icons.
-pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
+pub fn palette_search_icon(theme: &Theme) -> Div {
     div().size(px(16.0)).flex_none().flex().items_center().justify_center().child(
         crate::icons::icon(crate::icons::PALETTE_SEARCH)
             .size(px(16.0))
@@ -1094,7 +1110,7 @@ pub fn palette_search_icon(theme: &Theme) -> gpui::Div {
 /// One footer key-cap (22px, rounded-5, `white/[0.05]`) holding arbitrary
 /// children — the base of [`key_hint`]/[`key_hint_pair`] and the search-bar
 /// chips ("⌘K", "esc").
-pub fn key_cap(_theme: &Theme) -> gpui::Div {
+pub fn key_cap(_theme: &Theme) -> Div {
     div()
         .h(px(22.0))
         .px(px(5.0))
@@ -1108,7 +1124,7 @@ pub fn key_cap(_theme: &Theme) -> gpui::Div {
 }
 
 /// The tiny verb after a key-cap.
-fn key_hint_label(theme: &Theme, label: &'static str) -> gpui::Div {
+fn key_hint_label(theme: &Theme, label: &'static str) -> Div {
     let theme = &theme.for_popup();
     div()
         .text_size(crate::typography::ui_rems(10.5))
@@ -1118,7 +1134,7 @@ fn key_hint_label(theme: &Theme, label: &'static str) -> gpui::Div {
 
 /// A footer legend: one icon key-cap + tiny verb (the add-space palette's
 /// footer voice, shared by the pickers).
-pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> gpui::Div {
+pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> Div {
     let theme = &theme.for_popup();
     div()
         .flex()
@@ -1134,7 +1150,7 @@ pub fn key_hint(theme: &Theme, icon_path: &'static str, label: &'static str) -> 
 
 /// A footer legend whose cap holds a WORD ("tab", "esc") instead of a glyph
 /// — for keys with no icon in the set.
-pub fn key_hint_text(theme: &Theme, cap: &'static str, label: &'static str) -> gpui::Div {
+pub fn key_hint_text(theme: &Theme, cap: &'static str, label: &'static str) -> Div {
     let theme = &theme.for_popup();
     div()
         .flex()
@@ -1158,7 +1174,7 @@ pub fn key_hint_pair(
     first: &'static str,
     second: &'static str,
     label: &'static str,
-) -> gpui::Div {
+) -> Div {
     let theme = &theme.for_popup();
     div()
         .flex()
@@ -1181,18 +1197,14 @@ pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
 /// A menu row's fixed key, one its own handler takes rather than a binding to look up
 /// (F2 renames): the key at the row's end in [`kbd_hint`]'s voice, and the same key for
 /// assistive tech. A bound action's key is read from the keymap instead (`keys::for_action`).
-pub fn fixed_key(
-    row: gpui::Stateful<gpui::Div>,
-    theme: &Theme,
-    combo: &str,
-) -> gpui::Stateful<gpui::Div> {
+pub fn fixed_key(row: Stateful<Div>, theme: &Theme, combo: &str) -> Stateful<Div> {
     row.aria_keyshortcuts(crate::keys::aria_combo(combo))
         .child(kbd_hint(theme, &crate::keys::combo_text(combo)))
 }
 
 /// A shortcut legend (`⌘N`, `⇧⌘N`, `⌘1`): the sidebar's jump-hint voice
 /// everywhere — plain muted text at the row's subline size, no chip.
-pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
+pub fn kbd_hint(theme: &Theme, label: &str) -> Div {
     let theme = &theme.for_popup();
     div()
         .flex_none()
@@ -1200,7 +1212,7 @@ pub fn kbd_hint(theme: &Theme, label: &str) -> gpui::Div {
         .font_family(KEY_GLYPH_FONT)
         .text_size(crate::typography::ui_rems(11.0))
         .text_color(theme.text_muted.opacity(0.5))
-        .child(SharedString::from(label.to_string()))
+        .child(SharedString::from(label.to_owned()))
 }
 
 /// The search row's height, hairline included.
@@ -1210,13 +1222,13 @@ pub const SEARCH_ROW_HEIGHT: f32 = 40.0;
 /// magnifier and a borderless input over a full-bleed hairline, in the
 /// card's own tone. Mount it as the card's FIRST child — it cancels the
 /// card's inset to run edge to edge, then restores the inset above the list.
-pub fn search_input_frame(theme: &Theme, input: AnyElement) -> gpui::Div {
+pub fn search_input_frame(theme: &Theme, input: AnyElement) -> Div {
     search_row(theme).child(div().flex_1().min_w_0().child(input))
 }
 
 /// [`search_input_frame`] without the input, for rows that carry their own
 /// trailing controls. Children follow the magnifier.
-pub fn search_row(theme: &Theme) -> gpui::Div {
+pub fn search_row(theme: &Theme) -> Div {
     div()
         .flex_none()
         .h(px(SEARCH_ROW_HEIGHT))
@@ -1329,7 +1341,7 @@ pub fn picker_row(
     selected: bool,
     highlighted: bool,
     fade_key: impl Into<SharedString>,
-) -> gpui::Div {
+) -> Div {
     let row = div()
         .flex()
         .flex_row()
@@ -1355,19 +1367,19 @@ pub fn picker_row(
 
 /// A picker row's leading slot: a project's artwork, or a glyph centred in
 /// the same square, so every label starts at one edge.
-pub fn picker_icon_slot(art: AnyElement) -> gpui::Div {
+pub fn picker_icon_slot(art: AnyElement) -> Div {
     div().size(px(16.0)).flex_none().flex().items_center().justify_center().child(art)
 }
 
 /// A full-bleed hairline between a picker's list and its pinned action rows.
-pub fn picker_divider() -> gpui::Div {
+pub fn picker_divider() -> Div {
     div().flex_none().h(px(1.0)).my(px(2.0)).mx(px(-CARD_INSET)).bg(hairline(0.08))
 }
 
 /// A bordered trailing menu section (a picker's action group: `mt-1 flex flex-col gap-0.5 border-t
 /// border-white/[0.06] pt-1` — the hairline runs edge-to-edge of the card's
 /// p-1 inset, unlike [`menu_separator`]'s mx-1).
-pub fn menu_section() -> gpui::Div {
+pub fn menu_section() -> Div {
     div()
         .mt(px(4.0))
         .pt(px(4.0))
@@ -1384,7 +1396,7 @@ pub fn menu_section() -> gpui::Div {
 
 /// Centered dialog with the shared popover surface. A filled drop shadow
 /// would show through the translucent card, so only opaque cards use it.
-pub fn dialog_card(theme: &Theme) -> gpui::Div {
+pub fn dialog_card(theme: &Theme) -> Div {
     div()
         .w(px(360.0))
         .p(px(20.0))
@@ -1399,17 +1411,17 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
 }
 
 /// Dialog title: `text-[15px] font-medium tracking-tight`.
-pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
+pub fn dialog_title(theme: &Theme, title: &str) -> Div {
     div()
         .text_size(crate::typography::ui_rems(15.0))
         // Medium, as every other title in the app is.
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
-        .child(SharedString::from(title.to_string()))
+        .child(SharedString::from(title.to_owned()))
 }
 
 /// Dialog body copy: `text-[13px] leading-relaxed text-muted-foreground`.
-pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
+pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> Div {
     div()
         .text_size(crate::typography::ui_rems(13.0))
         .line_height(px(19.0))
@@ -1419,7 +1431,7 @@ pub fn dialog_body(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div {
 
 /// Dialog text-field frame: `rounded-lg border border-white/[0.08]
 /// bg-white/[0.04] px-3 py-2 text-[14px]`.
-pub fn dialog_field(input: AnyElement) -> gpui::Div {
+pub fn dialog_field(input: AnyElement) -> Div {
     div()
         .w_full()
         .px(px(12.0))
@@ -1435,7 +1447,7 @@ pub fn dialog_field(input: AnyElement) -> gpui::Div {
 /// Ghost button (`btnGhost`): quiet text, hover wash fading over
 /// `transition-colors`. Caller adds id + click; `fade_key`
 /// as in [`menu_row`].
-pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) -> gpui::Div {
+pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) -> Div {
     let fade_key = fade_key.into();
     let mut btn = div()
         .px(px(12.0))
@@ -1445,7 +1457,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
         .text_color(motion::hover_blend(&fade_key, theme.text_muted, theme.text))
         .bg(motion::hover_blend(&fade_key, crate::theme::wash(0.0), ink(0.06)))
         .cursor_pointer()
-        .child(SharedString::from(label.to_string()));
+        .child(SharedString::from(label.to_owned()));
     btn.interactivity().on_hover(motion::hover_listener(fade_key.clone()));
     btn.child(motion::fade_driver(fade_key))
 }
@@ -1453,7 +1465,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
 /// Primary button (`btnPrimary`): white fill, near-black text.
 // The keyboard reaches it (Tab, then Enter or Space) and the shell's ring shows it; the
 // caller gives it the id a keyboard stop needs, and names it ([`named_button`]).
-pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
+pub fn btn_primary(theme: &Theme, label: &str) -> Div {
     let button = div()
         .px(px(12.0))
         .py(px(6.0))
@@ -1465,22 +1477,19 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
         .cursor_pointer()
         .tab_index(0)
         .hover(|s| s.opacity(0.9))
-        .child(SharedString::from(label.to_string()));
+        .child(SharedString::from(label.to_owned()));
     crate::surface_chrome::focus_ring(button, theme)
 }
 
 // A button a screen reader names by its words, which a press dims a step, as Claude
 // desktop's and T3's answer the pointer.
 /// `button` (a [`btn_primary`] with its id) as a named button that shows a press.
-pub fn named_button(
-    button: gpui::Stateful<gpui::Div>,
-    label: impl Into<SharedString>,
-) -> gpui::Stateful<gpui::Div> {
+pub fn named_button(button: Stateful<Div>, label: impl Into<SharedString>) -> Stateful<Div> {
     button.role(gpui::Role::Button).aria_label(label).active(|s| s.opacity(0.8))
 }
 
 /// Destructive button (`btnDestructive`): the muted red fill.
-pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
+pub fn btn_danger(theme: &Theme, label: &str) -> Div {
     div()
         .px(px(12.0))
         .py(px(6.0))
@@ -1491,7 +1500,7 @@ pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
         .text_color(gpui::white())
         .cursor_pointer()
         .hover(|s| s.opacity(0.9))
-        .child(SharedString::from(label.to_string()))
+        .child(SharedString::from(label.to_owned()))
 }
 
 /// Pulsing skeleton rows shown while a list loads
@@ -1570,7 +1579,7 @@ pub fn skeleton_menu_rows(
 
 /// Inline error row + Retry affordance (the caller attaches the listener to the
 /// returned id).
-pub fn error_row(theme: &Theme, message: &str) -> gpui::Div {
+pub fn error_row(theme: &Theme, message: &str) -> Div {
     div()
         .flex()
         .flex_col()
@@ -1578,7 +1587,7 @@ pub fn error_row(theme: &Theme, message: &str) -> gpui::Div {
         .p(px(Theme::SPACE_SM))
         .text_size(crate::typography::ui_rems(12.0))
         .text_color(theme.danger)
-        .child(gpui::SharedString::from(message.to_string()))
+        .child(SharedString::from(message.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,8 +1670,8 @@ pub struct MenuScrollbarDrag;
 /// Invisible drag preview: scrollbar drags manipulate the existing thumb.
 pub struct MenuScrollbarDragGhost;
 
-impl gpui::Render for MenuScrollbarDragGhost {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl gpui::IntoElement {
+impl Render for MenuScrollbarDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         gpui::Empty
     }
 }
@@ -1707,7 +1716,7 @@ impl MenuScrollbarState {
     /// Record scroll activity from the live handle. Call once per render
     /// before [`Self::metrics`]/[`Self::render_rail`]; a changed offset marks
     /// the rail as recently scrolled.
-    pub fn note_scroll(&mut self, scroll: &gpui::ScrollHandle) {
+    pub fn note_scroll(&mut self, scroll: &ScrollHandle) {
         self.note_scroll_offset(-f32::from(scroll.offset().y));
     }
 
@@ -1740,7 +1749,7 @@ impl MenuScrollbarState {
     /// Forget the baseline entirely: the next [`Self::note_scroll`] observes
     /// whatever offset the layout settled on (e.g. after `scroll_to_item`)
     /// as the fresh baseline, again without marking motion.
-    pub fn clear_scroll_baseline(&mut self) {
+    pub const fn clear_scroll_baseline(&mut self) {
         self.last_scroll_y = None;
         self.last_scroll_at = None;
         self.fade_from = None;
@@ -1760,7 +1769,7 @@ impl MenuScrollbarState {
     /// Metrics from any scroll handle's live bounds/offset — both
     /// `ScrollHandle` and a virtualized list's base handle qualify. `None`
     /// when the content fits.
-    pub fn metrics(&self, scroll: &gpui::ScrollHandle) -> Option<MenuScrollbarMetrics> {
+    pub fn metrics(&self, scroll: &ScrollHandle) -> Option<MenuScrollbarMetrics> {
         let bounds = scroll.bounds();
         // GPUI stores the maximum as a positive distance; only the live
         // scroll offset is negative while content moves upward.
@@ -1821,7 +1830,7 @@ impl MenuScrollbarState {
     }
 
     /// Whether the thumb carries the expanded/stronger treatment.
-    pub fn active(&self) -> bool {
+    pub const fn active(&self) -> bool {
         self.bar_hovered || self.grab.is_some()
     }
 
@@ -2294,7 +2303,7 @@ pub struct HorizontalScrollbarState {
 }
 
 impl HorizontalScrollbarState {
-    pub fn metrics(&self, scroll: &gpui::ScrollHandle) -> Option<HorizontalScrollbarMetrics> {
+    pub fn metrics(&self, scroll: &ScrollHandle) -> Option<HorizontalScrollbarMetrics> {
         let bounds = scroll.bounds();
         let max_scroll = f32::from(scroll.max_offset().x).max(0.0);
         let current_scroll = (-f32::from(scroll.offset().x)).clamp(0.0, max_scroll);
@@ -2305,15 +2314,15 @@ impl HorizontalScrollbarState {
         )
     }
 
-    pub fn visible(&self) -> bool {
+    pub const fn visible(&self) -> bool {
         self.viewport_hovered || self.grab.is_some()
     }
 
-    pub fn active(&self) -> bool {
+    pub const fn active(&self) -> bool {
         self.bar_hovered || self.grab.is_some()
     }
 
-    pub fn set_viewport_hovered(&mut self, hovered: bool) -> bool {
+    pub const fn set_viewport_hovered(&mut self, hovered: bool) -> bool {
         if self.viewport_hovered == hovered {
             return false;
         }
@@ -2324,7 +2333,7 @@ impl HorizontalScrollbarState {
         true
     }
 
-    pub fn set_bar_hovered(&mut self, hovered: bool) -> bool {
+    pub const fn set_bar_hovered(&mut self, hovered: bool) -> bool {
         let active = hovered || self.grab.is_some();
         if self.bar_hovered == active {
             return false;
@@ -2333,7 +2342,7 @@ impl HorizontalScrollbarState {
         true
     }
 
-    pub fn begin_press(&mut self, scroll: &gpui::ScrollHandle, pointer_x: Pixels) -> bool {
+    pub fn begin_press(&mut self, scroll: &ScrollHandle, pointer_x: Pixels) -> bool {
         let Some(metrics) = self.metrics(scroll) else {
             return false;
         };
@@ -2350,7 +2359,7 @@ impl HorizontalScrollbarState {
         true
     }
 
-    pub fn drag_to(&self, scroll: &gpui::ScrollHandle, pointer_x: Pixels) -> bool {
+    pub fn drag_to(&self, scroll: &ScrollHandle, pointer_x: Pixels) -> bool {
         let Some(grab_offset) = self.grab else {
             return false;
         };
@@ -2365,11 +2374,11 @@ impl HorizontalScrollbarState {
             thumb_left / metrics.travel() * metrics.max_scroll
         };
         let offset = scroll.offset();
-        scroll.set_offset(gpui::Point::new(px(-scroll_to), offset.y));
+        scroll.set_offset(Point::new(px(-scroll_to), offset.y));
         true
     }
 
-    pub fn end_press(&mut self) -> bool {
+    pub const fn end_press(&mut self) -> bool {
         self.grab = None;
         if !self.viewport_hovered && self.bar_hovered {
             self.bar_hovered = false;
@@ -2378,7 +2387,7 @@ impl HorizontalScrollbarState {
         false
     }
 
-    fn pointer_in_track(&self, scroll: &gpui::ScrollHandle, pointer_x: Pixels) -> f32 {
+    fn pointer_in_track(&self, scroll: &ScrollHandle, pointer_x: Pixels) -> f32 {
         f32::from(pointer_x - scroll.bounds().left()) - MENU_SCROLLBAR_TRACK_INSET
     }
 }
@@ -2400,11 +2409,11 @@ mod tests {
         // close on the press (either handler order) — the note still reads
         // mounted, so the click must NOT reopen.
         popup.note_trigger_press();
-        popup.begin_close(std::time::Instant::now());
+        popup.begin_close(Instant::now());
         assert!(popup.take_press_was_open());
         // Out-handler first, trigger note second: mid-exit still counts.
         popup.open(1);
-        popup.begin_close(std::time::Instant::now());
+        popup.begin_close(Instant::now());
         popup.note_trigger_press();
         assert!(popup.take_press_was_open());
 
@@ -2683,7 +2692,7 @@ pub(crate) fn search_highlight_ranges(
     // A TextRun background would be square and can disappear when clipped.
     let underlay = gpui::canvas(
         |_, _, _| (),
-        move |_, _, window, _| {
+        move |_, (), window, _| {
             for range in &badges {
                 for mut bounds in crate::markdown::render::range_rects(&layout, range, 1.0, 1.5) {
                     // Glyphs sit below the line box's optical center. Shift the

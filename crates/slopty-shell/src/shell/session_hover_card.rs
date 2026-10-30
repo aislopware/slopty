@@ -12,6 +12,14 @@
 //! The card waits out a short dwell so sweeping the pointer down the list
 //! stays quiet. Once one has shown, the card is warm: the next row's card
 //! follows the pointer at once, until it rests off the list for a moment.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 use std::time::Instant;
 
 use super::*;
@@ -176,10 +184,7 @@ impl Shell {
         let task = cx.spawn(async move |this, cx| {
             let Ok(mut updates) = engine
                 .client()
-                .subscribe(
-                    slopty_view_rpc::methods::WATCH_PREVIEWS,
-                    serde_json::json!({ "chatId": watched }),
-                )
+                .subscribe(methods::WATCH_PREVIEWS, serde_json::json!({ "chatId": watched }))
                 .await
             else {
                 return;
@@ -230,17 +235,17 @@ impl Shell {
         let theme = Theme::of(cx).for_popup();
         let now = crate::clock::utc(cx);
         // Slopty's facts of the row (`sidebar_status::chat_card`).
-        let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
+        let facts = sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
         let (title, project, local, online, turned_away, branch) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
             let space = state.space_for_chat(chat);
             let project = space.map(|space| SharedString::from(space.display_name().to_owned()));
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
-            let online = !super::sidebar_status::out_of_reach(state, &chat.device_id, now);
-            let turned_away = super::sidebar_status::turned_away(state, &chat.device_id).is_some();
-            let branch = super::sidebar_status::branch_of(chat)
-                .map(|branch| SharedString::from(branch.to_owned()));
+            let online = !sidebar_status::out_of_reach(state, &chat.device_id, now);
+            let turned_away = sidebar_status::turned_away(state, &chat.device_id).is_some();
+            let branch =
+                sidebar_status::branch_of(chat).map(|branch| SharedString::from(branch.to_owned()));
             let title = SharedString::from(
                 chat.title
                     .as_deref()
@@ -362,7 +367,7 @@ impl Shell {
         // row wears for it (`marks`): the row has room for the glyph alone.
         let need = facts.need.clone().map(|need| {
             let words = need.words.clone();
-            let mark = super::marks::Mark::NeedsYou(need);
+            let mark = marks::Mark::NeedsYou(need);
             div()
                 .debug_selector({
                     let chat_id = chat_id.to_owned();
@@ -380,11 +385,11 @@ impl Shell {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .children(super::marks::mark_element(
+                        .children(marks::mark_element(
                             SharedString::from(format!("session-hover-card-mark-{chat_id}")),
                             format!("session-hover-card-mark-{chat_id}"),
                             &mark,
-                            crate::loaders::status_mark::MARK_SMALL,
+                            loaders::status_mark::MARK_SMALL,
                             popover::surface_bg(&theme),
                         )),
                 )
@@ -433,7 +438,7 @@ impl Shell {
         let card = div()
             .id(SharedString::from(format!("session-hover-card-body-{chat_id}")))
             .role(gpui::Role::Tooltip) // read as the row's tooltip
-            .aria_label(title.clone())
+            .aria_label(title)
             .aria_value(spoken)
             .w(px(CARD_WIDTH))
             .p(px(CARD_PAD))
@@ -445,7 +450,7 @@ impl Shell {
             .border_1()
             .border_color(theme.border)
             .bg(popover::surface_bg(&theme))
-            .when(!theme.is_frost(), |card| card.shadow_lg())
+            .when(!theme.is_frost(), Styled::shadow_lg)
             .child(header)
             .children(need)
             .children(last)
@@ -488,7 +493,7 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext};
 
     use super::*;
 
@@ -524,7 +529,7 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir, cx);
+            settings::init(UiSettings::default(), dir, cx);
             motion::set_reduced_motion(cx, true);
         });
     }
@@ -627,7 +632,7 @@ mod tests {
         cx.simulate_mouse_move(row, None, gpui::Modifiers::default());
         redraw(cx);
         shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.session_hover_card.target(), Some("hover-test"))
+            assert_eq!(shell.session_hover_card.target(), Some("hover-test"));
         });
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -661,13 +666,13 @@ mod tests {
                 wait_for_card(cx);
             }
             shell.read_with(cx, |shell, _| {
-                assert_eq!(shell.session_hover_card.shown().is_some(), shown)
+                assert_eq!(shell.session_hover_card.shown().is_some(), shown);
             });
             shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::Appearance, cx));
             redraw(cx);
             wait_for_card(cx);
             shell.read_with(cx, |shell, _| assert_eq!(shell.session_hover_card.target(), None));
-            shell.update(cx, |shell, cx| shell.close_settings(cx));
+            shell.update(cx, Shell::close_settings);
             redraw(cx);
             assert!(cx.debug_bounds("session-hover-card-hover-test").is_none());
         }

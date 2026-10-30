@@ -5,6 +5,15 @@
 //! "page 1 of N"; the pane shows every page. A table shows its first rows in the card in the
 //! markdown table's chrome (hairlines between rows, the header at weight 700), and every row in
 //! the pane. Both are a11y nodes of their own: an image per page, a table of rows and cells.
+#![allow(
+    missing_debug_implementations,
+    clippy::clone_on_ref_ptr,
+    clippy::format_push_string,
+    clippy::needless_pass_by_value,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,13 +68,12 @@ impl PdfDoc {
     pub fn aspect_of(&self, index: usize) -> f32 {
         self.drawn
             .get(&index)
-            .map(|(_, picture)| {
+            .map_or(self.aspect, |(_, picture)| {
                 let size = picture.size(0);
                 let side = |pixels: i32| u16::try_from(pixels).map_or(0.0, f32::from);
                 let (w, h) = (side(size.width.0), side(size.height.0));
                 if w > 0.0 { h / w } else { self.aspect }
             })
-            .unwrap_or(self.aspect)
             .max(0.05)
     }
 }

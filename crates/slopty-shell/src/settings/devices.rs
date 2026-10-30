@@ -1,9 +1,25 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Settings → Devices: the device registry — name, platform, last-seen, an Online/Offline badge,
-//! a "This device" badge, click-to-copy id, and an Add device dialog (AddDevice).
+//! a "This device" badge, click-to-copy id, and an Add device dialog (`AddDevice`).
 // A machine is named by its own name. Add device is Slopty's own dialog (`add_device`): this
 // Mac, a machine over ssh, or the server. The page shows the server this app follows, with a way
 // to change it.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::manual_midpoint,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 use chrono::{DateTime, Utc};
 use gpui::prelude::*;
@@ -36,11 +52,11 @@ pub fn device_online(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bo
 /// Compact last-seen line. Pure.
 pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let Some(at) = last_seen else {
-        return "never seen".to_string();
+        return "never seen".to_owned();
     };
     let secs = now.signed_duration_since(at).num_seconds();
     if secs < 60 {
-        "just now".to_string()
+        "just now".to_owned()
     } else if secs < 3600 {
         format!("{}m ago", secs / 60)
     } else if secs < 86_400 {
@@ -297,7 +313,7 @@ fn action_tone(id: &str) -> widgets::ActionTone {
 
 /// Short device id for the click-to-copy chip (`abcd1234…wxyz`).
 pub fn short_id(id: &str) -> String {
-    if id.len() > 12 { format!("{}…{}", &id[..8], &id[id.len() - 4..]) } else { id.to_string() }
+    if id.len() > 12 { format!("{}…{}", &id[..8], &id[id.len() - 4..]) } else { id.to_owned() }
 }
 
 impl Render for DevicesPage {
@@ -389,7 +405,7 @@ impl Render for DevicesPage {
             let mut meta: Vec<AnyElement> = (!device.platform.is_empty())
                 .then(|| {
                     div()
-                        .child(SharedString::from(platform_label(&device.platform).to_string()))
+                        .child(SharedString::from(platform_label(&device.platform).to_owned()))
                         .into_any_element()
                 })
                 .into_iter()
@@ -634,8 +650,8 @@ impl Render for DevicesPage {
                 .fade_overflow_y(&self.scroll.scroll),
             )
             .children(scrollbar)
-            .when_some(dialog, |el, dialog| el.child(dialog))
-            .when_some(invite_dialog, |el, dialog| el.child(dialog))
+            .when_some(dialog, ParentElement::child)
+            .when_some(invite_dialog, ParentElement::child)
     }
 }
 
@@ -649,7 +665,7 @@ mod tests {
     #[gpui::test]
     fn copying_an_id_marks_it_copied_for_the_span(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
-        cx.update(|cx| cx.set_global(crate::theme::Theme::default()));
+        cx.update(|cx| cx.set_global(Theme::default()));
         let state = cx.new(|_| AppState::new());
         let page = cx.new(|cx| DevicesPage::new(state, cx));
         page.update(cx, |page, cx| page.copy_id("studio".into(), cx));
@@ -679,7 +695,7 @@ mod tests {
         }
         cx.update(|cx| {
             gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(Theme::default());
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| {
@@ -704,7 +720,7 @@ mod tests {
             window.focus(&before, cx);
         });
         cx.run_until_parked();
-        page.update(cx, |page, cx| page.open_invite(cx));
+        page.update(cx, DevicesPage::open_invite);
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
@@ -732,7 +748,7 @@ mod tests {
         use gpui::AppContext as _;
         cx.update(|cx| {
             gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::default());
+            cx.set_global(Theme::default());
             cx.set_reduce_motion(true);
         });
         let (page, cx) = cx.add_window_view(|_, cx| {

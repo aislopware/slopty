@@ -11,6 +11,13 @@
 //!
 //! The view model answers both calls (`slopty_ui`'s `view_model::past`) from the session's own
 //! machine, so a remote project reads as a local one.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::or_fun_call,
+    clippy::string_slice,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::time::Duration;
 

@@ -3,6 +3,12 @@
 //! column"): whether the window has room for it, how wide it may be, and its glide when the
 //! window grows too narrow for it or wide enough again. Everything else beside the terminal is
 //! a pane of the session's own view (`panes.rs`), laid out in the room the sidebar leaves.
+#![allow(
+    clippy::field_scoped_visibility_modifiers,
+    clippy::or_fun_call,
+    clippy::wildcard_imports,
+    reason = "shell lint migration: slice A"
+)]
 use super::*;
 
 /// Whether the window has room for the sidebar this frame, and the widest it may be there.

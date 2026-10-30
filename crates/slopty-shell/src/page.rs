@@ -24,6 +24,21 @@
 //! person's Allow, network its app declares waits for theirs too, and each call made says so
 //! under the page. A message it sends lands in the chat's draft and context it offers rides
 //! there as a chip, both the view model's.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::match_same_arms,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -195,7 +210,7 @@ pub fn theme_variables(theme: &Theme) -> Vec<(String, String)> {
 ///
 /// Live only once its document has `loaded`: a web view made live comes up empty and
 /// takes no touch until its document is in it.
-pub fn presence_words(
+pub const fn presence_words(
     presence: Option<PagePresence>,
     snapshot: bool,
     failed: bool,
@@ -329,7 +344,7 @@ impl PageCardView {
 
     /// The band of the window a live page may sit in: below the titlebar's fade, above the
     /// composer's frost.
-    pub fn set_clear_band(&mut self, top: f32, bottom: f32) {
+    pub const fn set_clear_band(&mut self, top: f32, bottom: f32) {
         self.clear = Some((top, bottom));
     }
 
@@ -337,7 +352,7 @@ impl PageCardView {
     /// card without drawing it again, so its transcript builds it again to see whether it went
     /// into a fade band.
     #[must_use]
-    pub fn placed_live(&self) -> bool {
+    pub const fn placed_live(&self) -> bool {
         self.placed_live
     }
 
@@ -725,13 +740,9 @@ impl Render for PageCardView {
 
         let body_content: AnyElement = match (&hosted, presence) {
             // Why, and Try again unless the call that showed it failed.
-            _ if failed => failed_body(
-                &self.card.page,
-                why.clone(),
-                !self.card.failed,
-                &self.card.page,
-                &theme,
-            ),
+            _ if failed => {
+                failed_body(&self.card.page, why, !self.card.failed, &self.card.page, &theme)
+            }
             (Some(live::HostedPage { native: Some(native), .. }), Some(PagePresence::Live)) => {
                 // The wheel passes to the chat under the card. On the Mac the page
                 // takes it first, and hands the window what it cannot scroll
@@ -809,14 +820,14 @@ impl Render for PageCardView {
                         let out = clear.is_some_and(|band| !meets_band(bounds, band));
                         let resized = (f32::from(bounds.size.width) - width).abs() > 0.5;
                         if (live_now && out) || resized {
-                            let card = card.clone();
+                            let card = card;
                             cx.defer(move |cx| {
                                 card.update(cx, |_, cx| cx.notify()).ok();
                             });
                         }
                     }
                 },
-                |_, _, _, _| (),
+                |_, (), _, _| (),
             )
             .absolute()
             .inset_0()
@@ -961,7 +972,7 @@ impl Render for PageCardView {
             asks = asks.child(ask_line(
                 "page-confirm",
                 format!("The page wants to call {}", confirm.tool),
-                Some(confirm.arguments.clone()),
+                Some(confirm.arguments),
                 theme.warning,
                 &theme,
                 vec![
@@ -1051,7 +1062,7 @@ impl IntoElement for BandClip {
     }
 }
 
-impl gpui::Element for BandClip {
+impl Element for BandClip {
     type PrepaintState = ();
     type RequestLayoutState = ();
 
@@ -1287,7 +1298,7 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| chat);
         cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
         cx.run_until_parked();
-        cx.update(|window, cx| window.draw_and_present(cx));
+        cx.update(Window::draw_and_present);
         // Under the header, in the page's body.
         let over = gpui::point(px(450.0), px(250.0));
         let placed = cx.update(|window, _| window.native_hit_map());

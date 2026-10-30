@@ -1,5 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Workspace drag targets are scoped to the tree viewport; the chat keeps its own receiver.
+#![allow(
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::partial_pub_fields,
+    clippy::type_complexity,
+    reason = "shell lint migration: slice C"
+)]
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -95,7 +102,7 @@ impl FilesSurface {
                     move |bounds, _, _| {
                         rows.borrow_mut().insert(key.clone(), (bounds, target.clone()));
                     },
-                    |_, _, _, _| {},
+                    |_, (), _, _| {},
                 )
                 .absolute()
                 .inset_0(),
@@ -108,14 +115,14 @@ impl FilesSurface {
         let active = self.tree_drag.destination.as_deref() == Some("");
         // The root row names the folder itself ("slopty"), as a Finder sidebar does.
         let folder = self.folder_name();
-        let label: gpui::SharedString = if self.tree_drag.payload.is_some() {
+        let label: SharedString = if self.tree_drag.payload.is_some() {
             format!("Move to {folder}").into()
         } else {
             folder.into()
         };
         self.track_tree_drop_row(
-            "".into(),
-            Some("".into()),
+            String::new(),
+            Some(String::new()),
             24.,
             div()
                 .id("tree-workspace-root")
@@ -221,10 +228,7 @@ impl FilesSurface {
             self.tree_drag.tick_task = Some(cx.spawn_in(window, async move |this, cx| {
                 loop {
                     cx.background_executor().timer(Duration::from_millis(16)).await;
-                    if !this
-                        .update_in(cx, |files, window, cx| files.tree_drag_tick(window, cx))
-                        .unwrap_or(false)
-                    {
+                    if !this.update_in(cx, Self::tree_drag_tick).unwrap_or(false) {
                         break;
                     }
                 }
@@ -278,8 +282,7 @@ impl FilesSurface {
             .tree_drag
             .last_tick
             .replace(now)
-            .map(|last| now.saturating_duration_since(last).as_secs_f32())
-            .unwrap_or(0.)
+            .map_or(0., |last| now.saturating_duration_since(last).as_secs_f32())
             .min(0.05);
         let viewport = self.tree_list.viewport_bounds();
         let speed = if viewport.contains(&pointer) {
@@ -312,18 +315,16 @@ impl FilesSurface {
             .is_some_and(|since| now.saturating_duration_since(since) >= Duration::from_millis(650))
         {
             self.tree_drag.hover_since = None;
-            if let Some(directory) = self.tree_drag.destination.clone().filter(|p| !p.is_empty()) {
-                if self.tree.expand(&directory) {
-                    self.sync_tree_list();
-                    let needs_load = self
-                        .tree
-                        .node(&directory)
-                        .is_some_and(|node| node.stale || !node.has_loaded);
-                    if needs_load {
-                        self.load_directory(directory, None, cx);
-                    }
-                    cx.notify();
+            if let Some(directory) = self.tree_drag.destination.clone().filter(|p| !p.is_empty())
+                && self.tree.expand(&directory)
+            {
+                self.sync_tree_list();
+                let needs_load =
+                    self.tree.node(&directory).is_some_and(|node| node.stale || !node.has_loaded);
+                if needs_load {
+                    self.load_directory(directory, None, cx);
                 }
+                cx.notify();
             }
         }
         true
@@ -379,8 +380,8 @@ mod tests {
     use super::*;
     #[gpui::test]
     fn real_tree_drop_emits_one_move(cx: &mut gpui::TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let (files, cx) = test_support::setup(cx);
+        let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
@@ -409,7 +410,7 @@ mod tests {
     }
     #[gpui::test]
     fn hover_expands_only_after_delay_and_escape_stops_tasks(cx: &mut gpui::TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let start = cx.debug_bounds("tree-entry:a.txt").unwrap().center();
         let end = cx.debug_bounds("tree-entry:folder").unwrap().center();
         cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::default());
@@ -446,17 +447,17 @@ mod tests {
     }
     #[gpui::test]
     fn dragging_a_selection_moves_every_root_once(cx: &mut gpui::TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
-        super::super::test_support::set_root_entries(
+        let (files, cx) = test_support::setup(cx);
+        test_support::set_root_entries(
             &files,
             cx,
             vec![
-                super::super::test_support::entry("folder", WorkspaceEntryKind::Directory),
-                super::super::test_support::entry("a.txt", WorkspaceEntryKind::File),
-                super::super::test_support::entry("b.txt", WorkspaceEntryKind::File),
+                test_support::entry("folder", WorkspaceEntryKind::Directory),
+                test_support::entry("a.txt", WorkspaceEntryKind::File),
+                test_support::entry("b.txt", WorkspaceEntryKind::File),
             ],
         );
-        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let events = Rc::new(RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))

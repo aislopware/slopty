@@ -14,11 +14,11 @@ use crate::theme::Theme;
 
 /// The height of the line of figures under a prompt: always drawn under a session's prompt, so
 /// a turn's figures arriving move nothing.
-pub(crate) const TURN_LINE: f32 = 20.0;
+pub const TURN_LINE: f32 = 20.0;
 
 /// What a turn's line says.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct TurnWords {
+pub struct TurnWords {
     /// How it ended when it did not end well ("Interrupted", "Failed · overloaded"), and whether
     /// it failed.
     pub fault: Option<(String, bool)>,
@@ -54,7 +54,7 @@ fn kind_words(kind: &str) -> String {
 }
 
 /// What turn `facts`'s line says at `now`, its times of day in `tz`.
-pub(crate) fn turn_words<Tz: chrono::TimeZone>(facts: &TurnFacts, now: i64, tz: &Tz) -> TurnWords
+pub fn turn_words<Tz: chrono::TimeZone>(facts: &TurnFacts, now: i64, tz: &Tz) -> TurnWords
 where
     Tz::Offset: std::fmt::Display,
 {
@@ -118,7 +118,7 @@ impl Transcript {
         row_id: &SharedString,
         facts: Option<&TurnFacts>,
         theme: &Theme,
-        cx: &mut gpui::Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let line = div()
             .id(SharedString::from(format!("{row_id}-turn")))

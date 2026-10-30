@@ -1,12 +1,62 @@
-# Copied UI code keeps clippy's defaults, not the workspace's settings, so it stays diffable with
-# the source it was copied from (docs/decisions/ui.md).
-
-# The shell reads the time through `crate::clock` alone (the frame's moment, or the
-# dispatcher's clock between frames), so a frame drawn twice at one moment draws alike
-# (docs/decisions/testing.md, "Every clock in the shell is the frame's").
+# Clippy reads the nearest clippy.toml alone, so the shell's is the workspace's own plus the
+# shell's clock rules in `disallowed-methods`. Keep the rest equal to the root's file.
+msrv = "1.99"
+avoid-breaking-exported-api = false
+too-many-arguments-threshold = 6
+type-complexity-threshold = 250
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+doc-valid-idents = [
+    "SkyLight",
+    "objc2",
+    "GPUI",
+    "macOS",
+    "iOS",
+    "iPadOS",
+    "AppKit",
+    "UIKit",
+    "QUIC",
+    "HEVC",
+    "IOSurface",
+    "ScreenCaptureKit",
+    "VideoToolbox",
+    "CoreMedia",
+    "CoreVideo",
+    "CoreFoundation",
+    "WindowServer",
+    "CoreText",
+    "libghostty",
+    "libghostty-vt",
+    "OpenGOP",
+    "LTR",
+    "PTY",
+    "..",
+]
 disallowed-methods = [
+    { path = "std::mem::forget", reason = "use ManuallyDrop, or a CFRetained handle" },
+    { path = "std::thread::sleep", reason = "no blocking sleeps in library code; use timers" },
+    # The shell reads the time through `crate::clock` alone (the frame's moment, or the
+    # dispatcher's clock between frames), so a frame drawn twice at one moment draws alike
+    # (docs/decisions/testing.md, "Every clock in the shell is the frame's").
     { path = "std::time::Instant::now", reason = "read crate::clock::now(cx) (the frame's moment)" },
     { path = "std::time::SystemTime::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
     { path = "chrono::Utc::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
     { path = "chrono::Local::now", reason = "read crate::clock::utc(cx) (the frame's date)" },
+]
+disallowed-types = [
+    { path = "std::sync::Mutex", reason = "use parking_lot::Mutex" },
+    { path = "std::sync::RwLock", reason = "use parking_lot::RwLock" },
+]
+# GPUI geometry is f32 underneath; `Pixels` arithmetic cannot overflow in any meaningful sense.
+arithmetic-side-effects-allowed = [ "gpui::Pixels", "gpui::Point", "gpui::Size", "gpui::Bounds" ]
+arithmetic-side-effects-allowed-binary = [
+    [ "gpui::Pixels", "f32" ],
+    [ "gpui::Point", "gpui::Point" ],
+    [ "gpui::Point", "gpui::Pixels" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Point<gpui::Pixels>" ],
+    [ "gpui::Point<gpui::Pixels>", "gpui::Pixels" ],
 ]

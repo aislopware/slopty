@@ -5,6 +5,15 @@
 //! keeps its place in the transcript as one quiet line. A PDF shows every page there, each drawn
 //! as it scrolls into view, and a table every row. Closing the tab, or the card's "Bring back",
 //! puts the page back in its card.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -346,7 +355,7 @@ impl Render for PagePaneView {
                                 probe.set(Some(bounds));
                             }
                         },
-                        |_, _, _, _| (),
+                        |_, (), _, _| (),
                     )
                     .absolute()
                     .inset_0(),

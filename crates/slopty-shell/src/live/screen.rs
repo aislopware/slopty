@@ -2,6 +2,24 @@
 //! windows to choose from, in a searchable picker (zeron's model picker anatomy: a search row,
 //! sections, 32 pt rows, ↑ ↓ and ↩), then the chosen one's live picture, Slopty's own view of it
 //! ([`crate::live::screen`]). The pane's takeover makes it the window.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    reason = "shell lint migration: slice C"
+)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -170,7 +188,7 @@ impl ScreenSurface {
                 cx.notify();
             }
             ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
-                this.choose_active(cx)
+                this.choose_active(cx);
             }
             ComposerInputEvent::MentionDismiss => {
                 this.search.update(cx, |search, cx| search.set_text("", cx));
@@ -419,7 +437,7 @@ impl ScreenSurface {
                 continue;
             }
             list = list.child(popover::menu_heading(&theme, heading));
-            for &ix in section.iter() {
+            for &ix in section {
                 let choice = &choices[ix];
                 list = list.child(self.choice_row(choice, at, &theme, cx));
                 at += 1;

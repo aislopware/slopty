@@ -1,5 +1,23 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Native, virtualized preview of a file's current Markdown buffer.
+#![allow(
+    let_underscore_drop,
+    trivial_casts,
+    clippy::arithmetic_side_effects,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::items_after_statements,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_collect,
+    clippy::needless_for_each,
+    clippy::needless_pass_by_ref_mut,
+    clippy::or_fun_call,
+    clippy::partial_pub_fields,
+    clippy::type_complexity,
+    reason = "shell lint migration: slice C"
+)]
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -86,7 +104,7 @@ pub(super) fn relative_target(document: &str, target: &str) -> Option<(String, O
         return None;
     }
     let (path, anchor) =
-        target.split_once('#').map_or((target, None), |(p, a)| (p, Some(a.to_string())));
+        target.split_once('#').map_or((target, None), |(p, a)| (p, Some(a.to_owned())));
     let decode = |s: &str| -> Option<String> {
         let mut bytes = Vec::new();
         let mut chars = s.as_bytes().iter().copied();
@@ -151,7 +169,7 @@ pub(super) struct MarkdownPreview {
     diagram_allowed: Rc<HashSet<String>>,
     image_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
     diagram_snapshot: Rc<HashMap<String, Result<crate::image_media::MediaImage, String>>>,
-    visible_rows: HashSet<gpui::SharedString>,
+    visible_rows: HashSet<SharedString>,
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
@@ -175,14 +193,13 @@ pub(super) type WebLinkHandler = Rc<dyn Fn(&render::LinkActivation, &mut gpui::A
 
 impl MarkdownPreview {
     fn close_media_preview(&mut self, cx: &mut gpui::App) {
-        if let Some(preview) = self.preview_image.take() {
-            if self
+        if let Some(preview) = self.preview_image.take()
+            && self
                 .zoom_source
                 .as_ref()
                 .is_some_and(|source| !Arc::ptr_eq(&source.image, &preview.image))
-            {
-                cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
-            }
+        {
+            cx.defer(move |cx| gpui::ImageSource::Image(preview.image).evict(None, cx));
         }
         self.zoom_source = None;
         self.zoom_render = None;
@@ -350,16 +367,15 @@ impl MarkdownPreview {
                     let mut highlights = HashMap::new();
                     let mut anchors = HashMap::new();
                     for (ix, top) in tree.blocks.iter().enumerate() {
-                        if let Block::CodeBlock { language, code } = &top.block {
-                            if let Ok(doc) =
+                        if let Block::CodeBlock { language, code } = &top.block
+                            && let Ok(doc) =
                                 slopty_syntax::highlight(slopty_syntax::HighlightRequest {
                                     source: code,
                                     path: None,
                                     fence_tag: language.as_deref(),
                                 })
-                            {
-                                highlights.insert(ix, Arc::new(doc));
-                            }
+                        {
+                            highlights.insert(ix, Arc::new(doc));
                         }
                         if let Block::Heading { runs, .. } = &top.block {
                             let text: String = runs.iter().map(|r| r.text.as_str()).collect();
@@ -454,13 +470,11 @@ impl MarkdownPreview {
                 if source.starts_with("https://") || source.starts_with("http://") {
                     return None;
                 }
-                match relative_target(&self.path, &source) {
-                    Some((path, _)) => Some((source, path)),
-                    None => {
-                        self.images
-                            .insert(source, Err("Image path is outside the workspace".into()));
-                        None
-                    }
+                if let Some((path, _)) = relative_target(&self.path, &source) {
+                    Some((source, path))
+                } else {
+                    self.images.insert(source, Err("Image path is outside the workspace".into()));
+                    None
                 }
             })
             .collect();
@@ -595,7 +609,7 @@ impl MarkdownPreview {
         cx: &mut Context<Self>,
     ) {
         if self.path != path || self.media_location.as_ref() != Some(location) {
-            self.path = path.to_string();
+            self.path = path.to_owned();
             self.media_location = Some(location.clone());
             self.version = None;
             self.image_generation = self.image_generation.wrapping_add(1);
@@ -785,7 +799,7 @@ impl MarkdownPreview {
 
     fn media_element(
         loaded: &crate::image_media::MediaImage,
-        id: gpui::SharedString,
+        id: SharedString,
         name: String,
         plate: Option<gpui::Hsla>,
         weak: gpui::WeakEntity<Self>,
@@ -806,12 +820,12 @@ impl MarkdownPreview {
     }
 
     #[cfg(test)]
-    pub(super) fn test_tree(&self) -> &BlockTree {
+    pub(super) const fn test_tree(&self) -> &BlockTree {
         &self.tree
     }
 
     #[cfg(test)]
-    pub(super) fn test_suspended(&self) -> bool {
+    pub(super) const fn test_suspended(&self) -> bool {
         self.suspended
     }
 
@@ -836,13 +850,13 @@ impl MarkdownPreview {
                 if weak.upgrade().is_none() {
                     return render::LinkOutcome::Rejected;
                 }
-                if activation.target.navigation.is_ok() {
-                    if let Some(open_web_link) = &open_web_link {
-                        // Emit through the owning FilesSurface before borrowing
-                        // this preview: selecting Browser can suspend this view.
-                        open_web_link(activation, cx);
-                        return render::LinkOutcome::Internal;
-                    }
+                if activation.target.navigation.is_ok()
+                    && let Some(open_web_link) = &open_web_link
+                {
+                    // Emit through the owning FilesSurface before borrowing
+                    // this preview: selecting Browser can suspend this view.
+                    open_web_link(activation, cx);
+                    return render::LinkOutcome::Internal;
                 }
                 let target = &activation.target.original;
                 weak.update(cx, |view, cx| {
@@ -881,7 +895,7 @@ impl MarkdownPreview {
                     crate::clock::now(cx),
                 );
                 opts.code = self.code_uis_for(&opts.row_key, &top.block, ix, cx);
-                let editor = self.editor.as_ref().and_then(|editor| editor.upgrade());
+                let editor = self.editor.as_ref().and_then(gpui::WeakEntity::upgrade);
                 let source = self.parsed_source.clone();
                 opts.tasks = Some(render::TaskUi {
                     toggle: editor
@@ -1012,14 +1026,14 @@ impl MarkdownPreview {
                                     format!(
                                         "{} — {}",
                                         image.alt,
-                                        state
-                                            .and_then(|s| s.as_ref().err())
-                                            .map(String::as_str)
-                                            .unwrap_or(if image_allowed.contains(&image.source) {
+                                        state.and_then(|s| s.as_ref().err()).map_or(
+                                            if image_allowed.contains(&image.source) {
                                                 "Loading image…"
                                             } else {
                                                 "Document image preview limit reached"
-                                            })
+                                            },
+                                            String::as_str
+                                        )
                                     )
                                 };
                                 let target = image.source.clone();
@@ -1129,11 +1143,10 @@ impl Render for MarkdownPreview {
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
                 if event.keystroke.key == "c"
                     && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
+                    && let Some(text) = crate::markdown::selection::selected_text()
                 {
-                    if let Some(text) = crate::markdown::selection::selected_text() {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                        cx.stop_propagation();
-                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    cx.stop_propagation();
                 }
             }))
             .child(render::selection_surface_reset(self.scope.clone()))

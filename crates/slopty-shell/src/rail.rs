@@ -1,10 +1,22 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! The transcript's jump to a row, gliding (zeron's MessageRail without its rail: slopty).
+//! The transcript's jump to a row, gliding (zeron's `MessageRail` without its rail: slopty).
 //!
 //! TUI-first, the transcript is the inspector's timeline, a side pane narrower than
 //! the 48rem the rail of prompt ticks needed, so the rail went (`docs/decisions/ui.md`, "A
 //! session is its terminal, its inspector beside it"). What stays is the jump it made, which
 //! find and the held group's press take: a glide to a row on one eased timeline, landing marked.
+#![allow(
+    missing_copy_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{Context, ListOffset, px};
 
@@ -14,7 +26,7 @@ use crate::transcript::Transcript;
 /// How far below the list's top a row a jump lands on stands (slopty): past the scroll edge
 /// the transcript fades under at the top of its pane, at the inset a sent prompt is held at. The
 /// first row carries its own gap.
-pub fn landing_inset(row: usize) -> f32 {
+pub const fn landing_inset(row: usize) -> f32 {
     if row == 0 { 0.0 } else { crate::transcript::OWN_SEND_TOP_INSET_PX }
 }
 
@@ -71,7 +83,7 @@ impl Default for GlideTimeline {
 }
 
 impl GlideTimeline {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { eased_prev: 0.0 }
     }
 
@@ -189,7 +201,7 @@ impl Transcript {
         if viewport > 0.0 {
             let bottom = f32::from(list.viewport_bounds().bottom());
             let mut ix = top.item_ix;
-            let mut count = 0.0f32;
+            let mut count = 0.0_f32;
             while let Some(b) = list.bounds_for_item(ix) {
                 if f32::from(b.top()) >= bottom {
                     break;
@@ -212,9 +224,7 @@ impl Transcript {
         // the layout adjusted or re-glued keeps its real remaining
         // distance and continues the same timeline).
         let here = top.item_ix as f32
-            + top_height
-                .map(|h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0))
-                .unwrap_or(0.0);
+            + top_height.map_or(0.0, |h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0));
         if scroll_trace_enabled() {
             tracing::warn!(
                 ms = now.saturating_duration_since(glide.started).as_millis() as u64,
@@ -247,7 +257,7 @@ impl Transcript {
                 // pixel-exact — and never below the current offset,
                 // so motion stays monotone even when a height
                 // estimate was corrected.
-                top_height.map(|h| (within * h).min(f32::from(top.offset_in_item))).unwrap_or(0.0)
+                top_height.map_or(0.0, |h| (within * h).min(f32::from(top.offset_in_item)))
             } else {
                 within * height_ema.unwrap_or(0.0)
             };
@@ -255,22 +265,19 @@ impl Transcript {
             cx.notify();
             return;
         }
-        match list.bounds_for_item(target) {
-            Some(bounds) => {
-                // Measured: pixel-exact step along the timeline.
-                let delta = f32::from(bounds.top() - list.viewport_bounds().top()) - land;
-                list.scroll_by(px(frac * delta));
-            }
-            None => {
-                // Below but unmeasured: item space, same timeline.
-                let next = here + frac * (target as f32 - here);
-                let ix = (next.floor().max(0.0) as usize).min(target);
-                let within = next - ix as f32;
-                list.scroll_to(ListOffset {
-                    item_ix: ix,
-                    offset_in_item: px(within * height_ema.unwrap_or(0.0)),
-                });
-            }
+        if let Some(bounds) = list.bounds_for_item(target) {
+            // Measured: pixel-exact step along the timeline.
+            let delta = f32::from(bounds.top() - list.viewport_bounds().top()) - land;
+            list.scroll_by(px(frac * delta));
+        } else {
+            // Below but unmeasured: item space, same timeline.
+            let next = here + frac * (target as f32 - here);
+            let ix = (next.floor().max(0.0) as usize).min(target);
+            let within = next - ix as f32;
+            list.scroll_to(ListOffset {
+                item_ix: ix,
+                offset_in_item: px(within * height_ema.unwrap_or(0.0)),
+            });
         }
         cx.notify();
     }
@@ -288,7 +295,7 @@ mod tests {
     fn glide_timeline_matches_absolute_eased_interpolation() {
         let curve = motion::SCROLL_GLIDE.curve;
         let mut timeline = GlideTimeline::new();
-        let (start, target) = (1000.0f32, 0.0f32);
+        let (start, target) = (1000.0_f32, 0.0_f32);
         let mut pos = start;
         for i in 1..=60 {
             let t = i as f32 / 60.0;
@@ -308,8 +315,8 @@ mod tests {
     fn glide_timeline_survives_remaining_distance_reestimate() {
         let curve = motion::SCROLL_GLIDE.curve;
         let mut timeline = GlideTimeline::new();
-        let mut pos = 500.0f32;
-        let mut prev_frac = 0.0f32;
+        let mut pos = 500.0_f32;
+        let mut prev_frac = 0.0_f32;
         for i in 1..=60 {
             let t = i as f32 / 60.0;
             let frac = timeline.step(curve.eval(t));

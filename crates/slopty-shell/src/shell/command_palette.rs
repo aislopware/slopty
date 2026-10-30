@@ -2,10 +2,21 @@
 //! The command palette, in Ghostty's geometry (`docs/decisions/layout.md`, "The picker and the
 //! palette are one keyboard door to everything"): every command with its current value (a ✓ on
 //! a toggle that is on, the thing it acts on after a ›) and its key, the ones the person runs
-//! most and most lately first (WezTerm's frecency, kept in `paletteUses`); the focused chat's
+//! most and most lately first (`WezTerm`'s frecency, kept in `paletteUses`); the focused chat's
 //! recently opened and changed files before anything is typed; and, as the query asks,
 //! sessions by their titles and by what was said in them (`session_search`) and the workspace's
 //! files by name and by content. Results are grouped in sections.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::unreachable,
+    reason = "shell lint migration: slice A"
+)]
 use slopty_view_proto::{
     SearchWorkspaceContentRequest, SearchWorkspaceFilesRequest, WorkspaceContentMatch,
     WorkspaceEntryKind, WorkspaceFileSearchMatch, WorkspaceSearchIndexState, WorkspaceTarget,
@@ -92,7 +103,7 @@ impl<T: Default> WorkspaceQuery<T> {
     }
 
     /// Start a request; the returned generation identifies its answer.
-    fn begin(&mut self) -> u64 {
+    const fn begin(&mut self) -> u64 {
         self.generation += 1;
         self.loading = true;
         self.generation
@@ -187,12 +198,12 @@ struct EnterPress {
 }
 
 impl EnterPress {
-    fn press(&mut self, is_held: bool) -> bool {
+    const fn press(&mut self, is_held: bool) -> bool {
         let was_down = std::mem::replace(&mut self.down, true);
         !was_down && !is_held
     }
 
-    fn release(&mut self) {
+    const fn release(&mut self) {
         self.down = false;
     }
 }
@@ -209,7 +220,7 @@ enum Section {
 }
 
 impl Section {
-    fn title(self) -> &'static str {
+    const fn title(self) -> &'static str {
         match self {
             // Sentence case, as every label in the app.
             Self::RecentFiles => "Recent files",
@@ -236,7 +247,7 @@ enum Command {
 }
 
 impl Command {
-    fn label(&self) -> &'static str {
+    const fn label(&self) -> &'static str {
         match self {
             Self::NewChat => "New session",
             Self::NewProject => "New project\u{2026}",
@@ -250,7 +261,7 @@ impl Command {
         }
     }
 
-    fn icon(&self) -> &'static str {
+    const fn icon(&self) -> &'static str {
         match self {
             Self::NewChat => icons::PLUS,
             Self::NewProject => icons::FOLDER,
@@ -315,7 +326,7 @@ struct PaletteRow {
 struct RowKey(Section, String);
 
 impl PaletteRow {
-    fn new(section: Section, kind: RowKind) -> Self {
+    const fn new(section: Section, kind: RowKind) -> Self {
         Self { section, kind }
     }
 
@@ -356,7 +367,7 @@ impl PaletteSection {
         self
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.rows.is_empty() && self.status.is_none()
     }
 }
@@ -402,7 +413,7 @@ fn commands_for(
     commands.into_iter().map(|(_, command)| command).collect()
 }
 
-/// How much a command's runs count as of `now_ms`: WezTerm's frecency, the times it ran halved
+/// How much a command's runs count as of `now_ms`: `WezTerm`'s frecency, the times it ran halved
 /// for each week since the last ([`FRECENCY_HALF_LIFE_HOURS`]).
 fn frecency(used: settings::PaletteUse, now_ms: i64) -> f64 {
     let hours = now_ms.saturating_sub(used.last_ms).max(0) / 3_600_000;
@@ -476,7 +487,7 @@ impl CommandPalette {
 }
 
 impl Shell {
-    pub(super) fn reset_command_palette_key_state(&mut self) {
+    pub(super) const fn reset_command_palette_key_state(&mut self) {
         if let Some(palette) = self.command_palette.as_mut() {
             palette.enter_press.release();
         }
@@ -851,17 +862,17 @@ impl Shell {
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
             // After the palette closed, so the key's handler sees the window as it is.
             RowKind::Command(Command::Window(command)) => {
-                window.dispatch_action((command.action)(), cx)
+                window.dispatch_action((command.action)(), cx);
             }
             RowKind::Chat(id) => self.open_chat(id, cx),
             RowKind::ChatWords(found) => self.open_chat(found.chat_id, cx),
             RowKind::File { path, is_dir } => {
-                self.open_palette_path(path, is_dir, None, window, cx)
+                self.open_palette_path(path, is_dir, None, window, cx);
             }
             RowKind::Content(found) => {
                 let line = u32::try_from(found.line).unwrap_or(u32::MAX);
                 let column = Some(FileColumn::Byte(found.column));
-                self.open_palette_path(found.path, false, Some((line, column)), window, cx)
+                self.open_palette_path(found.path, false, Some((line, column)), window, cx);
             }
         }
     }
@@ -916,7 +927,7 @@ impl Shell {
                         .any(|view| matches!(view, RightSurface::Diff(_))))
                 } else if is(&ToggleFiles) {
                     on(self.view_open(RightSurface::Files, cx))
-                } else if is(&chrome_keys::ToggleInspector) {
+                } else if is(&ToggleInspector) {
                     on(self.view_open(RightSurface::Inspector, cx))
                 } else {
                     CommandState::None
@@ -953,7 +964,7 @@ impl Shell {
             }
         };
         let combo = self.settings.keymap.get(id);
-        let valid = crate::settings::parse_combo(combo).is_ok();
+        let valid = settings::parse_combo(combo).is_ok();
         Some(crate::keys::combo_text(if valid { combo } else { id.default_combo() }).to_string())
     }
 
@@ -980,7 +991,7 @@ impl Shell {
                     .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
+                        this.activate_palette_row(target.clone(), window, cx);
                     }))
                     .child(
                         icon(command.icon())
@@ -1042,7 +1053,7 @@ impl Shell {
                     .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
+                        this.activate_palette_row(target.clone(), window, cx);
                     }))
                     .child(crate::file_icons::icon(identity, theme.appearance).size(px(16.0)))
                     .child(
@@ -1088,7 +1099,7 @@ impl Shell {
                     .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
+                        this.activate_palette_row(target.clone(), window, cx);
                     }))
                     .child(
                         crate::file_icons::icon(
@@ -1142,7 +1153,7 @@ impl Shell {
                     .min_h(px(44.0))
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.activate_palette_row(target.clone(), window, cx)
+                        this.activate_palette_row(target.clone(), window, cx);
                     }))
                     .child(glyph.size(px(16.0)).flex_none())
                     .child(
@@ -1172,10 +1183,10 @@ impl Shell {
                 };
                 let folder = match (project, state.device_name(&chat.device_id)) {
                     (Some(project), Some(device)) => format!("{project} @ {device}"),
-                    (Some(project), None) => project.to_string(),
-                    (None, device) => device.unwrap_or_default().to_string(),
+                    (Some(project), None) => project.to_owned(),
+                    (None, device) => device.unwrap_or_default().to_owned(),
                 };
-                let branch = super::sidebar_status::branch_of(chat).map(SharedString::from);
+                let branch = sidebar_status::branch_of(chat).map(SharedString::from);
                 let harness = chat.config.as_ref().map(|c| c.harness);
                 self.render_chat_row(
                     id.clone(),
@@ -1215,7 +1226,7 @@ impl Shell {
         let row_count = sections.iter().map(|section| section.rows.len()).sum::<usize>();
         let active = palette.active_position(&flat_rows(&sections));
         let search = palette.search.clone();
-        let query = search.read(cx).text().to_string();
+        let query = search.read(cx).text().to_owned();
         let focus = palette.focus.clone();
         let scroll = palette.scroll.clone();
         let theme = Theme::of(cx).for_popup();
@@ -1251,7 +1262,7 @@ impl Shell {
                         .id(("command-result", ix))
                         .flex_none()
                         .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                            this.hover_command(key.clone(), ix, cx)
+                            this.hover_command(key.clone(), ix, cx);
                         }))
                         .when(ix + 1 == row_count, |row| row.pb(px(8.0)))
                         .child(div().px(px(8.0)).child(content))
@@ -1286,7 +1297,7 @@ impl Shell {
                     "up" | "down" => this.move_palette_selection(keys.key == "down", cx),
                     // Ghostty's ⌃N and ⌃P, and Tab and ⇧Tab, step as ↓ and ↑ do.
                     "n" | "p" if keys.modifiers.control && !keys.modifiers.platform => {
-                        this.move_palette_selection(keys.key == "n", cx)
+                        this.move_palette_selection(keys.key == "n", cx);
                     }
                     "tab" => this.move_palette_selection(!keys.modifiers.shift, cx),
                     "enter" => {
@@ -1325,7 +1336,7 @@ impl Shell {
             ))
             .child(body)
             // The keys, where there are keys.
-            .when(!crate::shell::touch_screen(), |card| {
+            .when(!touch_screen(), |card| {
                 card.child(
                     palette_footer()
                         .child(command_key_hint(&theme, "↑ ↓", "Navigate", window, cx))
@@ -1406,7 +1417,7 @@ pub(super) fn palette_card(
         // Between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
         // top, its footer at its foot. A touch screen has no footer of keys to hold there: the
         // card hugs its rows.
-        .when(!crate::shell::touch_screen(), |card| {
+        .when(!touch_screen(), |card| {
             card.min_h(px(PALETTE_MIN_HEIGHT
                 .min(f32::from(viewport.height - palette_top(viewport.height)) - 16.0)))
         })
@@ -1435,7 +1446,7 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
         .child(popover::palette_search_icon(theme))
         .child(div().flex_1().min_w_0().text_size(crate::typography::ui_rems(14.0)).child(search))
         // A key to press, where there are keys.
-        .when(!crate::shell::touch_screen(), |header| header.child(hint))
+        .when(!touch_screen(), |header| header.child(hint))
 }
 
 pub(super) fn palette_footer() -> gpui::Div {
@@ -1477,7 +1488,7 @@ pub(super) const PALETTE_MIN_HEIGHT: f32 = 280.0;
 /// touch screen keeps a dialog's top (`popover::modal_top_edge`): there the field waits for a
 /// tap and a card just under the status bar would sit where taps reach the system's.
 pub(super) fn palette_top(height: Pixels) -> Pixels {
-    if crate::shell::touch_screen() {
+    if touch_screen() {
         return popover::modal_top_edge(height);
     }
     let row = Theme::TITLEBAR_HEIGHT;
@@ -1525,22 +1536,19 @@ pub(super) fn command_key_hint(
     keys: &str,
     label: &'static str,
     window: &mut Window,
-    cx: &gpui::App,
+    cx: &App,
 ) -> gpui::Div {
-    let glyph =
-        |path: &'static str| crate::icons::icon(path).size(px(12.5)).text_color(theme.text_muted);
+    let glyph = |path: &'static str| icon(path).size(px(12.5)).text_color(theme.text_muted);
     let cap = popover::key_cap(theme);
     let cap = match keys {
-        "⏎" | "↵" => cap.child(glyph(crate::icons::RETURN)),
-        "←" => cap.child(glyph(crate::icons::ARROW_LEFT)),
-        "↑ ↓" => {
-            cap.child(glyph(crate::icons::ARROW_UP)).child(glyph(crate::icons::ARROW_DOWN))
-        }
+        "⏎" | "↵" => cap.child(glyph(icons::RETURN)),
+        "←" => cap.child(glyph(icons::ARROW_LEFT)),
+        "↑ ↓" => cap.child(glyph(icons::ARROW_UP)).child(glyph(icons::ARROW_DOWN)),
         _ => cap
             .font_family(popover::KEY_GLYPH_FONT)
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
-            .child(SharedString::from(keys.to_string())),
+            .child(SharedString::from(keys.to_owned())),
     };
     let selector = format!("key-cap-{keys}");
     let cap = crate::live::chrome::pressable_cap(cap, keys, 0.05, window, cx)
@@ -1552,7 +1560,7 @@ pub(super) fn command_key_hint(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::super::session_search::tests::words;
     use super::super::session_search::{CHAT_WORDS_DEBOUNCE, CHAT_WORDS_LIMIT};
@@ -1610,11 +1618,9 @@ mod tests {
     #[gpui::test]
     fn a_footer_cap_sinks_while_its_key_is_held(cx: &mut TestAppContext) {
         let (window, _dir) = keyed_palette_window(cx);
-        cx.update(|cx| crate::motion::set_reduced_motion(cx, true));
+        cx.update(|cx| motion::set_reduced_motion(cx, true));
         let open = |cx: &mut TestAppContext| {
-            window
-                .update(cx, |shell, window, cx| shell.toggle_command_palette(window, cx))
-                .unwrap();
+            window.update(cx, Shell::toggle_command_palette).unwrap();
         };
         open(cx);
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
@@ -1626,7 +1632,7 @@ mod tests {
             });
         };
         let key = |down: bool, key: &'static str, cx: &mut gpui::VisualTestContext| {
-            let keystroke = gpui::Keystroke::parse(key).unwrap();
+            let keystroke = Keystroke::parse(key).unwrap();
             cx.update(|window, cx| {
                 window.dispatch_event(
                     if down {
@@ -2044,7 +2050,7 @@ mod tests {
                 methods::WARM_WORKSPACE_SEARCH if warm == "unsupported" => engine
                     .fail(&request, &format!("unknown method: {}", methods::WARM_WORKSPACE_SEARCH)),
                 methods::WARM_WORKSPACE_SEARCH => {
-                    engine.reply(&request, serde_json::json!({ "state": warm }))
+                    engine.reply(&request, serde_json::json!({ "state": warm }));
                 }
                 methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, serde_json::json!([])),
                 // The chats' words search is not the workspace's.
@@ -2088,7 +2094,8 @@ mod tests {
         type_query(window, "d", cx);
         assert!(chat_word_requests(&mut engine, cx).is_empty(), "one character is not sent");
         type_query(window, "deploy", cx);
-        cx.executor().advance_clock(CHAT_WORDS_DEBOUNCE - Duration::from_millis(1));
+        cx.executor()
+            .advance_clock(CHAT_WORDS_DEBOUNCE.checked_sub(Duration::from_millis(1)).unwrap());
         assert!(
             engine.take_after(methods::SEARCH_CHATS, Duration::ZERO, cx).is_empty(),
             "waits for the pause"
@@ -2109,7 +2116,7 @@ mod tests {
             ]),
         );
         cx.run_until_parked();
-        let shown = window.read_with(cx, |shell, cx| sections(shell, cx)).unwrap();
+        let shown = window.read_with(cx, sections).unwrap();
         assert_eq!(shown.len(), 2);
         assert_eq!(shown[0], (Section::Threads, vec![RowKind::Chat("deploy-thread".into())]));
         assert_eq!(shown[1].0, Section::InThreads);
@@ -2602,7 +2609,7 @@ mod tests {
             cx.run_until_parked();
             // `take` itself advances the clock by the debounce; stay short of
             // the wait, then cross it.
-            cx.executor().advance_clock(wait - early);
+            cx.executor().advance_clock(wait.checked_sub(early).unwrap());
             assert!(
                 engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty(),
                 "refreshed before {wait:?}"
@@ -2644,7 +2651,7 @@ mod tests {
         let first = engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx);
         engine.reply(&first[0], content_answer(Vec::new(), true));
         cx.run_until_parked();
-        window.update(cx, |shell, window, cx| shell.close_command_palette(window, cx)).unwrap();
+        window.update(cx, Shell::close_command_palette).unwrap();
         cx.executor().advance_clock(Duration::from_secs(10));
         assert!(engine.take(methods::SEARCH_WORKSPACE_CONTENT, cx).is_empty());
     }
@@ -2706,7 +2713,7 @@ mod tests {
     ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             crate::composer::init(cx);
             apply_keymap(cx, &KeymapConfig::default());
         });
@@ -2714,7 +2721,7 @@ mod tests {
         window
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
-                    state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
+                    state.connection = ConnectionStatus::Ready;
                     state.workspace_scope = Some(WorkspaceScope::Local);
                     state.local_device_id = Some("local".into());
                     state.apply_chats(vec![
@@ -2769,7 +2776,7 @@ mod tests {
     #[gpui::test]
     fn tab_and_control_n_step_the_highlight(cx: &mut TestAppContext) {
         let (window, _dir) = keyed_palette_window(cx);
-        window.update(cx, |shell, window, cx| shell.toggle_command_palette(window, cx)).unwrap();
+        window.update(cx, Shell::toggle_command_palette).unwrap();
         cx.run_until_parked();
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx)).unwrap();
 
@@ -2863,7 +2870,7 @@ mod tests {
         assert!(labels("deployment", &none).is_empty());
     }
 
-    /// WezTerm's frecency: a command run often and lately leads, one run as often a month ago
+    /// `WezTerm`'s frecency: a command run often and lately leads, one run as often a month ago
     /// stands behind one run less but this week, and the rest keep the table's order.
     #[test]
     fn commands_run_often_and_lately_lead() {

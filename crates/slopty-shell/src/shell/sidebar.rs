@@ -1,5 +1,18 @@
 //! The session sidebar as `impl Shell`: its column, the list body and its rows, the
 //! connection pill, and the server foot with its menu (`docs/decisions/layout.md`).
+#![allow(
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::float_cmp_const,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::or_fun_call,
+    clippy::suboptimal_flops,
+    clippy::type_complexity,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use super::*;
 
@@ -96,7 +109,7 @@ pub(super) fn sidebar_faded_label(
         div()
             .id(id.clone())
             .debug_selector(move || id.to_string())
-            .when(fill, |el| el.flex_1())
+            .when(fill, Styled::flex_1)
             .min_w_0()
             .overflow_hidden()
             .track_scroll(&overflow)
@@ -195,7 +208,7 @@ impl Shell {
             .items_center()
             .justify_center()
             .child(icon(icons::LOCK).size(px(12.0)).text_color(theme.warning.opacity(0.8)))
-            .tooltip(crate::settings::widgets::text_tooltip(why))
+            .tooltip(settings::widgets::text_tooltip(why))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
@@ -214,8 +227,7 @@ impl Shell {
                 "deviceId": device,
                 "action": slopty_view_proto::DeviceAction::REDIAL,
             });
-            let result =
-                engine.client().call(slopty_view_rpc::methods::DEVICE_ACTION, params).await;
+            let result = engine.client().call(methods::DEVICE_ACTION, params).await;
             if let Err(err) = result {
                 let _gone = this.update(cx, |this, cx| {
                     this.sidebar_notice = Some(format!("Couldn\u{2019}t retry: {err}").into());
@@ -325,10 +337,9 @@ impl Shell {
         for group in groups.into_iter().filter(|group| group.key != sidebar_status::INACTIVE) {
             let Some(first) = group.rows.first() else { continue };
             // A cached row's mark is the last word from a machine out of reach.
-            let loudest = super::marks::loudest(
-                group.rows.iter().filter(|row| !row.cached).map(|row| &row.mark),
-            )
-            .cloned();
+            let loudest =
+                marks::loudest(group.rows.iter().filter(|row| !row.cached).map(|row| &row.mark))
+                    .cloned();
             let target = group
                 .rows
                 .iter()
@@ -338,17 +349,17 @@ impl Shell {
                 .id
                 .clone();
             let count = group.rows.len() + group.hidden;
-            let said = match loudest.as_ref().and_then(super::marks::Mark::word) {
+            let said = match loudest.as_ref().and_then(marks::Mark::word) {
                 Some(word) => format!("{}, {count}, {word}", group.label),
                 None => format!("{}, {count}", group.label),
             };
             let key = group.key.clone();
             let mark = loudest.as_ref().and_then(|mark| {
-                super::marks::mark_element(
+                marks::mark_element(
                     SharedString::from(format!("sidebar-rail-mark-{key}")),
                     format!("sidebar-rail-mark-{key}"),
                     mark,
-                    crate::loaders::status_mark::MARK_SMALL,
+                    loaders::status_mark::MARK_SMALL,
                     theme.bg,
                 )
             });
@@ -374,7 +385,7 @@ impl Shell {
                     .hover(|s| s.bg(theme.glass_hover()))
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(said.clone()))
-                    .tooltip(crate::settings::widgets::text_tooltip(said))
+                    .tooltip(settings::widgets::text_tooltip(said))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_chat(target.clone(), cx)))
                     .child(art)
                     .children(
@@ -408,7 +419,7 @@ impl Shell {
     /// machine is out of reach dims and wears the cached glyph in its mark's place. The palette's
     /// copy spells out where the chat runs, its status or time, and its branch.
     /// Click selects; right-click opens the context menu.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn render_chat_row(
         &self,
         id: String,
@@ -466,7 +477,7 @@ impl Shell {
         // its disc in the row's own ground. An agent at rest on its own work (a background
         // command, a subagent it left running) is at work; a result nobody has seen sets the
         // title in the heavier weight.
-        let mark = super::marks::Mark::of(status, self.state.read(cx).session_for(&id), now);
+        let mark = marks::Mark::of(status, self.state.read(cx).session_for(&id), now);
         let status_label = mark.word();
         let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
         let shows_metadata = branch.is_some();
@@ -475,19 +486,19 @@ impl Shell {
         // (`sidebar_status::Row::cached`).
         let cached = compact
             && row_device.as_deref().is_some_and(|device| {
-                super::sidebar_status::out_of_reach(self.state.read(cx), device, now)
+                sidebar_status::out_of_reach(self.state.read(cx), device, now)
             });
         // A machine that turns this device away wears the login badge in the row's mark
         // slot: why, and a press dials it again (`turned_away_badge`).
         let turned_away = row_device.as_deref().filter(|_| cached).and_then(|device| {
-            let why = super::sidebar_status::turned_away(self.state.read(cx), device)?;
+            let why = sidebar_status::turned_away(self.state.read(cx), device)?;
             Some((device.to_owned(), SharedString::from(why.to_owned())))
         });
         // A need's glyph says which need; its words are the hover card's and a screen
         // reader's, never a line of the row (`docs/decisions/layout.md`, "A state is a glyph").
         // A cached row asks nothing in its name.
         let need = match &mark {
-            super::marks::Mark::NeedsYou(need) if !cached => Some(need.words.clone()),
+            marks::Mark::NeedsYou(need) if !cached => Some(need.words.clone()),
             _ => None,
         };
         let mark_ground = if selected {
@@ -496,11 +507,11 @@ impl Shell {
             theme.bg
         };
         let status_mark = || {
-            super::marks::mark_element(
+            marks::mark_element(
                 SharedString::from(format!("{row_id}-mark")),
                 format!("chat-mark-{id}"), // for the tests
                 &mark,
-                crate::loaders::status_mark::MARK_SMALL,
+                loaders::status_mark::MARK_SMALL,
                 mark_ground,
             )
         };
@@ -571,7 +582,7 @@ impl Shell {
                 // A node needs a role to be one of the tree a screen reader reads; a row
                 // at rest has nothing to say. A need's words are its description.
                 .when_some(said, |el, label| el.role(gpui::Role::Status).aria_label(label))
-                .when_some(need.clone(), |el, need| el.aria_description(need))
+                .when_some(need.clone(), StatefulInteractiveElement::aria_description)
                 .children(glyph)
                 .into_any_element()
         });
@@ -629,7 +640,7 @@ impl Shell {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     // Tabular figures, so "1m" and "11m" keep the column.
                     .font_features(crate::typography::tabular())
-                    .child(time_ago.clone())
+                    .child(time_ago)
                     .into_any_element(),
             }
         };
@@ -705,7 +716,7 @@ impl Shell {
             .group("sidebar-session-row")
             .debug_selector({
                 let row_id = row_id.clone();
-                move || row_id.clone()
+                move || row_id
             })
             .h(px(if compact { SIDEBAR_ROW_HEIGHT } else { chat_row_height(branch.is_some()) }))
             .flex()
@@ -808,7 +819,7 @@ impl Shell {
                 el.child(
                     gpui::canvas(
                         |_, _, _| {},
-                        move |bounds, _, window, cx| {
+                        move |bounds, (), window, cx| {
                             window.defer(cx, move |_, cx| {
                                 shell
                                     .update(cx, |this, cx| this.keep_rename_row_in_view(bounds, cx))
@@ -838,7 +849,7 @@ impl Shell {
                             window.defer(cx, move |_, cx| {
                                 shell
                                     .update(cx, |this, cx| {
-                                        this.sync_chat_row_hover(row_id, hovered, cx)
+                                        this.sync_chat_row_hover(row_id, hovered, cx);
                                     })
                                     .ok();
                             });
@@ -870,7 +881,7 @@ impl Shell {
                                 window.defer(cx, move |_, cx| {
                                     shell
                                         .update(cx, |this, cx| {
-                                            this.hover_session_card(&chat_id, false, cx)
+                                            this.hover_session_card(&chat_id, false, cx);
                                         })
                                         .ok();
                                 });
@@ -1031,9 +1042,7 @@ impl Shell {
                                             }))
                                             .tooltip(archive_tooltip(archived, selected))
                                             .tooltip_placement(gpui::TooltipPlacement::Above)
-                                            .tooltip_show_delay(
-                                                crate::settings::widgets::TOOLTIP_DELAY,
-                                            )
+                                            .tooltip_show_delay(settings::widgets::TOOLTIP_DELAY)
                                             .child(
                                                 icon(if archived {
                                                     icons::ARCHIVE_UP_MINIMALISTIC
@@ -1099,7 +1108,7 @@ impl Shell {
             ),
         };
         Some(
-            crate::motion::fade_in(
+            motion::fade_in(
                 "connection-pill",
                 div()
                     .id("connection-pill")
@@ -1205,16 +1214,7 @@ impl Shell {
         // The space filter lives ABOVE the scroll region (fixed) so its
         // dropdown can float without being clipped by the list's overflow.
         let filter_row = self.render_spaces_filter(theme, cx);
-        let active_list = if !list_items.is_empty() {
-            div()
-                .id("sidebar-active-sessions")
-                .flex()
-                .flex_col()
-                .gap(px(SIDEBAR_LIST_GAP))
-                .pb(px(Theme::SPACE_SM))
-                .children(list_items)
-                .into_any_element()
-        } else {
+        let active_list = if list_items.is_empty() {
             // The empty list names the key that fills it (M16); a phone's Sessions page
             // has no key to offer and says its own noun.
             let compact = self.compact();
@@ -1252,6 +1252,15 @@ impl Shell {
                             .child(popover::kbd_hint(theme, &crate::keys::combo_text(combo))),
                     )
                 })
+                .into_any_element()
+        } else {
+            div()
+                .id("sidebar-active-sessions")
+                .flex()
+                .flex_col()
+                .gap(px(SIDEBAR_LIST_GAP))
+                .pb(px(Theme::SPACE_SM))
+                .children(list_items)
                 .into_any_element()
         };
 
@@ -1302,7 +1311,7 @@ impl Shell {
             // Global connection pill (durable-by-design UI truth): appears
             // whenever the edge posture is degraded; hidden while healthy —
             // appearing IS the signal.
-            .when_some(self.render_connection_pill(theme, cx), |el, pill| el.child(pill))
+            .when_some(self.render_connection_pill(theme, cx), ParentElement::child)
             // A phone has no sidebar foot: Settings is a tab, the server its page's.
             .when(!self.compact(), |el| {
                 el.child(
@@ -1377,7 +1386,7 @@ impl Shell {
         ];
         if invite {
             rows.push(
-                row("user-menu-connect-phone", icons::SMARTPHONE, crate::settings::devices::INVITE)
+                row("user-menu-connect-phone", icons::SMARTPHONE, settings::devices::INVITE)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.close_user_menu(cx);
                         this.open_connect_phone(cx);
@@ -1389,7 +1398,7 @@ impl Shell {
             row("user-menu-change-server", icons::REMOTE_SERVER, "Change server")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.close_user_menu(cx);
-                    this.open_add_device_on(crate::settings::add_device::Choice::Server, cx);
+                    this.open_add_device_on(settings::add_device::Choice::Server, cx);
                 }))
                 .into_any_element(),
         );
@@ -1402,7 +1411,7 @@ impl Shell {
         let state = self.state.clone();
         let page =
             self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
-        page.update(cx, |page, cx| page.open_invite(cx));
+        page.update(cx, DevicesPage::open_invite);
     }
 
     fn render_user_menu(
@@ -1421,8 +1430,7 @@ impl Shell {
             .trim()
             .chars()
             .next()
-            .map(|c| c.to_uppercase().to_string())
-            .unwrap_or_else(|| "?".into())
+            .map_or_else(|| "?".into(), |c| c.to_uppercase().to_string())
             .into();
         let mut trigger = div()
             .id("user-menu")
@@ -1593,7 +1601,7 @@ impl Shell {
                     .justify_center()
                     .cursor_pointer()
                     .hover_fade("settings-trigger")
-                    .map(|el| crate::surface_chrome::focus_ring_within(el, &theme, reach))
+                    .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
                     .child(drawn)
             }))
@@ -1745,7 +1753,7 @@ mod tests {
         let header_key = format!("sidebar-header-{key}");
         let rest = cx.update(|_, cx| {
             let theme = Theme::of(cx);
-            crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+            motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
         });
         assert_eq!(rest.a, 0.0, "unseen at rest");
         let chevron = |cx: &mut VisualTestContext| {
@@ -1753,13 +1761,13 @@ mod tests {
         };
         assert_eq!(chevron(cx), 0.0, "an open group's chevron rests unseen with it");
         // Settled at once, so the frame read is the faded-in one.
-        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        cx.update(|_, cx| motion::set_reduced_motion(cx, true));
         cx.simulate_mouse_move(working.bounds.center(), None, gpui::Modifiers::default());
         let hovered = count(cx);
         assert_eq!(hovered, resting, "the count fades in where it stood: nothing moves");
         let shown = cx.update(|_, cx| {
             let theme = Theme::of(cx);
-            crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+            motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
         });
         assert!(shown.a > 0.9, "shown under the pointer: {shown:?}");
         assert!(chevron(cx) > 0.9, "and its chevron");
@@ -1858,7 +1866,7 @@ mod tests {
         draw(cx);
         // A key press clicks as it comes up.
         cx.simulate_keystrokes("enter");
-        cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: Keystroke::parse("enter").unwrap() });
         draw(cx);
         assert_eq!(
             shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).as_deref(),
@@ -1959,14 +1967,13 @@ mod tests {
         let badge = find(&nodes, Role::Button, "Retry").expect("a button a screen reader hears");
         assert_eq!(badge.description.as_deref(), Some(why), "saying why");
         let card = shell.read_with(cx, |shell, cx| {
-            super::super::sidebar_status::chat_card(shell.state.read(cx), "b", Utc::now())
-                .map(|card| card.status)
+            sidebar_status::chat_card(shell.state.read(cx), "b", Utc::now()).map(|card| card.status)
         });
         assert_eq!(
             card.as_deref(),
             Some("Cached \u{b7} studio is closed to this device by the tailnet policy")
         );
-        shell.update_in(cx, |shell, window, cx| shell.open_spaces_menu(window, cx));
+        shell.update_in(cx, Shell::open_spaces_menu);
         let retries = tree(cx)
             .into_values()
             .filter(|node| node.role == Role::Button && node.label == "Retry");
@@ -2002,11 +2009,7 @@ mod tests {
         );
     }
 
-    fn init_settings_test(
-        saved: settings::UiSettings,
-        dir: &std::path::Path,
-        cx: &mut TestAppContext,
-    ) {
+    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &mut TestAppContext) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
             gpui_base::init(cx);
@@ -2029,7 +2032,7 @@ mod tests {
 
     /// What the window shows against the same state drawn from scratch, as the app's own check
     /// judges a frame: the primitives only the frame shown paints, and only the scratch paints.
-    fn stale_sidebar(cx: &mut gpui::VisualTestContext) -> Option<String> {
+    fn stale_sidebar(cx: &mut VisualTestContext) -> Option<String> {
         cx.update(|window, cx| {
             let mut shown = window.painted_primitives();
             shown.sort_unstable();
@@ -2078,14 +2081,14 @@ mod tests {
     #[gpui::test]
     fn the_sidebars_list_reads_its_clock_and_ticks_when_a_row_folds(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
         // A clock taken five minutes ago, a chat that folds two minutes after it: folded by the
         // wall's clock, not yet by the sidebar's.
         let clock = Utc::now() - chrono::Duration::minutes(5);
         let folds = clock + chrono::Duration::minutes(2);
-        let moved = folds - chrono::Duration::hours(super::sidebar_status::INACTIVE_AFTER_HOURS);
+        let moved = folds - chrono::Duration::hours(sidebar_status::INACTIVE_AFTER_HOURS);
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
@@ -2119,7 +2122,7 @@ mod tests {
     #[gpui::test]
     fn the_sidebar_under_a_resting_pointer_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         cx.update(|cx| cx.set_reduce_motion(true));
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         cx.simulate_resize(gpui::size(px(1320.0), px(1100.0)));
@@ -2141,13 +2144,13 @@ mod tests {
                     })
                     .collect();
             });
-            shell.sidebar_collapsed_groups.remove(super::sidebar_status::INACTIVE);
+            shell.sidebar_collapsed_groups.remove(sidebar_status::INACTIVE);
             // The gate and splash are set behind the shell's back: it draws them on its next
             // frame only when told.
             cx.notify();
         });
-        crate::motion::run_on(cx.executor());
-        let settle = |cx: &mut gpui::VisualTestContext, wait: std::time::Duration| {
+        motion::run_on(cx.executor());
+        let settle = |cx: &mut VisualTestContext, wait: Duration| {
             cx.executor().advance_clock(wait);
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -2155,20 +2158,20 @@ mod tests {
             cx.update(|window, cx| window.draw(cx).clear(cx));
         };
         let mut stale = Vec::new();
-        settle(cx, std::time::Duration::ZERO);
+        settle(cx, Duration::ZERO);
         stale.extend(stale_sidebar(cx).map(|s| format!("at rest: {s}")));
         let row = cx.debug_bounds("chat-c0").expect("a sidebar row");
         cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-        settle(cx, std::time::Duration::from_millis(50));
+        settle(cx, Duration::from_millis(50));
         stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
-        settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+        settle(cx, settings::widgets::TOOLTIP_DELAY * 3);
         stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
         let more = cx.debug_bounds("sidebar-group-more-inactive");
         if let Some(more) = more {
             cx.simulate_click(more.center(), gpui::Modifiers::default());
-            settle(cx, std::time::Duration::from_millis(50));
+            settle(cx, Duration::from_millis(50));
             stale.extend(stale_sidebar(cx).map(|s| format!("after Show more: {s}")));
-            settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+            settle(cx, settings::widgets::TOOLTIP_DELAY * 3);
             stale.extend(stale_sidebar(cx).map(|s| format!("a row under it: {s}")));
         } else {
             stale.push("no Show more drawn".to_owned());

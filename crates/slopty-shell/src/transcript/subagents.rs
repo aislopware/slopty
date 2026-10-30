@@ -10,6 +10,15 @@
 //! the inspector pushes its trace on a stack of its own (`inspector.rs`), and the terminal, the
 //! sidebar and the prompt box's mirror stay where they were. Subagents started
 //! together share one line over their rows, "3 Explore agents · 2 working · 1m 12s".
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::needless_pass_by_value,
+    clippy::nonminimal_bool,
+    clippy::type_complexity,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -163,8 +172,8 @@ pub(super) struct SubagentsState {
 }
 
 /// A subagent as its row reads it.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Run {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
     /// Its task, as its parent's agent named it: the row's label.
     pub title: SharedString,
     /// Its kind, as the agent names it ("Explore").
@@ -194,7 +203,7 @@ pub(crate) struct Run {
 /// A model's id in words: "claude-haiku-5-5" reads "Haiku 5.5", a dated
 /// "claude-sonnet-4-5-20250929" "Sonnet 4.5", a bare "opus" "Opus"; an id of another maker's
 /// stays as it is.
-pub(crate) fn model_words(id: &str) -> String {
+pub fn model_words(id: &str) -> String {
     let id = id.trim();
     let rest = id.strip_prefix("claude-").unwrap_or(id);
     let mut parts = rest.split('-');
@@ -727,7 +736,7 @@ impl Transcript {
                     .truncate()
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(if run.failed { theme.danger } else { theme.text })
-                    .child(run.title.clone()),
+                    .child(run.title),
             )
             .children(step.map(|step| {
                 // The word swaps as it changes (Amp).
@@ -878,7 +887,7 @@ mod tests {
         progress.state = SubagentProgress::FAILED.into();
         progress.outcome = Some("Failed: out of turns".into());
         let mut failed = spawn(Some(progress.clone()));
-        failed.detail = answered.detail.clone();
+        failed.detail = answered.detail;
         assert_eq!(Run::of(&failed).step.as_deref(), Some("Failed: out of turns"));
         progress.state = SubagentProgress::STOPPED.into();
         progress.outcome = Some("Stopped".into());

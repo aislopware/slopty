@@ -1,10 +1,16 @@
 //! A copy control's glyph that answers a copy with a check drawn in, not swapped in
-//! (HextaUI's button state; `.research/design-inspiration-2026-10-19.md` item 12). The copy glyph
+//! (`HextaUI`'s button state; `.research/design-inspiration-2026-10-19.md` item 12). The copy glyph
 //! fades over [`COPY_FADE`] while the check waits, then the check is drawn stroke by stroke over
 //! 180 ms, 180 ms in, in the success green; the copy glyph comes back once the control's "Copied"
 //! span ([`motion::COPIED_FOR`], 1.5 s) ends. Under reduced motion the check is drawn at once.
 //! The control keeps its words and its size (only its tooltip says "Copied"), so nothing beside
-//! it moves; HextaUI's word roll is left out for that.
+//! it moves; `HextaUI`'s word roll is left out for that.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::time::{Duration, Instant};
 

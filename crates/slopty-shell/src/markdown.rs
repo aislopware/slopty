@@ -15,6 +15,7 @@
 //!   parse settles honestly on completion.
 
 // Find in a thread, the paint half.
+#![allow(clippy::too_long_first_doc_paragraph, reason = "shell lint migration: slice C")]
 pub mod find;
 pub(crate) mod inline_code_links;
 mod link_destination;

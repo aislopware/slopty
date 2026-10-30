@@ -12,6 +12,22 @@
 //! keyboard stays the inspector's, on the way back, so Esc goes back. It sends nothing to the
 //! agent: copying, opening a file and looking at a picture are its only actions, and the TUI
 //! does the rest.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::manual_midpoint,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_self,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -625,7 +641,7 @@ impl Inspector {
                     )
             })
             .children(at.map(|at| {
-                canvas(move |bounds, _, _| at.set(bounds), |_, _, _, _| ()).absolute().inset_0()
+                canvas(move |bounds, _, _| at.set(bounds), |_, (), _, _| ()).absolute().inset_0()
             }))
     }
 
@@ -1306,7 +1322,7 @@ impl PromptMirror {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let preview = preview.clone();
                         let _gone = this.inspector.update(cx, |inspector, cx| {
-                            inspector.show_picture(preview, window, cx)
+                            inspector.show_picture(preview, window, cx);
                         });
                     }))
                     .child(
@@ -1800,7 +1816,7 @@ mod tests {
             });
         };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-        transcript.update(cx, |this, cx| this.sync(cx));
+        transcript.update(cx, Transcript::sync);
         let inspector = cx.new(|cx| Inspector::new(state.clone(), transcript.clone(), cx));
         let (terminal, pane) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
         let (_, cx) = cx.add_window_view(|_, _| Host {
@@ -1933,7 +1949,7 @@ mod tests {
         while focused(cx) != "Subagent Count lines" {
             assert!(stops < 40, "Tab reaches the run's row");
             stops += 1;
-            cx.update(|window, cx| window.focus_next(cx));
+            cx.update(Window::focus_next);
         }
         // A key press clicks as it comes up.
         cx.simulate_keystrokes("enter");

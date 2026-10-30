@@ -1,6 +1,11 @@
 //! The jump pill at the foot of a transcript that no longer follows its end: an arrow,
 //! and how many steps arrived below since it let go ("↓ 12 new steps"; `docs/decisions/
 //! inspector.md`, "Follow and anchor"). A press goes back to the end, following it.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::option_option,
+    reason = "shell lint migration: slice B"
+)]
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{

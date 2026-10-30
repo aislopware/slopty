@@ -5,6 +5,7 @@
 //! `slopty-fence:{row}-chart-{n}`: the view model reads the fence here ([`fence`]) and builds
 //! the page from the chart libraries the app vendors, served from the page's own origin, so a
 //! chart draws offline and reaches no network. A fence that is not a chart's JSON stays code.
+#![allow(missing_debug_implementations, reason = "shell lint migration: slice C")]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -132,17 +133,14 @@ impl RenderOnce for FenceChart {
         let card = Arc::new(Self::card(&self.key, &self.fence));
         put_fence(&self.key, self.fence.clone(), cx);
         let existing = self.cards.borrow().get(&self.key).cloned();
-        let view = match existing {
-            Some(view) => {
-                view.update(cx, |view, cx| view.set_card(card, cx));
-                view
-            }
-            None => {
-                let (chat, engine) = (self.fence.chat.clone(), self.engine.clone());
-                let view = cx.new(|cx| PageCardView::new(card, chat, engine, cx));
-                self.cards.borrow_mut().insert(self.key.clone(), view.clone());
-                view
-            }
+        let view = if let Some(view) = existing {
+            view.update(cx, |view, cx| view.set_card(card, cx));
+            view
+        } else {
+            let (chat, engine) = (self.fence.chat.clone(), self.engine.clone());
+            let view = cx.new(|cx| PageCardView::new(card, chat, engine, cx));
+            self.cards.borrow_mut().insert(self.key.clone(), view.clone());
+            view
         };
         div().w_full().id(SharedString::from(format!("{}-fence", self.key))).child(view)
     }

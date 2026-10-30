@@ -9,6 +9,12 @@
 //! `Attrs::compatible` ignores color/metadata, so adjacent same-font runs are
 //! shaped as one contiguous word even across the split (kerning and ligatures
 //! survive; wrapping is byte-identical to the unsplit render).
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use gpui::TextRun;
 pub use slopty_veil::{RowVeil, VeilSpan, slice_spans};
@@ -21,7 +27,7 @@ pub fn apply_veil(runs: Vec<TextRun>, spans: &[VeilSpan]) -> Vec<TextRun> {
         return runs;
     }
     let mut out = Vec::with_capacity(runs.len() + spans.len() * 2);
-    let mut pos = 0usize;
+    let mut pos = 0_usize;
     for run in runs {
         let (start, end) = (pos, pos + run.len);
         pos = end;
@@ -101,7 +107,7 @@ mod tests {
         assert_eq!(out[0].len, 5);
         // Settled spans (alpha 1) also pass straight through unsplit — the
         // settled frame is byte-identical to an unsplit render.
-        let out = apply_veil(runs.clone(), &[(0..5, 1.0)]);
+        let out = apply_veil(runs, &[(0..5, 1.0)]);
         assert_eq!(out.len(), 1);
     }
 

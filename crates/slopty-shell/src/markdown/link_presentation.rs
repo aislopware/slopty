@@ -1,9 +1,25 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Width-dependent presentation; selection offsets always refer to original text.
+#![allow(
+    missing_debug_implementations,
+    unnameable_types,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::indexing_slicing,
+    clippy::manual_midpoint,
+    clippy::renamed_function_params,
+    clippy::string_slice,
+    clippy::unicode_not_nfc,
+    reason = "shell lint migration: slice C"
+)]
 use std::ops::Range;
 
 use gpui::{SharedString, TextRun};
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use super::render::FlatText;
 
@@ -16,7 +32,7 @@ use super::render::FlatText;
 pub struct OffsetMap {
     pub omissions: Vec<(Range<usize>, Range<usize>)>,
     /// The previous stage's map (closer to the source text), if any.
-    pub prior: Option<Box<OffsetMap>>,
+    pub prior: Option<Box<Self>>,
 }
 impl OffsetMap {
     /// This stage only: input-text offset for a shown offset.
@@ -80,7 +96,7 @@ impl OffsetMap {
     /// Source-text range → shown range (all stages).
     pub fn displayed_range(&self, range: Range<usize>) -> Range<usize> {
         let mid = match &self.prior {
-            Some(prior) => prior.displayed_range(range.clone()),
+            Some(prior) => prior.displayed_range(range),
             None => range,
         };
         self.local_displayed_range(mid)
@@ -92,7 +108,7 @@ pub struct OriginalText {
     pub offsets: OffsetMap,
 }
 
-pub(crate) fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
+pub fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
     let mut at = 0;
     runs.iter()
         .filter_map(|run| {
@@ -248,13 +264,12 @@ pub(super) fn present(
 ) -> FlatText {
     let with_glyphs = with_file_link_glyphs(flat, opts);
     truncate(&with_glyphs, f32::from(width), |text, runs| {
-        window
-            .text_system()
-            .shape_text(text.to_owned().into(), font_size, runs, None, None)
-            .map(|lines| {
+        window.text_system().shape_text(text.to_owned().into(), font_size, runs, None, None).map_or(
+            f32::INFINITY,
+            |lines| {
                 lines.iter().map(|line| f32::from(line.size(font_size).width)).fold(0., f32::max)
-            })
-            .unwrap_or(f32::INFINITY)
+            },
+        )
     })
 }
 
@@ -263,8 +278,8 @@ pub(super) fn present(
 /// the shaped text never notices. Copy and selection map the slot back to the
 /// link end, so the raw text survives and nothing reflows on hover.
 const FILE_GLYPH_SLOT: &str = "\u{00A0}\u{00A0}\u{00A0}\u{00A0}";
-pub(crate) const FILE_GLYPH_SIZE: f32 = 12.0;
-pub(crate) const FILE_GLYPH_GAP: f32 = 4.0;
+pub const FILE_GLYPH_SIZE: f32 = 12.0;
+pub const FILE_GLYPH_GAP: f32 = 4.0;
 
 /// Reserve a slot after every file link the surface's roots resolve. Web
 /// links and targets no known root owns keep their shape, as does a
@@ -412,7 +427,7 @@ impl Element for ResponsiveText {
                     .shape_text(flat.text.clone(), font_size, &flat.runs, width, None)
                     .unwrap_or_default();
                 let mut result: Size<Pixels> = Size::default();
-                for line in lines.iter() {
+                for line in &lines {
                     let size = line.size(line_height);
                     result.width = result.width.max(size.width).ceil();
                     result.height += size.height;
@@ -432,7 +447,7 @@ impl Element for ResponsiveText {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> AnyElement {
@@ -454,7 +469,7 @@ impl Element for ResponsiveText {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         child: &mut AnyElement,
         window: &mut Window,
         cx: &mut App,
@@ -466,7 +481,7 @@ impl Element for ResponsiveText {
 /// Paints the trailing open glyph of every resolved file link over the
 /// shaped text — the same reserved-slot overlay pattern, so the NBSP slots
 /// keep layout, selection and copy stable.
-pub(crate) struct FileLinkGlyphs {
+pub struct FileLinkGlyphs {
     pub id: SharedString,
     pub child: AnyElement,
     pub layout: TextLayout,
@@ -508,7 +523,7 @@ impl Element for FileLinkGlyphs {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<AnyElement> {
@@ -549,7 +564,7 @@ impl Element for FileLinkGlyphs {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         overlays: &mut Vec<AnyElement>,
         window: &mut Window,
         cx: &mut App,
@@ -631,7 +646,7 @@ mod tests {
 
         // Without a root snapshot no link grows a glyph (previews, web-only
         // surfaces).
-        let mut no_roots = opts.clone();
+        let mut no_roots = opts;
         no_roots.link = Some(LinkUi {
             source_session: Some("chat".into()),
             source_local: false,

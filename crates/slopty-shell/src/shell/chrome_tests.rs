@@ -31,12 +31,12 @@ fn a_chat_title_the_agent_gives_rolls_in(cx: &mut TestAppContext) {
             crate::roll_text::rolling(key, title.into(), false, crate::clock::now(cx)).is_some()
         })
     };
-    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, false));
+    cx.update(|_, cx| motion::set_reduced_motion(cx, false));
     retitle("Fix the lexer", cx);
     assert!(rolls("sidebar-title-b", "Fix the lexer", cx), "the row's title rolls in");
     assert!(rolls("titlebar-title-b", "Fix the lexer", cx), "the titlebar's too");
     assert!(cx.debug_bounds("chat-titlebar-title").is_some(), "in the title's place");
-    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+    cx.update(|_, cx| motion::set_reduced_motion(cx, true));
     retitle("Parse the lexer", cx);
     assert!(!rolls("sidebar-title-b", "Parse the lexer", cx), "under Reduce Motion, still");
     assert!(!rolls("titlebar-title-b", "Parse the lexer", cx));
@@ -88,7 +88,7 @@ fn before_any_project_the_sidebar_says_so_and_offers_only_what_works(cx: &mut Te
     assert!(find(&nodes, Role::Button, "Add a project").is_some(), "its one action, named");
     // A project, and the list says what fills it now, with its key.
     shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, _| state.spaces = vec![space("app")])
+        shell.state.update(cx, |state, _| state.spaces = vec![space("app")]);
     });
     let nodes = tree(cx);
     assert!(find(&nodes, Role::Label, "No sessions yet").is_some());
@@ -209,8 +209,7 @@ fn the_titlebar_row_names_the_session_then_its_actions(cx: &mut TestAppContext) 
                     && node.label == label
                     && node.bounds.top() < px(Theme::TITLEBAR_HEIGHT)
             })
-            .map(|node| node.bounds)
-            .unwrap_or_else(|| panic!("no {label} in the row"))
+            .map_or_else(|| panic!("no {label} in the row"), |node| node.bounds)
     };
     // A screen reader hears the identity as a button named by the session's title, its machine
     // and branch after.
@@ -262,14 +261,14 @@ fn the_title_opens_its_chats_menu(cx: &mut TestAppContext) {
     shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
     draw(cx);
     let title = cx.debug_bounds("chat-titlebar-title").expect("the title");
-    cx.simulate_event(gpui::MouseDownEvent {
-        button: gpui::MouseButton::Right,
+    cx.simulate_event(MouseDownEvent {
+        button: MouseButton::Right,
         position: title.center(),
         click_count: 1,
         ..Default::default()
     });
-    cx.simulate_event(gpui::MouseUpEvent {
-        button: gpui::MouseButton::Right,
+    cx.simulate_event(MouseUpEvent {
+        button: MouseButton::Right,
         position: title.center(),
         click_count: 1,
         ..Default::default()
@@ -299,7 +298,7 @@ fn each_move_between_settings_and_the_chats_fades_the_page_in(cx: &mut TestAppCo
     assert_eq!(changes(cx), Some(1), "into Settings");
     shell.update(cx, |shell, cx| shell.open_settings(SettingsSection::Shortcuts, cx));
     assert_eq!(changes(cx), Some(1), "a page within it is no move");
-    shell.update(cx, |shell, cx| shell.close_settings(cx));
+    shell.update(cx, Shell::close_settings);
     assert_eq!(changes(cx), Some(2), "back to the chats");
 }
 
@@ -351,8 +350,7 @@ mod session_card {
         cx: &mut gpui::TestAppContext,
     ) {
         use super::super::RightSurface;
-        let (shell, cx) =
-            super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
+        let (shell, cx) = retention_tests::launch(cx, retention_tests::DESKTOP);
         let show = |chat: &str, cx: &mut gpui::VisualTestContext| {
             shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
             cx.run_until_parked();
@@ -360,7 +358,7 @@ mod session_card {
         let shown = |chat: &str, cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let (views, front) = shell.read_with(cx, |shell, cx| {
-                let views = shell.panes.get(chat).map(|panes| panes.views()).unwrap_or_default();
+                let views = shell.panes.get(chat).map(panes::Panes::views).unwrap_or_default();
                 (views, shell.inspector_shown(cx))
             });
             let drawn = cx.debug_bounds("inspector").is_some();
@@ -388,8 +386,7 @@ mod session_card {
 
         let terminal = format!("{}t", crate::inspector::TERMINAL_CHAT);
         shell.update(cx, |shell, cx| {
-            let row =
-                super::super::retention_tests::chat_row(&terminal, 3, None, chrono::Utc::now());
+            let row = retention_tests::chat_row(&terminal, 3, None, Utc::now());
             shell.state.update(cx, |state, cx| {
                 state.chats.push(row);
                 cx.notify();
@@ -413,7 +410,7 @@ mod session_card {
     fn the_inspector_does_not_repeat_its_sessions_title(cx: &mut gpui::TestAppContext) {
         use super::super::retention_tests::{DESKTOP, chat_row, launch};
         let (shell, cx) = launch(cx, DESKTOP);
-        let now = chrono::Utc::now();
+        let now = Utc::now();
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| state.chats.push(chat_row("c", 3, None, now)));
         });
@@ -423,10 +420,7 @@ mod session_card {
             cx.simulate_keystrokes("cmd-i");
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            assert!(
-                shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)),
-                "{chat}'s inspector is open"
-            );
+            assert!(shell.read_with(cx, Shell::inspector_shown), "{chat}'s inspector is open");
             assert!(cx.debug_bounds("inspector-timeline").is_some(), "its timeline is drawn");
             assert!(
                 cx.debug_bounds("inspector-title").is_none(),
@@ -456,7 +450,7 @@ mod session_card {
         cx.simulate_resize(gpui::size(px(1280.0), px(800.0)));
         cx.update(|_, cx| crate::toast::info(cx, "Link copied"));
         let settle = |cx: &mut gpui::VisualTestContext| {
-            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.executor().advance_clock(Duration::from_secs(1));
             cx.run_until_parked();
             cx.update(|window, cx| {
                 window.refresh();

@@ -1,4 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+#![allow(
+    let_underscore_drop,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "shell lint migration: slice C"
+)]
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, KeyDownEvent, ListSizingBehavior, MouseButton, Window, div, list, px,
@@ -229,7 +244,7 @@ impl FilesSurface {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                this.on_tree_key_down(event, window, cx)
+                this.on_tree_key_down(event, window, cx);
             }))
             .child(root_target)
             .child({
@@ -391,8 +406,7 @@ impl FilesSurface {
                     )
                     .when(!renaming, |element| {
                         element.on_drag(drag_payload, move |payload, _, _, cx| {
-                            let _ = drag_owner
-                                .update(cx, |files, cx| files.close_tree_context_menu(cx));
+                            let _ = drag_owner.update(cx, Self::close_tree_context_menu);
                             cx.stop_propagation();
                             workspace_path_drag_ghost(payload, cx)
                         })
@@ -591,7 +605,7 @@ impl FilesSurface {
         if event.keystroke.key == "menu"
             || (event.keystroke.key == "f10" && event.keystroke.modifiers.shift)
         {
-            if let Some(path) = self.tree.selected().map(str::to_string) {
+            if let Some(path) = self.tree.selected().map(str::to_owned) {
                 self.open_tree_context_menu(
                     path,
                     self.tree_list.viewport_bounds().origin,
@@ -638,7 +652,7 @@ impl FilesSurface {
                 true
             }
             "left" => {
-                let selected = self.tree.selected().map(str::to_string);
+                let selected = self.tree.selected().map(str::to_owned);
                 if let Some(path) = selected {
                     if self.tree.is_expanded(&path) {
                         self.tree.toggle_expanded(&path);
@@ -650,7 +664,7 @@ impl FilesSurface {
                 true
             }
             "right" => {
-                let selected = self.tree.selected().map(str::to_string);
+                let selected = self.tree.selected().map(str::to_owned);
                 if let Some(path) = selected
                     && self
                         .tree
@@ -666,7 +680,7 @@ impl FilesSurface {
                 true
             }
             "enter" | "space" => {
-                if let Some(path) = self.tree.selected().map(str::to_string) {
+                if let Some(path) = self.tree.selected().map(str::to_owned) {
                     self.activate_tree_path(path, cx);
                 }
                 true
@@ -716,7 +730,7 @@ fn status_row(
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, ListAlignment, ListOffset, ListState};
+    use gpui::{ListAlignment, ListOffset, ListState};
 
     use super::super::model::VisibleTreeRow;
     use super::*;
@@ -735,7 +749,7 @@ mod tests {
     #[gpui::test]
     fn tree_fades_only_at_edges_with_hidden_rows(cx: &mut gpui::TestAppContext) {
         struct TestTree(ListState);
-        impl gpui::Render for TestTree {
+        impl Render for TestTree {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 list(self.0.clone(), |_, _, _| {
                     div().h(px(TREE_ROW_HEIGHT)).w_full().into_any_element()

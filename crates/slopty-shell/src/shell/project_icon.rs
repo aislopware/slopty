@@ -1,5 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Repository artwork is fetched once per project/connection, off the render thread.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::create_dir,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::match_wildcard_for_single_variants,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice A"
+)]
 use super::*;
 use crate::files::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::image_media::{MediaImage, decode_project_icon, release_media};
@@ -35,7 +49,7 @@ fn load_local_icon(root: &std::path::Path) -> Option<MediaImage> {
             continue;
         }
         let bytes = std::fs::File::open(&path).ok().and_then(|file| {
-            use std::io::Read;
+            use std::io::Read as _;
             let mut bytes = Vec::new();
             file.take(slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
@@ -70,7 +84,7 @@ fn monogram(name: &str, seed: &str, selected: bool, theme: &Theme) -> AnyElement
     // FNV-1a selects a stable entry from the curated palette.
     let hash = seed
         .bytes()
-        .fold(2166136261u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16777619));
+        .fold(2166136261_u32, |hash, byte| (hash ^ u32::from(byte)).wrapping_mul(16777619));
     let letter = name.trim().chars().next().unwrap_or('?').to_uppercase().to_string();
     let (dark, light) = MONOGRAM_PALETTE[hash as usize % MONOGRAM_PALETTE.len()];
     let tone = gpui::Hsla::from(gpui::rgb(if theme.appearance.is_dark() { dark } else { light }));
@@ -119,7 +133,7 @@ impl ProjectIcon {
             let executor = cx.background_executor().clone();
             let load = async {
                 if context.target_device_id.is_none() {
-                    let root = std::path::PathBuf::from(context.cwd);
+                    let root = PathBuf::from(context.cwd);
                     return executor.spawn(async move { load_local_icon(&root) }).await;
                 }
                 let client = WorkspaceFilesClient::new(engine?, context.clone());
@@ -196,8 +210,8 @@ impl Render for ProjectIconTooltip {
             .rounded(px(6.0))
             .border_1()
             .border_color(theme.border_strong)
-            .bg(crate::popover::surface_bg(theme))
-            .when(!theme.is_frost(), |el| el.shadow_md())
+            .bg(popover::surface_bg(theme))
+            .when(!theme.is_frost(), Styled::shadow_md)
             .child(
                 div()
                     .min_w_0()
@@ -255,13 +269,12 @@ impl Shell {
         // The tooltip names this row's own project; the artwork is shared.
         let name = chat
             .and_then(|chat| state.space_for_chat(chat))
-            .map(|space| space.display_name().to_string())
-            .unwrap_or_else(|| "No project".into());
+            .map_or_else(|| "No project".into(), |space| space.display_name().to_owned());
         // Same fallback as the row's "@ device" fragment.
         let device = chat
             .and_then(|chat| state.device_name(&chat.device_id))
             .unwrap_or("Unknown device")
-            .to_string();
+            .to_owned();
         let art = self.project_icon_art(chat_id, selected, cx);
         project_icon_frame(chat_id, &name, &device, size, art)
     }
@@ -295,7 +308,7 @@ impl Shell {
 /// Shared artwork pipeline for sidebar and repository picker. Each owner keeps
 /// the entities alive; loading stays off the render thread and has a deadline.
 #[derive(Default)]
-pub(crate) struct ProjectIcons {
+pub struct ProjectIcons {
     entries: std::cell::RefCell<std::collections::HashMap<String, Entity<ProjectIcon>>>,
 }
 
@@ -310,10 +323,9 @@ impl ProjectIcons {
     ) -> AnyElement {
         let state = state.read(cx);
         let representative = space.map(|space| state.representative_space(space));
-        let name = representative
-            .map(|space| space.display_name().to_string())
-            .unwrap_or_else(|| "Home".into());
-        let seed = representative.map(|space| space.path.clone()).unwrap_or_else(|| "home".into());
+        let name =
+            representative.map_or_else(|| "Home".into(), |space| space.display_name().to_owned());
+        let seed = representative.map_or_else(|| "home".into(), |space| space.path.clone());
         let artwork = space.map(|space| {
             state
                 .project_members(space)

@@ -2,6 +2,14 @@
 //! How many subagents are running, on the titlebar's explorer toggle: a count badge on its
 //! corner. slopty: the "● 3" pill on the sidebar's chat rows is gone (Amp's prune): a subagent
 //! left at work reads as its agent's own work there, and the row's hover card counts them.
+#![allow(
+    let_underscore_drop,
+    rustdoc::private_intra_doc_links,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -29,7 +37,7 @@ pub fn count_label(count: u32) -> SharedString {
     if count > COUNT_CAP { format!("{COUNT_CAP}+").into() } else { count.to_string().into() }
 }
 
-fn is_capped(count: u32) -> bool {
+const fn is_capped(count: u32) -> bool {
     count > COUNT_CAP
 }
 
@@ -128,7 +136,7 @@ impl RenderOnce for CountBadge {
         let tone = self.tone;
         canvas(
             |_, _, _| (),
-            move |bounds: Bounds<gpui::Pixels>, _, window, cx| {
+            move |bounds: Bounds<gpui::Pixels>, (), window, cx| {
                 let scale = window.scale_factor();
                 let snap = |value: f32| (value * scale).round() / scale;
                 window.paint_quad(fill(bounds, tone).corner_radii(bounds.size.height / 2.0));

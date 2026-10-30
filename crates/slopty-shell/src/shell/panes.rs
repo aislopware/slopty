@@ -9,6 +9,14 @@
 //! direction (⌥⌘ arrows) and the panes in reading order (⌘] ⌘[); a pane can fill the view
 //! (zoom) while the tree keeps its shape. The session's pane never closes: closing every other
 //! pane brings the view back to it.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::indexing_slicing,
+    clippy::match_same_arms,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{Bounds, Pixels, Size, point, px, size};
 
@@ -16,7 +24,7 @@ use super::RightSurface;
 
 /// What a pane shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(crate) enum Pane {
+pub enum Pane {
     /// The session's own terminal: the agent's TUI, or the session's shell.
     Session,
     /// A shell opened beside the session (⌘D), by its number in the view.
@@ -35,7 +43,7 @@ impl Pane {
 
 /// How a split lays out its two children.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Axis {
+pub enum Axis {
     /// Side by side: the first on the left.
     Row,
     /// One over the other: the first on top.
@@ -44,7 +52,7 @@ pub(crate) enum Axis {
 
 /// A direction focus moves in, or a split opens toward.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Direction {
+pub enum Direction {
     Left,
     Right,
     Up,
@@ -64,19 +72,19 @@ impl Direction {
 }
 
 /// The visible divider between two panes, in points (Ghostty's).
-pub(crate) const DIVIDER: f32 = 1.0;
+pub const DIVIDER: f32 = 1.0;
 /// The divider's grab target, in points: the hairline and 3 pt either side (Ghostty's 7).
-pub(crate) const DIVIDER_GRAB: f32 = 7.0;
+pub const DIVIDER_GRAB: f32 = 7.0;
 /// The smallest a pane is laid out, in points (Ghostty's 10, raised to keep a terminal's grid
 /// a few cells wide and a view's header whole).
-pub(crate) const MIN_PANE: f32 = 80.0;
+pub const MIN_PANE: f32 = 80.0;
 /// A ratio's bounds, so neither child of a split can be dragged away (Ghostty's 10-90 %).
 const RATIO: (f32, f32) = (0.1, 0.9);
 
 /// The grid a terminal pane draws: its cell, and what its pane takes besides whole cells along
 /// each axis (its padding, and a pane header's height while the view holds more than one).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) struct Grid {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Grid {
     pub(crate) cell: Size<Pixels>,
     pub(crate) frame: Size<Pixels>,
 }
@@ -94,14 +102,14 @@ impl Grid {
 
 /// A node of the tree.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) enum Node {
+pub enum Node {
     Leaf(Pane),
     Split {
         axis: Axis,
         /// The first child's share of the room, between [`RATIO`]'s bounds.
         ratio: f32,
-        first: Box<Node>,
-        second: Box<Node>,
+        first: Box<Self>,
+        second: Box<Self>,
     },
 }
 
@@ -270,8 +278,8 @@ impl Node {
 
 /// A divider as laid out: where it stands across `axis`, the split's whole rectangle, and the
 /// split's place in the tree (`false` first, `true` second, from the root).
-#[derive(Clone, PartialEq, Debug)]
-pub(crate) struct Divider {
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Divider {
     pub(crate) axis: Axis,
     pub(crate) at: Pixels,
     pub(crate) span: Bounds<Pixels>,
@@ -296,8 +304,8 @@ impl Divider {
 }
 
 /// The tree laid out: each pane's rectangle in reading order, and each divider.
-#[derive(Clone, Default, PartialEq, Debug)]
-pub(crate) struct Laid {
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Laid {
     pub(crate) panes: Vec<(Pane, Bounds<Pixels>)>,
     pub(crate) dividers: Vec<Divider>,
     path: Vec<bool>,
@@ -313,7 +321,7 @@ impl Laid {
 /// A session's view: its tree, the pane with the keyboard, and the pane filling the view while
 /// zoomed.
 #[derive(Clone, PartialEq, Debug)]
-pub(crate) struct Panes {
+pub struct Panes {
     root: Node,
     focused: Pane,
     zoomed: Option<Pane>,
@@ -407,17 +415,14 @@ impl Panes {
                 pane @ Pane::View(_) => Some(pane),
                 _ => self.panes().into_iter().rev().find(|pane| matches!(pane, Pane::View(_))),
             };
-            match beside {
-                Some(pane) => {
-                    self.root.split(pane, Axis::Column, view, true);
-                }
-                None => {
-                    self.root.split(Pane::Session, Axis::Row, view, true);
-                    if let Some(path) = self.path_to_split_of(view)
-                        && let Some(Node::Split { ratio, .. }) = self.root.at_path(&path)
-                    {
-                        *ratio = (1.0 - share).clamp(RATIO.0, RATIO.1);
-                    }
+            if let Some(pane) = beside {
+                self.root.split(pane, Axis::Column, view, true);
+            } else {
+                self.root.split(Pane::Session, Axis::Row, view, true);
+                if let Some(path) = self.path_to_split_of(view)
+                    && let Some(Node::Split { ratio, .. }) = self.root.at_path(&path)
+                {
+                    *ratio = (1.0 - share).clamp(RATIO.0, RATIO.1);
                 }
             }
         }

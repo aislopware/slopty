@@ -1,6 +1,7 @@
 //! A page part's row hosts its card ([`crate::page::PageCardView`]), kept per row so the
 //! page's web view and watch outlive a frame; a chart fence in a reply hosts one too
 //! ([`crate::page::FenceChart`]).
+#![allow(clippy::clone_on_ref_ptr, reason = "shell lint migration: slice B")]
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -23,20 +24,17 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let view: Entity<PageCardView> = match self.pages.get(&row.id) {
-            Some(view) => {
-                let card = card.clone();
-                view.update(cx, |view, cx| view.set_card(card, cx));
-                view.clone()
-            }
-            None => {
-                let chat = self.work_chat();
-                let engine = self.state.read(cx).engine().cloned();
-                let card = card.clone();
-                let view = cx.new(|cx| PageCardView::new(card, chat, engine, cx));
-                self.pages.insert(row.id.clone(), view.clone());
-                view
-            }
+        let view: Entity<PageCardView> = if let Some(view) = self.pages.get(&row.id) {
+            let card = card.clone();
+            view.update(cx, |view, cx| view.set_card(card, cx));
+            view.clone()
+        } else {
+            let chat = self.work_chat();
+            let engine = self.state.read(cx).engine().cloned();
+            let card = card.clone();
+            let view = cx.new(|cx| PageCardView::new(card, chat, engine, cx));
+            self.pages.insert(row.id.clone(), view.clone());
+            view
         };
         let (top, bottom) = self.page_clear_band();
         view.update(cx, |view, _| view.set_clear_band(top, bottom));

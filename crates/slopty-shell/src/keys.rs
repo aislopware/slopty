@@ -7,6 +7,16 @@
 //! key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓ and the word "Esc"); elsewhere it is words ("Ctrl+Shift+A"). The
 //! binding shown is the one the keymap holds when the hint draws, so a rebind shows at once and an
 //! unbound action shows nothing.
+#![allow(
+    rustdoc::private_intra_doc_links,
+    clippy::derive_partial_eq_without_eq,
+    clippy::fn_params_excessive_bools,
+    clippy::match_same_arms,
+    clippy::panic,
+    clippy::too_long_first_doc_paragraph,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{Action, App, FocusHandle, KeyBinding, Modifiers, SharedString, Window};
 
@@ -160,11 +170,7 @@ pub fn for_action_anywhere(action: &dyn Action, cx: &App) -> Option<SharedString
 fn global_binding(action: &dyn Action, cx: &App) -> Option<KeyBinding> {
     let keymap = cx.key_bindings();
     let keymap = keymap.borrow();
-    keymap
-        .bindings_for_action(action)
-        .filter(|binding| binding.predicate().is_none())
-        .last()
-        .cloned()
+    keymap.bindings_for_action(action).rfind(|binding| binding.predicate().is_none()).cloned()
 }
 
 /// A stored combo ("mod-shift-a", "shift-tab", "escape") as [`stroke_text`] writes it, for keys a
@@ -272,7 +278,7 @@ fn aria_stroke(modifiers: &Modifiers, key: &str) -> String {
     parts.join("+")
 }
 
-/// A key by its DOM `key` name ("ArrowUp", "Escape"); a letter in capitals.
+/// A key by its DOM `key` name ("`ArrowUp`", "Escape"); a letter in capitals.
 fn aria_key(key: &str) -> String {
     let named = match key {
         "enter" => "Enter",
@@ -406,7 +412,7 @@ mod tests {
             // The fixed keys the keymap applies, the inspector's among them.
             let inspector = Keys::Action(Box::new(crate::shell::ToggleInspector));
             assert_eq!(inspector.text(window, cx), Some(combo_text("mod-i")));
-            let bound = |action: &dyn gpui::Action| {
+            let bound = |action: &dyn Action| {
                 cx.key_bindings().borrow().bindings_for_action(action).next().is_some()
             };
             assert!(

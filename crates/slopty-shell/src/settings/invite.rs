@@ -1,6 +1,12 @@
 //! The code a phone or iPad scans to connect to the server (Settings → Devices' "Connect a
 //! phone"): the link the app gives (`ServerInvite`) drawn as a QR code, with the address it
 //! carries and how to use it, or why there is none.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Hsla, div, px};
@@ -18,7 +24,7 @@ pub const QUIET: usize = 4;
 
 /// The field the code is drawn on and its modules' colour, whatever the appearance: a scanner
 /// needs dark modules on a light field, and an inverted code is one many scanners do not read.
-pub fn inks() -> (Hsla, Hsla) {
+pub const fn inks() -> (Hsla, Hsla) {
     (gpui::hsla(0.0, 0.0, 1.0, 1.0), gpui::hsla(0.0, 0.0, 0.08, 1.0))
 }
 

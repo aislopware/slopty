@@ -1,10 +1,10 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-use gpui::{AppContext, TestAppContext, VisualTestContext};
+use gpui::{TestAppContext, VisualTestContext};
 use slopty_view_proto::{WorkspaceDirectoryPage, WorkspaceEntry, WorkspaceEntryKind};
 
 use super::*;
 
-pub(crate) fn state() -> AppState {
+pub fn state() -> AppState {
     let mut state = AppState::new();
     state.local_device_id = Some("device".into());
     state.chats.push(
@@ -17,7 +17,7 @@ pub(crate) fn state() -> AppState {
     state
 }
 
-pub(crate) fn explorer(state: Entity<AppState>, cx: &mut Context<FilesSurface>) -> FilesSurface {
+pub fn explorer(state: Entity<AppState>, cx: &mut Context<FilesSurface>) -> FilesSurface {
     let mut files = FilesSurface::new_explorer(state, "chat".into(), false, cx);
     files.effective_checkout_id = Some("checkout".into());
     files.mutation_capabilities = Some(slopty_view_proto::WorkspaceMutationCapabilities {
@@ -27,7 +27,7 @@ pub(crate) fn explorer(state: Entity<AppState>, cx: &mut Context<FilesSurface>) 
     files.tree.begin_load("", None, files.tree.generation());
     files.tree.apply_page(
         WorkspaceDirectoryPage {
-            directory: "".into(),
+            directory: String::new(),
             checkout_id: Some("checkout".into()),
             mutation_capabilities: files.mutation_capabilities,
             entries: vec![
@@ -68,7 +68,7 @@ pub(super) fn set_root_entries(
         files.tree.begin_load("", None, files.tree.generation());
         files.tree.apply_page(
             WorkspaceDirectoryPage {
-                directory: "".into(),
+                directory: String::new(),
                 checkout_id: Some("checkout".into()),
                 mutation_capabilities: files.mutation_capabilities,
                 entries,
@@ -83,7 +83,7 @@ pub(super) fn set_root_entries(
     cx.run_until_parked();
 }
 
-pub(crate) fn entry(path: &str, kind: WorkspaceEntryKind) -> WorkspaceEntry {
+pub fn entry(path: &str, kind: WorkspaceEntryKind) -> WorkspaceEntry {
     WorkspaceEntry {
         path: path.into(),
         name: path.rsplit('/').next().unwrap().into(),

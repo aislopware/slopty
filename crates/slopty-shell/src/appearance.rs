@@ -22,6 +22,14 @@
 //! [`App::refresh_windows`] marks every window dirty *and* disables gpui's
 //! per-view prepaint cache for the frame, which is the only thing that forces
 //! already-laid-out elements to re-run their paint with the new palette.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::needless_pass_by_value,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -46,7 +54,7 @@ impl AppearanceMode {
     pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
 
     /// Menu/label text.
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::System => "System",
             Self::Light => "Light",
@@ -55,7 +63,7 @@ impl AppearanceMode {
     }
 
     /// Shared glyph for appearance controls throughout the app.
-    pub fn icon(self) -> &'static str {
+    pub const fn icon(self) -> &'static str {
         match self {
             Self::System => crate::icons::MONITOR,
             Self::Light => crate::icons::SUN,
@@ -78,7 +86,7 @@ pub struct AppearanceState {
 impl Global for AppearanceState {}
 
 /// Combine the person's choice with the system's appearance.
-pub fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
+pub const fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
     match mode {
         AppearanceMode::System => system,
         AppearanceMode::Light => Appearance::Light,
@@ -207,7 +215,7 @@ pub fn set_surface(surface: SurfacePreference, cx: &mut App) {
 /// The application's appearance for `mode`: a pinned mode's, so what AppKit draws
 /// (the traffic lights above all) matches the palette Slopty paints, or none, so
 /// AppKit follows the system and the theme with it.
-fn app_appearance(mode: AppearanceMode) -> Option<gpui::WindowAppearance> {
+const fn app_appearance(mode: AppearanceMode) -> Option<gpui::WindowAppearance> {
     match mode {
         AppearanceMode::System => None,
         AppearanceMode::Light => Some(gpui::WindowAppearance::Light),
@@ -245,6 +253,7 @@ fn follow_app(cx: &mut App) {
 }
 
 /// [`follow_app`], with the application's appearance read from `window` as it opens.
+///
 /// A window that just opened has no appearance of its own yet, so it wears the
 /// application's, and it has it even early in launch, when
 /// `NSApp.effectiveAppearance` may not be populated: read from there, the app
@@ -283,6 +292,7 @@ fn apply_from(app: Appearance, cx: &mut App) {
 }
 
 /// Rebuild the current palette after the installed custom registry changes.
+///
 /// Unlike [`apply`], this deliberately reinstalls even when the selected id is
 /// unchanged because a linked theme may have recompiled under that same id.
 pub fn apply_registry_change(cx: &mut App) {
@@ -298,7 +308,7 @@ pub fn apply_registry_change(cx: &mut App) {
     reapply_window_background(cx);
 }
 
-fn model_appearance(appearance: Appearance) -> slopty_shell_theme::Appearance {
+const fn model_appearance(appearance: Appearance) -> slopty_shell_theme::Appearance {
     match appearance {
         Appearance::Dark => slopty_shell_theme::Appearance::Dark,
         Appearance::Light => slopty_shell_theme::Appearance::Light,
@@ -315,8 +325,7 @@ pub fn reapply_window_background(cx: &mut App) {
 }
 
 fn apply_window_background(cx: &mut App) {
-    let Some(wanted) = cx.try_global::<Theme>().map(|theme| theme.window_background_appearance())
-    else {
+    let Some(wanted) = cx.try_global::<Theme>().map(Theme::window_background_appearance) else {
         return;
     };
     for window in cx.windows() {

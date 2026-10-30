@@ -7,6 +7,12 @@
 //! titles and links) is dropped. A real escape byte is read in any fence; an ` ```ansi ` fence
 //! also reads the spelled-out forms an agent writes (`\x1b[`, `\033[`, `\e[`, `\u001b[`), which
 //! in any other fence are code and stay as written.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::ops::Range;
 
@@ -75,7 +81,7 @@ pub fn parse(language: Option<&str>, code: &str) -> Vec<AnsiLine> {
     for raw in code.split('\n') {
         let mut line = AnsiLine::default();
         let mut chars = raw.chars().peekable();
-        let mut run_start = 0usize;
+        let mut run_start = 0_usize;
         let push = |line: &mut AnsiLine, start: usize, style: AnsiStyle| {
             let end = line.text.len();
             if end > start {

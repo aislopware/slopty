@@ -3,11 +3,28 @@
 //! dialog draws its steps, the host key or password a run stops to ask for, this Mac's
 //! checklist with each line's fix, the servers to choose between, and what was added. A look on
 //! the tailnet (`LookOnTailnet`) offers the servers and machines that answer.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, Focusable, SharedString, Subscription, Task,
-    Window, div, px,
+    AnyElement, App, Context, Entity, EventEmitter, Focusable as _, SharedString, Subscription,
+    Task, Window, div, px,
 };
 use gpui_base::input::{Input, InputEvent, InputState};
 use serde::Deserialize;
@@ -31,7 +48,7 @@ pub enum Choice {
 
 impl Choice {
     /// The choices this device offers: a Mac shares itself and reaches others over ssh.
-    fn offered() -> &'static [Self] {
+    const fn offered() -> &'static [Self] {
         if cfg!(target_os = "macos") {
             &[Self::ThisMac, Self::Ssh, Self::Server]
         } else {
@@ -693,7 +710,7 @@ impl AddDeviceDialog {
                 Mark::NeedsYou => status_mark(crate::loaders::status_mark::MarkState::Waiting),
                 // The run's share, on the step under way.
                 Mark::Running if share_on(&progress.steps, progress.share) == Some(ix) => {
-                    let percent = progress.share.map_or(0, |share| share_percent(share));
+                    let percent = progress.share.map_or(0, share_percent);
                     crate::loaders::upload_progress_arc(
                         percent,
                         14.0,
@@ -909,7 +926,7 @@ impl Render for AddDeviceDialog {
                     .cursor_pointer()
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.accent)
-                    .hover(|s| s.underline())
+                    .hover(Styled::underline)
                     .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.serve = !serve;
@@ -1135,7 +1152,7 @@ mod tests {
         let typed = dialog.read_with(cx, |dialog, cx| dialog.address.read(cx).value().to_string());
         assert_eq!(typed, "", "a node that cannot be joined does not act");
         // Near its left edge, far from any word that says what it does.
-        let at = gpui::point(row.origin.x + gpui::px(4.0), row.center().y);
+        let at = gpui::point(row.origin.x + px(4.0), row.center().y);
         cx.simulate_click(at, gpui::Modifiers::default());
         cx.run_until_parked();
         let typed = dialog.read_with(cx, |dialog, cx| dialog.address.read(cx).value().to_string());
@@ -1158,7 +1175,7 @@ mod tests {
         });
         cx.run_until_parked();
         let mut left = |name: &'static str| {
-            cx.debug_bounds(name).map(|b| f32::from(b.origin.x)).unwrap_or_else(|| panic!("{name}"))
+            cx.debug_bounds(name).map_or_else(|| panic!("{name}"), |b| f32::from(b.origin.x))
         };
         let blurb = left("add-device-blurb");
         let label = left("add-device-found-label");
@@ -1289,7 +1306,7 @@ mod tests {
         let (dialog, cx) = dialog(cx);
         let closed = closes(&dialog, cx);
         let _ = focused(cx);
-        cx.update(|window, cx| window.blur(cx));
+        cx.update(Window::blur);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         assert_eq!(closed.get(), 1);

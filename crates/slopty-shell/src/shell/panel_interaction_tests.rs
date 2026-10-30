@@ -1,7 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The sidebar beside a session's panes, and the panes themselves, through Shell's actions and
 //! GPUI's real layout.
-use gpui::{AppContext, Bounds, TestAppContext, VisualTestContext};
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::items_after_statements,
+    reason = "shell lint migration: slice A"
+)]
+use gpui::{Bounds, TestAppContext, VisualTestContext};
 
 use super::panes::Pane;
 use super::*;
@@ -62,7 +67,7 @@ fn change(
         shell.update(cx, |shell, cx| {
             action(shell, window, cx);
             cx.notify();
-        })
+        });
     });
 }
 
@@ -128,7 +133,7 @@ fn the_panes_fill_the_room_the_sidebar_leaves_through_its_glide(cx: &mut TestApp
     near(f32::from(initial.session.size.width), 1300.0);
 
     // A view docks at the session's right, in the room the sidebar leaves.
-    change(&shell, cx, |s, window, cx| s.add_diff_surface(window, cx));
+    change(&shell, cx, Shell::add_diff_surface);
     let docked = settled(&shell, cx);
     expect(docked, [300.0, 1300.0]);
     let session = cx.debug_bounds("pane-session").expect("the session's pane");
@@ -222,7 +227,7 @@ fn a_subagent_shows_its_agents_panes_and_the_panes_come_back(cx: &mut TestAppCon
     change(&shell, cx, |shell, window, cx| {
         shell.state.update(cx, |state, _| {
             let main = state.chats[0].clone();
-            let mut sub = main.clone();
+            let mut sub = main;
             sub.id = "s".into();
             sub.parent_chat_id = Some("a".into());
             (sub.subagent, sub.in_parent) = (true, true);
@@ -263,7 +268,7 @@ fn a_subagent_shows_its_agents_panes_and_the_panes_come_back(cx: &mut TestAppCon
         assert_eq!(shell.panes_now(cx).views(), [RightSurface::Inspector]);
         assert!(shell.inspector_shown(cx));
     });
-    change(&shell, cx, |shell, window, cx| shell.summon_files(window, cx));
+    change(&shell, cx, Shell::summon_files);
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.panes_now(cx).views(), [RightSurface::Inspector, RightSurface::Files]);

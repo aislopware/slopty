@@ -2,6 +2,13 @@
 //! typed into that terminal, never one that runs an agent or a project action. A plain one-line
 //! command runs at once. A line of several lines, or one that asks for root or destroys (`sudo`,
 //! `rm`, a forced push…), is left at the prompt for the person to read and run with Enter.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::App;
 

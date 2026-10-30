@@ -1,5 +1,18 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Settings → Files: local preferences for workspace-file editing.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::enum_variant_names,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_many_arguments,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, Window, div, px};
@@ -10,7 +23,7 @@ use crate::theme::Theme;
 
 const DELAY_OPTIONS: [u64; 5] = [300, 600, 900, 1_500, 3_000];
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesSettingsEvent {
     AutosaveChanged(bool),
     AutosaveDelayChanged(u64),

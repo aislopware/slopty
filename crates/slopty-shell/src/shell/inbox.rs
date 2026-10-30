@@ -6,6 +6,14 @@
 //! line, the state's mark and its age. It works from the keyboard alone: typing filters, ↑ ↓
 //! walk, ⏎ lands on the session, Esc puts it away. It answers nothing: Slopty never answers for
 //! the person (`docs/decisions/agents.md`, "TUI-first").
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::Cell;
 
@@ -172,7 +180,7 @@ struct Open {
 
 impl Inbox {
     /// Whether it is up: it holds the keyboard.
-    pub(super) fn is_open(&self) -> bool {
+    pub(super) const fn is_open(&self) -> bool {
         self.open.is_some()
     }
 }
@@ -422,8 +430,7 @@ fn inbox_row(
     now: DateTime<Utc>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    let brand =
-        row.harness.map(crate::pickers::harness_brand_icon).unwrap_or((icons::TERMINAL, None));
+    let brand = row.harness.map_or((icons::TERMINAL, None), crate::pickers::harness_brand_icon);
     let program =
         icon(brand.0).size(px(14.0)).flex_none().text_color(brand.1.unwrap_or(theme.text_muted));
     let age: SharedString = crate::state::format_time_ago(row.since, now).into();

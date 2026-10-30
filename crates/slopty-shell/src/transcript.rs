@@ -20,6 +20,49 @@
 //! selection in a row. Otherwise the first row in view holds its place by its key, whatever
 //! lands above or below it; scrolling back to the end follows again, and while it does not, a
 //! pill says how many rows wait below.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp,
+    clippy::float_cmp_const,
+    clippy::fn_params_excessive_bools,
+    clippy::format_collect,
+    clippy::implicit_hasher,
+    clippy::indexing_slicing,
+    clippy::items_after_statements,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::needless_collect,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::rc_buffer,
+    clippy::single_match_else,
+    clippy::string_add,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unreachable,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    clippy::unwrap_used,
+    clippy::useless_let_if_seq,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -92,6 +135,7 @@ const SELECTION_SCROLL_EDGE_PX: f32 = 36.0;
 const WORKING_LEAD_SIZE: f32 = 13.0;
 const SELECTION_SCROLL_MAX_STEP_PX: f32 = 24.0;
 /// Activity row height / gap — analytic, so fold heights need no measurement.
+///
 /// Ordinary tools place their icon on the rail; subagents retain a 30px card.
 /// Rows stack without a gap so the rail continues alongside expanded output.
 pub const CHIP_HEIGHT: f32 = 38.0;
@@ -185,7 +229,7 @@ const CHIPS_TOP_PAD: f32 = 2.0;
 /// How long a user fold toggle keeps its height tween armed: the RESIZE
 /// spec's 200ms plus margin. Past this the fold renders statically — an armed
 /// tween replays on remount, i.e. on every scroll-back-into-view.
-const FOLD_TWEEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+const FOLD_TWEEN_WINDOW: Duration = Duration::from_millis(400);
 /// A user prompt renders at most this many wrapped lines until expanded. A
 /// pasted log or file drops into the transcript as one endless slab otherwise
 /// (user report) — past the cap the bubble clips and grows a chevron.
@@ -217,7 +261,7 @@ pub const FOLLOW_PX: f32 = 2.0;
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TRANSCRIPT_FADE_BAND;
 /// What a markdown block says, as plain text: its texts as drawn (a relabelled link by
 /// its label), in paint order, a line each.
-fn block_words(block: &crate::markdown::Block) -> String {
+fn block_words(block: &Block) -> String {
     let mut texts = Vec::new();
     crate::markdown::find::block_texts(&crate::markdown::chat_links::as_drawn(block), &mut texts);
     texts.join("\n")
@@ -235,7 +279,7 @@ fn agent_name(harness: Option<slopty_view_proto::HarnessId>) -> SharedString {
 /// The focus of a strip's Copy, and what redraws the strip as it gains or loses it.
 struct StripFocus {
     copy: gpui::FocusHandle,
-    _redraw: [gpui::Subscription; 2],
+    _redraw: [Subscription; 2],
 }
 
 /// `inner` as the start of a message `who` said, to the accessibility tree.
@@ -266,7 +310,7 @@ pub enum ToolItemKind {
 }
 
 /// One tool invocation inside a group row.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolItem {
     /// Stable document part identity, independent of arrival order.
     pub part_id: String,
@@ -470,7 +514,7 @@ fn wrap_styled_runs(runs: &[InlineRun], indent: usize, out: &mut Vec<Vec<InlineR
             }
         }
         let mut line: Vec<InlineRun> = Vec::new();
-        let mut len = 0usize;
+        let mut len = 0_usize;
         for token in tokens {
             let tok_len: usize = token.iter().map(|r| r.text.chars().count()).sum();
             if tok_len > budget {
@@ -523,7 +567,7 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
         // A heading in a thought reads as its prose does, at the body's size and weight
         // (opencode's reasoning): a thought never outranks the answer.
         Block::Paragraph { runs } | Block::Heading { runs, .. } => {
-            wrap_styled_runs(runs, indent, out)
+            wrap_styled_runs(runs, indent, out);
         }
         // Interim: display math shows its TeX source like a code block.
         Block::CodeBlock { code, .. } | Block::Math { tex: code } => {
@@ -543,7 +587,7 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
             for (ix, item) in items.iter().enumerate() {
                 let marker = match ordered_start {
                     Some(start) => format!("{}. ", start + ix as u64),
-                    None => "• ".to_string(),
+                    None => "• ".to_owned(),
                 };
                 let inner = indent + marker.chars().count();
                 let mark = out.len();
@@ -651,7 +695,7 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
 }
 
 /// A chip's expandable detail payload.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolDetail {
     /// Command/tool output as a code block: verbatim lines (indentation
     /// intact), capped at [`OUTPUT_DETAIL_MAX_LINES`] with a counted tail.
@@ -820,6 +864,7 @@ fn output_line(line: &str) -> SharedString {
 }
 
 /// Columns at which an invocation line soft-wraps into continuation lines.
+///
 /// The wrap is char-counted, not measured — block heights must be analytic —
 /// so the budget is sized to fit the narrowest useful transcript pane.
 pub const CALL_WRAP_COLS: usize = 80;
@@ -908,8 +953,8 @@ pub fn diff_to_file(diff: &slopty_view_proto::ToolDiff) -> crate::changes::FileD
     let old = diff.old_text.as_deref().unwrap_or("");
     let text_diff = similar::TextDiff::from_lines(old, &diff.new_text);
     let mut hunks = Vec::new();
-    let (mut additions, mut deletions) = (0u32, 0u32);
-    let mut max_line = 0u32;
+    let (mut additions, mut deletions) = (0_u32, 0_u32);
+    let mut max_line = 0_u32;
     for group in text_diff.grouped_ops(3) {
         let (Some(first), Some(last)) = (group.first(), group.last()) else {
             continue;
@@ -998,7 +1043,7 @@ pub enum RowKind {
         /// as typed.
         markdown: Option<UserMarkdown>,
         /// Image refs parsed out of the message text:
-        /// thumbnails load from the owning device via ReadAttachmentChunk.
+        /// thumbnails load from the owning device via `ReadAttachmentChunk`.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// The figures of the turn this prompt opened, which its row says under it
         /// (`inspector.md`, "The turn is the root row").
@@ -1195,7 +1240,7 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
         let (label, detail) = tool_chip_content(&t.call);
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
-        acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
+        acc.push(u8::from(t.is_error) | (u8::from(t.resolved) << 1));
         // Thought chips use `ToolCall::Unknown` — the kind is the
         // label/icon discriminator, so a flip must re-splice.
         acc.push(t.kind as u8);
@@ -1223,12 +1268,12 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
                     for run in line {
                         acc.extend_from_slice(run.text.as_bytes());
                         acc.push(
-                            run.style.bold as u8
-                                | (run.style.italic as u8) << 1
-                                | (run.style.code as u8) << 2
-                                | (run.style.strikethrough as u8) << 3
-                                | (run.style.link.is_some() as u8) << 4
-                                | (run.style.math as u8) << 5,
+                            u8::from(run.style.bold)
+                                | (u8::from(run.style.italic) << 1)
+                                | (u8::from(run.style.code) << 2)
+                                | (u8::from(run.style.strikethrough) << 3)
+                                | (u8::from(run.style.link.is_some()) << 4)
+                                | (u8::from(run.style.math) << 5),
                         );
                     }
                     acc.push(b'\n');
@@ -1263,11 +1308,11 @@ fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
         }
         // Sidecar refs arriving after the resolve tick must re-splice too —
         // they add the fetch affordance without changing the detail payload.
-        acc.push(t.output_ref.is_some() as u8 | (t.diff_ref.is_some() as u8) << 1);
+        acc.push(u8::from(t.output_ref.is_some()) | (u8::from(t.diff_ref.is_some()) << 1));
         // Subagent lifecycle mutates the chip in place (its status flips):
         // hash it so the row re-splices on every change.
         acc.push(
-            t.subagent_ref.is_some() as u8
+            u8::from(t.subagent_ref.is_some())
                 | match t.subagent_status {
                     None => 0,
                     Some(SubagentStatus::Running) => 1 << 1,
@@ -1327,7 +1372,7 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 }
 
 #[cfg(test)]
-thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+thread_local! { static FORBID_ROW_PREPARATION: Cell<bool> = const { Cell::new(false) }; }
 
 /// Build the block rows of one (already continuation-joined) entry.
 ///
@@ -1406,7 +1451,7 @@ pub fn rows_for_entry(
     // started together are headed by one line.
     let last_part_ix = entry.parts.len().saturating_sub(1);
     let mut pending_group: Vec<ToolItem> = Vec::new();
-    let mut group_last_part_ix = 0usize;
+    let mut group_last_part_ix = 0_usize;
     let mut pending_spawns: Vec<ToolItem> = Vec::new();
     let flush_spawns = |rows: &mut Vec<Row>, spawns: &mut Vec<ToolItem>| {
         let spawns = std::mem::take(spawns);
@@ -1562,7 +1607,7 @@ pub fn rows_for_entry(
                             let end = range.end.min(text.len());
                             let bytes =
                                 text.as_bytes().get(range.start.min(end)..end).unwrap_or_default();
-                            let version = (fnv1a(bytes) << 1) | streaming as u64;
+                            let version = (fnv1a(bytes) << 1) | u64::from(streaming);
                             rows.push(Row {
                                 id: format!("{key}.{block_ix}").into(),
                                 version,
@@ -1622,8 +1667,8 @@ pub fn rows_for_entry(
                         let (label, header) = input_chip_words(questions);
                         rows.push(Row {
                             id: format!("{}#{}", entry.id, part_id).into(),
-                            version: fnv1a(format!("{label}\0{header}").as_bytes()) << 1
-                                | *resolved as u64,
+                            version: (fnv1a(format!("{label}\0{header}").as_bytes()) << 1)
+                                | u64::from(*resolved),
                             turn_start: false,
                             kind: RowKind::InputChip { label, header, resolved: *resolved },
                             entry_id: entry_id.clone(),
@@ -1830,7 +1875,7 @@ pub fn parse_for_row(
     tree_cache: &mut HashMap<String, (usize, Arc<BlockTree>)>,
 ) -> (Arc<BlockTree>, ParseOutcome) {
     if streaming {
-        let parser = live_parsers.entry(key.to_string()).or_default();
+        let parser = live_parsers.entry(key.to_owned()).or_default();
         parser.set_text(text);
         (
             // Display tree: hanging inline markers mended so closers arriving
@@ -1857,7 +1902,7 @@ pub fn parse_for_row(
             }
             _ => (Arc::new(parse_full(text)), ParseOutcome::Full),
         };
-        tree_cache.insert(key.to_string(), (text.len(), tree.clone()));
+        tree_cache.insert(key.to_owned(), (text.len(), tree.clone()));
         (tree, outcome)
     }
 }
@@ -1865,7 +1910,7 @@ pub fn parse_for_row(
 /// Markdown row ids are `{entry}#{part}.{blockIx}` — the part prefix is
 /// everything before the block index.
 fn part_prefix(id: &str) -> &str {
-    id.rsplit_once('.').map(|(p, _)| p).unwrap_or(id)
+    id.rsplit_once('.').map_or(id, |(p, _)| p)
 }
 
 /// Vertical gap opening `row` given its predecessor: turn gap at turn starts;
@@ -1901,7 +1946,7 @@ pub fn top_gap_for(prev: Option<&Row>, row: &Row) -> f32 {
 /// `None` when the sets are identical by (id, version).
 pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
     let eq = |a: &Row, b: &Row| a.id == b.id && a.version == b.version;
-    let mut prefix = 0usize;
+    let mut prefix = 0_usize;
     let max_prefix = old.len().min(new.len());
     while prefix < max_prefix && eq(&old[prefix], &new[prefix]) {
         prefix += 1;
@@ -1909,7 +1954,7 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
     if prefix == old.len() && prefix == new.len() {
         return None;
     }
-    let mut suffix = 0usize;
+    let mut suffix = 0_usize;
     let max_suffix = (old.len() - prefix).min(new.len() - prefix);
     while suffix < max_suffix && eq(&old[old.len() - 1 - suffix], &new[new.len() - 1 - suffix]) {
         suffix += 1;
@@ -1925,7 +1970,7 @@ pub fn diff_rows(old: &[Row], new: &[Row]) -> Option<(Range<usize>, usize)> {
 /// item 2): its clauses joined by ", ", or " and " between two, each followed by what it adds in
 /// parentheses: "Ran 3 commands (1 failed), edited 2 files (+40 −12)". `marks` say which spans
 /// are drawn apart: the joins and parentheses faint, an edit's counts as a diff's.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sentence {
     pub text: SharedString,
     pub marks: Arc<[(Range<usize>, Mark)]>,
@@ -2030,7 +2075,7 @@ fn sentence(clauses: Vec<Clause>) -> Sentence {
     Sentence { text: text.into(), marks: marks.into() }
 }
 
-/// The ToolGroup summary line — "Ran 3 commands, edited 2 files".
+/// The `ToolGroup` summary line — "Ran 3 commands, edited 2 files".
 pub fn tool_group_summary(tools: &[ToolItem]) -> String {
     tool_group_summary_waiting(tools, None, false).text.to_string()
 }
@@ -2332,7 +2377,7 @@ fn tool_group_title(
         };
         (range.clone(), gpui::HighlightStyle { color: Some(ink), ..Default::default() })
     });
-    StyledText::new(text).with_highlights(runs.collect::<Vec<_>>()).into_any_element()
+    StyledText::new(text).with_highlights(runs).into_any_element()
 }
 
 /// The ink of each glyph of `text` at `phase` ms into the shimmer's cycle.
@@ -2580,7 +2625,7 @@ impl HighlightStore {
             );
             return Some(document);
         }
-        let code = code.to_string();
+        let code = code.to_owned();
         let source_bytes = code.len();
         let task = cx.spawn(async move |this, cx| {
             let started = crate::clock::stopwatch();
@@ -2742,12 +2787,12 @@ impl TranscriptPreparation {
                     rows_for_entry(&prefix, &mut |_, text| Arc::new(parse_full(text))),
                 );
             }
-            bytes += std::mem::size_of::<SessionMessageEntry>()
+            bytes += size_of::<SessionMessageEntry>()
                 + entry.id.len()
                 + entry
                     .parts
                     .iter()
-                    .map(|part| std::mem::size_of::<MessagePart>() + part.byte_len())
+                    .map(|part| size_of::<MessagePart>() + part.byte_len())
                     .sum::<usize>();
         }
         self.cache.retain(|id, _| rows.contains_key(id));
@@ -2845,7 +2890,7 @@ fn tool_connector_parts(progress: f32, has_predecessor: bool) -> (f32, f32) {
 /// The outgoing trunk belongs visually to the row that is already present,
 /// but its timing belongs to the next row's arrival.
 fn tool_connector_continuation(next_progress: Option<f32>) -> f32 {
-    next_progress.map(|progress| (progress / 0.45).clamp(0.0, 1.0)).unwrap_or(0.0)
+    next_progress.map_or(0.0, |progress| (progress / 0.45).clamp(0.0, 1.0))
 }
 
 /// Reveal by distance along the elbow and straight leg, so changing the branch
@@ -2957,7 +3002,7 @@ impl FrameAsk {
     }
 
     /// Whether the frame answering `token` answers the latest ask, which is then over.
-    fn answered(&mut self, token: u64) -> bool {
+    const fn answered(&mut self, token: u64) -> bool {
         let latest = token == self.token && self.since.is_some();
         if latest {
             self.since = None;
@@ -3012,8 +3057,7 @@ impl ViewportAnchor {
             .enumerate()
             .filter(|(_, row)| row.entry_id == self.entry_id)
             .min_by_key(|(ix, _)| ix.abs_diff(self.fallback_ix))
-            .map(|(ix, _)| ix)
-            .unwrap_or_else(|| self.fallback_ix.min(rows.len().saturating_sub(1)));
+            .map_or_else(|| self.fallback_ix.min(rows.len().saturating_sub(1)), |(ix, _)| ix);
         (!rows.is_empty()).then_some(ListOffset { item_ix, offset_in_item: px(0.0) })
     }
 }
@@ -3055,11 +3099,11 @@ impl TranscriptReplayState {
 }
 
 impl ViewportFinalizeToken {
-    fn still_current(self, generation: u64) -> bool {
+    const fn still_current(self, generation: u64) -> bool {
         self.generation == generation
     }
 
-    fn layout_settled(self, layout_revision: u64) -> bool {
+    const fn layout_settled(self, layout_revision: u64) -> bool {
         self.layout_revision == layout_revision
     }
 }
@@ -3120,7 +3164,7 @@ impl SavedViewportCache {
     fn get_cloned_and_touch(&mut self, chat_id: &str) -> Option<SavedViewport> {
         let viewport = self.by_chat.get(chat_id).cloned()?;
         self.recency.retain(|candidate| candidate != chat_id);
-        self.recency.push_back(chat_id.to_string());
+        self.recency.push_back(chat_id.to_owned());
         Some(viewport)
     }
 
@@ -3168,7 +3212,7 @@ pub struct Transcript {
     /// never spin, whatever its entries claim.
     doc_live: bool,
     /// Memory-only viewport state for primary chats visited in this window.
-    /// A transcript instance is shared across tabs, so the active ListState is
+    /// A transcript instance is shared across tabs, so the active `ListState` is
     /// reset on every attach and cannot retain these positions by itself.
     saved_viewports: SavedViewportCache,
     /// The work groups the person opened or shut in each chat visited, so a chat left
@@ -3229,7 +3273,7 @@ pub struct Transcript {
     /// streamed before the switch never fades in — only appends after it do
     /// (mugen's `FadePainter.attach` baseline; user report: switching back to
     /// a streaming session dissolved the entire reply).
-    veil_baseline: std::collections::HashSet<SharedString>,
+    veil_baseline: HashSet<SharedString>,
     /// Armed at attach, disarmed on the first sync whose transcript is
     /// non-empty: the baseline must be captured from the doc REPLAY frame,
     /// not the attach-time sync — selection clears the transcript and the
@@ -3295,7 +3339,7 @@ pub struct Transcript {
     clock: chrono::DateTime<chrono::Utc>,
     /// The list's viewport as this frame began. A page row reads it while the list lays
     /// out, when asking the list itself would borrow it twice.
-    page_viewport: gpui::Bounds<Pixels>,
+    page_viewport: Bounds<Pixels>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
     /// strip (the rows report hover themselves). Keyed by ROW so a row→row move
     /// within one entry can't clear the reveal when the old row's leave event
@@ -3345,7 +3389,7 @@ pub struct Transcript {
     image_menu: crate::popover::Popup<ImageMenu>,
     image_menu_focus: gpui::FocusHandle,
     image_copy: Option<Task<()>>,
-    /// In-flight ReadAttachmentChunk loads, keyed by device, path and validation
+    /// In-flight `ReadAttachmentChunk` loads, keyed by device, path and validation
     /// policy; results land in the global attachment cache.
     attachment_loads: HashMap<crate::attachments::AttachmentKey, Task<()>>,
     /// Inline `show_visual` visuals, keyed by row id.
@@ -3390,12 +3434,12 @@ struct Reveal {
     row: SharedString,
     /// The frames drawn since, and the moment of the first.
     frames: u8,
-    since: Option<std::time::Instant>,
+    since: Option<Instant>,
 }
 
 /// One sidecar blob fetch's lifecycle.
 enum BlobFetch {
-    Loading(#[allow(dead_code)] Task<()>),
+    Loading(#[expect(dead_code)] Task<()>),
     /// Failed, saying why, with the affordance re-armed as a retry.
     Failed(SharedString),
     Ready(Arc<ToolDetail>),
@@ -3551,7 +3595,7 @@ impl Transcript {
         let list = ListState::new(0, alignment, px(OVERDRAW_PX));
         let weak = cx.weak_entity();
         list.set_scroll_handler(move |event: &ListScrollEvent, _window, cx| {
-            weak.update(cx, |this: &mut Transcript, cx| this.handle_scroll(event, cx)).ok();
+            weak.update(cx, |this: &mut Self, cx| this.handle_scroll(event, cx)).ok();
         });
         list
     }
@@ -3641,7 +3685,7 @@ impl Transcript {
             user_collapse_scroll: None,
             user_collapse_scroll_scheduled: FrameAsk::default(),
             veils: HashMap::new(),
-            veil_baseline: std::collections::HashSet::new(),
+            veil_baseline: HashSet::new(),
             veil_attach_pending: true,
             render_cache: Rc::new(RefCell::new(RenderCache::default())),
             chip_words: HashMap::new(),
@@ -3665,7 +3709,7 @@ impl Transcript {
             selection_drag_position: None,
             selection_scroll_task: None,
             clock: crate::clock::utc(cx),
-            page_viewport: gpui::Bounds::default(),
+            page_viewport: Bounds::default(),
             hovered_entry: None,
             strip_focus: HashMap::new(),
             strip_drawn: HashSet::new(),
@@ -3764,15 +3808,15 @@ impl Transcript {
 
     /// Whether the prompt box's mirror stands at its foot.
     #[cfg(test)]
-    pub(crate) fn has_footer(&self) -> bool {
+    pub(crate) const fn has_footer(&self) -> bool {
         self.footer.is_some()
     }
 
-    pub(crate) fn list_state(&self) -> &ListState {
+    pub(crate) const fn list_state(&self) -> &ListState {
         &self.list
     }
 
-    /// Snapshot the outgoing primary chat before its rows and ListState are
+    /// Snapshot the outgoing primary chat before its rows and `ListState` are
     /// reset. Empty rows never overwrite an older snapshot: during a rapid
     /// A→B→A switch, B's replay may not have arrived before leaving it again.
     fn remember_current_viewport(&mut self) {
@@ -3949,12 +3993,12 @@ impl Transcript {
     }
 
     /// Store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
-    pub(crate) fn set_glide(&mut self, glide: Option<crate::rail::Glide>) {
+    pub(crate) const fn set_glide(&mut self, glide: Option<crate::rail::Glide>) {
         self.glide = glide;
     }
 
     /// The glide under way, taken to step it.
-    pub(crate) fn take_glide(&mut self) -> Option<crate::rail::Glide> {
+    pub(crate) const fn take_glide(&mut self) -> Option<crate::rail::Glide> {
         self.glide.take()
     }
 
@@ -4002,7 +4046,7 @@ impl Transcript {
         // decision waits for the end of the effect cycle.
         let this = cx.weak_entity();
         cx.defer(move |cx| {
-            this.update(cx, |this: &mut Transcript, cx| {
+            this.update(cx, |this: &mut Self, cx| {
                 this.discard_pending_viewport();
                 let distance = this.distance_from_bottom();
                 this.last_scroll_distance = distance;
@@ -4165,7 +4209,7 @@ impl Transcript {
     }
 
     /// Whether the transcript is currently pinned to the bottom.
-    pub fn is_pinned(&self) -> bool {
+    pub const fn is_pinned(&self) -> bool {
         self.pinned
     }
 
@@ -4572,7 +4616,7 @@ impl Transcript {
             if baseline_changed && historical_count == tools.len() {
                 reveal.header_started_at = None;
             }
-            let first_row_delay = is_new_group.then_some(TOOL_FIRST_ROW_DELAY_MS).unwrap_or(0);
+            let first_row_delay = if is_new_group { TOOL_FIRST_ROW_DELAY_MS } else { 0 };
             let mut arrival_ix = 0;
             if whole_group_historical {
                 reveal.starts.clear();
@@ -4715,11 +4759,11 @@ impl Transcript {
         {
             self.cursor = None;
         }
-        if old_last != self.rows.len().checked_sub(1) {
-            if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
-                // Bottom chrome moves to the new tail too.
-                self.list.remeasure_items(ix..ix + 1);
-            }
+        if old_last != self.rows.len().checked_sub(1)
+            && let Some(ix) = old_last.filter(|&ix| ix < self.rows.len())
+        {
+            // Bottom chrome moves to the new tail too.
+            self.list.remeasure_items(ix..ix + 1);
         }
         if let Some(offset) = held.and_then(|held| held.resolve_exact(&self.rows))
             && offset != self.list.logical_scroll_top()
@@ -5001,7 +5045,7 @@ impl Transcript {
 
     fn protected_attachment_keys(&self, cx: &Context<Self>) -> HashSet<(String, String)> {
         let devices = self.attachment_device_ids(cx);
-        let mut keys = std::collections::HashSet::new();
+        let mut keys = HashSet::new();
         for row in &self.rows {
             // Generated images use bounded LRU retention, not history-wide protection.
             if let RowKind::User { attachments, .. } = &row.kind {
@@ -5072,7 +5116,7 @@ impl Transcript {
             if begin_load_for(&AttachmentKey::new(dev, path, expected_raster_mime)) {
                 self.spawn_attachment_load(
                     dev.clone(),
-                    path.to_string(),
+                    path.to_owned(),
                     expected_raster_mime.map(str::to_owned),
                     cx,
                 );
@@ -5098,7 +5142,7 @@ impl Transcript {
         match min_retry {
             Some(retry_in) => {
                 if let Some(dev) = device_ids.first() {
-                    self.schedule_attachment_retry((dev.clone(), path.to_string()), retry_in, cx);
+                    self.schedule_attachment_retry((dev.clone(), path.to_owned()), retry_in, cx);
                 }
                 AttachmentSnapshot::Error { retry_in }
             }
@@ -5176,7 +5220,7 @@ impl Transcript {
 
     // ---- tool-call image previews + the image context menu ----
 
-    fn tool_images_of(this: &mut Self) -> &mut crate::tool_images::ToolImages {
+    const fn tool_images_of(this: &mut Self) -> &mut crate::tool_images::ToolImages {
         &mut this.tool_images
     }
 
@@ -5305,7 +5349,7 @@ impl Transcript {
                 .role(gpui::Role::Image) // a picture to assistive tech.
                 .aria_label(name.clone())
                 .on_mouse_down(
-                    gpui::MouseButton::Right,
+                    MouseButton::Right,
                     cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                         cx.stop_propagation();
                         this.open_image_menu(
@@ -5426,7 +5470,7 @@ impl Transcript {
         let (path, devices) = (menu.path.clone(), menu.devices.clone());
         self.close_image_menu(cx);
         match action {
-            0 => cx.write_to_clipboard(gpui::ClipboardItem::new_string(path)),
+            0 => cx.write_to_clipboard(ClipboardItem::new_string(path)),
             1 => self.copy_image(path, devices, cx),
             _ => {}
         }
@@ -5466,7 +5510,7 @@ impl Transcript {
                     };
                     let image = gpui::Image::from_bytes(format, bytes);
                     this.update(cx, |this, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_image(&image));
+                        cx.write_to_clipboard(ClipboardItem::new_image(&image));
                         this.image_copy = None;
                     })
                     .ok();
@@ -5488,7 +5532,7 @@ impl Transcript {
             .flex_col()
             .on_key_down(cx.listener(|this, event, _, cx| this.image_menu_key(event, cx)))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_image_menu(cx)))
-            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (index, (label, icon)) in
             [("Copy path", crate::icons::COPY), ("Copy image", crate::icons::FILE_IMAGE)]
                 .into_iter()
@@ -5586,7 +5630,7 @@ impl Transcript {
                 let down_height = hold_height.clone();
                 let down_selection = hold_selection.clone();
                 el.on_mouse_down(
-                    gpui::MouseButton::Left,
+                    MouseButton::Left,
                     cx.listener(move |this, _, _, cx| {
                         this.arm_user_hold(
                             down_key.clone(),
@@ -5599,13 +5643,13 @@ impl Transcript {
                     }),
                 )
                 .on_mouse_up(
-                    gpui::MouseButton::Left,
+                    MouseButton::Left,
                     cx.listener(move |this, _, _, _| {
                         this.cancel_user_hold();
                     }),
                 )
                 .on_mouse_up_out(
-                    gpui::MouseButton::Left,
+                    MouseButton::Left,
                     cx.listener(move |this, _, _, _| {
                         this.cancel_user_hold();
                     }),
@@ -5834,7 +5878,7 @@ impl Transcript {
                                 format!("{id}-image").into(),
                                 move |window, cx| {
                                     let _ = open.update(cx, |this, cx| {
-                                        this.open_diagram_preview(source.clone(), window, cx)
+                                        this.open_diagram_preview(source.clone(), window, cx);
                                     });
                                 },
                             )
@@ -6008,7 +6052,7 @@ impl Transcript {
                 let menu_path = path.to_owned();
                 frame
                     .on_mouse_down(
-                        gpui::MouseButton::Right,
+                        MouseButton::Right,
                         cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             this.open_image_menu(
@@ -6042,12 +6086,12 @@ impl Transcript {
                             .w_full()
                             .aspect_ratio(dimensions.0.max(1) as f32 / dimensions.1.max(1) as f32)
                             .child(
-                                gpui::img(loaded.image)
+                                img(loaded.image)
                                     .size_full()
                                     // The frame's overflow clip is rectangular; round the image
                                     // itself.
                                     .rounded(px(TRANSCRIPT_CARD_RADIUS))
-                                    .object_fit(gpui::ObjectFit::Contain),
+                                    .object_fit(ObjectFit::Contain),
                             ),
                     )
                     .into_any_element()
@@ -6072,37 +6116,33 @@ impl Transcript {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let link_ui = self.link_ui(cx);
-        let frame = match self.visuals.get(row_id) {
-            Some(frame) => frame.clone(),
-            None => {
-                let state = self.state.read(cx);
-                let engine = state.engine().cloned();
-                // Relay-forward only for a genuinely remote owner.
-                let target =
-                    (state.local_device_id.as_deref() != Some(owner)).then(|| owner.to_owned());
-                let frame = cx.new(|cx| {
-                    crate::visuals::VisualFrame::new(
-                        row_id.clone(),
-                        title.to_owned(),
-                        path.to_owned(),
-                        engine,
-                        target,
-                        cx,
-                    )
-                });
-                // A visual whose tree changes shape (a tab switch, a load)
-                // resizes its row, like a diagram finishing.
-                let id = row_id.clone();
-                cx.subscribe(
-                    &frame,
-                    move |this, _, _: &crate::visuals::VisualLayoutChanged, cx| {
-                        this.diagram_layout_changed(std::slice::from_ref(&id), cx);
-                    },
+        let frame = if let Some(frame) = self.visuals.get(row_id) {
+            frame.clone()
+        } else {
+            let state = self.state.read(cx);
+            let engine = state.engine().cloned();
+            // Relay-forward only for a genuinely remote owner.
+            let target =
+                (state.local_device_id.as_deref() != Some(owner)).then(|| owner.to_owned());
+            let frame = cx.new(|cx| {
+                crate::visuals::VisualFrame::new(
+                    row_id.clone(),
+                    title.to_owned(),
+                    path.to_owned(),
+                    engine,
+                    target,
+                    cx,
                 )
-                .detach();
-                self.visuals.insert(row_id.clone(), frame.clone());
-                frame
-            }
+            });
+            // A visual whose tree changes shape (a tab switch, a load)
+            // resizes its row, like a diagram finishing.
+            let id = row_id.clone();
+            cx.subscribe(&frame, move |this, _, _: &crate::visuals::VisualLayoutChanged, cx| {
+                this.diagram_layout_changed(std::slice::from_ref(&id), cx);
+            })
+            .detach();
+            self.visuals.insert(row_id.clone(), frame.clone());
+            frame
         };
         frame.update(cx, |frame, _| frame.set_link_ui(link_ui));
         div().w_full().child(frame).into_any_element()
@@ -6153,7 +6193,7 @@ impl Transcript {
                     frame
                         .id(SharedString::from(format!("{row_id}#att{aix}")))
                         .on_mouse_down(
-                            gpui::MouseButton::Right,
+                            MouseButton::Right,
                             cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 this.open_image_menu(
@@ -6252,7 +6292,7 @@ impl Transcript {
             if !live {
                 return None;
             }
-            let elapsed = ((now.timestamp_millis() - last.created_at).max(0) / 1000) as i64;
+            let elapsed = (now.timestamp_millis() - last.created_at).max(0) / 1000;
             (elapsed, flavour_seed(doc_id), last.created_at)
         } else {
             let chat_id = self.chat_id.clone()?;
@@ -6262,9 +6302,8 @@ impl Transcript {
                     return None;
                 }
                 let turn_started = state.session_for(&chat_id).and_then(|s| s.started_at);
-                let elapsed = turn_started
-                    .map(|t| now.signed_duration_since(t).num_seconds().max(0))
-                    .unwrap_or(0);
+                let elapsed =
+                    turn_started.map_or(0, |t| now.signed_duration_since(t).num_seconds().max(0));
                 (elapsed, turn_started.map_or(0, |t| t.timestamp_millis()))
             };
             (elapsed, flavour_seed(&chat_id), turn)
@@ -6439,7 +6478,7 @@ impl Transcript {
                     .cursor_pointer()
                     .hover_fade(fade_key.clone())
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_message(entry_id.clone(), text.clone(), cx)
+                        this.copy_message(entry_id.clone(), text.clone(), cx);
                     }))
                     // Keeps its size; its tooltip says "Copied" for the span; a role.
                     .role(gpui::Role::Button)
@@ -6492,7 +6531,7 @@ impl Transcript {
                 // so the label must too — assistant label's left edge on the
                 // text's first-character x, user label's right edge on the
                 // bubble's right edge (user-reported 4px drift).
-                .when(is_user_row && !task, |el| el.justify_end()) // a task reads left.
+                .when(is_user_row && !task, Styled::justify_end) // a task reads left.
                 .child(metadata)
                 .into_any_element()
         });
@@ -6598,7 +6637,7 @@ impl Transcript {
                     now: cx.frame_time(), // the frame's moment
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
-                    workspace_root: workspace_root.clone(),
+                    workspace_root,
                     code,
                     code_menu: Some(self.code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // a run in place reads compact (#24).
@@ -6669,7 +6708,7 @@ impl Transcript {
                     now: motion::pulse_moment(cx.entity_id(), cx), // the veil's tick, which drew it
                     copy: Some(self.copy_ui_for(&row.id, cx)),
                     link,
-                    workspace_root: workspace_root.clone(),
+                    workspace_root,
                     code,
                     code_menu: Some(self.code_menu_ui(cx)),
                     body: self.markdown_body(&row.id), // a run in place reads compact (#24).
@@ -6948,7 +6987,7 @@ impl Transcript {
                                 window.on_next_frame(move |_, cx| cx.notify(owner));
                             }
                         },
-                        |_, _, _, _| (),
+                        |_, (), _, _| (),
                     )
                     .absolute()
                     .inset_0(),
@@ -7337,18 +7376,18 @@ impl Transcript {
                     } else {
                         base_row_height
                     };
-                    if !cx.reduce_motion() {
-                        if let Some(at) = fold.toggled_at {
-                            let fold_now = tool_fold(*open, Some(at), frame_now, false);
-                            if fold_now.moving {
-                                motion_active = true;
-                            }
-                            return motion::lerp(
-                                fold.from + base_row_height - CHIP_CARD_HEIGHT,
-                                target,
-                                fold_now.share,
-                            );
+                    if !cx.reduce_motion()
+                        && let Some(at) = fold.toggled_at
+                    {
+                        let fold_now = tool_fold(*open, Some(at), frame_now, false);
+                        if fold_now.moving {
+                            motion_active = true;
                         }
+                        return motion::lerp(
+                            fold.from + base_row_height - CHIP_CARD_HEIGHT,
+                            target,
+                            fold_now.share,
+                        );
                     }
                     target
                 },
@@ -7399,13 +7438,11 @@ impl Transcript {
         let target = if open { viewport_height } else { 0.0 };
         // A running call's row sweeps in phase with its group's title (#14).
         let running_call = open && tools.iter().any(sweeps);
-        let shimmer_phase = if (active || running_call) && !reduce_motion {
+        let shimmer_phase = ((active || running_call) && !reduce_motion).then(|| {
             motion::pulse_lease(cx.entity_id(), cx);
             // The pulse's tick, which drew it, on the shimmer's one clock.
-            Some(shimmer_ms(motion::pulse_moment(cx.entity_id(), cx)))
-        } else {
-            None
-        };
+            shimmer_ms(motion::pulse_moment(cx.entity_id(), cx))
+        });
         let row_shimmer = shimmer_phase.filter(|_| running_call);
         let shimmer_phase = shimmer_phase.filter(|_| active);
         let disclosure_progress = if reduce_motion {
@@ -7863,9 +7900,7 @@ impl Transcript {
         if let Some(reveal) = self.tool_group_reveals.get_mut(row_id) {
             reveal.rendered_height = body_height;
         }
-        let body: AnyElement = if !collapses {
-            chips.into_any_element()
-        } else {
+        let body: AnyElement = if collapses {
             div()
                 .overflow_hidden()
                 .h(px(body_height))
@@ -7877,6 +7912,8 @@ impl Transcript {
                         .child(chips),
                 )
                 .into_any_element()
+        } else {
+            chips.into_any_element()
         };
 
         let view = cx.entity_id();
@@ -7899,7 +7936,7 @@ impl Transcript {
                 group.child(
                     canvas(
                         |_, _, _| (),
-                        move |_, _, window, _| {
+                        move |_, (), window, _| {
                             window.on_next_frame(move |_, cx| cx.notify(view));
                         },
                     )
@@ -8103,7 +8140,7 @@ fn user_bubble_text(
     let runs = user_bubble_runs(&text, theme);
     let styled = StyledText::new(text.clone()).with_runs(runs);
     let layout = styled.layout().clone();
-    let sel_key: std::sync::Arc<str> = format!("{row_id}:u").into();
+    let sel_key: Arc<str> = format!("{row_id}:u").into();
     let sel_theme = theme.clone();
     let underlay = canvas(
         |bounds, window, _| window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal),
@@ -8857,11 +8894,11 @@ fn chip_header_row(
         )
         .child(
             div()
-                .when(!activity, |detail| detail.flex_1())
+                .when(!activity, Styled::flex_1)
                 .min_w_0()
                 .h(px(if file_path.is_some() { 22.0 } else { TOOL_LABEL_LINE_HEIGHT }))
                 .flex()
-                .when(activity && detail.is_empty(), |detail| detail.hidden())
+                .when(activity && detail.is_empty(), Styled::hidden)
                 .items_center()
                 .truncate()
                 .text_color(if failed {
@@ -9234,7 +9271,7 @@ fn activity_rail(
         .child(
             canvas(
                 move |_, _, _| (),
-                move |bounds, _, window, _| {
+                move |bounds, (), window, _| {
                     let x = bounds.origin.x + px(ACTIVITY_TRUNK_X);
                     let branch_y = bounds.origin.y + px(row_height / 2.0);
                     let bend_y = branch_y - px(ACTIVITY_BEND_RADIUS);
@@ -9422,13 +9459,13 @@ fn entry_fingerprint(entry: &SessionMessageEntry) -> u64 {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
         if let MessagePart::Tool { is_error, resolved, subagent_ref, subagent_status, .. } = part {
-            acc.push(*is_error as u8 | (*resolved as u8) << 1);
+            acc.push(u8::from(*is_error) | (u8::from(*resolved) << 1));
             // Subagent lifecycle mutates a COMPLETED entry in place (eager-
             // done: the spawn resolves while the subagent runs on) and
             // `byte_len` above doesn't cover these fields — hash them or the
             // cached rows never refresh on status changes.
             acc.push(
-                subagent_ref.is_some() as u8
+                u8::from(subagent_ref.is_some())
                     | match subagent_status {
                         None => 0,
                         Some(SubagentStatus::Running) => 1 << 1,
@@ -9450,7 +9487,7 @@ fn entry_fingerprint(entry: &SessionMessageEntry) -> u64 {
             }
         }
         if let MessagePart::Input { resolved, .. } = part {
-            acc.push(0x10 | *resolved as u8);
+            acc.push(0x10 | u8::from(*resolved));
         }
         // An error's and a divider's words change in place.
         match part {
@@ -9546,7 +9583,7 @@ impl Render for Transcript {
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
-                    .update(cx, |this: &mut Transcript, cx| {
+                    .update(cx, |this: &mut Self, cx| {
                         if this.glide_scheduled.answered(ask) {
                             this.step_glide(cx);
                         }
@@ -9567,7 +9604,7 @@ impl Render for Transcript {
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
-                    .update(cx, |this: &mut Transcript, cx| {
+                    .update(cx, |this: &mut Self, cx| {
                         if !this.viewport_finalize_scheduled.answered(ask) {
                             return;
                         }
@@ -9596,7 +9633,7 @@ impl Render for Transcript {
             let entity = cx.weak_entity();
             window.on_next_frame(move |_, cx| {
                 entity
-                    .update(cx, |this: &mut Transcript, cx| {
+                    .update(cx, |this: &mut Self, cx| {
                         if this.user_collapse_scroll_scheduled.answered(ask) {
                             this.step_user_collapse_scroll(cx);
                         }
@@ -9649,7 +9686,7 @@ impl Render for Transcript {
             // elements re-register (document paint order = selection order;
             // see markdown/render.rs). Keyed by entity so a side chat or
             // subagent tab painted in the same frame can't wipe it.
-            .child(crate::markdown::render::selection_frame_reset_for(cx.entity_id().as_u64()))
+            .child(render::selection_frame_reset_for(cx.entity_id().as_u64()))
             // Find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
@@ -9853,7 +9890,7 @@ mod tests {
                     let y = if matches!(step, Step::WheelUp(_)) { y } else { -y };
                     cx.simulate_event(gpui::ScrollEvent {
                         position: middle,
-                        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(y))),
+                        delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(y))),
                         ..Default::default()
                     });
                     show(&entries, cx);
@@ -9867,7 +9904,7 @@ mod tests {
                         first_mouse: false,
                     });
                     history.push(format!("{round} pressed -> {:?}", probe(cx)));
-                    cx.simulate_event(gpui::MouseUpEvent {
+                    cx.simulate_event(MouseUpEvent {
                         button: MouseButton::Left,
                         position: middle,
                         modifiers: gpui::Modifiers::default(),
@@ -9931,7 +9968,7 @@ mod tests {
             }
         }
         // Back to the end through the pill, whatever stands below.
-        transcript.update(cx, |this, cx| this.jump_to_bottom(cx));
+        transcript.update(cx, Transcript::jump_to_bottom);
         show(&entries, cx);
         let end = probe(cx);
         assert!(end.0 && end.1 <= FOLLOW_PX, "the jump follows the end again: {end:?}");
@@ -9972,7 +10009,7 @@ mod tests {
             )];
             state.transcript_revision += 1;
         });
-        transcript.update(cx, |this, cx| this.sync(cx));
+        transcript.update(cx, Transcript::sync);
     }
 
     fn assert_replayed_group_is_closed(transcript: &Entity<Transcript>, cx: &mut gpui::App) {
@@ -10025,9 +10062,9 @@ mod tests {
                 );
             });
             state.update(cx, |state, cx| state.select_chat(None, cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             replay_tool_group(&state, &transcript, "chat-a", cx);
             assert_replayed_group_is_closed(&transcript, cx);
         });
@@ -10053,7 +10090,7 @@ mod tests {
                     this.hovered_entry = Some((work.clone(), "tools".into()));
                 });
                 state.update(cx, |state, cx| state.select_chat(Some(away.into()), cx));
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
                 replay_tool_group(&state, &transcript, away, cx);
                 assert!(!open(&transcript, cx), "{away}'s own work stays shut");
                 replay_tool_group(&state, &transcript, "chat-a", cx);
@@ -10079,13 +10116,13 @@ mod tests {
             transcript.update(cx, |this, cx| this.toggle_fold(work.clone(), 0.0, cx));
 
             state.update(cx, |state, cx| state.select_chat(None, cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let left = transcript.read(cx);
             assert!(left.rows.is_empty(), "no row of the session left stays drawn");
             assert_eq!(left.chat_id, None, "nothing selected, the transcript shows nothing");
 
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             replay_tool_group(&state, &transcript, "chat-a", cx);
             transcript.update(cx, |this, cx| {
                 assert_eq!(this.chat_id.as_deref(), Some("chat-a"));
@@ -10125,7 +10162,7 @@ mod tests {
                         )
                         .unwrap();
                 });
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
             };
             let cached =
                 vec![assistant("tools", MessageStatus::Streaming, vec![tool_part("call", "pwd")])];
@@ -10135,7 +10172,7 @@ mod tests {
                 cx,
             );
             state.update(cx, |state, cx| state.select_chat(Some("chat-b".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
 
             // The agent does this work while A is away. On return, a stale
             // local snapshot can arrive before remote catch-up deltas. Keep
@@ -10152,7 +10189,7 @@ mod tests {
             ]);
 
             state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             assert!(
                 !transcript.read(cx).rows.is_empty(),
                 "revisited transcript must have visible rows before the new watch responds"
@@ -10255,14 +10292,14 @@ mod tests {
         }).join().unwrap();
         with_tool_group_navigation(cx, |state, transcript, cx| {
             state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             FORBID_ROW_PREPARATION.with(|flag| flag.set(true));
             let start = Instant::now();
             state.update(cx, |state, cx| {
                 state.receive_opening_transcript_update(update, false, cx).unwrap();
                 state.prepared_transcripts.insert("whale".into(), prepared.clone());
             });
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let open_ms = start.elapsed().as_millis();
             assert!(!transcript.read(cx).rows.is_empty());
             assert!(
@@ -10274,9 +10311,9 @@ mod tests {
             );
             let start = Instant::now();
             state.update(cx, |state, cx| state.select_chat(None, cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let revisit_ms = start.elapsed().as_millis();
             assert!(Arc::ptr_eq(&state.read(cx).prepared_transcripts["whale"], &prepared));
             assert!(
@@ -10299,7 +10336,7 @@ mod tests {
     ) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let preview = vec![assistant(
                 "turn",
                 MessageStatus::Streaming,
@@ -10329,7 +10366,7 @@ mod tests {
                         )
                         .unwrap();
                 });
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
             };
             let assert_settled = |expected_tools, cx: &mut gpui::App| {
                 let this = transcript.read(cx);
@@ -10351,9 +10388,9 @@ mod tests {
             assert_settled(2, cx);
             for _ in 0..3 {
                 state.update(cx, |state, cx| state.select_chat(Some("away".into()), cx));
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
                 state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
                 assert_settled(2, cx);
                 apply(&preview, true, cx); // ignored because the cache is complete
                 assert_settled(2, cx);
@@ -10373,7 +10410,7 @@ mod tests {
                     )
                     .unwrap();
             });
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let this = transcript.read(cx);
             let older = &this.tool_group_reveals[&SharedString::from("turn#g:older-tool")];
             assert!(older.header_started_at.is_none());
@@ -10452,7 +10489,7 @@ mod tests {
                         )
                         .unwrap();
                 });
-                transcript.update(cx, |this, cx| this.sync(cx));
+                transcript.update(cx, Transcript::sync);
             };
             // Two live tools are already animating when older work arrives
             // before and between them in the same group.
@@ -10500,7 +10537,7 @@ mod tests {
                     )
                     .unwrap();
             });
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             let live = vec![assistant(
                 "first",
                 MessageStatus::Streaming,
@@ -10569,7 +10606,7 @@ mod tests {
                 );
             });
             state.update(cx, |state, cx| state.select_chat(None, cx));
-            transcript.update(cx, |this, cx| this.sync(cx));
+            transcript.update(cx, Transcript::sync);
             // Cached replay can land without an intervening pending frame.
             replay_tool_group(&state, &transcript, "chat-a", cx);
             transcript.update(cx, |this, cx| {
@@ -10623,7 +10660,9 @@ mod tests {
         let path = path.build().unwrap();
         let area: f32 = path
             .vertices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triangle| {
                 let a = triangle[0].xy_position;
                 let b = triangle[1].xy_position;
@@ -10680,13 +10719,13 @@ mod tests {
 
     #[test]
     fn selection_scroll_ramps_at_viewport_edges() {
-        let bounds = Bounds::new(gpui::point(px(10.0), px(20.0)), gpui::size(px(300.0), px(200.0)));
-        assert_eq!(selection_scroll_step(bounds, gpui::point(px(20.0), px(120.0))), 0.0);
-        assert!(selection_scroll_step(bounds, gpui::point(px(20.0), px(20.0))) < 0.0);
-        assert!(selection_scroll_step(bounds, gpui::point(px(20.0), px(220.0))) > 0.0);
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(300.0), px(200.0)));
+        assert_eq!(selection_scroll_step(bounds, point(px(20.0), px(120.0))), 0.0);
+        assert!(selection_scroll_step(bounds, point(px(20.0), px(20.0))) < 0.0);
+        assert!(selection_scroll_step(bounds, point(px(20.0), px(220.0))) > 0.0);
         assert!(
-            selection_scroll_step(bounds, gpui::point(px(20.0), px(220.0)))
-                > selection_scroll_step(bounds, gpui::point(px(20.0), px(200.0)))
+            selection_scroll_step(bounds, point(px(20.0), px(220.0)))
+                > selection_scroll_step(bounds, point(px(20.0), px(200.0)))
         );
     }
 
@@ -10703,9 +10742,9 @@ mod tests {
         let mut live_parsers = HashMap::new();
         let mut tree_cache = HashMap::new();
         let paragraph = "A paragraph of streaming prose that keeps arriving.\n\n";
-        let commits = 120usize;
+        let commits = 120_usize;
         let mut text = String::new();
-        let mut total_parsed = 0usize;
+        let mut total_parsed = 0_usize;
         for i in 0..commits {
             // Each commit appends ~half a paragraph (crosses block boundaries).
             let chunk = &paragraph[..paragraph.len() / 2];
@@ -10913,7 +10952,7 @@ mod tests {
             vec!["owner", "host", "local"]
         );
         assert_eq!(
-            generated_image_devices("", &["host".into(), "host".into(), "".into()]),
+            generated_image_devices("", &["host".into(), "host".into(), String::new()]),
             vec!["host"]
         );
         let entries: Vec<SessionMessageEntry> =
@@ -10970,8 +11009,8 @@ mod tests {
         let (_, cx) = cx.add_window_view(|_, _| Detail);
         cx.run_until_parked();
         let bounds = render::selection_test_bounds("probe-0");
-        let start = bounds.origin + gpui::point(px(1.0), bounds.size.height / 2.0);
-        let end = start + gpui::point(bounds.size.width + px(40.0), px(0.0));
+        let start = bounds.origin + point(px(1.0), bounds.size.height / 2.0);
+        let end = start + point(bounds.size.width + px(40.0), px(0.0));
         cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
         cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
         cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
@@ -11082,11 +11121,8 @@ mod tests {
         let mut frames = 0;
         while transcript.read_with(cx, |this, _| this.glide.is_some()) {
             assert!(frames < 120, "a 500 ms glide lands on its clock, not at its frames' bound");
-            cx.executor().advance_clock(std::time::Duration::from_millis(8));
-            assert!(
-                cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
-                "a frame asked for"
-            );
+            cx.executor().advance_clock(Duration::from_millis(8));
+            assert!(cx.update(Window::simulate_next_frame) > 0, "a frame asked for");
             cx.run_until_parked();
             seen.push(at(cx));
             frames += 1;
@@ -11163,7 +11199,7 @@ mod tests {
         });
         let stuck = top(cx);
         cx.executor().advance_clock(Duration::from_millis(8));
-        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
         assert_eq!(top(cx), stuck, "the lost frame stepped nothing");
         assert!(transcript.read_with(cx, |this, _| this.glide.is_some()));
@@ -11175,10 +11211,7 @@ mod tests {
         while transcript.read_with(cx, |this, _| this.glide.is_some()) {
             assert!(frames < 120, "the glide never landed: its frame was waited on for good");
             cx.executor().advance_clock(Duration::from_millis(8));
-            assert!(
-                cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
-                "a frame asked for"
-            );
+            assert!(cx.update(Window::simulate_next_frame) > 0, "a frame asked for");
             cx.run_until_parked();
             frames += 1;
         }
@@ -11252,7 +11285,7 @@ mod tests {
         }
         let (fixture, cx) = cx.add_window_view(|_, _| PreviewFixture(transcript.clone()));
         cx.run_until_parked();
-        cx.simulate_click(gpui::point(px(20.0), px(20.0)), gpui::Modifiers::default());
+        cx.simulate_click(point(px(20.0), px(20.0)), gpui::Modifiers::default());
         let return_focus = transcript.read_with(cx, |this, _| {
             assert!(this.attachment_preview.is_some());
             this.attachment_preview_return_focus
@@ -11402,7 +11435,7 @@ mod tests {
             tools[0].detail.as_deref(),
             Some(ToolDetail::Thought { lines, .. }) if !lines.is_empty()
         ));
-        let summary = tool_group_summary(&tools);
+        let summary = tool_group_summary(tools);
         assert!(summary.starts_with("Thought 2 times"), "{summary}");
         assert!(summary.contains("2 commands"), "{summary}");
         // A thought that says how long it took is named by it.
@@ -11451,7 +11484,7 @@ mod tests {
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
-        assert_eq!(tool_group_summary(&tools), "Thought once");
+        assert_eq!(tool_group_summary(tools), "Thought once");
 
         // Empty reasoning renders nothing.
         let entry = assistant("a3", MessageStatus::Complete, vec![reasoning_part("r0", "   ")]);
@@ -11597,12 +11630,12 @@ mod tests {
 
     #[test]
     fn thought_math_keeps_its_delimiters_as_code() {
-        let lines = thought_of(r"so $x_1 + y$ holds");
-        assert_eq!(line_string(&lines[0]), r"so $x_1 + y$ holds");
+        let lines = thought_of("so $x_1 + y$ holds");
+        assert_eq!(line_string(&lines[0]), "so $x_1 + y$ holds");
         assert!(
             lines[0]
                 .iter()
-                .any(|r| r.style.code && !r.style.math && r.text.trim_end() == r"$x_1 + y$"),
+                .any(|r| r.style.code && !r.style.math && r.text.trim_end() == "$x_1 + y$"),
             "{:?}",
             lines[0]
         );
@@ -12003,7 +12036,7 @@ mod tests {
     fn user_rows_split_attachment_refs_from_text() {
         let content = crate::attachments::with_attachments(
             "what color is this?",
-            &["/data/uploads/ab12-red.png".to_string()],
+            &["/data/uploads/ab12-red.png".to_owned()],
         );
         let mut entry = assistant("u2", MessageStatus::Complete, vec![]);
         entry.role = MessageRole::User;
@@ -12021,7 +12054,7 @@ mod tests {
         assert_eq!(attachments[0].name, "ab12-red.png");
 
         // Image-only send: no bubble text, refs parsed.
-        let only = crate::attachments::with_attachments("", &["/a/p.png".to_string()]);
+        let only = crate::attachments::with_attachments("", &["/a/p.png".to_owned()]);
         entry.parts = vec![text_part("t0", &only)];
         let rows = rows_for_entry(&entry, &mut parse);
         let RowKind::User { text, attachments, .. } = &rows[0].kind else {
@@ -12240,7 +12273,7 @@ mod tests {
         // The person's own Deny is no failure.
         let mut denied = exec("rm -rf build");
         denied.is_error = true;
-        denied.facts = Some(std::sync::Arc::new(slopty_view_doc::ToolFacts {
+        denied.facts = Some(Arc::new(slopty_view_doc::ToolFacts {
             rejected: true,
             ..slopty_view_doc::ToolFacts::default()
         }));
@@ -12358,18 +12391,18 @@ mod tests {
     fn tool_chip_labels_per_kind() {
         assert_eq!(
             tool_chip_content(&ToolCall::Exec { command: "cargo test".into() }),
-            ("Run", "cargo test".to_string())
+            ("Run", "cargo test".to_owned())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Search {
                 pattern: "foo".into(),
                 path: Some("src".into())
             }),
-            ("Search", "foo in src".to_string())
+            ("Search", "foo in src".to_owned())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::ApplyPatch { path: None }),
-            ("Patch", "workspace".to_string())
+            ("Patch", "workspace".to_owned())
         );
         assert_eq!(
             tool_chip_content(&ToolCall::Mcp {
@@ -12377,7 +12410,7 @@ mod tests {
                 tool: "issues".into(),
                 input: None
             }),
-            ("MCP", "gh · issues".to_string())
+            ("MCP", "gh · issues".to_owned())
         );
         let todo = ToolCall::Todo {
             items: vec![
@@ -12385,7 +12418,7 @@ mod tests {
                 slopty_view_proto::TodoItem::new("b", slopty_view_proto::TodoStatus::Pending),
             ],
         };
-        assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
+        assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_owned()));
     }
 
     #[test]
@@ -12502,10 +12535,7 @@ mod tests {
         assert_eq!(toggles.get(), 0, "opening the file must not toggle the chip");
         // The rest of the header still toggles the accordion.
         let row = window.debug_bounds("chip-toggle").unwrap();
-        window.simulate_click(
-            gpui::point(row.left() + px(2.0), row.center().y),
-            Modifiers::default(),
-        );
+        window.simulate_click(point(row.left() + px(2.0), row.center().y), Modifiers::default());
         assert_eq!(toggles.get(), 1);
         assert_eq!(opened.borrow().len(), 1);
 
@@ -12550,7 +12580,7 @@ mod tests {
         };
         assert_eq!(truncated_by, 0);
         assert_eq!(
-            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            lines.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             vec!["set -e", "cargo test"]
         );
 
@@ -12585,7 +12615,7 @@ mod tests {
             panic!("expected an output block")
         };
         assert_eq!(
-            lines.iter().map(|l| l.as_ref()).collect::<Vec<_>>(),
+            lines.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             vec!["[x] a", "[~] b", "[ ] c"]
         );
 
@@ -12790,7 +12820,7 @@ mod tests {
 
     /// A title under way shimmers on the one clock every shimmer runs on: glyph by glyph
     /// from faint through the accent to its crest as the band crosses it (opencode's
-    /// `text-shimmer`, HextaUI's accent crest).
+    /// `text-shimmer`, `HextaUI`'s accent crest).
     #[test]
     fn a_title_under_way_shimmers_glyph_by_glyph_on_the_shared_clock() {
         let theme = Theme::dark();

@@ -6,6 +6,16 @@
 //!
 //! The pure half (case-folded matching, a block's searchable text in paint order) is unit
 //! tested; [`paint`] is called from the text elements' paint canvases in `render.rs`.
+#![allow(
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::indexing_slicing,
+    clippy::match_wildcard_for_single_variants,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +26,7 @@ use gpui::{BorderStyle, Hsla, IntoElement, Styled as _, Window, canvas, px, quad
 use super::parser::{Block, InlineRun};
 
 /// What one transcript looks for, as its rows paint.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FindPaint {
     /// The words, as typed.
     pub needle: String,
@@ -53,7 +63,7 @@ pub fn clear(surface: u64) {
 pub fn frame_reset(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |_, _, _, _| {
+        move |_, (), _, _| {
             PAINTED.with(|painted| painted.borrow_mut().retain(|(s, _), _| *s != surface));
         },
     )

@@ -3,6 +3,22 @@
 //! bindings — click a combo to record (Esc cancels), live conflict detection,
 //! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
 //! shell persists them and re-applies the app keymap.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::clone_on_ref_ptr,
+    clippy::fn_params_excessive_bools,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{Context, Entity, EventEmitter, FocusHandle, Keystroke, SharedString, Window, div, px};
@@ -59,7 +75,7 @@ pub enum ShortcutsEvent {
 }
 
 pub struct ShortcutsPage {
-    scroll: crate::settings::widgets::PageScroll,
+    scroll: widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
     recording: Option<ShortcutId>,
@@ -77,7 +93,7 @@ impl EventEmitter<ShortcutsEvent> for ShortcutsPage {}
 impl ShortcutsPage {
     pub fn new(state: Entity<AppState>, keymap: KeymapConfig, cx: &mut Context<Self>) -> Self {
         Self {
-            scroll: crate::settings::widgets::PageScroll::default(),
+            scroll: widgets::PageScroll::default(),
             keymap,
             recording: None,
             recording_blur: None,
@@ -255,7 +271,7 @@ fn binding_control(
     on_record: impl Fn(&mut Window, &mut gpui::App) + 'static,
 ) -> gpui::Div {
     let accent = theme.accent;
-    let combo = combo.to_string();
+    let combo = combo.to_owned();
     let non_default = combo != id.default_combo();
     let chip_text: SharedString = if is_recording {
         "Press keys…".into()
@@ -362,7 +378,7 @@ const GROUP_ORDER: [&str; 4] = [
 ];
 
 /// The section a shortcut's row renders under.
-fn group(id: ShortcutId) -> &'static str {
+const fn group(id: ShortcutId) -> &'static str {
     match id {
         ShortcutId::SaveFile | ShortcutId::BrowserReload => "Other",
         ShortcutId::ToggleSidebar
@@ -608,8 +624,7 @@ mod tests {
         for name in GROUP_ORDER {
             assert!(
                 ShortcutId::ALL.into_iter().any(|id| group(id) == name),
-                "group {:?} would render an empty card",
-                name
+                "group {name:?} would render an empty card"
             );
         }
     }

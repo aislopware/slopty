@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Where the keyboard goes back to: a press in the main column keeps it there, and a focus that
 //! goes away (an element unmounting) comes back to the pane with the keyboard.
+#![allow(clippy::needless_pass_by_ref_mut, reason = "shell lint migration: slice A")]
 use super::*;
 
 /// Capture establishes a fallback before child listeners run. Inputs can
@@ -56,18 +57,18 @@ impl Shell {
             return (self.settings_focus.clone(), self.unfocused.clone());
         }
         let shell = match self.panes_now(cx).focused() {
-            super::panes::Pane::View(view) => {
+            panes::Pane::View(view) => {
                 let handle = self.view_handle(view, cx);
                 return (handle.clone(), handle);
             }
-            super::panes::Pane::Shell(n) => {
+            panes::Pane::Shell(n) => {
                 self.pane_shells.get(&n).map(|shell| shell.read(cx).focus_handle())
             }
-            super::panes::Pane::Session => None,
+            panes::Pane::Session => None,
         };
         if let Some(shell) = shell {
             (shell, self.unfocused.clone())
-        } else if crate::shell::touch_screen() {
+        } else if touch_screen() {
             // On a touch screen the keyboard waits for a tap in the terminal
             // (`docs/decisions/ui.md`): focus recovered after a tap elsewhere, a sidebar row's,
             // goes where no software keyboard rises.
@@ -80,7 +81,7 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 

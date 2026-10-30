@@ -4,6 +4,11 @@
 //! some field; a match scores its field's weight, plus half again when it
 //! starts a word. Archived threads score half, and ties go to the most
 //! recently active thread.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::string_slice,
+    reason = "shell lint migration: slice A"
+)]
 
 /// Field weights: a title hit outranks any number of metadata hits.
 const TITLE: u32 = 100;

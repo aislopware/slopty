@@ -2,6 +2,17 @@
 //! Settings → Archived: archived sessions across devices, with Unarchive (Mutate
 //! setChatArchived false).
 //! A session's record is its agent's own, so Slopty archives and never deletes.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, px};
@@ -179,7 +190,7 @@ impl Render for ArchivedPage {
                     .filter(|branch| !branch.is_empty())
                     .map(|branch| SharedString::from(branch.to_owned()));
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
-                let chat_id = chat.id.clone();
+                let chat_id = chat.id;
                 // A card's row like every other page's: its tile, its title and meta, its
                 // time and Unarchive.
                 let meta: Vec<AnyElement> = place
@@ -360,7 +371,7 @@ impl Render for ArchivedPage {
 // Where an archived chat ran, as the app says it everywhere: "project @ device".
 /// Where `chat` ran, on the machine named `device`: "project @ device", the project or the
 /// machine alone, or nothing.
-fn place_of(chat: &slopty_view_proto::Chat, device: Option<&str>) -> Option<String> {
+fn place_of(chat: &Chat, device: Option<&str>) -> Option<String> {
     let project = chat
         .cwd
         .as_deref()

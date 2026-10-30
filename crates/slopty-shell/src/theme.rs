@@ -30,6 +30,26 @@
 //! verified in [`tests::text_contrast_is_paired_across_appearances`], not eyeballed.
 //!
 //! Installed as a gpui [`Global`] at boot; read with [`Theme::of`].
+#![allow(
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::assert_is_empty,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::default_trait_access,
+    clippy::expect_used,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::manual_midpoint,
+    clippy::many_single_char_names,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::return_self_not_must_use,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -64,7 +84,7 @@ impl AccentColor {
     pub const ALL: [Self; 7] =
         [Self::Slopty, Self::Orange, Self::Amber, Self::Green, Self::Cyan, Self::Blue, Self::Pink];
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Slopty => "Slopty",
             Self::Orange => "Orange",
@@ -153,7 +173,7 @@ impl From<AccentPreset> for AccentColor {
 /// The three authored rows of the animated 2×3 pixel glyph. Keeping this as a
 /// palette entity preserves the mark's light→mid→deep personality while letting
 /// every accent preset own it as one coherent family.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GlyphPalette {
     pub light: Hsla,
     pub mid: Hsla,
@@ -178,7 +198,7 @@ impl GlyphPalette {
         Self { light, mid: primary, deep }
     }
 
-    pub fn rows(self) -> [Hsla; 3] {
+    pub const fn rows(self) -> [Hsla; 3] {
         [self.light, self.mid, self.deep]
     }
 }
@@ -205,18 +225,18 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    pub fn is_dark(self) -> bool {
+    pub const fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
     }
 
-    pub fn is_light(self) -> bool {
+    pub const fn is_light(self) -> bool {
         matches!(self, Self::Light)
     }
 
     /// Map a gpui window appearance onto ours (both vibrant variants are just
     /// the blurred flavour of the same tone).
-    pub fn from_window(appearance: gpui::WindowAppearance) -> Self {
-        use gpui::WindowAppearance::*;
+    pub const fn from_window(appearance: gpui::WindowAppearance) -> Self {
+        use gpui::WindowAppearance::{Dark, Light, VibrantDark, VibrantLight};
         match appearance {
             Light | VibrantLight => Self::Light,
             Dark | VibrantDark => Self::Dark,
@@ -261,7 +281,7 @@ pub(crate) fn bump_style_generation() {
     STYLE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
-fn model_appearance(appearance: slopty_shell_theme::Appearance) -> Appearance {
+const fn model_appearance(appearance: slopty_shell_theme::Appearance) -> Appearance {
     match appearance {
         slopty_shell_theme::Appearance::Dark => Appearance::Dark,
         slopty_shell_theme::Appearance::Light => Appearance::Light,
@@ -269,9 +289,12 @@ fn model_appearance(appearance: slopty_shell_theme::Appearance) -> Appearance {
 }
 
 fn model_color(color: ModelColor) -> Hsla {
-    let (h, s, l) =
-        rgb_to_hsl(color.r as f32 / 255.0, color.g as f32 / 255.0, color.b as f32 / 255.0);
-    hsla(h, s, l, color.a as f32 / 255.0)
+    let (h, s, l) = rgb_to_hsl(
+        f32::from(color.r) / 255.0,
+        f32::from(color.g) / 255.0,
+        f32::from(color.b) / 255.0,
+    );
+    hsla(h, s, l, f32::from(color.a) / 255.0)
 }
 
 fn harden_model_foreground(
@@ -318,9 +341,9 @@ fn harden_model_foreground(
 /// because such tests exist outside this module too (see `motion::tests`).
 /// Tests that flip the appearance restore Dark before releasing the guard.
 #[cfg(test)]
-pub(crate) fn lock_appearance() -> std::sync::MutexGuard<'static, ()> {
-    static APPEARANCE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    APPEARANCE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+pub(crate) fn lock_appearance() -> parking_lot::MutexGuard<'static, ()> {
+    static APPEARANCE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    APPEARANCE_LOCK.lock()
 }
 
 /// Point the context-free paint helpers at an appearance. Called by
@@ -353,6 +376,7 @@ pub fn set_current_appearance(appearance: Appearance) {
 pub const INK_FILL_SCALE: f32 = 1.0;
 
 /// Light-mode alpha multiplier for **hairlines** (borders, dividers, rings).
+///
 /// Opposite of fills: a 1px edge has to hold its own against a bright surround,
 /// and the dark palette's white hairlines are deliberately faint. Scaling up
 /// keeps separators legible instead of dissolving into the panel.
@@ -361,7 +385,7 @@ pub const INK_HAIRLINE_SCALE: f32 = 1.35;
 /// Paint-only syntax colors. The hues follow the Git history graph's lane
 /// palette (indigo, pink, emerald, amber, red, neutral), while light-mode
 /// variants are darkened enough to remain readable as text on white.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyntaxPalette {
     pub comment: Hsla,
     pub keyword: Hsla,
@@ -396,7 +420,7 @@ pub struct SyntaxPalette {
 }
 
 impl SyntaxPalette {
-    pub fn color(&self, kind: HighlightKind) -> Hsla {
+    pub const fn color(&self, kind: HighlightKind) -> Hsla {
         match kind {
             HighlightKind::Comment => self.comment,
             HighlightKind::Keyword => self.keyword,
@@ -433,7 +457,7 @@ impl SyntaxPalette {
 
     fn from_variant(variant: &ThemeVariant, fallback: Self) -> Self {
         let color = |key: &str, fallback: Hsla| {
-            variant.syntax.get(key).copied().map(model_color).unwrap_or(fallback)
+            variant.syntax.get(key).copied().map_or(fallback, model_color)
         };
         Self {
             comment: color("comment", fallback.comment),
@@ -749,7 +773,7 @@ impl TerminalColors {
     }
 
     /// These colours selecting in `selection`.
-    fn selecting(self, selection: Hsla) -> Self {
+    const fn selecting(self, selection: Hsla) -> Self {
         Self { selection, ..self }
     }
 
@@ -803,7 +827,7 @@ impl Theme {
     pub const SPACE_SNUG: f32 = 6.0;
     pub const SPACE_XS: f32 = 4.0;
     /// Reserved status strip under the content outlet (slopty `h-6`) — the
-    /// WorkingIndicator row; reserving it keeps the composer from shifting.
+    /// `WorkingIndicator` row; reserving it keeps the composer from shifting.
     pub const STATUS_STRIP_HEIGHT: f32 = 24.0;
     /// Optical separation for a tightly coupled title/description stack.
     /// This is intentionally outside the base spacing ladder: it corrects
@@ -911,7 +935,7 @@ impl Theme {
     /// Theme-owned hover wash for chrome that sits on glass (sidebar rows,
     /// tabs, titlebar buttons). The importer maps this role from the source
     /// theme, so forcing frost does not reintroduce Slopty's neutral hover.
-    pub fn glass_hover(&self) -> Hsla {
+    pub const fn glass_hover(&self) -> Hsla {
         self.element_hover
     }
 
@@ -971,7 +995,7 @@ impl Theme {
 
     /// The theme-owned tint floating cards paint over their backdrop blur (see
     /// [`crate::frost::frosted`]). Light frost has fixed coverage so content
-    /// remains visible through it. Dark floating cards use composer_sidebar_tint.
+    /// remains visible through it. Dark floating cards use `composer_sidebar_tint`.
     pub fn glass_overlay(&self) -> Hsla {
         if !self.is_frost() {
             return self.surface_overlay;
@@ -1349,12 +1373,12 @@ impl Theme {
         self
     }
 
-    fn with_code_font_size(mut self, size: f32) -> Self {
+    const fn with_code_font_size(mut self, size: f32) -> Self {
         self.code_font_size = size;
         self
     }
 
-    fn with_terminal_font_size(mut self, size: f32) -> Self {
+    const fn with_terminal_font_size(mut self, size: f32) -> Self {
         self.terminal_font_size = size;
         self
     }
@@ -1494,7 +1518,7 @@ impl Theme {
 
     pub fn install_preferences(appearance: Appearance, accent: AccentColor, cx: &mut App) {
         let accent_changed =
-            cx.try_global::<Theme>().is_some_and(|theme| theme.accent_color != accent);
+            cx.try_global::<Self>().is_some_and(|theme| theme.accent_color != accent);
         set_current_appearance(appearance);
         let next = Self::for_preferences(appearance, accent)
             .with_font_sans(crate::typography::effective_family_name(cx))
@@ -1565,7 +1589,7 @@ impl Theme {
                 .with_font_terminal(crate::typography::terminal_effective_family_name(cx))
                 .with_code_font_size(crate::typography::code_font_size(cx))
                 .with_terminal_font_size(crate::typography::terminal_font_size(cx));
-        let changed = cx.try_global::<Theme>().is_some_and(|theme| {
+        let changed = cx.try_global::<Self>().is_some_and(|theme| {
             theme.variant_id != next.variant_id
                 || theme.accent_selection != next.accent_selection
                 || theme.surface_preference != next.surface_preference
@@ -1581,8 +1605,8 @@ impl Theme {
     }
 
     /// Read the theme global.
-    pub fn of(cx: &App) -> &Theme {
-        cx.global::<Theme>()
+    pub fn of(cx: &App) -> &Self {
+        cx.global::<Self>()
     }
 
     /// Overlay ink at `alpha` — see [`ink`].
@@ -1607,7 +1631,7 @@ impl Theme {
 // the design names (antialiased, never dilated, the web's `-webkit-font-smoothing:
 // antialiased`); light keeps the platform's smoothing, which barely dilates dark text.
 /// How text is smoothed under `appearance`.
-pub(crate) fn text_smoothing_for(appearance: Appearance) -> gpui::TextSmoothing {
+pub(crate) const fn text_smoothing_for(appearance: Appearance) -> gpui::TextSmoothing {
     if appearance.is_dark() {
         gpui::TextSmoothing::Antialiased
     } else {
@@ -1639,11 +1663,11 @@ impl Default for Theme {
 
 impl Global for Theme {}
 
-fn system_sans() -> &'static str {
+const fn system_sans() -> &'static str {
     if cfg!(target_os = "macos") { "Helvetica" } else { "DejaVu Sans" }
 }
 
-fn system_mono() -> &'static str {
+const fn system_mono() -> &'static str {
     if cfg!(target_os = "macos") { "Menlo" } else { "DejaVu Sans Mono" }
 }
 
@@ -1777,7 +1801,7 @@ pub fn band() -> Hsla {
     band_for(current_appearance())
 }
 
-fn band_for(appearance: Appearance) -> Hsla {
+const fn band_for(appearance: Appearance) -> Hsla {
     match appearance {
         Appearance::Dark => hsla(0.0, 0.0, 0.0, 0.16),
         // A recessed strip on white needs far less ink than on near-black; the
@@ -1872,7 +1896,7 @@ pub fn card_selected_shadows() -> Vec<gpui::BoxShadow> {
 /// An exact achromatic tone from an 8-bit channel value (`grey(13)` ≡ `#0d0d0d`)
 /// — for surfaces matched against reference-screenshot samples.
 pub fn grey(value: u8) -> Hsla {
-    hsla(0.0, 0.0, value as f32 / 255.0, 1.0)
+    hsla(0.0, 0.0, f32::from(value) / 255.0, 1.0)
 }
 
 /// Convert an oklch color (CSS notation: L 0..1, C, H in degrees) to gpui Hsla.
@@ -1883,7 +1907,7 @@ pub fn oklch(l: f32, c: f32, h_deg: f32) -> Hsla {
 }
 
 /// oklch → sRGB (each 0..1, clamped/gamut-clipped per channel).
-/// Reference: Björn Ottosson's OKLab definition (the same matrices CSS Color 4 uses).
+/// Reference: Björn Ottosson's `OKLab` definition (the same matrices CSS Color 4 uses).
 pub(crate) fn oklch_to_srgb(l: f32, c: f32, h_deg: f32) -> [f32; 3] {
     let h = h_deg.to_radians();
     let a = c * h.cos();
@@ -2045,7 +2069,7 @@ impl Theme {
 
     /// The opacity a spinner's cells rest at between pulses: zeron's floor on dark, and on light
     /// a higher one, so the grid keeps its shape on white instead of vanishing.
-    pub fn spinner_floor(&self, dark: f32) -> f32 {
+    pub const fn spinner_floor(&self, dark: f32) -> f32 {
         match self.appearance {
             Appearance::Dark => dark,
             Appearance::Light => dark.max(LIGHT_SPINNER_FLOOR),

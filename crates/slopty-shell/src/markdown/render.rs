@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! BlockTree → gpui elements.
+//! `BlockTree` → gpui elements.
 //!
 //! Numbers drive layout (font sizes, line heights, paddings — all constants
 //! here); colors are paint. Code blocks render per-line so their height is
@@ -8,6 +8,41 @@
 //! (mugen's "highlight is pure paint"). Streaming fade-in is a per-appended-
 //! chunk opacity veil over the text runs (see [`super::veil`]) — opacity only,
 //! zero translate, applied after layout-relevant properties are fixed.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    rustdoc::private_intra_doc_links,
+    trivial_casts,
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::doc_lazy_continuation,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp_const,
+    clippy::format_collect,
+    clippy::indexing_slicing,
+    clippy::items_after_statements,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::map_unwrap_or,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::needless_pass_by_ref_mut,
+    clippy::or_fun_call,
+    clippy::partial_pub_fields,
+    clippy::rc_buffer,
+    clippy::semicolon_if_nothing_returned,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unreachable,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -242,7 +277,7 @@ pub fn activate_link(
     cx: &mut gpui::App,
 ) {
     if action == LinkAction::Copy {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.original.clone()));
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(target.original));
         return;
     }
     let activation = LinkActivation {
@@ -529,11 +564,11 @@ pub fn render_tree(
         .into_any_element()
 }
 
-fn quote_child_ix(ix: usize, child_ix: usize) -> usize {
+const fn quote_child_ix(ix: usize, child_ix: usize) -> usize {
     ix * 100 + child_ix
 }
 
-fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
+const fn list_child_ix(ix: usize, item_ix: usize, child_ix: usize) -> usize {
     ix * 100 + item_ix * 10 + child_ix
 }
 
@@ -570,7 +605,7 @@ pub(crate) fn code_block_indices(block: &Block, ix: usize) -> Vec<usize> {
 
 /// Render one block (top-level or nested). `top_ix` is the enclosing top-level
 /// block index (cache invalidation scope); `ix` the per-element discriminator.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn render_block(
     block: &Block,
     top_ix: usize,
@@ -626,7 +661,7 @@ pub fn render_block(
                         _ => None,
                     })
                     .filter(|_| opts.tasks.is_some());
-                let marker: gpui::AnyElement = if let Some(task) = task {
+                let marker: AnyElement = if let Some(task) = task {
                     let toggle = opts.tasks.as_ref().and_then(|ui| ui.toggle.clone());
                     let marker = task.clone();
                     let label: String = match &item[0] {
@@ -648,11 +683,11 @@ pub fn render_block(
                             )))
                             .checked(task.checked)
                             .disabled(toggle.is_none())
-                            .when(toggle.is_some(), |checkbox| checkbox.cursor_pointer())
+                            .when(toggle.is_some(), Styled::cursor_pointer)
                             .focus_visible(|style| style.border_color(theme.text))
                             .styles(|styles| styles.disabled(|style| style.opacity(0.5)))
                             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
-                                cx.stop_propagation()
+                                cx.stop_propagation();
                             })
                             .accessibility_label(label)
                             .size(px(16.0))
@@ -747,7 +782,7 @@ pub fn render_block(
 /// Display math: the formula centered in the column on a line box of its own
 /// height, scrolling sideways when wider than the column. It's one line of
 /// selectable text (see [`super::math`]), so drags cross it and copy yields
-/// `$$tex$$`. Source slopty_math can't render stays a `math` code block.
+/// `$$tex$$`. Source `slopty_math` can't render stays a `math` code block.
 fn render_math_block(
     tex: &str,
     top_ix: usize,
@@ -812,7 +847,7 @@ fn render_math_block(
 
 /// Tight monochrome heading scale (h2 ≈ 16px semibold; headings step
 /// down quickly toward body size).
-fn heading_metrics(level: u8) -> (f32, f32) {
+const fn heading_metrics(level: u8) -> (f32, f32) {
     match level {
         1 => (19.0, 27.0),
         2 => (16.0, 24.0),
@@ -861,7 +896,7 @@ fn slice_runs(runs: &[TextRun], range: Range<usize>) -> Vec<TextRun> {
 }
 
 /// Element/cache discriminator for a table cell (row-major under the block ix).
-fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
+const fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
     ix * 100_000 + r * 100 + c
 }
 
@@ -876,7 +911,7 @@ fn table_cell_ix(ix: usize, r: usize, c: usize) -> usize {
 /// the same algorithm as the web's. When even the floors no longer fit, the
 /// rows overflow the viewport and the table scrolls horizontally instead of
 /// crushing every column into per-character wrapping.
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_table(
     header: &[Vec<InlineRun>],
     rows: &[Vec<Vec<InlineRun>>],
@@ -891,7 +926,7 @@ fn render_table(
     let all: Vec<&[Vec<InlineRun>]> = std::iter::once(header)
         .filter(|h| !h.is_empty())
         .map(|h| h as &[Vec<InlineRun>])
-        .chain(rows.iter().map(|r| r.as_slice()))
+        .chain(rows.iter().map(Vec::as_slice))
         .collect();
     let cols = all.iter().map(|r| r.len()).max().unwrap_or(0);
     if cols == 0 {
@@ -902,11 +937,11 @@ fn render_table(
     // Flatten every cell (cache-aware) and take per-column max-content widths.
     let text_system = window.text_system();
     let mut flats: Vec<Vec<Option<Rc<FlatText>>>> = Vec::with_capacity(all.len());
-    let mut content = vec![0.0f32; cols];
+    let mut content = vec![0.0_f32; cols];
     // Per column, the widest inline formula: a formula is atomic, so its
     // column may not shrink below it (its slot would wrap and the formula
     // paint over the next column).
-    let mut widest_formula = vec![0.0f32; cols];
+    let mut widest_formula = vec![0.0_f32; cols];
     let cell_font_size = crate::typography::ui_rems(MD_TEXT_SIZE).to_pixels(window.rem_size());
     for (r, row) in all.iter().enumerate() {
         let weight = if has_header && r == 0 { TABLE_HEADER_WEIGHT } else { FontWeight::NORMAL };
@@ -1098,10 +1133,10 @@ pub struct FlatText {
 }
 
 /// Inline-code tint: a text-safe use of the selected accent identity.
-pub fn inline_code_text(theme: &Theme) -> Hsla {
+pub const fn inline_code_text(theme: &Theme) -> Hsla {
     theme.code_text
 }
-pub fn inline_code_wash(theme: &Theme) -> Hsla {
+pub const fn inline_code_wash(theme: &Theme) -> Hsla {
     theme.code_wash
 }
 /// Rounded-wash geometry: small radius on a slightly inset box (paint-only —
@@ -1471,7 +1506,7 @@ pub(super) fn flat_text_presented_element(
                     text: flat_text.clone(),
                     layout: layout.clone(),
                     offsets: offsets.clone(),
-                })
+                });
             });
             register_selection_listeners(
                 window,
@@ -1516,7 +1551,7 @@ fn link_text_element(
 ) -> AnyElement {
     // A resolved file link's hit range covers its reserved glyph slot,
     // so the trailing open glyph activates the link too.
-    let glyph_end = |range: &std::ops::Range<usize>| {
+    let glyph_end = |range: &Range<usize>| {
         flat.file_glyphs
             .iter()
             .find(|slot| slot.start == range.end)
@@ -1564,7 +1599,7 @@ fn link_text_element(
 }
 
 /// Selection tint shared with native inputs and the composer.
-fn selection_wash(theme: &Theme) -> Hsla {
+const fn selection_wash(theme: &Theme) -> Hsla {
     theme.selection
 }
 
@@ -1614,7 +1649,7 @@ fn paint_text_selection_with_wash(
             text: text.clone(),
             layout: layout.clone(),
             offsets: None,
-        })
+        });
     });
     register_selection_listeners(window, hitbox, key, surface, text, layout, None);
 }
@@ -1676,7 +1711,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
+pub(crate) fn selection_test_bounds(key: &str) -> Bounds<gpui::Pixels> {
     REGISTRY.with(|r| {
         r.borrow()
             .iter()
@@ -1716,7 +1751,7 @@ pub fn selection_frame_reset() -> impl IntoElement {
 pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |_, _, _, _| {
+        move |_, (), _, _| {
             PAINTING_SURFACE.with(|s| s.set(surface));
             PAINTED_SURFACES.with(|painted| {
                 let mut painted = painted.borrow_mut();
@@ -1727,7 +1762,7 @@ pub fn selection_frame_reset_for(surface: u64) -> impl IntoElement {
                     r.borrow_mut().retain(|e| {
                         !selection_scope(&e.key).is_empty()
                             || (e.surface != surface && (!cycle || painted.contains(&e.surface)))
-                    })
+                    });
                 });
                 if cycle {
                     painted.clear();
@@ -1762,7 +1797,9 @@ pub(crate) fn clear_selection_surface(prefix: &str) {
 pub fn selection_surface_reset(prefix: String) -> impl IntoElement {
     canvas(
         |_, _, _| (),
-        move |_, _, _, _| REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix))),
+        move |_, (), _, _| {
+            REGISTRY.with(|r| r.borrow_mut().retain(|e| !e.key.starts_with(&prefix)))
+        },
     )
     .absolute()
     .w(px(0.0))
@@ -2002,7 +2039,7 @@ fn range_rects_with_positions(
     rects
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub(super) fn text_element(
     runs: &[InlineRun],
     size: f32,
@@ -2014,86 +2051,80 @@ pub(super) fn text_element(
     theme: &Theme,
     window: &Window,
 ) -> AnyElement {
-    if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref()) {
-        if runs.iter().any(|run| run.style.image.is_some()) {
-            // Images with nothing but space between them make one gallery.
-            let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
-            let mut start = 0;
-            for (index, run) in runs.iter().enumerate() {
-                if run.style.image.is_none() {
-                    continue;
-                }
-                let joins = runs[start..index].iter().all(|run| run.text.trim().is_empty());
-                match groups.last_mut() {
-                    Some((_, images)) if joins => images.push(index),
-                    _ => groups.push((start, vec![index])),
-                }
-                start = index + 1;
+    if let Some(image_ui) = opts.media.as_ref().and_then(|media| media.image.as_ref())
+        && runs.iter().any(|run| run.style.image.is_some())
+    {
+        // Images with nothing but space between them make one gallery.
+        let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut start = 0;
+        for (index, run) in runs.iter().enumerate() {
+            if run.style.image.is_none() {
+                continue;
             }
-            let mut elements = Vec::new();
-            for (text_start, images) in groups {
-                let first = images[0];
-                if runs[text_start..first].iter().any(|run| !run.text.trim().is_empty()) {
-                    elements.push(text_element(
-                        &runs[text_start..first],
-                        size,
-                        line_height,
-                        bold_default,
-                        top_ix,
-                        ix.wrapping_mul(4099).wrapping_add(text_start + 1000),
-                        opts,
-                        theme,
-                        window,
-                    ));
-                }
-                let image_at = |index: usize, kind: &str| {
-                    let Some(image) = &runs[index].style.image else {
-                        return gpui::Empty.into_any_element();
-                    };
-                    image_ui(image, format!("{}-{kind}-{ix}-{index}", opts.row_key).into(), theme)
-                };
-                if let [only] = images[..] {
-                    elements.push(image_at(only, "image"));
-                } else {
-                    let count = images.len();
-                    elements.push(
-                        div()
-                            .id(SharedString::from(format!(
-                                "{}-gallery-{ix}-{first}",
-                                opts.row_key
-                            )))
-                            .role(gpui::Role::Group)
-                            .aria_label(SharedString::from(format!("{count} images")))
-                            .flex()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_start()
-                            .gap(px(GALLERY_GAP))
-                            .children(images.into_iter().map(|index| {
-                                div()
-                                    .flex_none()
-                                    .w(px(GALLERY_TILE))
-                                    .child(image_at(index, GALLERY_ID))
-                            }))
-                            .into_any_element(),
-                    );
-                }
+            let joins = runs[start..index].iter().all(|run| run.text.trim().is_empty());
+            match groups.last_mut() {
+                Some((_, images)) if joins => images.push(index),
+                _ => groups.push((start, vec![index])),
             }
-            if start < runs.len() && runs[start..].iter().any(|run| !run.text.trim().is_empty()) {
+            start = index + 1;
+        }
+        let mut elements = Vec::new();
+        for (text_start, images) in groups {
+            let first = images[0];
+            if runs[text_start..first].iter().any(|run| !run.text.trim().is_empty()) {
                 elements.push(text_element(
-                    &runs[start..],
+                    &runs[text_start..first],
                     size,
                     line_height,
                     bold_default,
                     top_ix,
-                    ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                    ix.wrapping_mul(4099).wrapping_add(text_start + 1000),
                     opts,
                     theme,
                     window,
                 ));
             }
-            return div().flex().flex_col().gap(px(8.0)).children(elements).into_any_element();
+            let image_at = |index: usize, kind: &str| {
+                let Some(image) = &runs[index].style.image else {
+                    return gpui::Empty.into_any_element();
+                };
+                image_ui(image, format!("{}-{kind}-{ix}-{index}", opts.row_key).into(), theme)
+            };
+            if let [only] = images[..] {
+                elements.push(image_at(only, "image"));
+            } else {
+                let count = images.len();
+                elements.push(
+                    div()
+                        .id(SharedString::from(format!("{}-gallery-{ix}-{first}", opts.row_key)))
+                        .role(gpui::Role::Group)
+                        .aria_label(SharedString::from(format!("{count} images")))
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_start()
+                        .gap(px(GALLERY_GAP))
+                        .children(images.into_iter().map(|index| {
+                            div().flex_none().w(px(GALLERY_TILE)).child(image_at(index, GALLERY_ID))
+                        }))
+                        .into_any_element(),
+                );
+            }
         }
+        if start < runs.len() && runs[start..].iter().any(|run| !run.text.trim().is_empty()) {
+            elements.push(text_element(
+                &runs[start..],
+                size,
+                line_height,
+                bold_default,
+                top_ix,
+                ix.wrapping_mul(4099).wrapping_add(start + 1000),
+                opts,
+                theme,
+                window,
+            ));
+        }
+        return div().flex().flex_col().gap(px(8.0)).children(elements).into_any_element();
     }
     if let Some(lines) =
         opts.workspace_root.as_deref().and_then(|root| plain_file_reference_lines(runs, root))
@@ -2245,7 +2276,7 @@ fn sole_file_reference(runs: &[InlineRun], workspace_root: &str) -> Option<Strin
         .or_else(|| sole_plain_file_reference(runs, workspace_root))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_code_block(
     language: Option<&str>,
     code: &str,
@@ -2263,39 +2294,18 @@ fn render_code_block(
     {
         return card;
     }
-    if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid")) {
-        if let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref()) {
-            let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
-            let diagram = match handler(code, frame_id.clone(), theme) {
-                DiagramView::Source => {
-                    return render_code_block_source(
-                        language, code, top_ix, ix, opts, theme, highlight,
-                    );
-                }
-                DiagramView::Failed(reason) => {
-                    let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
-                    return render_code_block_source_with_actions(
-                        language,
-                        code,
-                        top_ix,
-                        ix,
-                        opts,
-                        theme,
-                        highlight,
-                        vec![notice],
-                    );
-                }
-                DiagramView::Diagram(diagram) => diagram,
-            };
-            let toggle = diagram.toggle_source.clone();
-            let toggle_action = code_icon_action(
-                format!("{frame_id}-source-toggle").into(),
-                if diagram.show_source { "Show diagram" } else { "Show source" },
-                if diagram.show_source { crate::icons::EYE } else { crate::icons::FILE_CODE },
-                Rc::new(move |window, cx| toggle(window, cx)),
-                theme,
-            );
-            if diagram.show_source {
+    if language.is_some_and(|l| l.eq_ignore_ascii_case("mermaid"))
+        && let Some(handler) = opts.media.as_ref().and_then(|media| media.diagram.as_ref())
+    {
+        let frame_id: SharedString = format!("{}-mermaid-{ix}", opts.row_key).into();
+        let diagram = match handler(code, frame_id.clone(), theme) {
+            DiagramView::Source => {
+                return render_code_block_source(
+                    language, code, top_ix, ix, opts, theme, highlight,
+                );
+            }
+            DiagramView::Failed(reason) => {
+                let notice = code_notice(format!("{frame_id}-failure").into(), reason, theme);
                 return render_code_block_source_with_actions(
                     language,
                     code,
@@ -2304,14 +2314,35 @@ fn render_code_block(
                     opts,
                     theme,
                     highlight,
-                    vec![toggle_action],
+                    vec![notice],
                 );
             }
-            let mut actions = vec![toggle_action];
-            actions.extend(code_copy_button(code, ix, opts, theme));
-            return code_block_frame(frame_id, language, actions, diagram.body, theme)
-                .into_any_element();
+            DiagramView::Diagram(diagram) => diagram,
+        };
+        let toggle = diagram.toggle_source.clone();
+        let toggle_action = code_icon_action(
+            format!("{frame_id}-source-toggle").into(),
+            if diagram.show_source { "Show diagram" } else { "Show source" },
+            if diagram.show_source { crate::icons::EYE } else { crate::icons::FILE_CODE },
+            Rc::new(move |window, cx| toggle(window, cx)),
+            theme,
+        );
+        if diagram.show_source {
+            return render_code_block_source_with_actions(
+                language,
+                code,
+                top_ix,
+                ix,
+                opts,
+                theme,
+                highlight,
+                vec![toggle_action],
+            );
         }
+        let mut actions = vec![toggle_action];
+        actions.extend(code_copy_button(code, ix, opts, theme));
+        return code_block_frame(frame_id, language, actions, diagram.body, theme)
+            .into_any_element();
     }
     render_code_block_source(language, code, top_ix, ix, opts, theme, highlight)
 }
@@ -2379,7 +2410,7 @@ fn code_copy_button(
 ) -> Option<AnyElement> {
     opts.copy.clone().map(|copy| {
         let copied = copy.copied_ix == Some(ix);
-        let code_text: SharedString = code.to_string().into();
+        let code_text: SharedString = code.to_owned().into();
         let handler = copy.handler.clone();
         let fade_key = format!("{}-copy{ix}", opts.row_key);
         // The copy keeps its size: its tooltip says "Copied" while the check is drawn in
@@ -2425,7 +2456,7 @@ fn code_block_header(
     language: Option<&str>,
     actions: Vec<AnyElement>,
     theme: &Theme,
-) -> Option<gpui::Div> {
+) -> Option<Div> {
     if language.is_none() && actions.is_empty() {
         return None;
     }
@@ -2447,7 +2478,7 @@ fn code_block_header(
                     .min_w_0()
                     .text_size(crate::typography::ui_rems(11.0))
                     .text_color(theme.text_muted)
-                    .children(language.map(|lang| SharedString::from(lang.to_string()))),
+                    .children(language.map(|lang| SharedString::from(lang.to_owned()))),
             )
             .child(
                 div().flex_none().flex().flex_row().items_center().gap(px(2.0)).children(actions),
@@ -2570,7 +2601,7 @@ fn table_with_copy(
                 .border_1()
                 .border_color(theme.border)
                 .invisible()
-                .group_hover(group.clone(), |s| s.visible())
+                .group_hover(group.clone(), Styled::visible)
                 .child(button(0, "Markdown", table_markdown(header, rows)))
                 .child(button(1, "CSV", table_csv(header, rows))),
         )
@@ -2595,7 +2626,7 @@ fn code_block_frame(
     actions: Vec<AnyElement>,
     body: AnyElement,
     theme: &Theme,
-) -> gpui::Stateful<gpui::Div> {
+) -> gpui::Stateful<Div> {
     div()
         .id(id)
         .w_full()
@@ -2612,7 +2643,7 @@ fn code_block_frame(
         .child(body)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_code_block_source(
     language: Option<&str>,
     code: &str,
@@ -2634,7 +2665,7 @@ fn render_code_block_source(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn render_code_block_source_with_actions(
     language: Option<&str>,
     code: &str,
@@ -2665,13 +2696,13 @@ fn render_code_block_source_with_actions(
             .map(|(li, line)| {
                 if let Some(styled) = ansi.as_ref().and_then(|lines| lines.get(li)) {
                     return (
-                        SharedString::from(line.to_string()),
+                        SharedString::from(line.to_owned()),
                         super::ansi::runs(styled, &mono, theme),
                     );
                 }
-                let spans = highlight.and_then(|h| h.get(li)).map(|t| &t[..]).unwrap_or(&[]);
+                let spans = highlight.and_then(|h| h.get(li)).map(|t| &**t).unwrap_or(&[]);
                 (
-                    SharedString::from(line.to_string()),
+                    SharedString::from(line.to_owned()),
                     runs_for_syntax_line(line, spans, &mono, theme),
                 )
             })
@@ -2713,7 +2744,7 @@ fn render_code_block_source_with_actions(
         .whitespace_nowrap()
         .flex()
         .flex_col()
-        .children((0..cached.lines.len()).scan(0usize, move |off, li| {
+        .children((0..cached.lines.len()).scan(0_usize, move |off, li| {
             let (line, runs) = &cached.lines[li];
             let start = *off;
             *off = start + line.len() + 1; // +1 for the '\n'
@@ -2777,7 +2808,7 @@ fn render_code_block_source_with_actions(
                 })
                 .on_mouse_up(gpui::MouseButton::Left, move |_, window, cx| release_up(window, cx))
                 .on_mouse_up_out(gpui::MouseButton::Left, move |_, window, cx| {
-                    release_out(window, cx)
+                    release_out(window, cx);
                 })
                 .child(
                     div()
@@ -2802,7 +2833,7 @@ fn render_code_block_source_with_actions(
                 label: "Copy code".into(),
                 keys: None,
                 act: Rc::new(move |window: &mut Window, cx: &mut gpui::App| {
-                    handler(ix, text.clone(), window, cx)
+                    handler(ix, text.clone(), window, cx);
                 }),
             });
         }
@@ -2842,7 +2873,7 @@ fn render_code_block_source_with_actions(
 /// Paint color for a token class — the soft syntax palette (round 9: the
 /// original's mdTheme code blocks are monochrome `#e7e7e7`, but the user
 /// asked for color; these are the diff pane's hues, now shared by both).
-pub fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
+pub const fn token_color(kind: HighlightKind, theme: &Theme) -> Hsla {
     theme.syntax.color(kind)
 }
 
@@ -2874,7 +2905,7 @@ pub fn runs_for_syntax_line_with_plain(
         strikethrough: None,
     };
     let mut runs = Vec::new();
-    let mut at = 0usize;
+    let mut at = 0_usize;
     for span in spans {
         if span.range.start > at {
             runs.push(plain(span.range.start - at));
@@ -2906,8 +2937,7 @@ mod tests {
     impl Render for CodeSelectionHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let opts =
-                RenderOptions::settled("code-selection-test".into(), std::time::Instant::now());
+            let opts = RenderOptions::settled("code-selection-test".into(), Instant::now());
             let plain =
                 |text: &str| vec![InlineRun { text: text.into(), style: InlineStyle::default() }];
             div()
@@ -2965,10 +2995,7 @@ mod tests {
                 After the table.";
             div().size_full().child(selection_frame_reset()).child(render_tree(
                 &parse_full(source),
-                &RenderOptions::settled(
-                    "markdown-selection-test".into(),
-                    std::time::Instant::now(),
-                ),
+                &RenderOptions::settled("markdown-selection-test".into(), Instant::now()),
                 &theme,
                 window,
                 &|_| None,
@@ -3056,8 +3083,7 @@ mod tests {
             let source = "Before $x = \\frac{a}{b}$ after.\n\n\
                 $$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n\
                 Tail $\\nope$ text.";
-            let opts =
-                RenderOptions::settled("math-selection-test".into(), std::time::Instant::now());
+            let opts = RenderOptions::settled("math-selection-test".into(), Instant::now());
             div().size_full().child(selection_frame_reset()).child(render_tree(
                 &parse_full(source),
                 &opts,
@@ -3128,7 +3154,7 @@ mod tests {
     impl Render for MathCostHarness {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
-            let opts = RenderOptions::settled("math-cost".into(), std::time::Instant::now());
+            let opts = RenderOptions::settled("math-cost".into(), Instant::now());
             div().size_full().child(render_tree(
                 &parse_full(&self.0),
                 &opts,
@@ -3154,7 +3180,7 @@ mod tests {
             let (_, cx) = cx.add_window_view(|_, _| MathCostHarness(source));
             cx.simulate_resize(size(px(720.0), px(4000.0)));
             let draw = |cx: &mut gpui::VisualTestContext| {
-                let started = std::time::Instant::now();
+                let started = Instant::now();
                 cx.update(|window, cx| {
                     window.refresh();
                     window.draw(cx).clear(cx);
@@ -3255,8 +3281,8 @@ mod tests {
         let before_key = selection_key_for_text("Before bold and italic with code.");
         let after_key = selection_key_for_text("After the table.");
         for (anchor_key, anchor_ix, head_key, head_ix, expected) in [
-            (&branch_key, 4, &target_key, 10, "linux\nLinux jobs".to_string()),
-            (&target_key, 10, &branch_key, 4, "linux\nLinux jobs".to_string()),
+            (&branch_key, 4, &target_key, 10, "linux\nLinux jobs".to_owned()),
+            (&target_key, 10, &branch_key, 4, "linux\nLinux jobs".to_owned()),
             (&branch_key, 4, &macos_key, 3, format!("linux\n{target}\nmacos\nlab")),
             (
                 &before_key,
@@ -3304,8 +3330,7 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx).clone();
             let pane = |prefix: &str, surface: u64| {
-                let opts =
-                    RenderOptions::settled(prefix.to_string().into(), std::time::Instant::now());
+                let opts = RenderOptions::settled(prefix.to_owned().into(), Instant::now());
                 div().w(px(320.0)).h_full().child(selection_frame_reset_for(surface)).child(
                     text_element(
                         &[InlineRun {
@@ -3565,7 +3590,7 @@ mod tests {
     #[test]
     fn the_default_code_font_size_reproduces_the_historical_code_block_size() {
         assert_eq!(CODE_TEXT_SIZE, crate::typography::CODE_FONT_SIZE_DEFAULT);
-        let theme = crate::theme::Theme::dark();
+        let theme = Theme::dark();
         assert_eq!(theme.code_font_size, CODE_TEXT_SIZE);
         assert_eq!(theme.code_font_size * CODE_LINE_HEIGHT_RATIO, CODE_LINE_HEIGHT);
     }
@@ -3972,7 +3997,7 @@ mod tests {
         ];
         let flat = flatten_runs(&runs, &theme, false);
         assert_eq!(flat.text, "go here now");
-        assert_eq!(flat.links, vec![(3..7, "https://x.dev".to_string())]);
+        assert_eq!(flat.links, vec![(3..7, "https://x.dev".to_owned())]);
         let total: usize = flat.runs.iter().map(|r| r.len).sum();
         assert_eq!(total, flat.text.len());
         // Links stay monochrome (foreground + underline), never accent-tinted.
@@ -4024,7 +4049,7 @@ mod tests {
             InlineRun { text: " tail".into(), style },
         ];
         let flat = flatten_runs(&runs, &theme, false);
-        assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_string())]);
+        assert_eq!(flat.links, vec![(0..9, "https://x.dev".to_owned())]);
     }
 
     fn math_run(text: &str, math: bool) -> InlineRun {
@@ -4127,7 +4152,7 @@ mod tests {
         let [slot] = flat.math.as_slice() else {
             panic!("one formula slot");
         };
-        assert_eq!(flat.links, vec![(0..flat.text.len(), url.to_string())]);
+        assert_eq!(flat.links, vec![(0..flat.text.len(), url.to_owned())]);
         let underlined = |runs: &[TextRun], range: Range<usize>| {
             super::super::link_presentation::slice_runs(runs, range)
                 .iter()

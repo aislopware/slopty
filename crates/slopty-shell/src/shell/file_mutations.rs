@@ -1,5 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Coordinate structural changes across every editor of the affected workspace.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 use slopty_view_proto::{
     DeleteWorkspaceEntryRequest, MoveWorkspaceEntryRequest, WorkspaceMutationOutcome,
 };
@@ -46,7 +55,7 @@ impl Shell {
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             source.update(cx, |files, cx| {
-                files.report_mutation_error("Workspace service is unavailable".into(), cx)
+                files.report_mutation_error("Workspace service is unavailable".into(), cx);
             });
             return;
         };
@@ -59,7 +68,7 @@ impl Shell {
             .collect::<Vec<_>>();
         if surfaces.iter().any(|surface| surface.read(cx).mutation_busy()) {
             source.update(cx, |files, cx| {
-                files.report_mutation_error("Another file operation is still running".into(), cx)
+                files.report_mutation_error("Another file operation is still running".into(), cx);
             });
             return;
         }
@@ -174,7 +183,7 @@ impl Shell {
             }
             if applied {
                 let _ = shell.update(cx, |shell, cx| {
-                    shell.run_file_mutation_queue(source, queue, total, cx)
+                    shell.run_file_mutation_queue(source, queue, total, cx);
                 });
             } else if total > 1 {
                 let completed = total - queue.len() - 1;
@@ -208,7 +217,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
+    use gpui::{TestAppContext, VisualTestContext};
 
     use super::*;
 

@@ -1,5 +1,15 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! A read-only workspace image. The client resolves bytes on the owning device.
+#![allow(
+    let_underscore_drop,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::partial_pub_fields,
+    clippy::unreachable,
+    reason = "shell lint migration: slice C"
+)]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +53,7 @@ impl ImagePreview {
         client: WorkspaceFilesClient,
         cx: &mut Context<Self>,
     ) -> Self {
-        cx.on_release(|view, cx| view.release(cx)).detach();
+        cx.on_release(Self::release).detach();
         let mut view = Self {
             focus: cx.focus_handle(),
             path,
@@ -190,12 +200,11 @@ impl Render for ImagePreview {
                 MAX_MEDIA_BYTES.saturating_sub(source.bytes),
                 self.display.as_ref(),
             );
-            if let Some(old) = self.display.replace(display.clone()) {
-                if !Arc::ptr_eq(&old.image, &display.image)
-                    && !Arc::ptr_eq(&old.image, &source.image)
-                {
-                    release_media([old], cx);
-                }
+            if let Some(old) = self.display.replace(display.clone())
+                && !Arc::ptr_eq(&old.image, &display.image)
+                && !Arc::ptr_eq(&old.image, &source.image)
+            {
+                release_media([old], cx);
             }
             root = root.child(self.viewer.render(
                 display.image,
@@ -231,7 +240,7 @@ impl Render for ImagePreview {
                         }
                     });
                 },
-                |_, _, _, _| {},
+                |_, (), _, _| {},
             )
             .absolute()
             .inset_0(),
@@ -350,7 +359,7 @@ mod tests {
     }
     #[derive(Default)]
     struct ImageTransport {
-        calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        calls: parking_lot::Mutex<Vec<(String, serde_json::Value)>>,
     }
     #[async_trait::async_trait]
     impl super::super::client::WorkspaceFilesTransport for ImageTransport {
@@ -360,7 +369,7 @@ mod tests {
             params: serde_json::Value,
         ) -> Result<serde_json::Value, slopty_view_rpc::RpcError> {
             use base64::Engine as _;
-            self.calls.lock().unwrap().push((method.to_string(), params.clone()));
+            self.calls.lock().push((method.to_owned(), params.clone()));
             assert_eq!(params["targetDeviceId"], "owner");
             assert_eq!(params["chatId"], "chat");
             assert_eq!(params["path"], "remote.svg");
@@ -391,7 +400,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         use gpui::AppContext as _;
-        for checkout_id in [Some("checkout".to_string()), None] {
+        for checkout_id in [Some("checkout".to_owned()), None] {
             let legacy = checkout_id.is_none();
             let transport = Arc::new(ImageTransport::default());
             let view = cx.new(|cx| {
@@ -416,7 +425,7 @@ mod tests {
                 assert_eq!((source.width, source.height), (100.0, 50.0));
                 assert!(view.task.is_none());
             });
-            let calls = transport.calls.lock().unwrap();
+            let calls = transport.calls.lock();
             assert_eq!(calls.len(), if legacy { 2 } else { 1 });
             assert_eq!(calls.last().unwrap().0, slopty_view_rpc::methods::READ_WORKSPACE_IMAGE);
         }

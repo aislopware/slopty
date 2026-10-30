@@ -1,7 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
+#![allow(
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_many_arguments,
+    reason = "shell lint migration: slice A"
+)]
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Focusable, IntoElement, KeyDownEvent, MouseButton, Render, Window, div, px,
+    AnyElement, Context, Focusable as _, IntoElement, KeyDownEvent, MouseButton, Render, Window,
+    div, px,
 };
 
 use super::{BrowserEvent, BrowserSurface};
@@ -117,7 +124,7 @@ impl BrowserSurface {
                             .hover_fade(fade)
                             .hover(move |style| style.border_color(border_strong))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.navigate(&row_url, window, cx)
+                                this.navigate(&row_url, window, cx);
                             }))
                     })
                     .child(
@@ -172,7 +179,7 @@ impl BrowserSurface {
                                     .active(|style| style.bg(crate::theme::pressed_wash()))
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
-                                        this.navigate(&url, window, cx)
+                                        this.navigate(&url, window, cx);
                                     }))
                             })
                             .child("Open"),

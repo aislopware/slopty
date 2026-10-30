@@ -2,6 +2,13 @@
 //! header's actions, and the line it leaves while its page shows in the pane. Each test draws a
 //! real card in a test window, its page served by a stand-in host, and judges by the
 //! accessibility tree.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::format_push_string,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -20,7 +27,7 @@ use crate::theme::Theme;
 struct Host(gpui::AnyView);
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.0.clone())
     }
 }
@@ -28,7 +35,7 @@ impl Render for Host {
 struct Both(gpui::AnyView, gpui::AnyView);
 
 impl Render for Both {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
@@ -231,7 +238,7 @@ fn a_page_in_the_pane_leaves_a_line_in_its_card(cx: &mut gpui::TestAppContext) {
     });
     let card = card(PageCard::HTML, "slopty-page:1/html", "Plot");
     let view = cx.new(|cx| PageCardView::new(card, Some("chat".into()), None, cx));
-    let (shown, panes) = (view.clone(), pane.clone());
+    let (shown, panes) = (view.clone(), pane);
     let (_, cx) = cx.add_window_view(|_, _| Both(shown.into(), panes.into()));
     cx.simulate_resize(gpui::size(px(900.0), px(800.0)));
     view.update(cx, |view, cx| {
@@ -277,7 +284,7 @@ fn a_failed_page_offers_try_again(cx: &mut gpui::TestAppContext) {
 struct Moved(gpui::AnyView, f32);
 
 impl Render for Moved {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size_full().pt(px(self.1)).child(self.0.clone())
     }
 }

@@ -2,6 +2,11 @@
 //! A session's explorer as the shell keeps it: the files opened lately, which explorer a file
 //! event may steer, explorers let go with their sessions, and the explorer following the file
 //! in front. Files itself is a view summoned beside the session (`views.rs`).
+#![allow(
+    clippy::needless_pass_by_ref_mut,
+    clippy::wildcard_imports,
+    reason = "shell lint migration: slice A"
+)]
 
 use super::*;
 

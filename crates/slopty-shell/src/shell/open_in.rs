@@ -4,12 +4,14 @@
 //! `vscode-remote/ssh-remote+<host>` link, Zed's `zed://ssh/<host>`. Only the editors installed
 //! here are offered, Finder for a folder on this Mac. Every open goes through [`launch`], which an
 //! end-to-end run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
+#![allow(
+    clippy::format_push_string,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::prelude::*;
-use gpui::{
-    AnyElement, App, Context, IntoElement, ParentElement, Pixels, Point, SharedString, Styled,
-    Window, div, px,
-};
+use gpui::{AnyElement, App, Context, Pixels, Point, SharedString, Window, div, px};
 
 use super::Shell;
 use crate::icons::{self, icon};
@@ -45,7 +47,7 @@ fn expand_home(path: &str, home: Option<&str>) -> String {
 
 /// Where the person's own editors and Finder are: what [`launch`] opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Editor {
+pub enum Editor {
     VsCode,
     Cursor,
     Zed,
@@ -53,21 +55,21 @@ pub(crate) enum Editor {
 }
 
 impl Editor {
-    const ALL: [Editor; 4] = [Editor::VsCode, Editor::Cursor, Editor::Zed, Editor::Finder];
+    const ALL: [Self; 4] = [Self::VsCode, Self::Cursor, Self::Zed, Self::Finder];
 
     /// Its name, as macOS knows the app.
-    fn app(self) -> &'static str {
+    const fn app(self) -> &'static str {
         match self {
-            Editor::VsCode => "Visual Studio Code",
-            Editor::Cursor => "Cursor",
-            Editor::Zed => "Zed",
-            Editor::Finder => "Finder",
+            Self::VsCode => "Visual Studio Code",
+            Self::Cursor => "Cursor",
+            Self::Zed => "Zed",
+            Self::Finder => "Finder",
         }
     }
 
     /// Whether this Mac has it.
     fn installed(self) -> bool {
-        if self == Editor::Finder {
+        if self == Self::Finder {
             return true;
         }
         let bundle = format!("{}.app", self.app());
@@ -80,7 +82,7 @@ impl Editor {
 
 /// What opening a folder in an editor runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Open {
+pub enum Open {
     /// A link the editor answers.
     Url(String),
     /// `open -a <app> <path>`.
@@ -91,15 +93,15 @@ impl Open {
     /// The line an end-to-end run reads back.
     fn said(&self) -> String {
         match self {
-            Open::Url(url) => url.clone(),
-            Open::App { app, path } => format!("open -a {app} {path}"),
+            Self::Url(url) => url.clone(),
+            Self::App { app, path } => format!("open -a {app} {path}"),
         }
     }
 }
 
 /// How `editor` opens `path`: on this Mac when `ssh_host` is `None`, else on the machine this Mac
 /// reaches at `ssh_host`. `None` where the editor cannot (Finder on another machine).
-pub(crate) fn open(editor: Editor, path: &str, ssh_host: Option<&str>) -> Option<Open> {
+pub fn open(editor: Editor, path: &str, ssh_host: Option<&str>) -> Option<Open> {
     let Some(host) = ssh_host.filter(|host| !host.is_empty()) else {
         return Some(Open::App { app: editor.app(), path: path.to_owned() });
     };
@@ -127,7 +129,7 @@ fn encode(text: &str, keep: &[u8]) -> String {
 }
 
 /// Open `what`; with `SLOPTY_E2E_OPEN_LOG` set, write it to that file instead.
-pub(crate) fn launch(what: &Open, cx: &mut App) {
+pub fn launch(what: &Open, cx: &mut App) {
     if let Some(log) = std::env::var_os("SLOPTY_E2E_OPEN_LOG") {
         use std::io::Write as _;
         let written = std::fs::OpenOptions::new()
@@ -166,7 +168,7 @@ pub(super) struct OpenInMenu {
 
 impl Shell {
     /// Whether this build offers Open in: a Mac's, where the editors are.
-    pub(super) fn offers_open_in() -> bool {
+    pub(super) const fn offers_open_in() -> bool {
         cfg!(target_os = "macos")
     }
 

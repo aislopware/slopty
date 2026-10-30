@@ -2,6 +2,23 @@
 //! Shared scaffolding for the settings pages — a centered page column, large
 //! title, small section labels over filled blocks of hairline-split rows,
 //! badges and small buttons, so every page reads as the same product surface.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::derive_partial_eq_without_eq,
+    clippy::float_cmp,
+    clippy::manual_clamp,
+    clippy::needless_pass_by_ref_mut,
+    clippy::partial_pub_fields,
+    clippy::ref_option,
+    clippy::return_self_not_must_use,
+    clippy::struct_field_names,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::rc::Rc;
 
@@ -40,7 +57,7 @@ pub fn pane_bounds(viewport: gpui::Size<Pixels>, sidebar_width: f32) -> gpui::Bo
 
 /// Inner width of the [`page_column`] at the current window size, for pages
 /// that choose a layout by the room they get (the Devices grid).
-pub fn column_width(window: &gpui::Window, cx: &gpui::App) -> f32 {
+pub fn column_width(window: &Window, cx: &gpui::App) -> f32 {
     let pane = f32::from(pane_bounds(window.viewport_size(), sidebar_width(cx)).size.width);
     pane.min(PAGE_MAX_WIDTH) - 2.0 * PAGE_PAD_X
 }
@@ -48,7 +65,7 @@ pub fn column_width(window: &gpui::Window, cx: &gpui::App) -> f32 {
 pub fn dropdown(
     id: impl Into<SharedString>,
     content: gpui::Div,
-    closing: Option<crate::popover::Closing>,
+    closing: Option<popover::Closing>,
     trigger_height: f32,
 ) -> AnyElement {
     SettingsDropdown {
@@ -65,13 +82,13 @@ pub fn dropdown(
 struct SettingsDropdown {
     id: SharedString,
     content: gpui::Div,
-    closing: Option<crate::popover::Closing>,
+    closing: Option<popover::Closing>,
     trigger_height: f32,
     align: popover::MenuAlign,
 }
 
 impl RenderOnce for SettingsDropdown {
-    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
         let limits = dropdown_limits(window.viewport_size(), sidebar_width(cx));
         popover::contained_menu(
             self.id,
@@ -129,7 +146,7 @@ struct DropdownRows {
 }
 
 impl RenderOnce for DropdownRows {
-    fn render(self, window: &mut gpui::Window, _: &mut gpui::App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut gpui::App) -> impl IntoElement {
         let key: SharedString = format!("{}-list-scroll", self.id).into();
         let scroll = window.with_global_id(key.into(), |id, window| {
             window.with_element_state(id, |previous: Option<ScrollHandle>, _| {
@@ -335,7 +352,7 @@ pub fn page_header(theme: &Theme, title: &str, count: Option<usize>) -> gpui::Di
                 .line_height(crate::typography::ui_rems(26.0))
                 .font_weight(gpui::FontWeight::MEDIUM)
                 .text_color(theme.text)
-                .child(SharedString::from(title.to_string())),
+                .child(SharedString::from(title.to_owned())),
         )
         .when_some(count, |el, count| {
             el.child(
@@ -644,6 +661,7 @@ const SWITCH_THUMB_HEIGHT: f32 = SWITCH_TRACK_HEIGHT - 2.0 * SWITCH_SIDE_INSET;
 const SWITCH_MARK_SIZE: f32 = 7.2;
 
 /// A pill switch with the on/off marks nested beneath a sliding thumb.
+///
 /// The caller owns activation and accessibility; only the thumb interpolates.
 /// The element is the pill itself, its row's room kept by a margin, so a
 /// focus ring on it hugs the track.
@@ -734,7 +752,7 @@ fn switch_surface_tones(theme: &Theme, base: gpui::Hsla, thumb: bool) -> (gpui::
 }
 
 impl RenderOnce for SwitchVisual {
-    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
         let now = crate::clock::now(cx);
         let target = if self.on { 1.0 } else { 0.0 };
         let reduced = crate::motion::reduced_motion(cx);
@@ -951,12 +969,8 @@ mod switch_tests {
 
     struct Switched;
 
-    impl gpui::Render for Switched {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            _: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
+    impl Render for Switched {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::dark();
             div()
                 .flex()
@@ -980,7 +994,7 @@ mod switch_tests {
         cx.update(|cx| cx.set_global(Theme::dark()));
         let (_, cx) = cx.add_window_view(|_, _| Switched);
         cx.simulate_keystrokes("a");
-        cx.update(|window, cx| window.focus_next(cx));
+        cx.update(Window::focus_next);
         let (quads, scale) = cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
@@ -1030,7 +1044,7 @@ impl TabSelectionTravel {
 /// Retargetable selected-state fade for a settings tab. First paint and
 /// reduced-motion changes settle immediately instead of flashing an entrance.
 pub fn tab_selection_t(
-    window: &mut gpui::Window,
+    window: &mut Window,
     key: impl Into<SharedString>,
     selected: bool,
     reduced_motion: bool,
@@ -1187,7 +1201,7 @@ pub struct SelectState {
 }
 
 impl SelectState {
-    pub fn is_open(&self) -> bool {
+    pub const fn is_open(&self) -> bool {
         self.menu.is_open()
     }
 
@@ -1324,12 +1338,12 @@ impl<V: 'static> Select<V> {
 
     /// Fixed trigger width; the menu matches it unless [`Self::menu_width`]
     /// says otherwise. Without one the trigger fits its value.
-    pub fn width(mut self, width: f32) -> Self {
+    pub const fn width(mut self, width: f32) -> Self {
         self.width = Some(width);
         self
     }
 
-    pub fn menu_width(mut self, width: f32) -> Self {
+    pub const fn menu_width(mut self, width: f32) -> Self {
         self.menu_width = Some(width);
         self
     }
@@ -1341,14 +1355,14 @@ impl<V: 'static> Select<V> {
     }
 
     /// A small heading over the rows.
-    pub fn heading(mut self, heading: &'static str) -> Self {
+    pub const fn heading(mut self, heading: &'static str) -> Self {
         self.heading = Some(heading);
         self
     }
 
     /// Open the menu rightward from the trigger's left edge, for triggers
     /// that lead a row rather than end it.
-    pub fn open_rightward(mut self) -> Self {
+    pub const fn open_rightward(mut self) -> Self {
         self.align = popover::MenuAlign::Start;
         self
     }
@@ -1381,7 +1395,7 @@ impl<V: 'static> Select<V> {
             })
             .aria_label(format!("{label}: {value}"))
             .when_some(width, |el, width| el.w(px(width)))
-            .when_some(font.clone(), |el, font| el.font_family(font))
+            .when_some(font.clone(), Styled::font_family)
             .on_mouse_down(gpui::MouseButton::Left, {
                 let reach = reach.clone();
                 cx.listener(move |view, _, _, _| reach(view).menu.note_trigger_press())
@@ -1481,7 +1495,7 @@ impl<V: 'static> Select<V> {
             });
             let menu = select_menu(&theme)
                 .w(px(menu_width.or(width).unwrap_or(0.0).max(SELECT_MENU_MIN_WIDTH)))
-                .when_some(font, |menu, font| menu.font_family(font))
+                .when_some(font, Styled::font_family)
                 .on_mouse_down_out({
                     let reach = reach.clone();
                     cx.listener(move |view, _, _, cx| close_select_rc(view, &reach, cx))
@@ -1694,9 +1708,9 @@ struct SettingsScroll {
 }
 
 impl RenderOnce for SettingsScroll {
-    fn render(self, window: &mut gpui::Window, _: &mut gpui::App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _: &mut gpui::App) -> impl IntoElement {
         let scroll = window.with_global_id(self.key.into(), |id, window| {
-            window.with_element_state(id, |previous: Option<gpui::ScrollHandle>, _| {
+            window.with_element_state(id, |previous: Option<ScrollHandle>, _| {
                 let scroll = previous.unwrap_or_default();
                 (scroll.clone(), scroll)
             })
@@ -1720,11 +1734,7 @@ pub struct TextTooltip {
 // sets `tooltip_placement(Above)` itself.
 
 impl Render for TextTooltip {
-    fn render(
-        &mut self,
-        _window: &mut gpui::Window,
-        cx: &mut gpui::Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
         let theme = Theme::of(cx);
         match self.detail.clone() {
@@ -1741,7 +1751,7 @@ impl Render for TextTooltip {
 /// `.tooltip(...)` builder for a [`TextTooltip`].
 pub fn text_tooltip(
     text: impl Into<SharedString>,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let text: SharedString = text.into();
     move |_, cx| cx.new(|_| TextTooltip { text: text.clone(), keys: None, detail: None }).into()
 }
@@ -1776,7 +1786,7 @@ impl Clone for Keys {
 
 impl Keys {
     /// The key as the tooltip shows it now, or `None` when nothing binds the action.
-    pub fn text(&self, window: &gpui::Window, cx: &gpui::App) -> Option<SharedString> {
+    pub fn text(&self, window: &Window, cx: &gpui::App) -> Option<SharedString> {
         match self {
             Self::Action(action) => crate::keys::for_action(action.as_ref(), None, window, cx),
             Self::ActionIn(action, focus) => {
@@ -1801,7 +1811,7 @@ impl Keys {
 pub fn action_tooltip(
     label: impl Into<SharedString>,
     keys: Keys,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     keyed_tooltip(label.into(), None, keys)
 }
 
@@ -1810,7 +1820,7 @@ pub fn detail_tooltip(
     title: impl Into<SharedString>,
     detail: impl Into<SharedString>,
     keys: Option<Keys>,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     let title: SharedString = title.into();
     let detail: SharedString = detail.into();
     move |window, cx| {
@@ -1824,7 +1834,7 @@ fn keyed_tooltip(
     label: SharedString,
     detail: Option<SharedString>,
     keys: Keys,
-) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     move |window, cx| {
         let keys = keys.text(window, cx);
         let (text, detail) = (label.clone(), detail.clone());
@@ -1908,7 +1918,7 @@ pub enum Standing {
 impl Standing {
     /// The standing of an option that is (or is not) the default and recommended; `None` for
     /// neither.
-    pub fn of(is_default: bool, is_recommended: bool) -> Option<Self> {
+    pub const fn of(is_default: bool, is_recommended: bool) -> Option<Self> {
         match (is_default, is_recommended) {
             (true, true) => Some(Self::DefaultRecommended),
             (true, false) => Some(Self::Default),
@@ -1917,7 +1927,7 @@ impl Standing {
         }
     }
 
-    pub fn words(self) -> &'static str {
+    pub const fn words(self) -> &'static str {
         match self {
             Self::Default => "Default",
             Self::Recommended => "Recommended",
@@ -2043,7 +2053,7 @@ pub fn truncate_with_tip(
 fn overflow_tooltip(
     overflow: &ScrollHandle,
     text: SharedString,
-    _window: &mut gpui::Window,
+    _window: &mut Window,
     cx: &mut gpui::App,
 ) -> gpui::AnyView {
     let cut = overflow.max_offset().x > px(0.5);
@@ -2055,7 +2065,7 @@ struct OverflowTooltip {
 }
 
 impl Render for OverflowTooltip {
-    fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(text) = self.text.clone() else {
             return div().into_any_element();
         };
@@ -2146,11 +2156,7 @@ mod hint_tests {
     struct Hinted;
 
     impl Render for Hinted {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             div().size(px(200.0)).child(
                 div()
                     .id("hinted")
@@ -2195,18 +2201,14 @@ mod page_head_tests {
     struct Page;
 
     impl Render for Page {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx);
             div().w(px(600.0)).child(page_head(
-                &theme,
+                theme,
                 "Notifications",
                 None,
                 "What Slopty tells you, and how.",
-                Some(text_action(&theme, ActionTone::Quiet, "Restore defaults").into_any_element()),
+                Some(text_action(theme, ActionTone::Quiet, "Restore defaults").into_any_element()),
             ))
         }
     }
@@ -2239,19 +2241,15 @@ mod page_head_tests {
     struct Row;
 
     impl Render for Row {
-        fn render(
-            &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let theme = Theme::of(cx);
             div()
                 .w(px(600.0))
                 .flex()
                 .flex_col()
-                .child(row_title(&theme, "Theme").debug_selector(|| "row-title".to_owned()))
+                .child(row_title(theme, "Theme").debug_selector(|| "row-title".to_owned()))
                 .child(
-                    meta_line(&theme, vec!["Follows the system".into_any_element()])
+                    meta_line(theme, vec!["Follows the system".into_any_element()])
                         .debug_selector(|| "row-description".to_owned()),
                 )
         }

@@ -8,6 +8,13 @@
 //! makes it up (`slopty::invariant`), and under `SLOPTY_INVARIANTS=panic` (the e2e harness's) the
 //! app stops on it, so an e2e run that meets one fails where it happened instead of in a golden
 //! later.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cloned_ref_to_slice_refs,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::collections::HashMap;
 use std::time::Duration;

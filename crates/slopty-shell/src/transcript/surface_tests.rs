@@ -1,6 +1,20 @@
 //! The transcript's own rows as assistive tech reads them: a subagent's row, the rows
 //! of background work, a reply's images and formulas. Each test draws a real transcript in a
 //! test window and judges by its accessibility tree.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::format_collect,
+    clippy::format_push_string,
+    clippy::manual_midpoint,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::suboptimal_flops,
+    clippy::unreachable,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,7 +37,7 @@ use crate::theme::Theme;
 struct Host(Entity<Transcript>);
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(self.0.clone())
     }
 }
@@ -100,7 +114,7 @@ fn draw(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
 fn settle(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
     let mut nodes = draw(cx);
     for _ in 0..4 {
-        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+        if cx.update(Window::simulate_next_frame) == 0 {
             break;
         }
         nodes = draw(cx);
@@ -123,7 +137,7 @@ fn entry(status: MessageStatus, parts: Vec<MessagePart>) -> SessionMessageEntry 
 
 fn text(text: &str) -> MessagePart {
     // Its words name it: a reply's parts each have their own id.
-    MessagePart::Text { id: format!("text:{text}").into(), text: text.into() }
+    MessagePart::Text { id: format!("text:{text}"), text: text.into() }
 }
 
 /// A transcript of chat "chat" (folder `/work/app`, no engine) showing `reply`, drawn.
@@ -153,7 +167,7 @@ fn open(
         state.transcript_revision += 1;
     });
     let transcript = cx.new(|cx| Transcript::new(state, cx));
-    transcript.update(cx, |this, cx| this.sync(cx));
+    transcript.update(cx, Transcript::sync);
     let (_, cx) = cx.add_window_view(|_, _| Host(transcript.clone()));
     cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
     (transcript, cx)
@@ -229,7 +243,7 @@ fn a_subagents_row_opens_its_steps_in_place_and_drills_in(cx: &mut gpui::TestApp
     let (drilled, _events) = drills(&transcript, cx);
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     state.update(cx, |state, _| {
-        state.set_subagent_snapshot("child-chat".into(), (0..2).map(run_line).collect())
+        state.set_subagent_snapshot("child-chat".into(), (0..2).map(run_line).collect());
     });
     let nodes = draw(cx);
     let row = find(&nodes, Role::Button, "Subagent Count lines").expect("the row").clone();
@@ -340,8 +354,8 @@ fn subagents_started_together_stand_under_one_line(cx: &mut gpui::TestAppContext
 struct Footer;
 
 impl Render for Footer {
-    fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
-        div().id("footer").role(gpui::Role::Group).aria_label("Footer").w_full().h(px(48.0))
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().id("footer").role(Role::Group).aria_label("Footer").w_full().h(px(48.0))
     }
 }
 
@@ -679,7 +693,7 @@ fn a_subagent_clicked_on_a_persons_frame_opens_on_the_next(cx: &mut gpui::TestAp
     );
     let state = transcript.read_with(cx, |transcript, _| transcript.state.clone());
     state.update(cx, |state, _| {
-        state.set_subagent_snapshot("child-chat".into(), (0..3).map(run_line).collect())
+        state.set_subagent_snapshot("child-chat".into(), (0..3).map(run_line).collect());
     });
     // A frame as the platform draws one: the frames asked for, then the draw.
     let plain = |cx: &mut VisualTestContext| {
@@ -904,7 +918,7 @@ fn press_enter(cx: &mut VisualTestContext) {
 
 /// Tab, as the window's keyboard moves focus to the next stop.
 fn tab(cx: &mut VisualTestContext) {
-    cx.update(|window, cx| window.focus_next(cx));
+    cx.update(Window::focus_next);
 }
 
 fn top(node: &Node) -> f32 {

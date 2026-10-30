@@ -12,6 +12,21 @@
 //!
 //! A session row takes the platform's gestures: a trailing swipe archives it (or brings it back
 //! from Archived), and a long press opens its menu.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::expect_used,
+    clippy::float_cmp_const,
+    clippy::items_after_statements,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::mem_forget,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::time::{Duration, Instant};
 
@@ -257,7 +272,7 @@ thread_local! {
 
 /// A test elsewhere lays its views out as a touch screen's (`on`) or a Mac's.
 #[cfg(test)]
-pub(crate) fn force_touch(on: bool) {
+pub fn force_touch(on: bool) {
     FORCE_COMPACT.with(|force| force.set(on));
 }
 
@@ -270,7 +285,14 @@ fn phone_platform() -> bool {
 /// There focusing a field raises the software keyboard over the page, so opening or landing on a
 /// session leaves it down and the keyboard comes when the person taps the terminal
 /// (`docs/decisions/ui.md`, "On a touch screen the keyboard waits for a tap").
-pub(crate) fn touch_screen() -> bool {
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "a test forces the touch layout through a thread-local"
+    )
+)]
+pub fn touch_screen() -> bool {
     #[cfg(test)]
     if FORCE_COMPACT.with(std::cell::Cell::get) {
         return true;
@@ -965,7 +987,7 @@ impl Shell {
                         return;
                     }
                     let _ = shell.update(cx, |this, cx| {
-                        this.pan_compact_inspector(event, height, safe_top, cx)
+                        this.pan_compact_inspector(event, height, safe_top, cx);
                     });
                     cx.stop_propagation();
                     window.refresh();
@@ -1344,9 +1366,9 @@ impl Shell {
             .child(
                 gpui::canvas(
                     |_, _, _| {},
-                    move |bounds, _, window, _| {
+                    move |bounds, (), window, _| {
                         let shell = shell.clone();
-                        let chat = pressed.clone();
+                        let chat = pressed;
                         window.on_mouse_event(move |event: &LongPressEvent, phase, window, cx| {
                             if phase != gpui::DispatchPhase::Bubble
                                 || event.phase != TouchPhase::Started
@@ -1456,7 +1478,7 @@ mod tests {
     /// The phone's session band and its session list, from a shell with no engine.
     struct PhoneHost(gpui::Entity<Shell>);
 
-    impl gpui::Render for PhoneHost {
+    impl Render for PhoneHost {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             self.0.update(cx, |shell, cx| {
                 shell.viewport_width = 390.0;
@@ -1573,7 +1595,7 @@ mod tests {
             "a screen reader reads the empty line: {read:?}"
         );
         FORCE_COMPACT.with(|force| force.set(false));
-        cx.simulate_resize(gpui::size(gpui::px(1320.0), gpui::px(880.0)));
+        cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
         redraw(cx);
         let sidebar = (
             cx.debug_bounds("sidebar-empty: No sessions yet").is_some(),
@@ -1701,7 +1723,7 @@ mod tests {
             let shell = Shell::new(
                 state,
                 crate::state::EngineBootConfig {
-                    data_dir: path.clone(),
+                    data_dir: path,
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -2065,12 +2087,12 @@ mod tests {
         // A slow pull well past half puts it away.
         pan(cx, &[0.0, 150.0, 150.0, 2.0, 0.0]);
         let pulled = top(cx);
-        let shown_after_pull = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
+        let shown_after_pull = shell.read_with(cx, Shell::inspector_shown);
         tap(cx, "compact-band-identity");
         let reopened = top(cx);
         tap(cx, "compact-inspector-close");
         let closed = top(cx);
-        let shown_after_close = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
+        let shown_after_close = shell.read_with(cx, Shell::inspector_shown);
         FORCE_COMPACT.with(|force| force.set(false));
         assert!(has(&chat, gpui::Role::Button, "Chat docs"), "the band's title: {chat:?}");
         assert!(

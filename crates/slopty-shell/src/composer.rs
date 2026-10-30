@@ -7,6 +7,30 @@
 //!
 //! Pure decision logic (auto-grow math, caret and scroll math) lives in free functions with unit
 //! tests; the gpui element only feeds them measurements.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::derive_partial_eq_without_eq,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::or_fun_call,
+    clippy::renamed_function_params,
+    clippy::return_self_not_must_use,
+    clippy::same_name_method,
+    clippy::string_add,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -20,7 +44,7 @@ use gpui::{
     UTF16Selection, UnderlineStyle, Window, WrappedLine, actions, div, fill, point, px, relative,
     size,
 };
-use unicode_segmentation::UnicodeSegmentation;
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use crate::theme::Theme;
 
@@ -114,7 +138,7 @@ enum PressIntent {
     PlaceCaret,
 }
 
-fn press_intent(click_count: usize, shift: bool) -> PressIntent {
+const fn press_intent(click_count: usize, shift: bool) -> PressIntent {
     if click_count >= 3 {
         PressIntent::Line
     } else if click_count == 2 {
@@ -428,7 +452,7 @@ enum CaretAffinity {
 /// Multiline input entity: content + selection + IME marked text + measured
 /// layout (wrapped lines) for mouse mapping and auto-grow.
 pub struct ComposerInput {
-    /// Key context for the binding map ("Composer", or "PaletteSearch" for
+    /// Key context for the binding map ("Composer", or "`PaletteSearch`" for
     /// palette filters whose navigation keys must bubble).
     key_context: &'static str,
     accessibility_role: Role,
@@ -585,7 +609,7 @@ impl ComposerInput {
 
     /// Override the text metrics for compact one-line surfaces such as
     /// toolbar searches without changing the main composer typography.
-    pub fn with_text_metrics(mut self, text_size: f32, line_height: f32) -> Self {
+    pub const fn with_text_metrics(mut self, text_size: f32, line_height: f32) -> Self {
         self.text_size = text_size;
         self.configured_line_height = line_height;
         self.line_height = px(line_height);
@@ -593,7 +617,7 @@ impl ComposerInput {
         self
     }
 
-    pub fn with_single_line(mut self) -> Self {
+    pub const fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
     }
@@ -605,7 +629,7 @@ impl ComposerInput {
         self
     }
 
-    pub fn with_accessibility_role(mut self, role: Role) -> Self {
+    pub const fn with_accessibility_role(mut self, role: Role) -> Self {
         self.accessibility_role = role;
         self
     }
@@ -650,7 +674,7 @@ impl ComposerInput {
     }
 
     /// Where the input was last drawn.
-    pub(crate) fn drawn_bounds(&self) -> Option<Bounds<Pixels>> {
+    pub(crate) const fn drawn_bounds(&self) -> Option<Bounds<Pixels>> {
         self.last_bounds
     }
 
@@ -672,7 +696,7 @@ impl ComposerInput {
         cx.notify();
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.content.is_empty()
     }
 
@@ -813,7 +837,7 @@ impl ComposerInput {
 
     // ---- editing ops ----
 
-    pub fn cursor_offset(&self) -> usize {
+    pub const fn cursor_offset(&self) -> usize {
         if self.selection_reversed { self.selected_range.start } else { self.selected_range.end }
     }
 
@@ -892,9 +916,8 @@ impl ComposerInput {
         while !self.content.is_char_boundary(offset) {
             offset -= 1;
         }
-        let start = self.content[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let end =
-            self.content[offset..].find('\n').map(|i| offset + i).unwrap_or(self.content.len());
+        let start = self.content[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.content[offset..].find('\n').map_or(self.content.len(), |i| offset + i);
         start..end
     }
 
@@ -1372,7 +1395,7 @@ impl ComposerInput {
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    const fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.is_selecting = false;
         self.drag_position = None;
         self.drag_generation = self.drag_generation.wrapping_add(1);
@@ -1611,7 +1634,7 @@ impl ComposerInput {
                 })
                 .collect();
             if let Ok(shaped) = window.text_system().shape_text(
-                text.to_string().into(),
+                text.to_owned().into(),
                 font_size,
                 &line_runs,
                 (!self.single_line).then_some(width.max(px(20.0))),
@@ -1624,7 +1647,7 @@ impl ComposerInput {
 
         // Logical line byte offsets (each shaped line covers one \n-split line).
         let mut line_starts = Vec::with_capacity(lines.len());
-        let mut at = 0usize;
+        let mut at = 0_usize;
         for line in &lines {
             line_starts.push(at);
             at += line.len() + 1; // + '\n'
@@ -1690,17 +1713,17 @@ impl ComposerInput {
             return self.scroll_left != previous;
         }
         let previous = self.scroll_top;
-        if self.follow_cursor {
-            if let Some(cursor) = self.cursor_point() {
-                self.scroll_top = input_scroll_offset_for_cursor(
-                    self.scroll_top,
-                    f32::from(cursor.y),
-                    f32::from(self.line_height),
-                    self.content_height,
-                    element_height,
-                    self.settled_viewport_height,
-                );
-            }
+        if self.follow_cursor
+            && let Some(cursor) = self.cursor_point()
+        {
+            self.scroll_top = input_scroll_offset_for_cursor(
+                self.scroll_top,
+                f32::from(cursor.y),
+                f32::from(self.line_height),
+                self.content_height,
+                element_height,
+                self.settled_viewport_height,
+            );
         }
         self.scroll_top = self.scroll_top.clamp(
             0.0,
@@ -1731,7 +1754,7 @@ impl EntityInputHandler for ComposerInput {
     ) -> Option<String> {
         let range = self.range_from_utf16(&range_utf16);
         actual_range.replace(self.range_to_utf16(&range));
-        Some(self.content.get(range)?.to_string())
+        Some(self.content.get(range)?.to_owned())
     }
 
     fn selected_text_range(
@@ -1845,8 +1868,10 @@ impl EntityInputHandler for ComposerInput {
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|r| Self::utf8_offset(new_text, r.start)..Self::utf8_offset(new_text, r.end))
-            .map(|new_range| new_range.start + range.start..new_range.end + range.start)
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+            .map_or_else(
+                || range.start + new_text.len()..range.start + new_text.len(),
+                |new_range| new_range.start + range.start..new_range.end + range.start,
+            );
         self.selection_reversed = false;
         self.caret_affinity = CaretAffinity::Downstream;
         self.preferred_column = None;
@@ -1912,7 +1937,7 @@ impl IntoElement for ComposerTextElement {
     }
 }
 
-impl gpui::Element for ComposerTextElement {
+impl Element for ComposerTextElement {
     type PrepaintState = ComposerTextPrepaint;
     type RequestLayoutState = ();
 
@@ -2142,7 +2167,7 @@ impl Render for ComposerInput {
         let theme = Theme::of(cx);
         let popup_theme = theme.for_popup();
         let theme = if self.key_context == "PaletteSearch"
-            || self.accessibility_role == gpui::Role::SearchInput
+            || self.accessibility_role == Role::SearchInput
         {
             &popup_theme
         } else {
@@ -2256,7 +2281,7 @@ pub(crate) fn finger_press(
         (crate::surface_chrome::touch_reach(width), crate::surface_chrome::touch_reach(height));
     let press = div()
         .id(id)
-        .on_mouse_down(gpui::MouseButton::Left, |_, window, _| {
+        .on_mouse_down(MouseButton::Left, |_, window, _| {
             if crate::shell::touch_screen() {
                 window.prevent_default();
             }
@@ -2494,7 +2519,7 @@ mod tests {
                 input.move_to(0, cx);
                 input.end(&End, window, cx);
                 input.backspace(&Backspace, window, cx);
-                let previous = first.grapheme_indices(true).last().unwrap().0;
+                let previous = first.grapheme_indices(true).next_back().unwrap().0;
                 assert_eq!(input.text(), format!("{}\r\nnext", &first[..previous]));
                 input.undo(&Undo, window, cx);
                 input.move_to(first.len(), cx);

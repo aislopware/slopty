@@ -21,6 +21,11 @@
 //! seen mark (`ThreadRow::seen`) is the last turn the person saw on any of them, the chat carries
 //! it as `last_seen_at`, and a finished or failed turn past it is what calls. Looking at a
 //! session moves it, from whichever device looked (`AppState::mark_chat_seen`, `Intent::Seen`).
+#![allow(
+    trivial_casts,
+    clippy::field_scoped_visibility_modifiers,
+    reason = "shell lint migration: slice A"
+)]
 
 use chrono::{DateTime, Utc};
 use gpui::prelude::*;
@@ -33,7 +38,7 @@ use crate::theme::Theme;
 
 /// What a session's mark says: one of the five states.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Mark {
+pub enum Mark {
     /// The agent works, or waits on its own work.
     AtWork,
     /// It waits on the person, for what its need says.
@@ -74,7 +79,7 @@ impl Mark {
 
     /// The state in a word, as a row's status and a screen reader say it; the need itself is
     /// the [`Need`]'s words.
-    pub(crate) fn word(&self) -> Option<&'static str> {
+    pub(crate) const fn word(&self) -> Option<&'static str> {
         match self {
             Self::AtWork => Some("Working"),
             Self::NeedsYou(_) => Some("Needs you"),
@@ -85,7 +90,7 @@ impl Mark {
     }
 
     /// What the mark draws, if anything.
-    pub(crate) fn drawn(&self) -> Option<MarkState> {
+    pub(crate) const fn drawn(&self) -> Option<MarkState> {
         match self {
             Self::AtWork => Some(MarkState::Working),
             Self::NeedsYou(need) => Some(need.glyph),
@@ -102,7 +107,7 @@ impl Mark {
 
     /// How loud it calls: needs you over failed over done unseen over at work; at rest, not at
     /// all. A shut group wears its loudest row's mark ([`loudest`]).
-    pub(crate) fn urgency(&self) -> u8 {
+    pub(crate) const fn urgency(&self) -> u8 {
         match self {
             Self::NeedsYou(_) => 4,
             Self::Failed => 3,
@@ -114,7 +119,7 @@ impl Mark {
 }
 
 /// The loudest of `marks` ([`Mark::urgency`]), the first of equals; none while all rest.
-pub(crate) fn loudest<'a>(marks: impl IntoIterator<Item = &'a Mark>) -> Option<&'a Mark> {
+pub fn loudest<'a>(marks: impl IntoIterator<Item = &'a Mark>) -> Option<&'a Mark> {
     marks.into_iter().filter(|mark| mark.urgency() > 0).fold(
         None,
         |loudest: Option<&Mark>, mark| match loudest {
@@ -127,7 +132,7 @@ pub(crate) fn loudest<'a>(marks: impl IntoIterator<Item = &'a Mark>) -> Option<&
 /// The hue table: at work blue, needs you amber, failed red, done green. On light each takes
 /// the tone of itself that clears 3:1 against the surfaces a mark sits on
 /// ([`Theme::spinner_ink`]); never a grey.
-pub(crate) fn hue(state: MarkState, theme: &Theme) -> Hsla {
+pub fn hue(state: MarkState, theme: &Theme) -> Hsla {
     let tint = match state {
         MarkState::Working => at_work_blue(theme),
         MarkState::Waiting | MarkState::Question | MarkState::Approval | MarkState::Plan => {
@@ -151,7 +156,7 @@ fn at_work_blue(theme: &Theme) -> Hsla {
 /// `mark` drawn `size` square as the mark `id` (it morphs from the state it last drew there),
 /// the done tick cut in `ground`, the colour beneath it, and found by the tests as `selector`;
 /// nothing at rest.
-pub(crate) fn mark_element(
+pub fn mark_element(
     id: SharedString,
     selector: String,
     mark: &Mark,
@@ -178,7 +183,7 @@ fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
 /// What a session waiting on the person waits for: the glyph its mark draws and the words its
 /// agent's records give.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Need {
+pub struct Need {
     /// A raised hand for an approval, a `?` for a question, a checklist for a plan to review,
     /// and a dot for any other need (`MarkState::{Approval, Question, Plan, Waiting}`).
     pub(crate) glyph: MarkState,
@@ -189,7 +194,7 @@ pub(crate) struct Need {
 /// What a session waiting on the person waits for, from the agent's records. A wait's kind is
 /// an open word: the three glyphs name the needs every agent has, and any other kind draws the
 /// dot with its summary for words.
-pub(crate) fn need(wait: Option<&SessionWait>) -> Need {
+pub fn need(wait: Option<&SessionWait>) -> Need {
     let other = |words: SharedString| Need { glyph: MarkState::Waiting, words };
     let Some(wait) = wait else { return other("Needs input".into()) };
     let summary = wait
@@ -215,7 +220,7 @@ pub(crate) fn need(wait: Option<&SessionWait>) -> Need {
 
 /// Whether the agent, at rest, waits on its own work (a background command, a wakeup, a
 /// subagent it left running), not on the person. A session past the staleness window says no.
-pub(crate) fn works_on_its_own(session: Option<&Session>, now: DateTime<Utc>) -> bool {
+pub fn works_on_its_own(session: Option<&Session>, now: DateTime<Utc>) -> bool {
     live(session, now).is_some_and(|session| {
         session.status == SessionStatus::Waiting
             || (session.status != SessionStatus::Working

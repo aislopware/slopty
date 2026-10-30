@@ -1,5 +1,24 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Workspace file browsing surface.
+#![allow(
+    let_underscore_drop,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::clone_on_ref_ptr,
+    clippy::derive_partial_eq_without_eq,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -74,12 +93,10 @@ impl FilesSurface {
     /// The chat's machine by its name.
     pub(super) fn host_name(&self, cx: &gpui::App) -> String {
         let state = self.state.read(cx);
-        state
-            .chats
-            .iter()
-            .find(|chat| chat.id == self.chat_id)
-            .map(|chat| state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned())
-            .unwrap_or_else(|| "This session's machine".to_owned())
+        state.chats.iter().find(|chat| chat.id == self.chat_id).map_or_else(
+            || "This session's machine".to_owned(),
+            |chat| state.device_name(&chat.device_id).unwrap_or(&chat.device_id).to_owned(),
+        )
     }
 
     /// What shows while the chat's machine is not up yet.
@@ -280,7 +297,7 @@ pub(crate) fn failure_state(
                 .child({
                     use crate::settings::widgets::ActionHint as _;
                     let key = copy_key.clone();
-                    let key_for_glyph = copy_key.clone();
+                    let key_for_glyph = copy_key;
                     state_button(SharedString::from(format!("{id}-copy")), "Copy error", theme)
                         .hint(if copied { "Copied" } else { "Copy the error" })
                         .on_click(move |_, _, cx| {
@@ -397,7 +414,7 @@ pub(crate) enum WorkspacePathSource {
 }
 
 impl WorkspacePathDrag {
-    pub(crate) fn new(path: String, is_directory: bool) -> Self {
+    pub(crate) const fn new(path: String, is_directory: bool) -> Self {
         Self {
             path,
             is_directory,
@@ -446,7 +463,7 @@ impl WorkspacePathDrag {
             [only] => &only.path,
             items => return format!("{} items", items.len()).into(),
         };
-        path.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.path).to_string().into()
+        path.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.path).to_owned().into()
     }
 }
 
@@ -457,7 +474,7 @@ pub(crate) struct WorkspacePathDragGhost {
 }
 
 impl Render for WorkspacePathDragGhost {
-    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = crate::theme::Theme::of(cx);
         div()
             .h(px(24.0))
@@ -489,12 +506,12 @@ impl Render for WorkspacePathDragGhost {
 pub(crate) fn workspace_path_drag_ghost(
     payload: &WorkspacePathDrag,
     cx: &mut gpui::App,
-) -> gpui::Entity<WorkspacePathDragGhost> {
+) -> Entity<WorkspacePathDragGhost> {
     let payload = payload.clone();
     cx.new(|_| WorkspacePathDragGhost { payload })
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
     /// Pause autosave under these paths while a confirmation is open; an
     /// empty list releases the hold.
@@ -533,7 +550,7 @@ enum FilesPresentation {
 }
 
 impl FilesPresentation {
-    fn is_editor(self) -> bool {
+    const fn is_editor(self) -> bool {
         matches!(self, Self::Editor)
     }
 }
@@ -596,7 +613,7 @@ pub struct FilesSurface {
 }
 
 impl Render for FilesSurface {
-    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !cx.has_active_drag() || !self.is_current_target(cx) {
             self.clear_tree_drag(window, cx);
         }
@@ -883,7 +900,7 @@ impl FilesSurface {
         let search_events = cx.subscribe(&search, |this: &mut Self, _, event, cx| match event {
             ComposerInputEvent::Edited => this.on_search_edited(cx),
             ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
-                this.activate_search_result(cx)
+                this.activate_search_result(cx);
             }
             ComposerInputEvent::MentionNavigate(delta) => {
                 let len = this.search_state.visible_len();
@@ -930,7 +947,7 @@ impl FilesSurface {
             state,
             chat_id,
             presentation,
-            editor_path: editor_path.clone(),
+            editor_path,
             request_context: None,
             target_change_pending: false,
             selected_editor_path: None,
@@ -1014,7 +1031,7 @@ impl FilesSurface {
             .when(!enabled, |row| row.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
             .when(enabled, |row| {
                 row.on_click(cx.listener(move |this, _, window, cx| {
-                    this.dispatch_editor_context_action(editor.clone(), action, window, cx)
+                    this.dispatch_editor_context_action(editor.clone(), action, window, cx);
                 }))
             })
             .child(label)
@@ -1096,12 +1113,7 @@ impl FilesSurface {
         cx.notify();
     }
 
-    pub fn set_word_wrap(
-        &mut self,
-        word_wrap: bool,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_word_wrap(&mut self, word_wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_word_wrap(word_wrap, window, cx);
     }
 
@@ -1208,7 +1220,7 @@ impl FilesSurface {
         let focus = if self.search_state.query.is_empty() {
             self.tree_focus.clone()
         } else {
-            use gpui::Focusable;
+            use gpui::Focusable as _;
             self.search.focus_handle(cx)
         };
         window.defer(cx, move |window, cx| focus.focus(window, cx));
@@ -1299,7 +1311,7 @@ impl FilesSurface {
         let client = WorkspaceFilesClient::new(engine, request_context);
         let task = cx.spawn(async move |this, cx| {
             let mut result = client.list_directory_snapshot(request.clone(), &cached_paths).await;
-            if result.as_ref().is_err_and(|error| error.retryable()) {
+            if result.as_ref().is_err_and(client::FilesClientError::retryable) {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
                 result = client.list_directory_snapshot(request, &cached_paths).await;
             }
@@ -1337,11 +1349,11 @@ impl FilesSurface {
         cx.notify();
     }
 
-    pub fn tree(&self) -> &FileTreeModel {
+    pub const fn tree(&self) -> &FileTreeModel {
         &self.tree
     }
 
-    pub fn error(&self) -> Option<&SharedString> {
+    pub const fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
     }
 
@@ -1415,7 +1427,7 @@ impl FilesSurface {
         self.search_state.error = None;
         self.reset_search_results();
         self.sync_tree_list();
-        self.error = if next.is_none() { Some(NO_FOLDER.into()) } else { None };
+        self.error = next.is_none().then(|| NO_FOLDER.into());
         self.request_context = next;
         self.started = false;
         if !self.search.read(cx).text().trim().is_empty() {
@@ -1428,14 +1440,14 @@ impl FilesSurface {
     }
 
     fn sync_tree_list(&mut self) {
-        if self.tree_list_generation != self.tree.generation() {
+        if self.tree_list_generation == self.tree.generation() {
+            tree::sync_list_rows(&self.tree_list, &self.tree_list_rows, self.tree.visible_rows());
+        } else {
             self.tree_list.reset_with_uniform_height(
                 self.tree.visible_rows().len(),
                 px(tree::TREE_ROW_HEIGHT),
             );
             self.tree_list_generation = self.tree.generation();
-        } else {
-            tree::sync_list_rows(&self.tree_list, &self.tree_list_rows, self.tree.visible_rows());
         }
         self.tree_list_rows = self.tree.visible_rows().to_vec();
     }
@@ -1455,7 +1467,7 @@ impl FilesSurface {
         theme: &crate::theme::Theme,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        use gpui::Focusable;
+        use gpui::Focusable as _;
         let include_ignored = self.tree.include_ignored();
         let search_focus = self.search.focus_handle(cx);
         toolbar(theme)
@@ -1531,13 +1543,13 @@ mod explorer_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
     #[gpui::test]
     fn explorer_header_search_and_visibility_toggle(cx: &mut TestAppContext) {
-        use gpui::{Focusable, Modifiers};
+        use gpui::{Focusable as _, Modifiers};
 
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -1740,7 +1752,7 @@ mod explorer_tests {
     #[gpui::test]
     fn the_hidden_files_key_toggles_and_its_button_names_it(cx: &mut TestAppContext) {
         use crate::settings::platform_combo;
-        let (files, cx) = super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         cx.update(|_, cx| bind_keys(cx));
         let shown = Rc::new(RefCell::new(None));
         let emitted = shown.clone();

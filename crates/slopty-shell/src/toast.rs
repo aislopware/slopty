@@ -15,6 +15,25 @@
 //!
 //! Push from anywhere with [`error`], [`success`] or [`info`]; the shell
 //! mounts [`render_toaster`] once per window.
+#![allow(
+    let_underscore_drop,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::option_option,
+    clippy::or_fun_call,
+    clippy::redundant_else,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -69,7 +88,7 @@ struct Glide {
 }
 
 impl Glide {
-    fn new(value: f32, now: Instant) -> Self {
+    const fn new(value: f32, now: Instant) -> Self {
         Self { from: value, to: value, started: now }
     }
 
@@ -143,7 +162,7 @@ impl Toast {
         }
     }
 
-    fn resume(&mut self, now: Instant) {
+    const fn resume(&mut self, now: Instant) {
         if self.resumed.is_none() {
             self.resumed = Some(now);
         }
@@ -884,7 +903,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                             window.on_next_frame(|window, _| window.refresh());
                         }
                     },
-                    |_, _, _, _| {},
+                    |_, (), _, _| {},
                 )
                 .absolute()
                 .inset_0(),
@@ -934,11 +953,11 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                     return;
                 };
                 let Some(from) = toast.swipe_from else { return };
-                if !event.dragging() {
+                if event.dragging() {
+                    toast.swipe = (f32::from(event.position.x) - from).max(0.0);
+                } else {
                     toast.swipe_from = None;
                     toast.swipe = 0.0;
-                } else {
-                    toast.swipe = (f32::from(event.position.x) - from).max(0.0);
                 }
                 window.refresh();
             })
@@ -1015,7 +1034,7 @@ fn stand(
 // Sonner's close button (20 round, at the corner, half over the edge), in the house's
 // icon control.
 /// The button that closes toast `id` at once.
-fn close_button(id: u64, theme: &Theme) -> gpui::AnyElement {
+fn close_button(id: u64, theme: &Theme) -> AnyElement {
     let fade = SharedString::from(format!("toast-close-hover-{id}"));
     div()
         .id(("toast-close", id as usize))
@@ -1258,7 +1277,7 @@ mod tests {
         });
         cx.run_until_parked();
         cx.update(|_, cx| {
-            assert_eq!(messages(cx), ["Couldn't open Zed. Check that it is installed."])
+            assert_eq!(messages(cx), ["Couldn't open Zed. Check that it is installed."]);
         });
         let id = cx.update(|_, cx| cx.global::<ToastStore>().toasts[0].id);
         cx.update(|_, cx| copy_error(id, cx));
@@ -1512,7 +1531,7 @@ mod tests {
         cx.run_until_parked();
         // The frames the platform delivers next, as many as the window asks for.
         for _ in 0..4 {
-            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.update(Window::simulate_next_frame);
             cx.run_until_parked();
         }
         let heights: Vec<f32> =

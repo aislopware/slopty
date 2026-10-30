@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! LaTeX math in Markdown: slopty_math lays formulas out, GPUI paints them.
+//! LaTeX math in Markdown: `slopty_math` lays formulas out, GPUI paints them.
 //!
-//! slopty_math's layout is linear in the font size, so every formula is laid out
+//! `slopty_math`'s layout is linear in the font size, so every formula is laid out
 //! once in ems and cached by source ([`formula`]); a frame scales it to the
 //! element's font size and never lays out again. Glyphs paint natively
 //! through GPUI's glyph atlas from the bundled math fonts — the rasterizer
@@ -14,21 +14,41 @@
 //! one-line text element whose line box is the formula's height, so drags
 //! cross it and copy yields `$$tex$$` like any paragraph.
 //!
-//! Glyphs name their font by index into slopty_math's fixed bundled table
+//! Glyphs name their font by index into `slopty_math`'s fixed bundled table
 //! ([`slopty_math::bundled::font_at`]) whichever face set them, so each font
 //! registers and verifies once, when a glyph first needs it, and every face
 //! paints through the same ids. Faces nobody uses are never parsed.
+#![allow(
+    missing_debug_implementations,
+    unnameable_types,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::indexing_slicing,
+    clippy::option_option,
+    clippy::significant_drop_in_scrutinee,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::unreachable,
+    clippy::unused_result_ok,
+    clippy::while_float,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, LazyLock, OnceLock};
 
 use gpui::{
     AnyElement, App, Bounds, Element, ElementId, FontId, GlobalElementId, GlyphId, Hsla,
     InspectorElementId, LayoutId, Pixels, Point, SharedString, TextLayout, TextRun, Window, point,
     px, size,
 };
+use parking_lot::Mutex;
 use slopty_math::bundled::Face;
 use slopty_math::{Formula, Item};
 
@@ -41,7 +61,7 @@ const CACHE_CAPACITY: usize = 4096;
 
 /// Tallest inline formula, in ems of its text: a text element has one line
 /// height, so a taller one would open every line of its paragraph.
-pub(crate) const MAX_INLINE_EMS: f32 = 12.0;
+pub const MAX_INLINE_EMS: f32 = 12.0;
 /// The bytes those formulas may hold (sources plus laid-out items). Most are
 /// a few hundred bytes, but a long valid source lays out to thousands of
 /// items, so count alone doesn't bound memory.
@@ -112,7 +132,7 @@ impl FormulaCache {
         }
     }
 
-    /// slopty_math's options for `display`, sized in ems.
+    /// `slopty_math`'s options for `display`, sized in ems.
     fn options(display: bool) -> slopty_math::Options {
         if display { slopty_math::Options::display(1.0) } else { slopty_math::Options::inline(1.0) }
     }
@@ -147,9 +167,7 @@ impl FormulaCache {
         let tick = self.tick;
         let key: Arc<str> = tex.into();
         let bytes = key.len()
-            + formula
-                .as_ref()
-                .map_or(0, |formula| formula.items.len() * std::mem::size_of::<Item>());
+            + formula.as_ref().map_or(0, |formula| formula.items.len() * size_of::<Item>());
         self.entries
             .entry((face, display))
             .or_default()
@@ -192,14 +210,14 @@ fn lay_out(tex: &str, face: Face, options: &slopty_math::Options) -> Option<Arc<
 }
 
 /// The process-wide formula cache.
-fn cache() -> std::sync::MutexGuard<'static, FormulaCache> {
+fn cache() -> parking_lot::MutexGuard<'static, FormulaCache> {
     static CACHE: LazyLock<Mutex<FormulaCache>> =
         LazyLock::new(|| Mutex::new(FormulaCache::new(CACHE_CAPACITY, CACHE_MAX_BYTES)));
-    CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+    CACHE.lock()
 }
 
 /// `tex` laid out in `face` in ems (1.0 = the surrounding font size), or
-/// `None` when slopty_math can't render it faithfully — the caller shows the
+/// `None` when `slopty_math` can't render it faithfully — the caller shows the
 /// source instead. Errors are cached like formulas, so a malformed formula
 /// isn't re-parsed every frame either.
 ///
@@ -207,7 +225,7 @@ fn cache() -> std::sync::MutexGuard<'static, FormulaCache> {
 /// so one slow formula doesn't stall every other lookup (and the window)
 /// behind it. Two threads missing on the same source may both lay it out;
 /// the first to insert wins and both return its layout.
-pub(crate) fn formula(tex: &str, display: bool, face: Face) -> Option<Arc<Formula>> {
+pub fn formula(tex: &str, display: bool, face: Face) -> Option<Arc<Formula>> {
     formula_with(tex, display, face, lay_out)
 }
 
@@ -251,15 +269,15 @@ fn nbsp_em() -> f32 {
 const FONTS: usize = slopty_math::bundled::FONTS as usize;
 
 /// The horizontal extent `formula` paints over, in ems from its origin: its
-/// advance box widened to everything it paints (slopty_math's `left`/`right`
+/// advance box widened to everything it paints (`slopty_math`'s `left`/`right`
 /// cover every glyph's ink and rule), so negative space or an overhang never
 /// paints past its slot. O(1), as it's asked every frame per formula.
-pub(crate) fn span(formula: &Formula) -> Range<f32> {
+pub const fn span(formula: &Formula) -> Range<f32> {
     formula.left.min(formula.width).min(0.0)..formula.right.max(formula.width).max(0.0)
 }
 
 /// The widest (and tallest) a formula may set, in ems of the surrounding
-/// text, math size included. slopty_math already refuses formulas wider than
+/// text, math size included. `slopty_math` already refuses formulas wider than
 /// [`slopty_math::Options::max_width`] (2000 em, so 4000 at the largest math size);
 /// this is the second line of defence, so a slot never grows into
 /// a string GPUI shapes every frame on surfaces that don't cache layout. At
@@ -274,8 +292,8 @@ const MAX_SLOT_EMS: f32 = 8192.0;
 ///
 /// `None` when the formula is too big to set (past [`MAX_SLOT_EMS`], or with
 /// a non-finite extent): the caller shows its source instead, as for one
-/// slopty_math can't render.
-pub(crate) fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
+/// `slopty_math` can't render.
+pub fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
     let span = span(formula);
     // `span` skips a NaN advance (`min`/`max` ignore NaN), so check it here.
     let width = if formula.width.is_finite() { (span.end - span.start) * scale } else { f32::NAN };
@@ -290,7 +308,7 @@ pub(crate) fn slot_text(formula: &Formula, scale: f32) -> Option<String> {
 }
 
 /// The font a slot shapes in (see [`SLOT_FAMILY`]).
-pub(crate) fn slot_font() -> gpui::Font {
+pub fn slot_font() -> gpui::Font {
     gpui::font(SLOT_FAMILY)
 }
 
@@ -302,7 +320,7 @@ pub(crate) fn slot_font() -> gpui::Font {
 /// point and its descent below it. The line height is the element's, so a
 /// tall formula (fraction, stacked scripts) opens every line of its
 /// paragraph; paragraphs without one keep their rhythm.
-pub(crate) fn line_height(flat: &FlatText, line_height: f32, size: f32, window: &Window) -> f32 {
+pub fn line_height(flat: &FlatText, line_height: f32, size: f32, window: &Window) -> f32 {
     let text_system = window.text_system();
     line_height_with(flat, line_height, size, |font| {
         let id = text_system.resolve_font(font);
@@ -320,7 +338,7 @@ fn line_height_with(
     if flat.math.iter().all(|slot| slot.display) {
         return line_height;
     }
-    let mut half = 0.0f32;
+    let mut half = 0.0_f32;
     // One forward pass over lines, inline slots (by position) and runs:
     // hard-broken lines of formulas must not cost lines × slots per render.
     let mut slots: Vec<&MathSlot> = flat.math.iter().filter(|slot| !slot.display).collect();
@@ -347,7 +365,7 @@ fn line_height_with(
             first_run_at += flat.runs[first_run].len;
             first_run += 1;
         }
-        let (mut ascent, mut descent) = (0.0f32, 0.0f32);
+        let (mut ascent, mut descent) = (0.0_f32, 0.0_f32);
         let mut at = first_run_at;
         for run in &flat.runs[first_run..] {
             if at >= range.end {
@@ -373,24 +391,14 @@ fn line_height_with(
 
 /// The line box a display formula set at `scale` sits centered in, in the
 /// units of `size`.
-pub(crate) fn display_line_height(
-    formula: &Formula,
-    scale: f32,
-    size: f32,
-    line_height: f32,
-) -> f32 {
+pub fn display_line_height(formula: &Formula, scale: f32, size: f32, line_height: f32) -> f32 {
     line_height.max((formula.height() * scale * size + 2.0 * DISPLAY_PAD_Y).ceil())
 }
 
 /// A display formula as one line of text: its slot shows the formula, and
 /// copy and selection read the source as `$$tex$$`. `None` when the formula
 /// is too big to set ([`slot_text`]).
-pub(crate) fn display_flat(
-    tex: &str,
-    formula: Arc<Formula>,
-    scale: f32,
-    color: Hsla,
-) -> Option<FlatText> {
+pub fn display_flat(tex: &str, formula: Arc<Formula>, scale: f32, color: Hsla) -> Option<FlatText> {
     let text = slot_text(&formula, scale)?;
     let source = format!("$${tex}$$");
     let range = 0..text.len();
@@ -416,7 +424,7 @@ pub(crate) fn display_flat(
 }
 
 /// The paint color of the text run covering byte `at`.
-pub(crate) fn color_at(runs: &[TextRun], at: usize) -> Option<Hsla> {
+pub fn color_at(runs: &[TextRun], at: usize) -> Option<Hsla> {
     let mut end = 0;
     runs.iter().find_map(|run| {
         end += run.len;
@@ -552,7 +560,7 @@ fn family_name(data: &[u8]) -> Option<String> {
 
 /// Paint `formula` with its baseline's left end at `origin`, scaled from
 /// ems to `font_size`.
-pub(crate) fn paint_formula(
+pub fn paint_formula(
     formula: &Formula,
     origin: Point<Pixels>,
     font_size: Pixels,
@@ -643,7 +651,7 @@ impl slopty_math::PathSink for OutlineSink {
 /// Paints each slot's formula over the shaped text: centered in the slot's
 /// reserved width, on its line's baseline (inline) or centered in the line
 /// box (display). The NBSPs underneath keep layout, selection and copy.
-pub(crate) struct MathGlyphs {
+pub struct MathGlyphs {
     pub id: SharedString,
     pub child: AnyElement,
     pub layout: TextLayout,
@@ -721,7 +729,7 @@ impl Element for MathGlyphs {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> (Vec<Placed>, Vec<AnyElement>) {
@@ -796,7 +804,7 @@ impl Element for MathGlyphs {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         (placed, nodes): &mut (Vec<Placed>, Vec<AnyElement>),
         window: &mut Window,
         cx: &mut App,
@@ -991,7 +999,7 @@ mod tests {
 
     #[test]
     fn slots_cover_the_formula_in_whole_spaces() {
-        let wide = formula(r"a + b + c + d", false, Face::Fira).unwrap();
+        let wide = formula("a + b + c + d", false, Face::Fira).unwrap();
         let text = slot_text(&wide, 1.0).unwrap();
         assert!(text.chars().all(|c| c == NBSP));
         let count = text.chars().count() as f32;
@@ -1104,7 +1112,7 @@ mod tests {
 
     #[test]
     fn slots_scale_with_the_math_size() {
-        let wide = formula(r"a + b + c + d", false, Face::Fira).unwrap();
+        let wide = formula("a + b + c + d", false, Face::Fira).unwrap();
         let count = |scale: f32| slot_text(&wide, scale).unwrap().chars().count() as f32;
         // 100% is the size-independent slot, unscaled.
         let span = span(&wide);
@@ -1122,7 +1130,7 @@ mod tests {
     fn display_blocks_scale_the_formula_but_not_its_padding() {
         let laid = formula(r"\int_0^1 \frac{x^2}{2}\,dx", true, Face::Fira).unwrap();
         let normal = display_line_height(&laid, 1.0, 14.0, 22.0);
-        assert_eq!(normal, 22.0f32.max((laid.height() * 14.0 + 2.0 * DISPLAY_PAD_Y).ceil()));
+        assert_eq!(normal, 22.0_f32.max((laid.height() * 14.0 + 2.0 * DISPLAY_PAD_Y).ceil()));
         let larger = display_line_height(&laid, 1.5, 14.0, 22.0);
         let grown = larger - 2.0 * DISPLAY_PAD_Y;
         let formula = normal - 2.0 * DISPLAY_PAD_Y;
@@ -1231,7 +1239,7 @@ mod tests {
             (" per step, so ", false),
             (r"\sum_{i=1}^n i", true),
             (" is the total (", false),
-            (r"x_1 + y_2", true),
+            ("x_1 + y_2", true),
             ("), with ", false),
             (r"\alpha", true),
             (", ", false),

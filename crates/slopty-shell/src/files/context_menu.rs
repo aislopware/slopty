@@ -1,5 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Tree menus share the editor's popup surface, positioning and dismissal.
+#![allow(
+    clippy::clone_on_ref_ptr,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice C"
+)]
 use gpui::{ClipboardItem, KeyDownEvent, MouseButton};
 use mutations::WorkspaceInteractionOrigin;
 
@@ -51,7 +57,7 @@ impl FilesSurface {
         }
         // Like other explorers, a right-click inside the selection keeps it.
         if !self.tree.is_selected(&path) {
-            self.tree.select(path.clone());
+            self.tree.select(path);
         }
         let paths = self.tree_action_paths();
         self.tree_focus.focus(window, cx);
@@ -65,7 +71,7 @@ impl FilesSurface {
     pub(super) fn tree_action_paths(&self) -> Vec<String> {
         match self.tree.selected() {
             Some(cursor) if self.tree.is_selected(cursor) => self.tree.selection_roots(),
-            Some(cursor) => vec![cursor.to_string()],
+            Some(cursor) => vec![cursor.to_owned()],
             None => Vec::new(),
         }
     }
@@ -203,7 +209,7 @@ impl FilesSurface {
         let key_of = |action: &dyn gpui::Action| {
             crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
         };
-        let keys = [key_of(&super::CopyPath), None, key_of(&super::DeleteSelection)];
+        let keys = [key_of(&CopyPath), None, key_of(&DeleteSelection)];
         let delete_label =
             if count > 1 { format!("Delete {count} items…") } else { "Delete…".into() };
         let mut card = popover::popover_card(&theme)
@@ -213,8 +219,8 @@ impl FilesSurface {
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (index, (label, icon_path)) in [
-            (if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(), icons::COPY),
-            ("Rename…".to_string(), icons::PEN),
+            (if count > 1 { "Copy full paths" } else { "Copy full path" }.to_owned(), icons::COPY),
+            ("Rename…".to_owned(), icons::PEN),
             (delete_label, icons::TRASH_BIN_MINIMALISTIC),
         ]
         .into_iter()
@@ -226,7 +232,7 @@ impl FilesSurface {
             let enabled = self.tree_menu_enabled(&menu.paths, index, cx);
             card = card.child(
                 popover::menu_row(&theme, menu.active == index, format!("tree-menu-{index}"))
-                    .id(gpui::SharedString::from(format!("tree-menu-{index}")))
+                    .id(SharedString::from(format!("tree-menu-{index}")))
                     .role(gpui::Role::MenuItem)
                     .aria_label(label.clone())
                     .when(index == 2, |row| row.text_color(theme.danger))
@@ -235,7 +241,7 @@ impl FilesSurface {
                     })
                     .when(enabled, |el| {
                         el.on_click(cx.listener(move |this, _, window, cx| {
-                            this.dispatch_tree_menu(index, window, cx)
+                            this.dispatch_tree_menu(index, window, cx);
                         }))
                     })
                     .child(icons::icon(icon_path).size(px(16.0)).text_color(if index == 2 {
@@ -267,7 +273,7 @@ fn copied_paths_message(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -299,12 +305,12 @@ mod tests {
         ] {
             let window = cx.add_window(|_, cx| {
                 let state = cx.new(|_| {
-                    let mut state = super::super::test_support::state();
+                    let mut state = test_support::state();
                     state.chats[0].device_id = "remote-host".into();
                     state.chats[0].cwd = Some(root.into());
                     state
                 });
-                super::super::test_support::explorer(state, cx)
+                test_support::explorer(state, cx)
             });
             window
                 .update(cx, |files, window, cx| {
@@ -327,7 +333,7 @@ mod tests {
 
     #[gpui::test]
     fn menu_selects_without_opening_and_copies_full_path(cx: &mut TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _subscription = cx.update(|_, cx| {
@@ -358,8 +364,8 @@ mod tests {
     #[gpui::test]
     fn the_trees_keys_copy_and_delete_and_its_menu_names_them(cx: &mut TestAppContext) {
         use crate::settings::platform_combo;
-        let (files, cx) = super::super::test_support::setup(cx);
-        cx.update(|_, cx| super::super::bind_keys(cx));
+        let (files, cx) = test_support::setup(cx);
+        cx.update(|_, cx| bind_keys(cx));
         files.update_in(cx, |files, window, cx| {
             files.tree.select("a.txt");
             files.tree_focus.focus(window, cx);
@@ -382,11 +388,11 @@ mod tests {
             window.draw(cx).clear(cx);
             let focus = files.read(cx).tree_focus.clone();
             assert_eq!(
-                crate::keys::for_action(&super::super::CopyPath, Some(&focus), window, cx),
+                crate::keys::for_action(&CopyPath, Some(&focus), window, cx),
                 Some(crate::keys::combo_text("alt-mod-c"))
             );
             assert_eq!(
-                crate::keys::for_action(&super::super::DeleteSelection, Some(&focus), window, cx),
+                crate::keys::for_action(&DeleteSelection, Some(&focus), window, cx),
                 Some(crate::keys::combo_text("mod-backspace"))
             );
         });
@@ -410,7 +416,7 @@ mod tests {
 
     #[gpui::test]
     fn menu_inside_a_selection_acts_on_every_root(cx: &mut TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _subscription = cx.update(|_, cx| {

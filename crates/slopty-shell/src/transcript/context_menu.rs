@@ -2,6 +2,13 @@
 //! code block, its header's actions (Copy code, Fit content or Use
 //! horizontal scrolling, Run in terminal). The menu is the house's floating menu
 //! (`popover::menu_at`) at the pointer, driven by the keyboard as every menu is.
+#![allow(
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::rc::Rc;
 
@@ -73,7 +80,7 @@ impl Transcript {
                   cx: &mut App| {
                 entity
                     .update(cx, |this, cx| {
-                        this.open_context_menu(label, choices, position, window, cx)
+                        this.open_context_menu(label, choices, position, window, cx);
                     })
                     .ok();
             },
@@ -166,9 +173,7 @@ impl Transcript {
             .min_w(px(180.0))
             .flex()
             .flex_col()
-            .on_key_down(
-                cx.listener(|this, event, window, cx| this.context_menu_key(event, window, cx)),
-            )
+            .on_key_down(cx.listener(Self::context_menu_key))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_context_menu(cx)))
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation());
         for (nth, choice) in menu.choices.iter().enumerate() {
@@ -182,7 +187,7 @@ impl Transcript {
                         row.aria_keyshortcuts(crate::keys::aria_combo(keys))
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.pick_context_choice(nth, window, cx)
+                        this.pick_context_choice(nth, window, cx);
                     }))
                     .child(div_label(choice.label.clone()))
                     .when_some(choice.keys, |row, keys| {

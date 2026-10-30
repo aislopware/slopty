@@ -7,6 +7,12 @@
 //!
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
 //! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice B"
+)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, SharedString, Window, div, px};
@@ -114,7 +120,7 @@ impl Transcript {
                     cx.defer(move |cx| transcript.update(cx, |_, cx| cx.notify()));
                 }
             },
-            |_, _, _, _| {},
+            |_, (), _, _| {},
         )
         .absolute()
         .size_0()

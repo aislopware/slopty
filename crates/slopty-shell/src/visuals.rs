@@ -11,6 +11,36 @@
 //! which change its state, and the view renders again. Canvases and scenes
 //! run their draw functions at paint time and are painted as GPUI paths and
 //! shaped text in theme colors.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::float_cmp,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::manual_midpoint,
+    clippy::many_single_char_names,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::or_fun_call,
+    clippy::rc_buffer,
+    clippy::semicolon_if_nothing_returned,
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::unreadable_literal,
+    clippy::unused_self,
+    clippy::unwrap_used,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,9 +51,9 @@ use std::time::Instant;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, Context, EventEmitter, FontStyle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, MouseButton, MouseMoveEvent, ParentElement, PathBuilder,
-    Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, StyledText, Task,
-    TextAlign, TextRun, Window, canvas, div, point, px,
+    InteractiveElement as _, IntoElement, MouseButton, MouseMoveEvent, ParentElement as _,
+    PathBuilder, Pixels, Point, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    StyledText, Task, TextAlign, TextRun, Window, canvas, div, point, px,
 };
 use slopty_visual::{
     Align, ChartKind, DrawCmd, HandlerArg, HandlerId, Justify, Node, NodeKind, Token,
@@ -232,9 +262,10 @@ impl VisualFrame {
                         }
                     }
                     let assets = slopty_visual::Assets::new(files);
-                    let _ = this.update(cx, |this, cx| match script {
-                        Some(script) => this.start(&script, assets, cx),
-                        None => {
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(script) = script {
+                            this.start(&script, assets, cx)
+                        } else {
                             this.load = Load::Failed(None);
                             cx.notify();
                         }
@@ -462,7 +493,7 @@ fn mix_rgb(a: Hsla, b: Hsla, t: f32) -> Hsla {
     gpui::Rgba { r: lerp(a.r, b.r), g: lerp(a.g, b.g), b: lerp(a.b, b.b), a: lerp(a.a, b.a) }.into()
 }
 
-fn weight(weight: slopty_visual::Weight) -> FontWeight {
+const fn weight(weight: slopty_visual::Weight) -> FontWeight {
     match weight {
         slopty_visual::Weight::Regular => FontWeight::NORMAL,
         slopty_visual::Weight::Medium => FontWeight::MEDIUM,
@@ -482,7 +513,7 @@ fn ui_font(theme: &Theme, mono: bool, w: FontWeight, italic: bool) -> gpui::Font
     font
 }
 
-fn rems(size: slopty_visual::TextSize) -> (gpui::Rems, gpui::Rems) {
+const fn rems(size: slopty_visual::TextSize) -> (gpui::Rems, gpui::Rems) {
     let (size, line_height) = size.metrics();
     (crate::typography::ui_rems(size), crate::typography::ui_rems(line_height))
 }
@@ -822,7 +853,7 @@ impl VisualFrame {
                     .line_height(crate::typography::ui_rems(22.0))
                     .text_color(theme.accent)
                     .cursor_pointer()
-                    .hover(|s| s.underline())
+                    .hover(gpui::Styled::underline)
                     .role(gpui::Role::Link)
                     // A tab stop, Enter opening it.
                     .tab_index(0)
@@ -850,7 +881,7 @@ impl VisualFrame {
         let horizontal = stack.axis == slopty_visual::Axis::Horizontal;
         let mut el = div().flex().gap(px(stack.gap));
         el = if horizontal {
-            el.flex_row().when(stack.wrap, |el| el.flex_wrap())
+            el.flex_row().when(stack.wrap, gpui::Styled::flex_wrap)
         } else {
             el.flex_col().w_full()
         };
@@ -994,7 +1025,7 @@ impl VisualFrame {
 
 fn text_element(text: &slopty_visual::Text, theme: &Theme, palette: &Palette) -> AnyElement {
     let (size, line_height) = rems(text.size);
-    let base_color = text.color.map(|c| palette.color(c)).unwrap_or(theme.text);
+    let base_color = text.color.map_or(theme.text, |c| palette.color(c));
     let mut content = String::new();
     let mut runs = Vec::new();
     for span in &text.spans {
@@ -1010,7 +1041,7 @@ fn text_element(text: &slopty_visual::Text, theme: &Theme, palette: &Palette) ->
                 weight(span.weight.unwrap_or(text.weight)),
                 text.italic || span.italic,
             ),
-            color: span.color.map(|c| palette.color(c)).unwrap_or(base_color),
+            color: span.color.map_or(base_color, |c| palette.color(c)),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -1021,7 +1052,7 @@ fn text_element(text: &slopty_visual::Text, theme: &Theme, palette: &Palette) ->
         .text_size(size)
         .line_height(line_height)
         .text_color(base_color)
-        .when(text.truncate, |el| el.truncate());
+        .when(text.truncate, gpui::Styled::truncate);
     let el = match text.align {
         Align::Start => el,
         Align::Center => el.text_center(),
@@ -1472,7 +1503,7 @@ fn fill_convex(points: &[Point<Pixels>], color: Hsla, window: &mut Window) {
     window.paint_path(path, color);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn paint_text(
     text: &str,
     at: Point<Pixels>,
@@ -1534,7 +1565,7 @@ fn paint_commands(
                 window,
             ),
             DrawCmd::Fill { points, color } => {
-                fill_path(points.iter().map(|p| at(origin, *p)), palette.color(*color), window)
+                fill_path(points.iter().map(|p| at(origin, *p)), palette.color(*color), window);
             }
             DrawCmd::Text(text) => {
                 paint_text(
@@ -1568,7 +1599,7 @@ impl VisualFrame {
     ) -> gpui::Stateful<gpui::Div> {
         let (down_key, drag_key, move_key, up_key, out_key) =
             (key.clone(), key.clone(), key.clone(), key.clone(), key.clone());
-        let release = move |this: &mut VisualFrame, key: &SharedString, now: std::time::Instant| {
+        let release = move |this: &mut Self, key: &SharedString, now: Instant| {
             if let Some(orbit) = this.local.borrow_mut().cameras.get_mut(key)
                 && orbit.drag.take().is_some()
             {
@@ -1681,7 +1712,7 @@ impl VisualFrame {
             el = self.orbit_handlers(el, &key, spin, cx);
         }
         let names: Vec<String> = node.inputs.iter().map(|(n, _)| n.clone()).collect();
-        let mut inputs = [[0.0f32; 4]; slopty_visual::shader::MAX_INPUTS / 4];
+        let mut inputs = [[0.0_f32; 4]; slopty_visual::shader::MAX_INPUTS / 4];
         for (i, (_, value)) in node.inputs.iter().enumerate() {
             inputs[i / 4][i % 4] = *value;
         }
@@ -1822,7 +1853,7 @@ impl VisualFrame {
                                 drop(state);
                                 free_images(freed, cx);
                                 let _ = entity.update(cx, |_, cx| cx.notify());
-                            })
+                            });
                         })
                         .detach();
                     }
@@ -1988,8 +2019,8 @@ impl VisualFrame {
                             // glass, bloom); the software renderer otherwise.
                             let started = crate::clock::stopwatch();
                             let mut cost = None;
-                            let (width, height, bgra, hints, labels) =
-                                match slopty_visual_gpu::render_scene(
+                            let (width, height, bgra, hints, labels) = if let Some(frame) =
+                                slopty_visual_gpu::render_scene(
                                     &scene,
                                     camera,
                                     size.0,
@@ -1998,32 +2029,28 @@ impl VisualFrame {
                                     &rgba,
                                     &mut gpu_state,
                                 ) {
-                                    Some(frame) => {
-                                        let (hints, labels) =
-                                            scene.annotations(camera, size.0, size.1);
-                                        (frame.width, frame.height, frame.bgra, hints, labels)
-                                    }
-                                    None => {
-                                        let raster = scene.render(
-                                            camera,
-                                            size.0,
-                                            size.1,
-                                            pixel_scale,
-                                            quality,
-                                            &rgba,
-                                        );
-                                        if quality == slopty_visual::Quality::Final {
-                                            cost = Some(crate::clock::spent(started));
-                                        }
-                                        (
-                                            raster.width,
-                                            raster.height,
-                                            raster.bgra,
-                                            raster.hints,
-                                            raster.labels,
-                                        )
-                                    }
-                                };
+                                let (hints, labels) = scene.annotations(camera, size.0, size.1);
+                                (frame.width, frame.height, frame.bgra, hints, labels)
+                            } else {
+                                let raster = scene.render(
+                                    camera,
+                                    size.0,
+                                    size.1,
+                                    pixel_scale,
+                                    quality,
+                                    &rgba,
+                                );
+                                if quality == slopty_visual::Quality::Final {
+                                    cost = Some(crate::clock::spent(started));
+                                }
+                                (
+                                    raster.width,
+                                    raster.height,
+                                    raster.bgra,
+                                    raster.hints,
+                                    raster.labels,
+                                )
+                            };
                             let image = render_image(width, height, bgra).map(|image| SceneImage {
                                 image,
                                 hints: Arc::new(hints),
@@ -2059,7 +2086,7 @@ impl VisualFrame {
                                 drop(state);
                                 free_images(freed, cx);
                                 let _ = entity.update(cx, |_, cx| cx.notify());
-                            })
+                            });
                         })
                         .detach();
                     }
@@ -2128,7 +2155,7 @@ impl VisualFrame {
 
 /// Identifies a palette's colors, so a theme change re-renders scenes.
 fn palette_key(palette: &Palette) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for color in [
         palette.text,
@@ -2314,7 +2341,7 @@ impl VisualFrame {
             && (chart.series.len() > 1 || hover.is_some())
             && chart.series.iter().any(|s| !s.name.is_empty());
         if show_legend || hover.is_some() {
-            for series in chart.series.iter() {
+            for series in &chart.series {
                 let value = hover.and_then(|i| series.values.get(i).copied().flatten());
                 let mut entry = div()
                     .flex()
@@ -2361,7 +2388,7 @@ impl VisualFrame {
                             plan
                         },
                         move |_, plan, window, cx| {
-                            paint_chart_plan(&paint_chart, &plan, &paint_palette, window, cx)
+                            paint_chart_plan(&paint_chart, &plan, &paint_palette, window, cx);
                         },
                     )
                     .size_full(),
@@ -2536,7 +2563,7 @@ fn paint_chart_plan(
             let bar = (inner / groups as f32).max(1.0);
             for i in 0..n {
                 let start = band * i as f32 + (band - inner) / 2.0;
-                let (mut pos, mut neg) = (0.0f64, 0.0f64);
+                let (mut pos, mut neg) = (0.0_f64, 0.0_f64);
                 for (s, series) in chart.series.iter().enumerate() {
                     let Some(v) = series.values.get(i).copied().flatten() else {
                         continue;
@@ -2550,7 +2577,7 @@ fn paint_chart_plan(
                             (neg - v, neg)
                         }
                     } else {
-                        (0.0f64.clamp(plan.lo, plan.hi), v)
+                        (0.0_f64.clamp(plan.lo, plan.hi), v)
                     };
                     let offset = if chart.stacked { 0.0 } else { bar * s as f32 };
                     let gap = if groups > 1 && !chart.stacked { 1.0 } else { 0.0 };
@@ -2619,7 +2646,7 @@ fn paint_chart_plan(
                     window,
                 );
             }
-            let base = vy(0.0f64.clamp(plan.lo, plan.hi));
+            let base = vy(0.0_f64.clamp(plan.lo, plan.hi));
             for series in &chart.series {
                 let color = palette.color(series.color);
                 // Gaps split a series into runs.
@@ -2965,13 +2992,13 @@ end
         cx.update(|cx| cx.set_global(Theme::dark()));
         // An animated canvas whose every draw runs forever: it passes no check, so it can only
         // come from a script that slows as it runs; this one is slow from the first frame.
-        let script = r#"
+        let script = "
 return function()
   return ui.canvas { height = 120, animate = true, draw = function(g, w, h, t)
     while true do end
   end }
 end
-"#;
+";
         let (frame, cx) =
             cx.add_window_view(|_, cx| VisualFrame::from_script("entry#spin".into(), script, cx));
         // The window's first frame ran the draw into its budget and stopped it.
@@ -2982,7 +3009,7 @@ end
         );
         // The tree rendered anew (as after a handler) tries the draw once more: that frame is
         // the budget, 60 ms, and some.
-        let first = frame_time(&frame, cx, |frame, cx| frame.rerender(cx));
+        let first = frame_time(&frame, cx, VisualFrame::rerender);
         assert!(first >= std::time::Duration::from_millis(60), "{first:?}");
         let mut after: Vec<std::time::Duration> =
             (0..30).map(|_| frame_time(&frame, cx, |_, cx| cx.notify())).collect();

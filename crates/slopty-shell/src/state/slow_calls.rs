@@ -5,6 +5,11 @@
 //!
 //! The watch wraps the engine's service, so every call the shell makes passes through it,
 //! whatever view made it; the toast is kept by a task on the app's side.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -19,13 +24,13 @@ use slopty_view_rpc::{RpcError, RpcReply, RpcService, methods};
 use super::AppState;
 
 /// How long a call runs before the person hears of it.
-pub(crate) const SLOW_AFTER: Duration = Duration::from_secs(10);
+pub const SLOW_AFTER: Duration = Duration::from_secs(10);
 /// How long the toast may stay up for a call that never answers.
 const TOAST_LASTS: Duration = Duration::from_secs(600);
 
 /// What the watch says of one call.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SlowCall {
+pub enum SlowCall {
     /// Call `id` has run past the threshold.
     Slow { id: u64, call: Call },
     /// A slow call answered, failed or was dropped.
@@ -34,7 +39,7 @@ pub(crate) enum SlowCall {
 
 /// A slow call as the person hears of it: what it does and whom it waits on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Call {
+pub struct Call {
     method: String,
     /// `Mutate`'s own name for what it changes.
     op: Option<String>,
@@ -72,7 +77,7 @@ fn long_by_design(method: &str) -> bool {
 }
 
 /// The engine's service, with every call timed.
-pub(crate) struct SlowCallWatch {
+pub struct SlowCallWatch {
     inner: Arc<dyn RpcService>,
     tx: UnboundedSender<SlowCall>,
     after: Duration,
@@ -117,19 +122,18 @@ impl RpcService for SlowCallWatch {
         let reply = self.inner.handle(method, params);
         futures::pin_mut!(reply);
         let mut answered = Answered { id, tx: self.tx.clone(), slow: false };
-        match tokio::time::timeout(self.after, &mut reply).await {
-            Ok(reply) => reply,
-            Err(_) => {
-                answered.slow = self.tx.unbounded_send(SlowCall::Slow { id, call }).is_ok();
-                reply.await
-            }
+        if let Ok(reply) = tokio::time::timeout(self.after, &mut reply).await {
+            reply
+        } else {
+            answered.slow = self.tx.unbounded_send(SlowCall::Slow { id, call }).is_ok();
+            reply.await
         }
     }
 }
 
 /// The slow calls outstanding, and the toast that says so.
 #[derive(Default)]
-pub(crate) struct SlowCalls {
+pub struct SlowCalls {
     open: BTreeMap<u64, Call>,
     toast: Option<u64>,
 }
@@ -198,7 +202,7 @@ fn said(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use futures::StreamExt;
+    use futures::StreamExt as _;
 
     use super::*;
 

@@ -7,6 +7,16 @@
 //! The words are the view model's (`slopty_view_doc::part_kinds`); this module only draws them
 //! and ticks what runs from the times they carry. It reads, never acts: moving a call to the
 //! background or stopping a task is the agent's TUI's (`docs/decisions/agents.md`, "TUI-first").
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -184,14 +194,14 @@ where
     if let Some(ended) = time.ended.and_then(|ended| clock_at(ended, full, tz)) {
         lines.push(format!("Ended {ended}"));
     }
-    if let (Some(ran), Some(waited)) = (time.ran_ms, time.waited_ms()) {
-        if waited > 0 {
-            lines.push(format!(
-                "Ran {}, after {} waiting for permission",
-                ran_for_words(ran),
-                ran_for_words(waited)
-            ));
-        }
+    if let (Some(ran), Some(waited)) = (time.ran_ms, time.waited_ms())
+        && waited > 0
+    {
+        lines.push(format!(
+            "Ran {}, after {} waiting for permission",
+            ran_for_words(ran),
+            ran_for_words(waited)
+        ));
     }
     lines.join("\n")
 }
@@ -321,7 +331,7 @@ impl Transcript {
     }
 
     /// What a chip's header adds from its call's facts, for this transcript.
-    pub(super) fn chip_facts(&self) -> ChipFacts {
+    pub(super) const fn chip_facts(&self) -> ChipFacts {
         ChipFacts { now: self.clock.timestamp_millis(), alt: self.alt }
     }
 

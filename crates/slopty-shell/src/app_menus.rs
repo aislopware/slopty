@@ -4,7 +4,7 @@
 //! slopty never called `cx.set_menus`, so on macOS `NSApp.mainMenu` stayed nil:
 //! no app menu, no ⌘Q quit, and nothing for the auto-hidden system menu bar to
 //! reveal on hover (gpui only calls `setMainMenu_` from `set_menus` —
-//! gpui_macos/src/platform.rs `fn set_menus`). Structure ported from zed's
+//! `gpui_macos/src/platform.rs` `fn set_menus`). Structure ported from zed's
 //! `crates/zed/src/zed/app_menus.rs` and the gpui `set_menus.rs` example at the
 //! pinned rev (f14fea9bf3c9).
 //!
@@ -12,6 +12,17 @@
 //! [`bind_keys`] installs the fixed application shortcuts (re-run by
 //! `shell::apply_keymap`, which clears every binding first), and
 //! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
+#![allow(
+    missing_docs,
+    clippy::cfg_not_test,
+    clippy::derive_partial_eq_without_eq,
+    clippy::multiple_unsafe_ops_per_block,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_long_first_doc_paragraph,
+    clippy::undocumented_unsafe_blocks,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
 
@@ -642,7 +653,7 @@ mod native_quit {
                     let app = app.clone(); // gpui-fast updates through `&AsyncApp`
                     executor
                         .spawn(async move {
-                            let _ = app.update(request_quit);
+                            let () = app.update(request_quit);
                         })
                         .detach();
                 }));
@@ -653,7 +664,7 @@ mod native_quit {
                 let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
                 let delegate: *mut AnyObject = msg_send![app, delegate];
                 assert!(!delegate.is_null(), "GPUI application delegate must exist");
-                let class = (*delegate).class() as *const AnyClass as *mut AnyClass;
+                let class = std::ptr::from_ref::<AnyClass>((*delegate).class()).cast_mut();
                 let added = objc2::ffi::class_addMethod(
                     class,
                     sel!(applicationShouldTerminate:),

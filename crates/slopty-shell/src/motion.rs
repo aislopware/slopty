@@ -30,6 +30,25 @@
 //! gpui has no scale transform for `div`s at the pinned rev (only `svg`
 //! transformations), so `menu-in`/`dialog-in` approximate their scale component
 //! with fade + translate; see the module report in ARCHITECTURE §4 follow-ups.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::cast_precision_loss,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp,
+    clippy::manual_midpoint,
+    clippy::missing_assert_message,
+    clippy::needless_pass_by_ref_mut,
+    clippy::nonminimal_bool,
+    clippy::return_self_not_must_use,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -94,7 +113,7 @@ impl PulseLease {
         self.stride = self.stride.min(stride);
     }
 
-    fn take_tick(&mut self, tick: u64) -> bool {
+    const fn take_tick(&mut self, tick: u64) -> bool {
         if !tick.is_multiple_of(self.stride) {
             return false;
         }
@@ -264,6 +283,7 @@ fn activity_pulse_every(view: EntityId, stride: u64, cx: &mut App) -> ActivityPu
 }
 
 /// Schedule cosmetic animation through the same bounded clock as loaders.
+///
 /// Renew only while painting an active animation; the clock parks after the
 /// last lease expires, including when a view is hidden or removed.
 pub fn pulse_lease(view: EntityId, cx: &mut App) {
@@ -338,7 +358,7 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
 
 /// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function (endpoints fixed at
 /// (0,0) and (1,1)). Evaluation solves x(t) = input by Newton iteration with a
-/// bisection fallback — the standard UnitBezier approach.
+/// bisection fallback — the standard `UnitBezier` approach.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CubicBezier {
     pub x1: f32,
@@ -458,7 +478,7 @@ impl MotionSpec {
     }
 
     /// Wall-clock span of the whole timeline (delay + duration).
-    pub fn total(&self) -> Duration {
+    pub const fn total(&self) -> Duration {
         Duration::from_millis(self.delay_ms + self.duration_ms)
     }
 
@@ -663,7 +683,7 @@ pub struct ResizeEdgeBounce {
 }
 
 impl ResizeEdgeBounce {
-    pub fn new(edge: ResizeEdge, now: Instant) -> Self {
+    pub const fn new(edge: ResizeEdge, now: Instant) -> Self {
         Self { edge, started: now }
     }
 }
@@ -722,7 +742,7 @@ pub fn fade_quick<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E
 where
     E: Styled + IntoElement + 'static,
 {
-    element.with_animation(id, FADE_QUICK.animation(), |el, t| el.opacity(t))
+    element.with_animation(id, FADE_QUICK.animation(), Styled::opacity)
 }
 
 /// A tooltip's entrance, a fade over [`TOOLTIP_IN`] (gpui has no div scale for the
@@ -731,7 +751,7 @@ pub fn tooltip_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E
 where
     E: Styled + IntoElement + 'static,
 {
-    element.with_animation(id, TOOLTIP_IN.animation(), |el, t| el.opacity(t))
+    element.with_animation(id, TOOLTIP_IN.animation(), Styled::opacity)
 }
 
 /// Popover entrance: fade + translateY −2→0 over [`MENU_IN`].
@@ -890,11 +910,11 @@ pub(crate) struct DisclosureMotion {
     pub(crate) epoch: u64,
     pub(crate) from: f32,
     pub(crate) to: f32,
-    pub(crate) started: std::time::Instant,
+    pub(crate) started: Instant,
 }
 
 impl DisclosureMotion {
-    pub(crate) fn new(epoch: u64, from: f32, to: f32, now: Instant) -> Self {
+    pub(crate) const fn new(epoch: u64, from: f32, to: f32, now: Instant) -> Self {
         Self { epoch, from, to, started: now }
     }
 
@@ -914,6 +934,7 @@ impl DisclosureMotion {
 }
 
 /// Interruptible slide of a selection indicator between segment slots.
+///
 /// `position` is measured in segments (`1.5` sits halfway between the second
 /// and third), so a retarget mid-flight continues from the drawn position
 /// instead of jumping. Pure core — callers pass `now`.
@@ -925,7 +946,7 @@ pub struct IndicatorSlide {
 }
 
 impl IndicatorSlide {
-    pub fn at(position: f32, now: Instant) -> Self {
+    pub const fn at(position: f32, now: Instant) -> Self {
         Self { from: position, to: position, started: now }
     }
 
@@ -979,13 +1000,13 @@ impl HoverFades {
     pub fn set_at(&mut self, key: &str, hovered: bool, reduced: bool, now: Instant) {
         let target = if hovered { 1.0 } else { 0.0 };
         let duration = Self::duration();
-        let current = self.entries.get(key).map(|e| e.value(now, duration)).unwrap_or(0.0);
+        let current = self.entries.get(key).map_or(0.0, |e| e.value(now, duration));
         if target == 0.0 && !self.entries.contains_key(key) {
             return; // never-hovered element reporting a leave — nothing to do
         }
         let origin = if reduced { target } else { current };
         let seen = self.frame;
-        self.entries.insert(key.to_string(), FadeEntry { origin, target, started: now, seen });
+        self.entries.insert(key.to_owned(), FadeEntry { origin, target, started: now, seen });
     }
 
     /// Hover progress (0..1) for `key` at `now`; stamps liveness.
@@ -1137,10 +1158,10 @@ impl<E: StatefulInteractiveElement + ParentElement> HoverFade for E {}
 pub fn fade_driver(key: SharedString) -> impl IntoElement {
     gpui::canvas(
         move |_, window, _| {
-            window.with_global_id(gpui::ElementId::Name(key.clone()), |id, window| {
+            window.with_global_id(ElementId::Name(key.clone()), |id, window| {
                 window.with_element_state::<FadeMount, _>(id, |mount, _| {
                     ((), mount.unwrap_or_else(|| FadeMount::new(key.clone())))
-                })
+                });
             });
             if HOVER_FADES.with(|f| f.borrow().moving_at(&key, hover_frame())) {
                 window.request_animation_frame();
@@ -1296,7 +1317,7 @@ impl StateMorphs {
         let frame = self.frame;
         let Some(entry) = self.entries.get_mut(key) else {
             self.entries.insert(
-                key.to_string(),
+                key.to_owned(),
                 StateEntry { origin: target, target, started: now, spec, seen: frame },
             );
             return target;
@@ -1374,8 +1395,7 @@ pub fn speed_scale() -> f32 {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|s| s.is_finite())
-            .map(|s| s.clamp(0.01, 100.0))
-            .unwrap_or(1.0)
+            .map_or(1.0, |s| s.clamp(0.01, 100.0))
     })
 }
 
@@ -1615,18 +1635,18 @@ mod tests {
     fn a_fold_opens_its_height_before_its_contents_and_hides_them_first() {
         use std::time::Duration;
         let ms = Duration::from_millis;
-        let early = super::fold_frame(true, ms(60), false);
+        let early = fold_frame(true, ms(60), false);
         assert!(early.height > 0.5, "height {}", early.height);
         assert!(early.opacity < 0.2, "contents {}", early.opacity);
         assert!(early.rise > 2.5);
-        let open = super::fold_frame(true, ms(300), false);
+        let open = fold_frame(true, ms(300), false);
         assert!(open.height > 0.999 && open.opacity > 0.999 && open.rise < 1e-3, "{open:?}");
-        let closing = super::fold_frame(false, ms(150), false);
+        let closing = fold_frame(false, ms(150), false);
         assert!(closing.opacity < 1e-3, "{closing:?}");
         assert!(closing.height > 0.05, "the height still landing: {closing:?}");
-        assert!(super::fold_frame(false, ms(220), false).height < 1e-3);
-        assert_eq!(super::fold_frame(true, ms(0), true).opacity, 1.0);
-        assert_eq!(super::fold_frame(false, ms(0), true).height, 0.0);
+        assert!(fold_frame(false, ms(220), false).height < 1e-3);
+        assert_eq!(fold_frame(true, ms(0), true).opacity, 1.0);
+        assert_eq!(fold_frame(false, ms(0), true).height, 0.0);
     }
 
     /// A hover fade read in a view of its own, which the window draws from its last frame while
@@ -1665,10 +1685,7 @@ mod tests {
         };
         frame(cx);
         let inner = cx.debug_bounds("inner").unwrap_or_else(|| {
-            gpui::Bounds::new(
-                gpui::point(gpui::px(10.), gpui::px(10.)),
-                gpui::size(gpui::px(10.), gpui::px(10.)),
-            )
+            gpui::Bounds::new(gpui::point(px(10.), px(10.)), gpui::size(px(10.), px(10.)))
         });
         cx.simulate_mouse_move(inner.center(), None, gpui::Modifiers::default());
         frame(cx);
@@ -1914,12 +1931,12 @@ mod tests {
         // the user's machine). Sweep densely, including the values right
         // below 1.0 where Newton lands closest to the endpoint.
         for curve in [EASE_OUT_EXPO, EASE_OUT, EASE, EASE_RESORT, EASE_IN_OUT] {
-            for i in 0..=100_000u32 {
+            for i in 0..=100_000_u32 {
                 let x = i as f32 / 100_000.0;
                 let y = curve.eval(x);
                 assert!((0.0..=1.0).contains(&y), "eval({x}) = {y} escaped [0,1]");
             }
-            for x in [0.999_999f32, 0.999_999_9, 1.0 - f32::EPSILON] {
+            for x in [0.999_999_f32, 0.999_999_9, 1.0 - f32::EPSILON] {
                 let y = curve.eval(x);
                 assert!((0.0..=1.0).contains(&y), "eval({x}) = {y} escaped [0,1]");
             }
@@ -2285,16 +2302,16 @@ mod tests {
     /// tile the text with the unlit stretches merged, and its crest passes through the accent.
     #[test]
     fn the_shimmer_sweeps_one_glyph_per_step() {
-        let pass = super::SHIMMER_BAND * super::SHIMMER_STEP_MS;
-        assert!((super::shimmer_ink(0, pass / 2.0) - 1.0).abs() < 1e-4);
-        assert!((super::shimmer_ink(1, pass / 2.0 + 45.0) - 1.0).abs() < 1e-4);
-        assert!(super::shimmer_ink(1, pass / 2.0) < 1.0);
-        assert_eq!(super::shimmer_ink(0, pass + 1.0), 0.0);
-        assert!((super::shimmer_ink(0, pass / 2.0 + 1200.0) - 1.0).abs() < 1e-3);
+        let pass = SHIMMER_BAND * SHIMMER_STEP_MS;
+        assert!((shimmer_ink(0, pass / 2.0) - 1.0).abs() < 1e-4);
+        assert!((shimmer_ink(1, pass / 2.0 + 45.0) - 1.0).abs() < 1e-4);
+        assert!(shimmer_ink(1, pass / 2.0) < 1.0);
+        assert_eq!(shimmer_ink(0, pass + 1.0), 0.0);
+        assert!((shimmer_ink(0, pass / 2.0 + 1200.0) - 1.0).abs() < 1e-3);
 
         let theme = crate::theme::Theme::dark();
         let text = "Running tests";
-        let runs = super::shimmer_runs(text, pass / 2.0 + 3.0 * 45.0, &theme);
+        let runs = shimmer_runs(text, pass / 2.0 + 3.0 * 45.0, &theme);
         let mut end = 0;
         for (range, _) in &runs {
             assert_eq!(range.start, end, "runs tile the text");
@@ -2302,11 +2319,11 @@ mod tests {
         }
         assert_eq!(end, text.len());
         assert!(runs.len() < text.len(), "unlit glyphs share a run");
-        let crest = super::shimmer_color(1.0, &theme);
+        let crest = shimmer_color(1.0, &theme);
         assert!(runs.iter().any(|(_, style)| style.color == Some(crest)), "a glyph at the crest");
         // The ramp passes through the accent hue, and the crest keeps colour, lighter than it.
-        assert_eq!(super::shimmer_color(0.5, &theme), theme.accent);
-        assert_eq!(super::shimmer_color(0.0, &theme), theme.text_faint);
+        assert_eq!(shimmer_color(0.5, &theme), theme.accent);
+        assert_eq!(shimmer_color(0.0, &theme), theme.text_faint);
         assert!(crest.s > 0.05, "a crest in colour, not grey");
         assert!(
             crate::theme::contrast(crest, theme.bg)
@@ -2320,7 +2337,7 @@ mod tests {
     fn a_pane_moves_on_the_quint_and_its_contents_fade_late_in_early_out() {
         use super::{PANEL_RESIZE, pane_content_opacity};
         let ms = Duration::from_millis;
-        assert_eq!((PANEL_RESIZE.total(), PANEL_RESIZE.curve), (ms(240), super::EASE_OUT_QUINT));
+        assert_eq!((PANEL_RESIZE.total(), PANEL_RESIZE.curve), (ms(240), EASE_OUT_QUINT));
         assert_eq!(pane_content_opacity(true, ms(0)), 0.0);
         assert_eq!(pane_content_opacity(true, ms(40)), 0.0, "nothing before the delay");
         let mid = pane_content_opacity(true, ms(140));
@@ -2340,7 +2357,7 @@ mod tests {
             let d = (a - b).rem_euclid(1.0);
             d.min(1.0 - d)
         };
-        let base = super::process_epoch() + Duration::from_secs(1000);
+        let base = process_epoch() + Duration::from_secs(1000);
         for offset_ms in [0_u64, 137, 512] {
             let since = base + Duration::from_millis(offset_ms);
             assert!(
@@ -2375,7 +2392,7 @@ pub use reveal::{COPIED_FOR, RevealHeight, copied, copy_feedback, copy_icon, rev
 /// A bounded activation sheen for Fast service tier; GPUI handles reduced motion.
 pub fn fast_tier(
     id: impl Into<ElementId>,
-    element: impl IntoElement + gpui::Styled + 'static,
+    element: impl IntoElement + Styled + 'static,
 ) -> impl IntoElement {
     element.with_animation(id, Animation::new(Duration::from_millis(700)), |el, t| {
         el.opacity(1.0 - 0.35 * (1.0 - t) * (std::f32::consts::PI * t).sin())

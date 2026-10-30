@@ -7,6 +7,16 @@
 //! Call `leave` on trigger exit, `cancel` on clicks/keyboard/dismissal, and
 //! `contains_pointer` from a window mouse listener to dismiss outside the safe
 //! trigger → child corridor. This works for children on either side.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::time::Duration;
 
@@ -44,11 +54,11 @@ impl<K: Clone + PartialEq> HoverIntent<K> {
         self.origin = None;
     }
 
-    pub fn record_origin(&mut self, pointer: Point<Pixels>) {
+    pub const fn record_origin(&mut self, pointer: Point<Pixels>) {
         self.origin = Some(pointer);
     }
 
-    pub fn pending(&self) -> Option<&K> {
+    pub const fn pending(&self) -> Option<&K> {
         self.pending.as_ref()
     }
 

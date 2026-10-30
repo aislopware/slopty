@@ -12,6 +12,41 @@
 //! Resize handles use gpui's drag-and-drop pattern (an `on_drag` with an empty
 //! ghost view + `on_drag_move::<Marker>` on the root), the same idiom as Zed's
 //! dock. Double-clicking a handle resets that pane to its default width.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::derive_partial_eq_without_eq,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::items_after_statements,
+    clippy::len_without_is_empty,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::manual_midpoint,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unreachable,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    clippy::unwrap_used,
+    clippy::used_underscore_binding,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -258,11 +293,11 @@ fn is_host_absolute_path(path: &str) -> bool {
 }
 
 /// How long a started session's main column says "Starting…" while no terminal shows.
-const STARTS_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
+const STARTS_WITHIN: Duration = Duration::from_secs(15);
 
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
 /// action carrying the slot, rather than nine near-identical action types.
-#[derive(Clone, PartialEq, Action)]
+#[derive(Clone, PartialEq, Eq, Action)]
 #[action(namespace = shell, no_json)]
 pub struct JumpSession(pub usize);
 
@@ -274,7 +309,7 @@ pub struct JumpSession(pub usize);
 /// left edge: 88, or 12 in fullscreen. The
 /// frameless hiddenInset chrome puts the macOS traffic lights at {14,15};
 /// fullscreen hides them and the cluster reclaims the inset.
-pub fn titlebar_cluster_start(fullscreen: bool) -> f32 {
+pub const fn titlebar_cluster_start(fullscreen: bool) -> f32 {
     if fullscreen { 12.0 } else { 88.0 }
 }
 
@@ -297,7 +332,7 @@ pub const CLUSTER_BUTTONS_WIDTH: f32 = 24.0;
 const TITLEBAR_CLUSTER_PAD: f32 = 10.0;
 
 /// Where the cluster's first button starts, from the window's left edge.
-pub fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
+pub const fn cluster_buttons_start(is_macos: bool, fullscreen: bool) -> f32 {
     if is_macos { titlebar_cluster_start(fullscreen) } else { 10.0 }
 }
 
@@ -316,7 +351,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             platform_combo(fallback)
         }
     }
-    let equivalents = crate::settings::key_equivalents(cx);
+    let equivalents = settings::key_equivalents(cx);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -349,19 +384,13 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         ),
         crate::keys::binding(&valid_or_default(&keymap.new_session, "mod-n"), NewSession, None, cx),
         crate::keys::binding(
-            &valid_or_default(
-                &keymap.next_session,
-                crate::settings::ShortcutId::NextSession.default_combo(),
-            ),
+            &valid_or_default(&keymap.next_session, ShortcutId::NextSession.default_combo()),
             NextSession,
             None,
             cx,
         ),
         crate::keys::binding(
-            &valid_or_default(
-                &keymap.prev_session,
-                crate::settings::ShortcutId::PrevSession.default_combo(),
-            ),
+            &valid_or_default(&keymap.prev_session, ShortcutId::PrevSession.default_combo()),
             PrevSession,
             None,
             cx,
@@ -381,11 +410,11 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         // Fixed: ⇧⌘P summons the command palette (Ghostty's and VS Code's key), and pressing it
         // again dismisses it. ⌘K is the session picker in every session (`picker`).
         crate::keys::binding(&platform_combo("mod-shift-p"), ToggleCommandPalette, None, cx),
-        crate::keys::binding(&platform_combo("mod-k"), picker::OpenPicker, None, cx),
+        crate::keys::binding(&platform_combo("mod-k"), OpenPicker, None, cx),
         // ⇧⌘G is Go to Directory, bound before `chrome_keys`' Find Previous on the same key, so
         // that one goes first and passes the key on unless a find is open where the keyboard is.
         // A terminal's own Find Previous goes before both and passes it on with its card shut.
-        crate::keys::binding(&platform_combo("mod-shift-g"), picker::GoToDirectory, None, cx),
+        crate::keys::binding(&platform_combo("mod-shift-g"), GoToDirectory, None, cx),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // The files surface's and the diff's fixed keys, in their own contexts.
@@ -415,7 +444,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // Slopty's views' own keys, last, so they hold in their contexts.
     crate::live::bind_keys(cx);
     localize_key_bindings(cx, &equivalents);
-    crate::settings::set_bound_key_equivalents(equivalents);
+    settings::set_bound_key_equivalents(equivalents);
 }
 
 /// Move every binding to the key the active layout types for it. Combos are
@@ -424,7 +453,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
 /// the same table, but `KeyBinding::new` never applies it — to Slopty's
 /// bindings or gpui-base's editor map. Order is kept: gpui breaks ties
 /// between equally deep matches by binding order.
-fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquivalents) {
+fn localize_key_bindings(cx: &mut App, equivalents: &settings::KeyEquivalents) {
     if equivalents.is_empty() {
         return;
     }
@@ -441,7 +470,7 @@ fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquival
 // gpui-fast parses and spells a keystroke for the OS the app runs on.
 fn localize_binding(
     binding: &gpui::KeyBinding,
-    equivalents: &crate::settings::KeyEquivalents,
+    equivalents: &settings::KeyEquivalents,
     cx: &App,
 ) -> gpui::KeyBinding {
     let mut moved = false;
@@ -450,10 +479,9 @@ fn localize_binding(
         .iter()
         .map(|keystroke| {
             let keystroke = keystroke.inner();
-            let key = crate::settings::localize_key(&keystroke.key, equivalents);
+            let key = settings::localize_key(&keystroke.key, equivalents);
             moved |= key != keystroke.key.as_str();
-            gpui::Keystroke { key: key.into_owned(), ..keystroke.clone() }
-                .unparse(cx.platform_info().os)
+            Keystroke { key: key.into_owned(), ..keystroke.clone() }.unparse(cx.platform_info().os)
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -498,59 +526,59 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings.
-    pub const ALL: [SettingsSection; 7] = [
-        SettingsSection::Appearance,
-        SettingsSection::Notifications,
-        SettingsSection::Shortcuts,
-        SettingsSection::Harnesses,
-        SettingsSection::Devices,
-        SettingsSection::Files,
-        SettingsSection::Archived,
+    pub const ALL: [Self; 7] = [
+        Self::Appearance,
+        Self::Notifications,
+        Self::Shortcuts,
+        Self::Harnesses,
+        Self::Devices,
+        Self::Files,
+        Self::Archived,
     ];
 
     /// Stable name shared by `ui-settings.json` and `SLOPTY_OPEN_ROUTE`.
-    fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "devices",
-            SettingsSection::Harnesses => "providers",
-            SettingsSection::Appearance => "appearance",
-            SettingsSection::Files => "files",
-            SettingsSection::Notifications => "notifications",
-            SettingsSection::Shortcuts => "shortcuts",
-            SettingsSection::Archived => "archived",
+            Self::Devices => "devices",
+            Self::Harnesses => "providers",
+            Self::Appearance => "appearance",
+            Self::Files => "files",
+            Self::Notifications => "notifications",
+            Self::Shortcuts => "shortcuts",
+            Self::Archived => "archived",
         }
     }
 
     /// Inverse of [`Self::slug`], plus the pages' former names.
     fn from_slug(slug: &str) -> Option<Self> {
         Some(match slug {
-            "devices" => SettingsSection::Devices,
-            "providers" | "harnesses" => SettingsSection::Harnesses,
-            "appearance" => SettingsSection::Appearance,
-            "files" => SettingsSection::Files,
-            "notifications" => SettingsSection::Notifications,
-            "shortcuts" => SettingsSection::Shortcuts,
-            "archived" => SettingsSection::Archived,
+            "devices" => Self::Devices,
+            "providers" | "harnesses" => Self::Harnesses,
+            "appearance" => Self::Appearance,
+            "files" => Self::Files,
+            "notifications" => Self::Notifications,
+            "shortcuts" => Self::Shortcuts,
+            "archived" => Self::Archived,
             _ => return None,
         })
     }
 
     /// Nav groups are separated by spacing alone: preferences, providers and
     /// devices, then workspace data.
-    fn starts_nav_group(self) -> bool {
+    const fn starts_nav_group(self) -> bool {
         matches!(self, Self::Harnesses | Self::Files)
     }
 
     /// The section's label, in the settings sidebar and the header alike.
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
-            SettingsSection::Devices => "Devices",
-            SettingsSection::Harnesses => "Providers",
-            SettingsSection::Appearance => "Appearance",
-            SettingsSection::Files => "Files",
-            SettingsSection::Notifications => "Notifications",
-            SettingsSection::Shortcuts => "Shortcuts",
-            SettingsSection::Archived => "Archived sessions",
+            Self::Devices => "Devices",
+            Self::Harnesses => "Providers",
+            Self::Appearance => "Appearance",
+            Self::Files => "Files",
+            Self::Notifications => "Notifications",
+            Self::Shortcuts => "Shortcuts",
+            Self::Archived => "Archived sessions",
         }
     }
 }
@@ -614,7 +642,7 @@ fn screen_chip_glyph(chosen: Option<&str>) -> &'static str {
 }
 
 fn workspace_file_title(path: &str) -> SharedString {
-    path.rsplit('/').next().unwrap_or(path).to_string().into()
+    path.rsplit('/').next().unwrap_or(path).to_owned().into()
 }
 
 /// One route-history entry: a route the person visited, kept browser-style.
@@ -662,7 +690,7 @@ impl NavHistory {
         self.entries[self.index] = entry;
     }
 
-    pub fn can_back(&self) -> bool {
+    pub const fn can_back(&self) -> bool {
         self.index > 0
     }
 
@@ -673,7 +701,7 @@ impl NavHistory {
 
     /// Memory history keeps every entry, so "behind the last entry" is exactly
     /// "can go forward".
-    pub fn can_forward(&self) -> bool {
+    pub const fn can_forward(&self) -> bool {
         self.index + 1 < self.entries.len()
     }
 
@@ -693,7 +721,7 @@ impl NavHistory {
         Some(self.current().clone())
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 }
@@ -707,7 +735,7 @@ const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
 /// The window's cursor while a drag runs, wherever the pointer is (Zed's
 /// `pane_group.rs`): a resize that outruns its handle keeps its cursor.
 fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
-    gpui::canvas(|_, _, _| {}, move |_, _, window, _| window.set_window_cursor_style(style))
+    gpui::canvas(|_, _, _| {}, move |_, (), window, _| window.set_window_cursor_style(style))
         .absolute()
         .size_0()
 }
@@ -799,7 +827,7 @@ enum SplashPhase {
 
 /// How long past a revealing disclosure's motion the sidebar keeps scrolling
 /// a renamed row into view.
-const CHAT_RENAME_REVEAL_GRACE: std::time::Duration = std::time::Duration::from_millis(150);
+const CHAT_RENAME_REVEAL_GRACE: Duration = Duration::from_millis(150);
 
 /// A chat title edited in place on its row (double-click, or Rename in the
 /// chat menu). Enter or blur commits, Escape cancels.
@@ -820,8 +848,8 @@ struct ChatRename {
 /// every second while the selected chat is Working (the trailer's elapsed
 /// timer and its 7s flavour word), else the next wall-clock minute for
 /// relative "5m"/"2h" labels. State transitions (staleness, device presence,
-/// send grace) arrive as AppState notifications instead — see
-/// [`AppState::watch_clock_transitions`]. Nothing else ticks: AwaitingInput
+/// send grace) arrive as `AppState` notifications instead — see
+/// [`AppState::watch_clock_transitions`]. Nothing else ticks: `AwaitingInput`
 /// and Errored show no clock, and the connection pill has no countdown (its
 /// spinner animates itself).
 fn shell_clock_wake(state: &AppState, now: DateTime<Utc>) -> DateTime<Utc> {
@@ -852,7 +880,7 @@ impl ClockRedraw {
         &mut self,
         wake: DateTime<Utc>,
         now: DateTime<Utc>,
-        slot: fn(&mut V) -> &mut ClockRedraw,
+        slot: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         if self.task.is_some() && self.wake_at.is_some_and(|at| at <= wake) {
@@ -887,7 +915,7 @@ struct SidebarPane {
 
 impl Render for SidebarPane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::transcript::record_view_frame("sidebar");
+        transcript::record_view_frame("sidebar");
         let Some(shell) = self.shell.upgrade() else {
             return div().into_any_element();
         };
@@ -965,9 +993,9 @@ pub struct Shell {
     pane_keyboard_pending: bool,
     /// The views each session had beside it when the app last ran, until it is shown
     /// again (`kept_tabs`).
-    unrestored_tabs: std::collections::BTreeMap<String, crate::settings::SavedTabs>,
+    unrestored_tabs: std::collections::BTreeMap<String, settings::SavedTabs>,
     // The views closed last, newest last, each with its session (`closed_tabs`).
-    closed_tabs: Vec<(String, crate::settings::SavedSurface)>,
+    closed_tabs: Vec<(String, settings::SavedSurface)>,
     // The chat archived last and its Undo toast (`chrome_keys`).
     last_archive: Option<(String, u64)>,
     // The Open in menu (`open_in`).
@@ -1067,12 +1095,12 @@ pub struct Shell {
     /// The time the sidebar's rows say how long ago they moved by: taken when the state
     /// moves and on [`Self::sidebar_clock_tick`], never as a row is built, so a sidebar built
     /// again (from scratch, or for a hover) says what the one shown says.
-    sidebar_clock: chrono::DateTime<Utc>,
+    sidebar_clock: DateTime<Utc>,
     /// When the list next reads differently of time alone (a row folding into Inactive,
     /// a session going quiet).
-    sidebar_clock_next: std::cell::Cell<Option<chrono::DateTime<Utc>>>,
+    sidebar_clock_next: std::cell::Cell<Option<DateTime<Utc>>>,
     /// The clock's next tick, at that time.
-    sidebar_clock_tick: Option<(chrono::DateTime<Utc>, Task<()>)>,
+    sidebar_clock_tick: Option<(DateTime<Utc>, Task<()>)>,
     /// Set by an archive-pill click until the pointer next moves. gpui only
     /// re-evaluates `on_hover` on mouse movement, so the row that slides up
     /// under a still pointer would otherwise never show its archive pill;
@@ -1189,7 +1217,7 @@ pub struct Shell {
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
         motion::run_on(cx.background_executor().clone()); // hover flips on the dispatcher's clock
-        let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
+        let observation = cx.observe(&state, |this: &mut Self, state, cx| {
             this.sidebar_clock = crate::clock::utc(cx); // the list's clock moves with the state
             this.on_state_changed(&state, cx);
             // A result arriving in the chat being looked at is seen as it arrives, here
@@ -1228,7 +1256,7 @@ impl Shell {
         let inspector_events = cx.subscribe(&inspector, Self::on_inspector_event);
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
-        state.update(cx, |state, cx| state.watch_clock_transitions(cx));
+        state.update(cx, AppState::watch_clock_transitions);
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `SLOPTY_OPEN_ROUTE=settings[/<section>]` boots
@@ -1243,7 +1271,7 @@ impl Shell {
                     Some(section) => {
                         if settings.settings_section != section {
                             settings.settings_section = section;
-                            settings::update(settings::SavePolicy::Debounced, cx, |s| {
+                            settings::update(SavePolicy::Debounced, cx, |s| {
                                 s.settings_section = section;
                             });
                         }
@@ -1499,11 +1527,11 @@ impl Shell {
                 // project stands (`last_space_id`, which follows opened chats),
                 // unless opted out.
                 let exists = |id: &String| state.read(cx).space_row(id).is_some();
-                let filter = self.settings.space_filter.clone().filter(&exists);
+                let filter = self.settings.space_filter.clone().filter(exists);
                 let target = match filter {
                     Some(filter) => Some(filter),
                     None if !state.read(cx).no_project => {
-                        self.settings.last_space_id.clone().filter(&exists)
+                        self.settings.last_space_id.clone().filter(exists)
                     }
                     None => None,
                 };
@@ -1572,7 +1600,7 @@ impl Shell {
                 if let RightSurface::Diff(id) = view
                     && let Some(changes) = self.diffs.get(&id).cloned()
                 {
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                    changes.update(cx, Changes::ensure_content);
                 }
             }
         }
@@ -1676,7 +1704,7 @@ impl Shell {
 
     fn suspend_file_images(&mut self, cx: &mut Context<Self>) {
         for files in self.files.values().chain(self.file_surfaces.values()) {
-            files.update(cx, |files, cx| files.suspend_images(cx));
+            files.update(cx, FilesSurface::suspend_images);
         }
     }
 
@@ -1769,7 +1797,7 @@ impl Shell {
         }
         let mut resolved = activation.clone();
         if resolved.action == LinkAction::Primary {
-            resolved.action = if crate::settings::current(cx).open_web_links_in_slopty {
+            resolved.action = if settings::current(cx).open_web_links_in_slopty {
                 LinkAction::Internal
             } else {
                 LinkAction::External
@@ -1793,7 +1821,7 @@ impl Shell {
         };
         if browser_profile != self.browser_profile {
             for browser in self.browsers.values() {
-                browser.update(cx, |browser, cx| browser.close(cx));
+                browser.update(cx, super::browser::BrowserSurface::close);
             }
             self.browsers.clear();
             self.browser_subs.clear();
@@ -1832,7 +1860,7 @@ impl Shell {
             let chat_id = self.active_chat.clone();
             browser.update(cx, |browser, cx| browser.watch_previews(handle, chat_id, cx));
         }
-        let owner = key.clone();
+        let owner = key;
         let sub = cx.subscribe_in(&browser, window, move |this, _, event, window, cx| {
             match event {
                 crate::browser::BrowserEvent::Changed => cx.notify(),
@@ -1922,11 +1950,11 @@ impl Shell {
                 cx,
             )
         });
-        let event_panel_key = panel_key.clone();
+        let event_panel_key = panel_key;
         let sub =
             cx.subscribe_in(&file, window, move |this: &mut Self, source, event, window, cx| {
                 if matches!(event, FilesEvent::OpenFile(_) | FilesEvent::RevealFile(_))
-                    && !this.accepts_file_navigation(&event_panel_key, &source, cx)
+                    && !this.accepts_file_navigation(&event_panel_key, source, cx)
                 {
                     return;
                 }
@@ -1944,22 +1972,22 @@ impl Shell {
                         }
                     }
                     FilesEvent::Mutate(intent) => {
-                        this.start_file_mutation(source.clone(), intent.clone(), cx)
+                        this.start_file_mutation(source.clone(), intent.clone(), cx);
                     }
                     FilesEvent::MutateMany(intents) => {
-                        this.start_file_mutations(source.clone(), intents.clone(), cx)
+                        this.start_file_mutations(source.clone(), intents.clone(), cx);
                     }
                     // Navigation from an editor stays in its own chat.
                     FilesEvent::OpenFile(path) => {
                         let owner = (source.read(cx).chat_id().to_owned(), owner_state.clone());
-                        this.add_file_surface_at(owner, path.clone(), None, window, cx)
+                        this.add_file_surface_at(owner, path.clone(), None, window, cx);
                     }
                     FilesEvent::RevealFile(path) => {
                         this.ensure_explorer(window, cx);
                         this.open_view(RightSurface::Files, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
                             files.update(cx, |files, cx| {
-                                files.reveal_file_explicit(path.clone(), cx)
+                                files.reveal_file_explicit(path.clone(), cx);
                             });
                         }
                     }
@@ -1972,19 +2000,19 @@ impl Shell {
                     }
                     FilesEvent::TitleChanged => cx.notify(),
                     FilesEvent::FileRenamed { old_path, new_path } => {
-                        this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx)
+                        this.rename_file_surface(id, &event_panel_key, old_path, new_path, cx);
                     }
                     FilesEvent::WordWrapChanged(word_wrap) => {
-                        this.set_files_word_wrap(*word_wrap, window, cx)
+                        this.set_files_word_wrap(*word_wrap, window, cx);
                     }
                     FilesEvent::ShowAllFilesChanged(show_all_files) => {
-                        this.set_files_show_all(*show_all_files, cx)
+                        this.set_files_show_all(*show_all_files, cx);
                     }
                     FilesEvent::CloseReady => {
-                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx)
+                        this.on_file_close_ready(RightSurface::File(id), &event_panel_key, cx);
                     }
                     FilesEvent::CloseCancelled => {
-                        this.cancel_file_close(RightSurface::File(id), cx)
+                        this.cancel_file_close(RightSurface::File(id), cx);
                     }
                 }
             });
@@ -2011,7 +2039,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         let shown = !self.active_chat.is_empty() && self.active_chat == chat_id;
-        if shown && crate::settings::current(cx).open_web_links_in_slopty {
+        if shown && settings::current(cx).open_web_links_in_slopty {
             self.add_browser_surface(Some(url.to_owned()), window, cx);
         } else {
             cx.open_url(url);
@@ -2034,10 +2062,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let owner_state = self
-            .link_owner(chat_id, cx)
-            .map(|(_, state)| state)
-            .unwrap_or_else(|| self.state.clone());
+        let owner_state =
+            self.link_owner(chat_id, cx).map_or_else(|| self.state.clone(), |(_, state)| state);
         let roots = owner_state.read(cx).file_link_roots(chat_id);
         let root_refs: Vec<&str> = roots.iter().map(|root| root.root.as_str()).collect();
         use crate::workspace_links::FileLinkResolution;
@@ -2092,19 +2118,15 @@ impl Shell {
         if self.file_surface_paths.get(&id).map(String::as_str) != Some(old_path) {
             return;
         }
-        self.file_surface_paths.insert(id, new_path.to_string());
+        self.file_surface_paths.insert(id, new_path.to_owned());
         let Some(owner) =
             self.file_surfaces.get(&id).map(|file| file.read(cx).chat_id().to_owned())
         else {
             return;
         };
-        self.file_surface_keys.remove(&(
-            panel_key.to_string(),
-            owner.clone(),
-            old_path.to_string(),
-        ));
+        self.file_surface_keys.remove(&(panel_key.to_owned(), owner.clone(), old_path.to_owned()));
         self.file_surface_keys
-            .entry((panel_key.to_string(), owner, new_path.to_string()))
+            .entry((panel_key.to_owned(), owner, new_path.to_owned()))
             .or_insert(id);
         cx.notify();
     }
@@ -2171,7 +2193,7 @@ impl Shell {
         self.pending_exit = Some(action);
         let mut all_ready = true;
         for surface in surfaces {
-            let disposition = surface.update(cx, |surface, cx| surface.prepare_close(cx));
+            let disposition = surface.update(cx, FilesSurface::prepare_close);
             all_ready &= disposition == FilesCloseDisposition::Allow;
         }
         if all_ready {
@@ -2462,7 +2484,7 @@ impl Shell {
                                 }
                             });
                         },
-                        move |trigger, _, window, _| {
+                        move |trigger, (), window, _| {
                             if !open {
                                 return;
                             }
@@ -2544,7 +2566,7 @@ impl Shell {
             })
             .child(item("chat-copy-slopty", "Slopty conversation link".into()).on_click(
                 cx.listener(move |this, _, _, cx| {
-                    this.copy_slopty_conversation_link(&slopty_id, cx)
+                    this.copy_slopty_conversation_link(&slopty_id, cx);
                 }),
             ))
             .when_some(harness_link, |menu, link| {
@@ -2555,7 +2577,7 @@ impl Shell {
             .when(session_id, |menu| {
                 menu.child(item("chat-copy-session", "Agent session ID".into()).on_click(
                     cx.listener(move |this, _, _, cx| {
-                        this.copy_harness_session_id(&session_chat_id, cx)
+                        this.copy_harness_session_id(&session_chat_id, cx);
                     }),
                 ))
             })
@@ -2564,7 +2586,7 @@ impl Shell {
                     move |bounds, _, cx| {
                         let _ = entity.update(cx, |this, _| this.chat_copy_bounds = Some(bounds));
                     },
-                    |_, _, _, _| {},
+                    |_, (), _, _| {},
                 )
                 .absolute()
                 .inset_0(),
@@ -2654,7 +2676,7 @@ impl Shell {
             let page = cx.new(AppearancePage::new);
             self.appearance_settings_sub = Some(cx.subscribe(
                 &page,
-                |this: &mut Shell, _, event: &AppearanceSettingsEvent, cx| match *event {
+                |this: &mut Self, _, event: &AppearanceSettingsEvent, cx| match *event {
                     AppearanceSettingsEvent::CodeFontSizeChanged(size) => {
                         this.set_code_font_size(size, cx);
                     }
@@ -2688,14 +2710,14 @@ impl Shell {
         let state = self.state.clone();
         let page =
             self.devices_page.get_or_insert_with(|| cx.new(|cx| DevicesPage::new(state, cx)));
-        page.update(cx, |page, cx| page.open_add_device(cx));
+        page.update(cx, DevicesPage::open_add_device);
     }
 
     // The app's menu (Add a machine, Connect to a server): Settings → Devices with Add
     // device open on that choice.
     pub fn open_add_device_on(
         &mut self,
-        choice: crate::settings::add_device::Choice,
+        choice: settings::add_device::Choice,
         cx: &mut Context<Self>,
     ) {
         self.open_settings(SettingsSection::Devices, cx);
@@ -2758,7 +2780,7 @@ impl Shell {
             && self
                 .devices_page
                 .as_ref()
-                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx)))
+                .is_some_and(|page| page.update(cx, DevicesPage::dismiss_on_escape))
     }
 
     fn close_settings(&mut self, cx: &mut Context<Self>) {
@@ -2870,14 +2892,14 @@ impl Shell {
                     self.files_settings_sub = Some(cx.subscribe_in(
                         &page,
                         window,
-                        |this: &mut Shell, _, event: &FilesSettingsEvent, window, cx| match *event {
+                        |this: &mut Self, _, event: &FilesSettingsEvent, window, cx| match *event {
                             FilesSettingsEvent::AutosaveChanged(autosave_enabled) => {
                                 this.settings.files_autosave_enabled = autosave_enabled;
                                 for surface in
                                     this.files.values().chain(this.file_surfaces.values())
                                 {
                                     surface.update(cx, |surface, cx| {
-                                        surface.set_autosave_enabled(autosave_enabled, cx)
+                                        surface.set_autosave_enabled(autosave_enabled, cx);
                                     });
                                 }
                                 this.schedule_save(cx);
@@ -2889,7 +2911,7 @@ impl Shell {
                                     this.files.values().chain(this.file_surfaces.values())
                                 {
                                     surface.update(cx, |surface, cx| {
-                                        surface.set_autosave_delay_ms(autosave_delay_ms, cx)
+                                        surface.set_autosave_delay_ms(autosave_delay_ms, cx);
                                     });
                                 }
                                 this.schedule_save(cx);
@@ -2917,7 +2939,7 @@ impl Shell {
                     // Keep the one switch whenever the page flips it.
                     self.notifications_sub = Some(cx.subscribe(
                         &page,
-                        |this: &mut Shell, _, event: &NotificationsEvent, cx| {
+                        |this: &mut Self, _, event: &NotificationsEvent, cx| {
                             let NotificationsEvent::Changed { desktop } = *event;
                             this.settings.notifications_enabled = desktop;
                             this.schedule_save(cx);
@@ -2939,7 +2961,7 @@ impl Shell {
                     // Persist + re-apply shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
                         &page,
-                        |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
+                        |this: &mut Self, _, event: &ShortcutsEvent, cx| {
                             let ShortcutsEvent::KeymapChanged(keymap) = event;
                             this.settings.keymap = keymap.clone();
                             apply_keymap(cx, &this.settings.keymap);
@@ -3024,7 +3046,7 @@ impl Shell {
             input.set_text(current, cx);
             input.select_all_text(cx);
         });
-        let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| {
+        let events = cx.subscribe(&input, |this: &mut Self, _, event, cx| {
             if matches!(event, ComposerInputEvent::Submitted) {
                 this.finish_rename_chat(true, cx);
             }
@@ -3077,7 +3099,7 @@ impl Shell {
         let Some(rename) = self.chat_rename.take() else {
             return;
         };
-        let title = rename.input.read(cx).text().trim().to_string();
+        let title = rename.input.read(cx).text().trim().to_owned();
         let unchanged = self
             .state
             .read(cx)
@@ -3114,7 +3136,7 @@ impl Shell {
     /// archived one, it does nothing — the shortcut archives, it never
     /// unarchives.
     fn archive_selected_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(chat_id) = self.state.read(cx).archivable_selected_chat().map(str::to_string)
+        let Some(chat_id) = self.state.read(cx).archivable_selected_chat().map(str::to_owned)
         else {
             return;
         };
@@ -3157,7 +3179,7 @@ impl Shell {
     /// unguarded jump would switch sessions UNDER the open overlay, stranding it over a session
     /// the user never picked. The Settings page is not one: navigating leaves it, and its shortcut
     /// recorder intercepts the keys it records before they can dispatch.
-    pub(super) fn overlay_owns_keyboard(&self) -> bool {
+    pub(super) const fn overlay_owns_keyboard(&self) -> bool {
         self.command_palette.is_some()
             || self.add_space.is_some()
             || self.picker_open() // the session picker or Go to Directory
@@ -3619,7 +3641,7 @@ impl Shell {
                                 theme,
                                 selected,
                                 selection_t,
-                                key.clone(),
+                                key,
                                 hover_key,
                             )
                             .when(item.starts_nav_group(), |el| el.mt(px(Theme::SPACE_LG)))
@@ -3652,7 +3674,7 @@ impl Shell {
                                 },
                             ))
                             // The shell's ring inside the row, paint only (M8).
-                            .map(|el| crate::surface_chrome::focus_ring_inset(el, &theme))
+                            .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                             .cursor_pointer()
                             .on_click(
                                 cx.listener(move |this, _, _, cx| this.open_settings(item, cx)),
@@ -3732,8 +3754,7 @@ impl Shell {
             return true;
         }
 
-        self.active_changes(cx)
-            .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
+        self.active_changes(cx).is_some_and(|changes| changes.update(cx, Changes::handle_escape))
     }
 
     fn on_key_down_capture(
@@ -3843,7 +3864,7 @@ impl Shell {
                         .role(gpui::Role::MenuItem)
                         .aria_label("Rename")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_rename_chat(rename_id.clone(), cx)
+                            this.open_rename_chat(rename_id.clone(), cx);
                         }))
                         .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Rename"));
@@ -3857,7 +3878,7 @@ impl Shell {
                             .role(gpui::Role::MenuItem)
                             .aria_label("Archive")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.archive_chat(archive_id.clone(), cx)
+                                this.archive_chat(archive_id.clone(), cx);
                             }))
                             .child(
                                 icon(icons::ARCHIVE_MINIMALISTIC)
@@ -3881,7 +3902,7 @@ impl Shell {
                         .role(gpui::Role::MenuItem)
                         .aria_label("Open in\u{2026}")
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.open_open_in(open_id.clone(), position, cx)
+                            this.open_open_in(open_id.clone(), position, cx);
                         }))
                         .child(icon(icons::FILE_CODE).size(px(16.0)).text_color(theme.text_muted))
                         .child(SharedString::from("Open in\u{2026}"));
@@ -3915,7 +3936,7 @@ impl Shell {
         id: &'static str,
         kind: PaneResizeKind,
         marker: fn() -> T,
-        reset: fn(&mut Shell, &mut Context<Shell>),
+        reset: fn(&mut Self, &mut Context<Self>),
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div>
     where
@@ -3989,7 +4010,7 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            .on_drag(marker(), |_, _point: Point<gpui::Pixels>, _, cx| {
+            .on_drag(marker(), |_, _point: Point<Pixels>, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| DragGhost)
             })
@@ -4500,7 +4521,7 @@ fn window_control_button_with(
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
             cx.stop_propagation();
-            on_click(event, window, cx)
+            on_click(event, window, cx);
         })
         .child(drawn)
         // A button for VoiceOver (and the simulator's e2e taps), reached by Tab, pressed
@@ -4524,7 +4545,7 @@ impl Render for Shell {
         // view's notifications.
         let now = crate::clock::utc(cx);
         let wake = shell_clock_wake(self.state.read(cx), now);
-        self.clock.arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
+        self.clock.arm(wake, now, |shell: &mut Self| &mut shell.clock, cx);
         // The panes a chat has beside its terminal are kept across launches.
         self.restore_tabs(window, cx);
         self.keep_tabs(cx);
@@ -4538,7 +4559,7 @@ impl Render for Shell {
             .map(|(_, files)| files.clone())
             .collect::<Vec<_>>();
         for files in hidden_explorers {
-            files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
+            files.update(cx, FilesSurface::suspend_tree_interactions);
         }
         if let Some(path) = self.pending_change.take() {
             self.show_change_at(&path, window, cx);
@@ -4568,7 +4589,7 @@ impl Render for Shell {
                 }
             });
         }
-        crate::transcript::record_view_frame("shell");
+        transcript::record_view_frame("shell");
         self.observe_viewport_width(f32::from(window.viewport_size().width));
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
@@ -4620,7 +4641,7 @@ impl Render for Shell {
         // session's, under a zoom, behind a phone's page); drawing it again brings them back.
         for (id, file) in &self.file_surfaces {
             if !laid_views.contains(&RightSurface::File(*id)) {
-                file.update(cx, |file, cx| file.suspend_images(cx));
+                file.update(cx, FilesSurface::suspend_images);
             }
         }
 
@@ -4642,7 +4663,7 @@ impl Render for Shell {
 
         if self.activation_sub.is_none() {
             self.activation_sub =
-                Some(cx.observe_window_activation(window, |this: &mut Shell, window, cx| {
+                Some(cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                     motion::window_activation_changed(window.is_window_active(), cx);
                     // The titlebar's title dims while the window is not the key one.
                     cx.notify();
@@ -4656,7 +4677,7 @@ impl Render for Shell {
         // A live handle can refer to an unmounted element. Recover against
         // the completed frame so newly mounted dialogs can claim focus first.
         if self.focus_sub.is_none() {
-            self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Shell, window, cx| {
+            self.focus_sub = Some(cx.on_focus_lost(window, |this: &mut Self, window, cx| {
                 let root = this.shortcut_focus.clone();
                 let (preferred, unfocused) = this.navigation_focus_fallback(cx);
                 window.on_next_frame(move |window, cx| {
@@ -4725,12 +4746,12 @@ impl Render for Shell {
                     && let Some(RightSurface::File(id)) = this.front_view(cx)
                     && let Some(file) = this.file_surfaces.get(&id).cloned()
                 {
-                    file.update(cx, |file, cx| file.save_active_document(cx));
+                    file.update(cx, FilesSurface::save_active_document);
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 if !matches!(this.route, Route::Settings(_)) {
-                    this.toggle_sidebar(cx)
+                    this.toggle_sidebar(cx);
                 }
             }))
             // New session works from anywhere — `open_new_session` routes back
@@ -4758,7 +4779,7 @@ impl Render for Shell {
             // session-nav shortcuts.
             .on_action(cx.listener(|this, _: &ArchiveSession, _, cx| {
                 if matches!(this.route, Route::Chat) && !this.overlay_owns_keyboard() {
-                    this.archive_selected_chat(cx)
+                    this.archive_selected_chat(cx);
                 }
             }))
             // A jump routes back to chat itself, so Settings is not a dead
@@ -4772,7 +4793,7 @@ impl Render for Shell {
                 if this.picker_open() {
                     this.pick_digit(jump.0, cx);
                 } else if !this.overlay_owns_keyboard() {
-                    this.jump_to_session(jump.0, cx)
+                    this.jump_to_session(jump.0, cx);
                 }
             }))
             .on_modifiers_changed(
@@ -4819,7 +4840,11 @@ impl Render for Shell {
                 // is active is marked as it arrives (`Shell::new`'s state observer), so this
                 // is the window coming back to the front.
                 if window_active
-                    && self.state.read(cx).selected_chat_row().is_some_and(|chat| chat.unseen())
+                    && self
+                        .state
+                        .read(cx)
+                        .selected_chat_row()
+                        .is_some_and(slopty_view_proto::Chat::unseen)
                 {
                     cx.defer_in(window, |this, _, cx| this.mark_open_chat_seen(cx));
                 }
@@ -4868,7 +4893,7 @@ impl Render for Shell {
                             "sidebar-resize",
                             PaneResizeKind::Sidebar,
                             || SidebarResize,
-                            |shell, cx| shell.reset_sidebar_width(cx),
+                            Self::reset_sidebar_width,
                             cx,
                         )
                     });
@@ -5033,13 +5058,13 @@ mod tests {
                     cwd: source_cwd.into(),
                     branch: "main".into(),
                     head_sha: None,
-                    observed_at: chrono::Utc::now(),
+                    observed_at: Utc::now(),
                 }
             }),
             config: None,
             last_message_preview: None,
             last_message_at: None,
-            created_at: chrono::Utc::now(),
+            created_at: Utc::now(),
             harness_session_id: None,
             harness_session_cwd: None,
             space_id: None,
@@ -5162,7 +5187,7 @@ mod tests {
     fn every_default_shortcut_binds_on_this_platform() {
         // `apply_keymap` silently falls back on an unparsable combo, so a
         // default gpui cannot parse would ship as a dead shortcut.
-        for id in crate::settings::ShortcutId::ALL {
+        for id in ShortcutId::ALL {
             let combo = platform_combo(id.default_combo());
             assert!(
                 Keystroke::parse_with_os(&combo, crate::keys::OS).is_ok(),
@@ -5201,7 +5226,7 @@ mod tests {
 
     fn clock_probe(
         cx: &mut gpui::TestAppContext,
-    ) -> (gpui::Entity<ClockProbe>, std::rc::Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+    ) -> (Entity<ClockProbe>, std::rc::Rc<std::cell::Cell<usize>>, Subscription) {
         use gpui::AppContext as _;
         let probe = cx.new(|_| ClockProbe { clock: ClockRedraw::default() });
         let redraws = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -5213,12 +5238,12 @@ mod tests {
 
     fn arm_probe(
         cx: &mut gpui::TestAppContext,
-        probe: &gpui::Entity<ClockProbe>,
+        probe: &Entity<ClockProbe>,
         wake: DateTime<Utc>,
         now: DateTime<Utc>,
     ) {
         probe.update(cx, |probe, cx| {
-            probe.clock.arm(wake, now, |probe: &mut ClockProbe| &mut probe.clock, cx)
+            probe.clock.arm(wake, now, |probe: &mut ClockProbe| &mut probe.clock, cx);
         });
     }
 
@@ -5236,7 +5261,7 @@ mod tests {
         let (probe, redraws, _subscription) = clock_probe(cx);
         arm_probe(cx, &probe, wake, now);
         let delay = (expected - now).to_std().unwrap();
-        cx.executor().advance_clock(delay - Duration::from_millis(1));
+        cx.executor().advance_clock(delay.checked_sub(Duration::from_millis(1)).unwrap());
         assert_eq!(redraws.get(), 0, "no redraw before the deadline");
         cx.executor().advance_clock(Duration::from_millis(1));
         assert_eq!(redraws.get(), 1, "one redraw at the deadline");
@@ -5323,7 +5348,7 @@ mod tests {
     // ---- navigation history (titlebar back/forward) ----
 
     fn chat(id: &str) -> NavEntry {
-        NavEntry::Chat(id.to_string())
+        NavEntry::Chat(id.to_owned())
     }
 
     #[test]
@@ -5410,7 +5435,7 @@ mod tests {
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
         let now = std::time::Instant::now();
         let mut tween = SidebarDisclosureMotion::new(1, 240.0, 0.0, now);
-        tween.started = now - motion::COLLAPSE.total().mul_f32(2.0);
+        tween.started = now.checked_sub(motion::COLLAPSE.total().mul_f32(2.0)).unwrap();
         assert_eq!(tween.current(now), 0.0);
         assert!(!tween.animating(now));
     }
@@ -5418,7 +5443,7 @@ mod tests {
 
 #[cfg(test)]
 mod exit_regressions {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -5426,7 +5451,7 @@ mod exit_regressions {
     fn new_shell_only_shows_boot_splash_while_connecting(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -5456,7 +5481,7 @@ mod exit_regressions {
     fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -5475,11 +5500,11 @@ mod exit_regressions {
         window
             .update(cx, |shell, _, cx| {
                 let duration = RESIZE.total().mul_f32(motion::speed_scale());
-                let started = std::time::Instant::now() - duration.mul_f32(2.);
+                let started = std::time::Instant::now().checked_sub(duration.mul_f32(2.)).unwrap();
                 let tween =
                     Some(WidthTween { from: 520., to: 0., started, duration, curve: RESIZE.curve });
                 // Motion on, read as a render would before the tween's frame.
-                crate::motion::set_reduced_motion(cx, false);
+                motion::set_reduced_motion(cx, false);
                 shell.reduced_motion = motion::ReducedMotion::of(cx);
                 // The frame started halfway through the transition but rendering
                 // crossed its deadline. Every region must still use that frame.
@@ -5515,7 +5540,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5557,7 +5582,7 @@ mod exit_regressions {
                     // cached snapshot. Include a previously queued geometry save.
                     shell.settings.sidebar_width = 280.0;
                     shell.schedule_save(cx);
-                    settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                    settings::update(SavePolicy::Immediate, cx, |settings| {
                         settings.pause_animations_in_background = pause_in_background;
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_slopty = open_links_in_slopty;
@@ -5583,7 +5608,7 @@ mod exit_regressions {
                         assert_eq!(current.conversation_width, conversation_width);
                     }
                     settings::flush(cx);
-                    let loaded = settings::UiSettings::load(dir.path());
+                    let loaded = UiSettings::load(dir.path());
                     assert_eq!(loaded.window_geometry, geometry);
                     assert_eq!(loaded.pause_animations_in_background, pause_in_background);
                     assert_eq!(loaded.open_web_links_in_slopty, open_links_in_slopty);
@@ -5607,7 +5632,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5647,7 +5672,7 @@ mod exit_regressions {
     fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -5685,7 +5710,7 @@ mod exit_regressions {
     fn shell_saves_keep_every_setting_chosen_outside_the_shell(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -5750,7 +5775,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             FooterHost(cx.new(|cx| {
@@ -5790,7 +5815,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5838,7 +5863,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5893,7 +5918,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5943,7 +5968,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -5987,7 +6012,7 @@ mod exit_regressions {
                 );
                 shell.activate_session_link(&activation, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
-                settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings::update(SavePolicy::Immediate, cx, |settings| {
                     settings.open_web_links_in_slopty = false;
                 });
                 assert_eq!(
@@ -6057,7 +6082,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -6072,7 +6097,7 @@ mod exit_regressions {
         });
         window
             .update(cx, |shell, window, cx| {
-                let mut owner = super::tests::chat_with_path(Some(&root.to_string_lossy()), None);
+                let mut owner = tests::chat_with_path(Some(&root.to_string_lossy()), None);
                 owner.id = "owner".into();
                 owner.device_id = "local".into();
                 shell.active_chat = "owner".into();
@@ -6169,7 +6194,7 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -6259,7 +6284,7 @@ mod exit_regressions {
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "session".into();
                 shell.state.update(cx, |state, _| {
-                    state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
+                    state.workspace_scope = Some(WorkspaceScope::Local);
                     state.local_device_id = Some("device-a".into());
                 });
                 // Selecting the identity happens before navigation, without requiring a render.
@@ -6455,7 +6480,7 @@ mod exit_regressions {
 }
 
 /// A note's landing: one 0.4 s accent border fade on its session's terminal.
-const LANDING: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE_OUT);
+const LANDING: MotionSpec = MotionSpec::new(400, motion::EASE_OUT);
 
 /// The landing border's opacity `elapsed` after the tap: full at once, faded out by
 /// [`LANDING`]'s end, then `None`.
@@ -6484,7 +6509,7 @@ mod landing_tests {
 
 #[cfg(test)]
 mod shortcut_focus_regressions {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -6641,7 +6666,7 @@ mod shortcut_focus_regressions {
 
 #[cfg(test)]
 mod settings_modal_regressions {
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
 
@@ -6699,7 +6724,7 @@ mod settings_modal_regressions {
     fn settings_visits_preserve_conversation_and_navigation_history(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
+            settings::init(UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -6738,11 +6763,7 @@ mod settings_modal_regressions {
             .unwrap();
     }
 
-    fn init_settings_test(
-        saved: settings::UiSettings,
-        dir: &std::path::Path,
-        cx: &mut TestAppContext,
-    ) {
+    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &mut TestAppContext) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
             gpui_base::init(cx);
@@ -6795,7 +6816,7 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn navigation_shortcuts_work_from_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let keymap = KeymapConfig::default();
         cx.update(|cx| apply_keymap(cx, &keymap));
         let window = cx.add_window(|_, cx| {
@@ -6847,7 +6868,7 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         // The keymap bound as the app binds it at start.
         cx.update(|cx| apply_keymap(cx, &KeymapConfig::default()));
         let window = cx.add_window(|_, cx| {
@@ -6887,7 +6908,7 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn azerty_keymap_moves_only_relocated_keys(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let keymap = KeymapConfig::default();
         cx.update(|cx| apply_keymap(cx, &keymap));
         let azerty = settings::azerty_key_equivalents();
@@ -6941,7 +6962,7 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn settings_reopen_where_they_were_left(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let window = cx.add_window(|_, cx| test_shell(dir.path(), cx));
         window
             .update(cx, |shell, _, cx| {
@@ -6975,21 +6996,18 @@ mod settings_modal_regressions {
             })
             .unwrap();
         // It survives a restart.
-        assert_eq!(
-            settings::UiSettings::load(dir.path()).settings_section,
-            SettingsSection::Appearance
-        );
+        assert_eq!(UiSettings::load(dir.path()).settings_section, SettingsSection::Appearance);
     }
 
     #[gpui::test]
     fn unknown_or_hidden_remembered_sections_reopen_general(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            settings::UiSettings::path(dir.path()),
+            UiSettings::path(dir.path()),
             r#"{"sidebarWidth": 300, "settingsSection": "billing"}"#,
         )
         .unwrap();
-        let saved = settings::UiSettings::load(dir.path());
+        let saved = UiSettings::load(dir.path());
         assert_eq!(saved.sidebar_width, 300.0);
         init_settings_test(saved, dir.path(), cx);
         let window = cx.add_window(|_, cx| test_shell(dir.path(), cx));
@@ -7007,7 +7025,7 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn the_first_run_without_a_device_opens_add_device(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
@@ -7021,7 +7039,7 @@ mod settings_modal_regressions {
         });
         let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
         assert!(
-            devices.update(cx, |page, cx| page.dismiss_on_escape(cx)),
+            devices.update(cx, DevicesPage::dismiss_on_escape),
             "the Add device dialog is open"
         );
     }
@@ -7029,23 +7047,23 @@ mod settings_modal_regressions {
     #[gpui::test]
     fn escape_closes_what_is_open_inside_settings_before_settings(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        init_settings_test(UiSettings::default(), dir.path(), cx);
         let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
         shell.update(cx, |shell, cx| {
             // No engine in tests: render the workspace, not the boot gate.
             shell.debug_gate = Some(GatePhase::Ready);
-            shell.open_settings(SettingsSection::Devices, cx)
+            shell.open_settings(SettingsSection::Devices, cx);
         });
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
 
         // The Add device dialog closes before Settings does.
         let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
-        devices.update(cx, |page, cx| page.open_add_device(cx));
+        devices.update(cx, DevicesPage::open_add_device);
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes("escape");
-        assert!(!devices.update(cx, |page, cx| page.dismiss_on_escape(cx)));
+        assert!(!devices.update(cx, DevicesPage::dismiss_on_escape));
         shell.read_with(cx, |shell, _| {
             assert_eq!(shell.route, Route::Settings(SettingsSection::Devices));
         });

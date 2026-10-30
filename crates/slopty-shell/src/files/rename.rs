@@ -1,6 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Inline single-line rename and permanent-delete confirmation.
-use gpui::{AnyElement, Focusable, KeyDownEvent, MouseButton};
+#![allow(
+    clippy::assertions_on_result_states,
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::partial_pub_fields,
+    reason = "shell lint migration: slice C"
+)]
+use gpui::{AnyElement, Focusable as _, KeyDownEvent, MouseButton};
 use gpui_base::input::{Input, InputEvent, InputState};
 
 use super::*;
@@ -49,7 +56,7 @@ fn delete_subject(paths: &[String]) -> String {
     let names =
         paths.iter().map(|path| path.rsplit('/').next().unwrap_or(path)).collect::<Vec<_>>();
     match names.as_slice() {
-        [name] => (*name).to_string(),
+        [name] => (*name).to_owned(),
         [first, second] => format!("2 items ({first} and {second})"),
         [first, second, rest @ ..] => {
             format!("{} items ({first}, {second} and {} more)", names.len(), rest.len())
@@ -96,7 +103,7 @@ impl FilesSurface {
                     entry.kind == slopty_view_proto::WorkspaceEntryKind::Directory,
                 ),
                 cx,
-            )
+            );
         });
         let events = cx.subscribe_in(&input, window, |this, _, event, window, cx| match event {
             InputEvent::PressEnter { .. } => this.submit_tree_rename(window, cx),
@@ -173,7 +180,7 @@ impl FilesSurface {
         // gpui-base's Input is unstyled: explicitly supply the same visible
         // caret and selection colors as the file editor, including theme changes.
         rename.input.update(cx, |input, _| {
-            input.set_editor_style(super::editor_adapter::editor_style(&theme));
+            input.set_editor_style(editor_adapter::editor_style(&theme));
         });
         Some(
             div()
@@ -334,7 +341,7 @@ impl FilesSurface {
                                 ))
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.dismiss_tree_delete(false, window, cx)
+                                this.dismiss_tree_delete(false, window, cx);
                             })),
                     )
                     .child(
@@ -349,7 +356,7 @@ impl FilesSurface {
                                 ))
                             })
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.dismiss_tree_delete(true, window, cx)
+                                this.dismiss_tree_delete(true, window, cx);
                             })),
                     ),
             );
@@ -361,7 +368,7 @@ mod tests {
     use super::*;
     #[gpui::test]
     fn rename_input_keeps_focus_and_supports_caret_editing(cx: &mut gpui::TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
@@ -439,7 +446,7 @@ mod tests {
     fn refreshed_revision_does_not_authorize_an_already_open_confirmation(
         cx: &mut gpui::TestAppContext,
     ) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
@@ -450,14 +457,12 @@ mod tests {
             files.begin_tree_rename("a.txt".into(), window, cx);
             let input = files.tree_rename.as_ref().unwrap().input.clone();
             input.update(cx, |input, cx| input.set_value("renamed.txt", window, cx));
-            let mut entry = super::super::test_support::entry(
-                "a.txt",
-                slopty_view_proto::WorkspaceEntryKind::File,
-            );
+            let mut entry =
+                test_support::entry("a.txt", slopty_view_proto::WorkspaceEntryKind::File);
             entry.mutation_revision = Some("external-edit".into());
             files.tree.apply_page(
                 slopty_view_proto::WorkspaceDirectoryPage {
-                    directory: "".into(),
+                    directory: String::new(),
                     checkout_id: Some("checkout".into()),
                     mutation_capabilities: files.mutation_capabilities,
                     entries: vec![entry],
@@ -478,7 +483,7 @@ mod tests {
 
     #[gpui::test]
     fn inline_rename_submits_once_and_cancel_delete_never_mutates(cx: &mut gpui::TestAppContext) {
-        let (files, cx) = super::super::test_support::setup(cx);
+        let (files, cx) = test_support::setup(cx);
         let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let recorded = events.clone();
         let _sub = cx.update(|_, cx| {
@@ -508,7 +513,7 @@ mod tests {
     }
     #[test]
     fn delete_copy_names_a_few_selected_entries() {
-        let paths = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let paths = |names: &[&str]| names.iter().map(ToString::to_string).collect::<Vec<_>>();
         assert_eq!(delete_subject(&paths(&["src/a.txt"])), "a.txt");
         assert_eq!(delete_subject(&paths(&["a.txt", "src"])), "2 items (a.txt and src)");
         assert_eq!(

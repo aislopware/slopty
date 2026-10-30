@@ -6,6 +6,14 @@
 //! choose (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed"). The
 //! page holds a working copy, a flip emits [`NotificationsEvent::Changed`], and the shell keeps
 //! it: a device-local UI setting.
+#![allow(
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::clone_on_ref_ptr,
+    clippy::trivially_copy_pass_by_ref,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{Context, EventEmitter, Window, div, px};

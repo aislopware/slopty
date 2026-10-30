@@ -1,4 +1,16 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_sign_loss,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::string_slice,
+    clippy::unused_self,
+    reason = "shell lint migration: slice C"
+)]
 use std::collections::{HashMap, HashSet};
 
 use slopty_view_proto::{
@@ -50,7 +62,7 @@ pub struct VisibleTreeRow {
 }
 
 impl VisibleTreeRow {
-    pub fn selectable(&self) -> bool {
+    pub const fn selectable(&self) -> bool {
         matches!(self.kind, VisibleRowKind::Entry | VisibleRowKind::LoadMore { .. })
     }
 }
@@ -97,11 +109,11 @@ impl FileTreeModel {
         }
     }
 
-    pub fn generation(&self) -> u64 {
+    pub const fn generation(&self) -> u64 {
         self.generation
     }
 
-    pub fn include_ignored(&self) -> bool {
+    pub const fn include_ignored(&self) -> bool {
         self.include_ignored
     }
 
@@ -304,13 +316,13 @@ impl FileTreeModel {
             return false;
         }
         if !self.expanded.remove(path) {
-            self.expanded.insert(path.to_string());
+            self.expanded.insert(path.to_owned());
         } else if let Some(cursor) =
             self.selected.clone().filter(|selected| is_descendant(selected, path))
         {
             // The folder replaces a selected cursor; a deselected cursor must
             // not pull the folder into the selection.
-            let folder = (!path.is_empty()).then(|| path.to_string());
+            let folder = (!path.is_empty()).then(|| path.to_owned());
             if let Some(folder) = &folder
                 && self.selection.contains(&cursor)
             {
@@ -327,7 +339,7 @@ impl FileTreeModel {
         {
             return false;
         }
-        let changed = self.expanded.insert(path.to_string());
+        let changed = self.expanded.insert(path.to_owned());
         if changed {
             self.rebuild_visible_rows();
         }
@@ -376,14 +388,14 @@ impl FileTreeModel {
             .unwrap_or(end);
         let range = entries[start.min(end)..=start.max(end)]
             .iter()
-            .map(|path| path.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         if !additive {
             self.selection.clear();
         }
         self.selection.extend(range);
-        self.anchor = Some(entries[start].to_string());
-        self.selected = Some(path.to_string());
+        self.anchor = Some(entries[start].to_owned());
+        self.selected = Some(path.to_owned());
         true
     }
 
@@ -489,11 +501,11 @@ impl FileTreeModel {
         }
         let remap = |path: &str| -> String {
             if path == old {
-                new.to_string()
+                new.to_owned()
             } else if is_descendant(path, old) {
                 format!("{new}{}", &path[old.len()..])
             } else {
-                path.to_string()
+                path.to_owned()
             }
         };
         if !self.nodes.contains_key(old) {
@@ -522,10 +534,10 @@ impl FileTreeModel {
             }
             self.nodes.insert(next, node);
         }
-        if let Some(entry) = entry {
-            if let Some(node) = self.nodes.get_mut(new) {
-                node.entry = entry;
-            }
+        if let Some(entry) = entry
+            && let Some(node) = self.nodes.get_mut(new)
+        {
+            node.entry = entry;
         }
         self.expanded = self.expanded.iter().map(|p| remap(p)).collect();
         self.selected = self.selected.as_deref().map(remap);
@@ -537,10 +549,10 @@ impl FileTreeModel {
             ancestor = parent_path(&path);
         }
         self.listing_children.clear();
-        if let Some(parent) = self.nodes.get_mut(&new_parent) {
-            if !parent.children.iter().any(|p| p == new) {
-                parent.children.push(new.into());
-            }
+        if let Some(parent) = self.nodes.get_mut(&new_parent)
+            && !parent.children.iter().any(|p| p == new)
+        {
+            parent.children.push(new.into());
         }
         for parent in [&old_parent, &new_parent] {
             if let Some(node) = self.nodes.get_mut(parent) {
@@ -629,7 +641,7 @@ impl FileTreeModel {
             (None, true) => selectable.len() - 1,
             (None, false) => 0,
         };
-        self.set_single(Some(selectable[next].to_string()));
+        self.set_single(Some(selectable[next].to_owned()));
         self.selected.as_deref()
     }
 
@@ -714,21 +726,21 @@ impl FileTreeModel {
                     rows.push(VisibleTreeRow {
                         path: synthetic_path(directory, "empty"),
                         depth,
-                        kind: VisibleRowKind::Empty { directory: directory.to_string() },
+                        kind: VisibleRowKind::Empty { directory: directory.to_owned() },
                     });
                 }
             }
             DirectoryLoadState::Loading { .. } => rows.push(VisibleTreeRow {
                 path: synthetic_path(directory, "loading"),
                 depth,
-                kind: VisibleRowKind::Loading { directory: directory.to_string() },
+                kind: VisibleRowKind::Loading { directory: directory.to_owned() },
             }),
             DirectoryLoadState::Loaded { next_cursor } => {
                 if node.children.is_empty() {
                     rows.push(VisibleTreeRow {
                         path: synthetic_path(directory, "empty"),
                         depth,
-                        kind: VisibleRowKind::Empty { directory: directory.to_string() },
+                        kind: VisibleRowKind::Empty { directory: directory.to_owned() },
                     });
                 }
                 if let Some(cursor) = next_cursor {
@@ -736,7 +748,7 @@ impl FileTreeModel {
                         path: synthetic_path(directory, "more"),
                         depth,
                         kind: VisibleRowKind::LoadMore {
-                            directory: directory.to_string(),
+                            directory: directory.to_owned(),
                             cursor: cursor.clone(),
                         },
                     });
@@ -746,7 +758,7 @@ impl FileTreeModel {
                 path: synthetic_path(directory, "error"),
                 depth,
                 kind: VisibleRowKind::Error {
-                    directory: directory.to_string(),
+                    directory: directory.to_owned(),
                     message: message.clone(),
                 },
             }),
@@ -754,7 +766,7 @@ impl FileTreeModel {
     }
 }
 
-fn root_entry() -> WorkspaceEntry {
+const fn root_entry() -> WorkspaceEntry {
     WorkspaceEntry {
         mutation_revision: None,
         path: String::new(),
@@ -779,7 +791,7 @@ fn compare_paths(nodes: &HashMap<String, TreeNode>, left: &str, right: &str) -> 
         .then_with(|| left.path.cmp(&right.path))
 }
 
-fn entry_rank(kind: WorkspaceEntryKind) -> u8 {
+const fn entry_rank(kind: WorkspaceEntryKind) -> u8 {
     match kind {
         WorkspaceEntryKind::Directory => 0,
         WorkspaceEntryKind::File => 1,
@@ -789,7 +801,7 @@ fn entry_rank(kind: WorkspaceEntryKind) -> u8 {
 
 pub fn parent_path(path: &str) -> Option<String> {
     path.rsplit_once('/')
-        .map(|(parent, _)| parent.to_string())
+        .map(|(parent, _)| parent.to_owned())
         .or_else(|| (!path.is_empty()).then(String::new))
 }
 
@@ -841,7 +853,7 @@ mod tests {
             mutation_capabilities: None,
             directory: directory.into(),
             entries,
-            next_cursor: next_cursor.map(str::to_string),
+            next_cursor: next_cursor.map(str::to_owned),
             truncated: next_cursor.is_some(),
         }
     }

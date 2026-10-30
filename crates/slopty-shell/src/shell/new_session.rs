@@ -6,6 +6,12 @@
 //! The view model starts it on the project's machine (`slopty.StartSession`); the session opens
 //! as soon as the sidebar lists it, its terminal a moment after. A start its machine refuses
 //! says why on its row. Nothing is said to the agent: the person types to it in its terminal.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::indexing_slicing,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::time::Duration;
 
@@ -336,61 +342,60 @@ impl Shell {
             };
             let corner: Option<SharedString> = opening.then(|| "Starting\u{2026}".into());
             let target = space.clone();
-            let row =
-                popover::menu_row(&theme, ix == active, format!("new-session-row-{ix}"))
-                    .id(("new-session-row", ix))
-                    .rounded(px(popover::PALETTE_ITEM_RADIUS))
-                    .role(gpui::Role::Button)
-                    .aria_label(SharedString::from(format!("Start {} in {name}", agent.name)))
-                    .min_h(px(44.0))
-                    .py(px(5.0))
-                    .child(
-                        icon(mark)
-                            .size(px(16.0))
-                            .flex_none()
-                            .text_color(tint.unwrap_or(theme.text_muted)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(div().truncate().child(name))
-                            .child(match why {
-                                Some(why) => div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.danger)
-                                    .child(SharedString::from(why)),
-                                None => div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(crate::typography::ui_rems(12.0))
-                                    .text_color(theme.text_faint)
-                                    .child(SharedString::from(place)),
-                            }),
-                    )
-                    .children(corner.map(|corner| {
-                        div()
-                            .flex_none()
-                            .text_size(crate::typography::ui_rems(11.0))
-                            .text_color(theme.text_faint)
-                            .child(corner)
-                    }))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.start_session(target.clone(), agent, cx)
-                    }))
-                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                        if let Some(picker) = this.new_session.as_mut()
-                            && picker.active != ix
-                        {
-                            picker.active = ix;
-                            cx.notify();
-                        }
-                    }));
+            let row = popover::menu_row(&theme, ix == active, format!("new-session-row-{ix}"))
+                .id(("new-session-row", ix))
+                .rounded(px(popover::PALETTE_ITEM_RADIUS))
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!("Start {} in {name}", agent.name)))
+                .min_h(px(44.0))
+                .py(px(5.0))
+                .child(
+                    icon(mark)
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(tint.unwrap_or(theme.text_muted)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(div().truncate().child(name))
+                        .child(match why {
+                            Some(why) => div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.danger)
+                                .child(SharedString::from(why)),
+                            None => div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(crate::typography::ui_rems(12.0))
+                                .text_color(theme.text_faint)
+                                .child(SharedString::from(place)),
+                        }),
+                )
+                .children(corner.map(|corner| {
+                    div()
+                        .flex_none()
+                        .text_size(crate::typography::ui_rems(11.0))
+                        .text_color(theme.text_faint)
+                        .child(corner)
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.start_session(target.clone(), agent, cx);
+                }))
+                .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    if let Some(picker) = this.new_session.as_mut()
+                        && picker.active != ix
+                    {
+                        picker.active = ix;
+                        cx.notify();
+                    }
+                }));
             children.push(div().px(px(8.0)).child(row).into_any_element());
         }
         let empty = rows.is_empty().then(|| {

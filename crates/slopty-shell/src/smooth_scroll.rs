@@ -35,6 +35,20 @@
 //!
 //! A macOS web page's wheel never reaches the root: AppKit hands it to the
 //! page, and `browser::macos` glides it on the same [`Glide`].
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::manual_midpoint,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -86,7 +100,7 @@ fn enabled(cx: &App) -> bool {
 
 /// A modifier that makes a wheel gesture something other than a scroll (zoom,
 /// for one). Shift only picks the axis, and the platform already applied it.
-fn commanded(modifiers: Modifiers) -> bool {
+const fn commanded(modifiers: Modifiers) -> bool {
     modifiers.control || modifiers.alt || modifiers.platform || modifiers.function
 }
 
@@ -130,7 +144,7 @@ struct Root {
 }
 
 impl Glide {
-    pub(crate) fn active(&self) -> bool {
+    pub(crate) const fn active(&self) -> bool {
         self.segment.is_some()
     }
 
@@ -676,7 +690,7 @@ mod tests {
         // The terminal's: whole rows scroll, the fraction carries over.
         let mut now = Instant::now();
         let mut glide = Glide::default();
-        let (mut remainder, mut rows) = (0.0f32, 0.0f32);
+        let (mut remainder, mut rows) = (0.0_f32, 0.0_f32);
         for _ in 0..7 {
             glide.push(point(0.0, -3.0), now);
             for slice in land(&mut glide, &mut now, FRAME) {
@@ -728,7 +742,7 @@ mod tests {
     fn init(cx: &mut TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx)
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         CLOCK.set(Some(Instant::now()));
         dir
@@ -843,14 +857,14 @@ mod tests {
                     modifiers: Modifiers::default(),
                     click_count: 1,
                     first_mouse: false,
-                })
+                });
             },
             &|cx| wheel(cx, ScrollDelta::Pixels(point(px(0.0), px(0.0))), Modifiers::default()),
             &|cx| {
                 cx.simulate_event(ModifiersChangedEvent {
                     modifiers: Modifiers::control(),
                     capslock: Default::default(),
-                })
+                });
             },
         ];
         for interrupt in interruptions {

@@ -1,12 +1,13 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Stable device-local browser storage, independent of chats and repositories.
+#![allow(clippy::indexing_slicing, clippy::unwrap_used, reason = "shell lint migration: slice A")]
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use slopty_view_proto::WorkspaceScope;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct BrowserProfile {
+pub struct BrowserProfile {
     pub root: PathBuf,
 }
 

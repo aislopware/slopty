@@ -3,6 +3,7 @@
 //! whether it works or waits on the person, in a wash, rather than the words or address it was
 //! written with; a click opens the chat as the link always did. Copy and selection keep what
 //! was written.
+#![allow(clippy::clone_on_ref_ptr, reason = "shell lint migration: slice C")]
 
 use std::sync::Arc;
 
@@ -67,7 +68,7 @@ fn block(block: &Block, label: &dyn Fn(&str) -> Option<String>) -> Option<Block>
                     None => item.clone(),
                 })
                 .collect();
-            changed.then(|| Block::List { ordered_start: *ordered_start, items })
+            changed.then_some(Block::List { ordered_start: *ordered_start, items })
         }
         Block::Table { .. } | Block::CodeBlock { .. } | Block::Rule | Block::Math { .. } => None,
     }

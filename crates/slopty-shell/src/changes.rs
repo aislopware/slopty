@@ -25,9 +25,47 @@
 //! - long-line wrapping is a persisted toolbar choice. It only changes the code plane: gutters and
 //!   sticky headers stay fixed, while the virtual list measures each logical row's resulting
 //!   height.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::derive_partial_eq_without_eq,
+    clippy::expect_used,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::match_wildcard_for_single_variants,
+    clippy::missing_assert_message,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::or_fun_call,
+    clippy::rc_buffer,
+    clippy::return_self_not_must_use,
+    clippy::string_add,
+    clippy::string_slice,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unneeded_field_pattern,
+    clippy::unused_result_ok,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{Hash, Hasher as _};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -131,7 +169,7 @@ const DIFF_EDGE_FADE: f32 = 16.0;
 /// Size of the painted diff body text, and the size the column measurement in
 /// [`DiffHorizontalGeometry::resolve`] must use: they desync otherwise. It is the
 /// `code_font_size` setting itself, as the editor's and a read-only file's.
-pub(crate) fn diff_text_size(theme: &Theme) -> f32 {
+pub(crate) const fn diff_text_size(theme: &Theme) -> f32 {
     crate::typography::clamp_font_size(theme.code_font_size)
 }
 
@@ -157,7 +195,7 @@ pub enum DiffMode {
 }
 
 impl DiffMode {
-    pub fn from_split(split: bool) -> Self {
+    pub const fn from_split(split: bool) -> Self {
         if split { Self::Split } else { Self::Unified }
     }
 
@@ -165,7 +203,7 @@ impl DiffMode {
         self == Self::Split
     }
 
-    pub fn toggled(self) -> Self {
+    pub const fn toggled(self) -> Self {
         match self {
             Self::Unified => Self::Split,
             Self::Split => Self::Unified,
@@ -186,7 +224,7 @@ pub enum LineKind {
     Meta,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffLine {
     pub kind: LineKind,
     pub old_no: Option<u32>,
@@ -249,7 +287,7 @@ impl DiffHighlights {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hunk {
     pub header: String,
     pub lines: Vec<DiffLine>,
@@ -263,7 +301,7 @@ pub enum FileStatus {
     Renamed,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     /// Display path (the post-change side).
     pub path: String,
@@ -282,7 +320,7 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
-    fn new(path: String, old_path: Option<String>) -> Self {
+    const fn new(path: String, old_path: Option<String>) -> Self {
         Self {
             path,
             old_path,
@@ -343,7 +381,7 @@ fn max_shaped_text_width(
         .ch_advance(text_system.resolve_font(&mono), size)
         .unwrap_or(size * 0.6)
         .as_f32();
-    file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(0.0f32, |widest, line| {
+    file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(0.0_f32, |widest, line| {
         let runs = line_runs(line, highlights, theme);
         let shaped =
             text_system.shape_line(line.text.clone().into(), size, &runs, None).width().as_f32();
@@ -355,7 +393,7 @@ fn max_shaped_text_width(
 /// Count terminal-style display columns, including tab stops and wide
 /// Unicode glyphs. This is only a floor; actual shaped runs determine the extent.
 pub(crate) fn visual_columns(text: &str) -> usize {
-    text.chars().fold(0usize, |columns, ch| {
+    text.chars().fold(0_usize, |columns, ch| {
         if ch == '\t' {
             columns + (DIFF_TAB_SIZE - columns % DIFF_TAB_SIZE)
         } else {
@@ -438,15 +476,15 @@ fn parse_git_paths(rest: &str) -> (String, String) {
         if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
             trimmed[1..trimmed.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
         } else {
-            trimmed.to_string()
+            trimmed.to_owned()
         }
     }
     if let Some(pos) = rest.rfind(" b/").or_else(|| rest.rfind(" \"b/")) {
         let old = unquote(&rest[..pos]);
         let new = unquote(&rest[pos + 1..]);
-        (strip_git_prefix(&old).to_string(), strip_git_prefix(&new).to_string())
+        (strip_git_prefix(&old).to_owned(), strip_git_prefix(&new).to_owned())
     } else {
-        let p = strip_git_prefix(&unquote(rest)).to_string();
+        let p = strip_git_prefix(&unquote(rest)).to_owned();
         (p.clone(), p)
     }
 }
@@ -566,7 +604,7 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if let Some((o, n)) = parse_hunk_header(raw) {
                 old_no = o;
                 new_no = n;
-                file.hunks.push(Hunk { header: raw.to_string(), lines: Vec::new() });
+                file.hunks.push(Hunk { header: raw.to_owned(), lines: Vec::new() });
                 in_hunk = true;
             }
             continue;
@@ -614,7 +652,7 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
                     kind: LineKind::Meta,
                     old_no: None,
                     new_no: None,
-                    text: raw.trim_start_matches('\\').trim().to_string(),
+                    text: raw.trim_start_matches('\\').trim().to_owned(),
                 }),
                 _ => {
                     // A non-hunk line ends the hunk; reprocess as a header.
@@ -642,10 +680,10 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             file.status = FileStatus::Deleted;
         } else if let Some(from) = raw.strip_prefix("rename from ") {
             file.status = FileStatus::Renamed;
-            file.old_path = Some(from.trim().to_string());
+            file.old_path = Some(from.trim().to_owned());
         } else if let Some(to) = raw.strip_prefix("rename to ") {
             file.status = FileStatus::Renamed;
-            file.path = to.trim().to_string();
+            file.path = to.trim().to_owned();
         } else if raw.starts_with("Binary files") || raw.starts_with("GIT binary patch") {
             file.binary = true;
         } else if let Some(mode) = raw.strip_prefix("new mode ") {
@@ -655,7 +693,7 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
             if new == "/dev/null" {
                 file.status = FileStatus::Deleted;
             } else if file.old_path.is_none() {
-                file.path = strip_git_prefix(new).to_string();
+                file.path = strip_git_prefix(new).to_owned();
             }
         } else if let Some(old) = raw.strip_prefix("--- ")
             && old.trim() == "/dev/null"
@@ -671,8 +709,8 @@ pub fn parse_patch(patch: &str) -> Vec<FileDiff> {
 pub fn file_notices(file: &FileDiff) -> Vec<String> {
     let mut notices = Vec::new();
     match file.status {
-        FileStatus::Added => notices.push("New file".to_string()),
-        FileStatus::Deleted => notices.push("Deleted file".to_string()),
+        FileStatus::Added => notices.push("New file".to_owned()),
+        FileStatus::Deleted => notices.push("Deleted file".to_owned()),
         FileStatus::Renamed => {
             let from = file.old_path.as_deref().unwrap_or("?");
             notices.push(format!("Renamed from {from}"));
@@ -680,7 +718,7 @@ pub fn file_notices(file: &FileDiff) -> Vec<String> {
         FileStatus::Modified => {}
     }
     if file.binary {
-        notices.push("Binary file — contents not shown".to_string());
+        notices.push("Binary file — contents not shown".to_owned());
     }
     notices.extend(file.notices.iter().cloned());
     notices
@@ -926,7 +964,7 @@ pub fn diff_phase(resolved: Option<&CheckoutDiff>) -> DiffPhase {
 /// Header label: "N uncommitted change(s)".
 pub fn uncommitted_label(count: usize) -> String {
     if count == 1 {
-        "1 uncommitted change".to_string()
+        "1 uncommitted change".to_owned()
     } else {
         format!("{count} uncommitted changes")
     }
@@ -1006,9 +1044,9 @@ pub enum DiffScope {
 impl DiffScope {
     /// Scopes available from a Diff tab. History is selected from the surface
     /// picker instead, so it can keep its own tab and toolbar state.
-    pub const ALL: [DiffScope; 2] = [Self::WorkingTree, Self::Branch];
+    pub const ALL: [Self; 2] = [Self::WorkingTree, Self::Branch];
 
-    pub fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::WorkingTree => "Working tree",
             Self::Branch => "Branch changes",
@@ -1016,7 +1054,7 @@ impl DiffScope {
     }
 
     /// Wire value for `GetCheckoutDiff` `mode` (and parse-key discriminant).
-    pub fn mode(self) -> &'static str {
+    pub const fn mode(self) -> &'static str {
         match self {
             Self::WorkingTree => "workingTree",
             Self::Branch => "branch",
@@ -1047,7 +1085,7 @@ pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<St
     }
     for candidate in ["main", "master"] {
         if branches.iter().any(|b| b == candidate) {
-            return Some(candidate.to_string());
+            return Some(candidate.to_owned());
         }
     }
     branches.iter().find(|b| current != Some(b.as_str())).or(Some(first)).cloned()
@@ -1055,7 +1093,7 @@ pub fn default_base_ref(branches: &[String], current: Option<&str>) -> Option<St
 
 // A clean diff says what fills it, as Claude desktop's empty panes do.
 /// The line under [`clean_message`]: what would show here.
-pub fn clean_line(scope: DiffScope) -> &'static str {
+pub const fn clean_line(scope: DiffScope) -> &'static str {
     match scope {
         DiffScope::WorkingTree => "Edits in this folder show here.",
         DiffScope::Branch => "Commits on this branch show here.",
@@ -1082,10 +1120,10 @@ fn pane_note(
 /// Empty-state copy per scope.
 pub fn clean_message(scope: DiffScope, base: Option<&str>) -> String {
     match scope {
-        DiffScope::WorkingTree => "No uncommitted changes".to_string(),
+        DiffScope::WorkingTree => "No uncommitted changes".to_owned(),
         DiffScope::Branch => match base {
             Some(base) => format!("No changes vs {base}"),
-            None => "No branch changes".to_string(),
+            None => "No branch changes".to_owned(),
         },
     }
 }
@@ -1411,7 +1449,7 @@ pub enum DiffRow {
 }
 
 impl DiffRow {
-    fn file(self) -> usize {
+    const fn file(self) -> usize {
         match self {
             Self::FileHeader { file }
             | Self::Notice { file, .. }
@@ -1425,14 +1463,14 @@ impl DiffRow {
 
     /// `FoldingBody` is height-animated, so it reports 0 and never lands in a
     /// height sum.
-    fn height(self, line_h: f32) -> f32 {
+    const fn height(self, line_h: f32) -> f32 {
         match self {
-            DiffRow::FileHeader { .. } => FILE_HEADER_HEIGHT,
-            DiffRow::Notice { .. } => NOTICE_HEIGHT,
-            DiffRow::Unchanged { .. } => UNCHANGED_HEIGHT,
-            DiffRow::Line { .. } | DiffRow::SplitLine { .. } => line_h,
-            DiffRow::BodyPad { .. } => BODY_BOTTOM_PAD,
-            DiffRow::FoldingBody { .. } => 0.0,
+            Self::FileHeader { .. } => FILE_HEADER_HEIGHT,
+            Self::Notice { .. } => NOTICE_HEIGHT,
+            Self::Unchanged { .. } => UNCHANGED_HEIGHT,
+            Self::Line { .. } | Self::SplitLine { .. } => line_h,
+            Self::BodyPad { .. } => BODY_BOTTOM_PAD,
+            Self::FoldingBody { .. } => 0.0,
         }
     }
 }
@@ -1451,7 +1489,7 @@ pub fn body_rows(file_ix: u32, file: &FileDiff, mode: DiffMode) -> Vec<DiffRow> 
     for notice in 0..file_notices(file).len() {
         rows.push(DiffRow::Notice { file: file_ix, notice: notice as u32 });
     }
-    let mut hunk_flat = 0u32;
+    let mut hunk_flat = 0_u32;
     for (hunk_ix, hunk) in file.hunks.iter().enumerate() {
         if unchanged_before(file, hunk_ix) > 0 {
             rows.push(DiffRow::Unchanged { file: file_ix, hunk: hunk_ix as u32 });
@@ -1540,7 +1578,7 @@ fn sticky_file_header(
 
 /// Offset a sticky header upward as the next file header enters its slot.
 pub(crate) fn sticky_header_push_offset(next_header_y: Option<f32>) -> f32 {
-    next_header_y.map(|y| (y - FILE_HEADER_HEIGHT).min(0.0)).unwrap_or(0.0)
+    next_header_y.map_or(0.0, |y| (y - FILE_HEADER_HEIGHT).min(0.0))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1550,7 +1588,7 @@ enum FileHeaderPresentation {
 }
 
 impl FileHeaderPresentation {
-    fn key_prefix(self) -> &'static str {
+    const fn key_prefix(self) -> &'static str {
         match self {
             Self::Row => "file-hdr",
             Self::Sticky => "sticky-file-hdr",
@@ -1842,8 +1880,8 @@ impl Changes {
     /// The surface-tab title. slopty: the pane's name; its scope ("Working tree", "Branch
     /// changes") is the picker's under the tab, said once (`docs/decisions/ui.md`, "The Changes
     /// pane names its scope once"). No History surface (ruled out).
-    pub fn tab_title(&self) -> gpui::SharedString {
-        gpui::SharedString::new_static("Changes")
+    pub const fn tab_title(&self) -> SharedString {
+        SharedString::new_static("Changes")
     }
 
     /// The selected chat's host device when it differs from the connected
@@ -1967,7 +2005,7 @@ impl Changes {
     /// switch re-parses even when checksums collide.
     fn scope_key(&self) -> String {
         match self.scope {
-            DiffScope::WorkingTree => "wt".to_string(),
+            DiffScope::WorkingTree => "wt".to_owned(),
             DiffScope::Branch => format!("br:{}", self.base_ref.as_deref().unwrap_or("")),
         }
     }
@@ -2099,7 +2137,7 @@ impl Changes {
         self.scoped_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
             params.insert("cwd".into(), serde_json::Value::String(cwd));
-            params.insert("mode".into(), serde_json::Value::String(mode.to_string()));
+            params.insert("mode".into(), serde_json::Value::String(mode.to_owned()));
             params.insert("chatId".into(), serde_json::Value::String(chat_id));
             if let Some(base) = base {
                 params.insert("baseRef".into(), serde_json::Value::String(base));
@@ -2385,7 +2423,7 @@ impl Changes {
         self.fold_settle = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(FOLD_TWEEN_WINDOW).await;
-                let more = this.update(cx, |changes, cx| changes.settle_folds(cx)).unwrap_or(false);
+                let more = this.update(cx, Self::settle_folds).unwrap_or(false);
                 if !more {
                     break;
                 }
@@ -2613,7 +2651,7 @@ impl Changes {
         let query = self
             .ref_menu
             .get()
-            .map(|menu| menu.search.read(cx).text().to_string())
+            .map(|menu| menu.search.read(cx).text().to_owned())
             .unwrap_or_default();
         popover::filter_indices(&query, &self.branches)
     }
@@ -2646,7 +2684,7 @@ impl Changes {
                 }
             }
             popover::MenuKey::Enter | popover::MenuKey::ModEnter => {
-                let active = self.ref_menu.get().map(|m| m.active).unwrap_or(0);
+                let active = self.ref_menu.get().map_or(0, |m| m.active);
                 let pick = self
                     .ref_menu_rows(cx)
                     .get(active)
@@ -2675,7 +2713,7 @@ impl Changes {
             checkout_id: diff.checkout_id,
             cwd: diff.cwd,
             path,
-            mode: self.scope.mode().to_string(),
+            mode: self.scope.mode().to_owned(),
             base_ref: self.base_ref.clone(),
             chat_id,
             commit_sha: None,
@@ -2792,20 +2830,20 @@ impl Changes {
         theme: &Theme,
     ) -> Vec<(std::ops::Range<usize>, gpui::Hsla)> {
         let mut marks = self.find_marks(file, hunk, line, theme);
-        let words =
-            match self.words.get(&(file, hunk)) {
-                Some(words) => words.clone(),
-                None => {
-                    let Some(found) = self.parsed.as_ref().and_then(|parsed| {
-                        parsed.files.get(file as usize)?.hunks.get(hunk as usize)
-                    }) else {
-                        return marks;
-                    };
-                    let words = Arc::new(words::hunk_words(found));
-                    self.words.insert((file, hunk), words.clone());
-                    words
-                }
+        let words = if let Some(words) = self.words.get(&(file, hunk)) {
+            words.clone()
+        } else {
+            let Some(found) = self
+                .parsed
+                .as_ref()
+                .and_then(|parsed| parsed.files.get(file as usize)?.hunks.get(hunk as usize))
+            else {
+                return marks;
             };
+            let words = Arc::new(words::hunk_words(found));
+            self.words.insert((file, hunk), words.clone());
+            words
+        };
         let Some(spans) = words.get(line as usize).filter(|spans| !spans.is_empty()) else {
             return marks;
         };
@@ -2883,7 +2921,7 @@ impl Changes {
 
         let fetch_file = file.clone();
         let fetch_path = path.clone();
-        let fetch_task = self.file_texts(path.clone(), cx).map(|texts| {
+        let fetch_task = self.file_texts(path, cx).map(|texts| {
             cx.spawn(async move |this, cx| {
                 let response = texts.await;
                 let (highlights, source) = match response {
@@ -2982,8 +3020,7 @@ impl Changes {
             DiffRow::Notice { file, notice } => files
                 .get(file as usize)
                 .and_then(|f| file_notices(f).into_iter().nth(notice as usize))
-                .map(|text| notice_row(text, &theme))
-                .unwrap_or_else(|| gpui::Empty.into_any_element()),
+                .map_or_else(|| gpui::Empty.into_any_element(), |text| notice_row(text, &theme)),
             DiffRow::Unchanged { file, hunk } => {
                 let Some(file_diff) = files.get(file as usize) else {
                     return gpui::Empty.into_any_element();
@@ -3094,12 +3131,14 @@ impl Changes {
                         )
                     })
                 };
-                let left = cell(left, true)
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| split_filler().into_any_element());
-                let right = cell(right, false)
-                    .map(IntoElement::into_any_element)
-                    .unwrap_or_else(|| split_filler().into_any_element());
+                let left = cell(left, true).map_or_else(
+                    || split_filler().into_any_element(),
+                    IntoElement::into_any_element,
+                );
+                let right = cell(right, false).map_or_else(
+                    || split_filler().into_any_element(),
+                    IntoElement::into_any_element,
+                );
                 split_row(left, right, self.wrap_lines, &theme).into_any_element()
             }
             DiffRow::BodyPad { .. } => div().w_full().h(px(BODY_BOTTOM_PAD)).into_any_element(),
@@ -3120,7 +3159,7 @@ impl Changes {
                     self.mode,
                     code_width,
                     Some(DiffCodeScrollContext {
-                        handle: code_scroll.handle.clone(),
+                        handle: code_scroll.handle,
                         prefix: SharedString::from(format!(
                             "changes-fold-code-{file}-{}",
                             fold.epoch
@@ -3585,8 +3624,8 @@ impl Changes {
             .read(cx)
             .selected_chat_row()
             .and_then(|chat| chat.branch.clone())
-            .unwrap_or_else(|| "HEAD".to_string());
-        let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
+            .unwrap_or_else(|| "HEAD".to_owned());
+        let base = self.base_ref.clone().unwrap_or_else(|| "…".to_owned());
         // Even truncation: taffy shrinks flex items ∝ factor × basis, and the
         // default factor of 1 splits the deficit proportionally to content —
         // a long branch stayed near-whole while a short base ("main") read as
@@ -3852,12 +3891,12 @@ impl Changes {
 }
 
 /// Green for additions — sampled from the reference diff (soft emerald).
-pub(crate) fn add_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) const fn add_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_add // emerald-400
 }
 
 /// Red for deletions — softer than the theme danger, per the reference diff.
-pub(crate) fn del_color(theme: &Theme) -> gpui::Hsla {
+pub(crate) const fn del_color(theme: &Theme) -> gpui::Hsla {
     theme.diff_del // red-400
 }
 
@@ -4076,15 +4115,11 @@ fn diff_line_row(
         .flex()
         .flex_row()
         .items_start()
-        .when_some(row_bg, |el, bg| el.bg(bg))
+        .when_some(row_bg, Styled::bg)
         // Accent bar: solid colour on +/− rows, invisible spacer on
         // context rows so columns always align.
         .child(
-            div()
-                .w(px(ACCENT_BAR_WIDTH))
-                .self_stretch()
-                .flex_none()
-                .when_some(accent, |el, color| el.bg(color)),
+            div().w(px(ACCENT_BAR_WIDTH)).self_stretch().flex_none().when_some(accent, Styled::bg),
         )
         .child(gutter_cell(
             line.old_no,
@@ -4113,7 +4148,7 @@ fn diff_line_row(
 }
 
 /// A line's number in its gutter. slopty: with wrap on, `wraps` is the line's text and each row
-/// it wraps onto shows `»` under the number (AgentCraft's continuation mark; design-inspiration
+/// it wraps onto shows `»` under the number (`AgentCraft`'s continuation mark; design-inspiration
 /// item 13), so a wrapped line never reads as two.
 fn gutter_cell(
     number: Option<u32>,
@@ -4195,7 +4230,7 @@ fn meta_line_row(text: &str, theme: &Theme, pad_left: f32) -> AnyElement {
         .text_size(px(11.0))
         .text_color(theme.text_faint)
         .italic()
-        .child(SharedString::from(text.to_string()))
+        .child(SharedString::from(text.to_owned()))
         .into_any_element()
 }
 
@@ -4251,13 +4286,9 @@ fn split_line_cell(
         .flex()
         .flex_row()
         .items_start()
-        .when_some(row_bg, |el, bg| el.bg(bg))
+        .when_some(row_bg, Styled::bg)
         .child(
-            div()
-                .w(px(ACCENT_BAR_WIDTH))
-                .self_stretch()
-                .flex_none()
-                .when_some(accent, |el, color| el.bg(color)),
+            div().w(px(ACCENT_BAR_WIDTH)).self_stretch().flex_none().when_some(accent, Styled::bg),
         )
         .child(gutter_cell(
             number,
@@ -4366,7 +4397,7 @@ fn render_file_body_upto(
     scroll: Option<DiffCodeScrollContext>,
 ) -> AnyElement {
     let mut children: Vec<AnyElement> = Vec::new();
-    let mut y = 0.0f32;
+    let mut y = 0.0_f32;
     let gutter_px = gutter_width(file);
     let wrapped = matches!(code_width, DiffCodeWidth::Wrapped);
     let spans_for = |line: &DiffLine| {
@@ -4600,7 +4631,7 @@ impl Render for Changes {
                                                     gpui::ListSizingBehavior::Auto,
                                                 ),
                                         )
-                                        .when_some(sticky_header, |el, header| el.child(header))
+                                        .when_some(sticky_header, ParentElement::child)
                                         .children(find),
                                 ),
                             )
@@ -5115,7 +5146,7 @@ rename to new_name.rs
 
         // A huge single-sided run must not be materialized to yield a few
         // rows: 20k deletions, 5 rows asked for, 5 rows built.
-        let many: Vec<DiffLine> = (0..20_000u32)
+        let many: Vec<DiffLine> = (0..20_000_u32)
             .map(|n| DiffLine {
                 kind: LineKind::Del,
                 old_no: Some(n + 1),
@@ -5197,8 +5228,8 @@ rename to new_name.rs
         // of the number (digits×6.6 + 8px right pad + 6px gap), and the
         // column never shrinks below its floor.
         let mut file = files[0].clone();
-        for digits in 1..=7u32 {
-            file.max_line = 10u32.pow(digits) - 1;
+        for digits in 1..=7_u32 {
+            file.max_line = 10_u32.pow(digits) - 1;
             let w = gutter_width(&file);
             assert!(w >= GUTTER_WIDTH);
             let left_gap = w - (digits as f32 * 6.6 + 8.0);
@@ -5256,7 +5287,7 @@ rename to new_name.rs
         assert_eq!(split_total(narrow), split_total(wide));
     }
 
-    /// Uses the native font backend, not TestAppContext's simulated metrics.
+    /// Uses the native font backend, not `TestAppContext`'s simulated metrics.
     #[test]
     #[ignore = "slopty: gpui-fast makes its Mac platform on the main thread only, and a test runs on another"]
     fn native_diff_font_geometry() {
@@ -5598,7 +5629,7 @@ rename to new_name.rs
     #[test]
     fn base_ref_defaults_to_repo_default_then_main() {
         let branches =
-            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+            |names: &[&str]| -> Vec<String> { names.iter().map(ToString::to_string).collect() };
         // Engine order puts the repo default first — take it when it isn't
         // the checked-out branch itself.
         let b = branches(&["main", "feature"]);
@@ -5645,14 +5676,14 @@ rename to new_name.rs
         // Identical frame is a no-op.
         assert!(!apply_diff_frame(&mut diffs, serde_json::to_value(&one).unwrap()));
         // Same checkout upserts in place.
-        let mut updated = one.clone();
+        let mut updated = one;
         updated.patch = "p2".into();
         assert!(apply_diff_frame(&mut diffs, serde_json::to_value(&updated).unwrap()));
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].patch, "p2");
         // List frame replaces wholesale.
         let two = diff("co-2", "d", "/x", "q");
-        assert!(apply_diff_frame(&mut diffs, serde_json::to_value(vec![two.clone()]).unwrap()));
+        assert!(apply_diff_frame(&mut diffs, serde_json::to_value(vec![two]).unwrap()));
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].checkout_id, "co-2");
         // Malformed frames change nothing.

@@ -1,11 +1,21 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Bounded media decoding. SVG resources are resolved in memory, never on the UI host.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assertions_on_result_states,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::partial_pub_fields,
+    reason = "shell lint migration: slice B"
+)]
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
 use gpui::{Image, ImageFormat};
 
-pub(crate) fn release_media(images: impl IntoIterator<Item = MediaImage>, cx: &mut gpui::App) {
+pub fn release_media(images: impl IntoIterator<Item = MediaImage>, cx: &mut gpui::App) {
     let images: Vec<_> = images.into_iter().map(|media| media.image).collect();
     // After the active window returns to App, release its atlas tiles as well.
     cx.defer(move |cx| {
@@ -16,7 +26,7 @@ pub(crate) fn release_media(images: impl IntoIterator<Item = MediaImage>, cx: &m
 }
 
 #[derive(Clone)]
-pub(crate) struct MediaImage {
+pub struct MediaImage {
     pub image: Arc<Image>,
     pub width: f32,
     pub height: f32,
@@ -37,7 +47,7 @@ fn raster_size(
     dpi: f32,
     pixels: usize,
 ) -> (u32, u32) {
-    let (w, h) = (width as f64, height as f64);
+    let (w, h) = (f64::from(width), f64::from(height));
     let dpi = f64::from(dpi.clamp(1.0, 4.0));
     let fit = (f64::from(viewport.0.max(1.0)) / w).min(f64::from(viewport.1.max(1.0)) / h).min(1.0);
     let scale = (fit * dpi)
@@ -57,7 +67,7 @@ fn raster_size(
 
 /// Memory a prepared SVG holds: its source and wrapper copies, plus both the
 /// CPU pixels and GPU texture of one raster.
-fn svg_retained_bytes(svg: &str, raster: (u32, u32)) -> usize {
+const fn svg_retained_bytes(svg: &str, raster: (u32, u32)) -> usize {
     svg.len() * 2 + 1024 + raster.0 as usize * raster.1 as usize * 8
 }
 
@@ -73,8 +83,8 @@ impl MediaImage {
         }
         let wrapper = format!(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">{}</svg>"#,
-            size.0 as f64 / GPUI_SVG_SCALE,
-            size.1 as f64 / GPUI_SVG_SCALE,
+            f64::from(size.0) / GPUI_SVG_SCALE,
+            f64::from(size.1) / GPUI_SVG_SCALE,
             self.width,
             self.height,
             svg
@@ -127,7 +137,7 @@ impl MediaImage {
 
 /// Prepared media centered at its natural size within the reading column,
 /// capped at 480px tall. A click requests the enlarged lightbox.
-pub(crate) fn preview_element(
+pub fn preview_element(
     loaded: &MediaImage,
     id: gpui::SharedString,
     on_click: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
@@ -151,11 +161,11 @@ pub(crate) fn preview_element(
         .into_any_element()
 }
 
-pub(crate) fn svg_options() -> usvg::Options<'static> {
-    static FONTS: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
+pub fn svg_options() -> usvg::Options<'static> {
+    static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
     let fonts = FONTS
         .get_or_init(|| {
-            let mut db = usvg::fontdb::Database::new();
+            let mut db = fontdb::Database::new();
             db.load_system_fonts();
             for face in crate::typography::bundled_font_faces() {
                 db.load_font_data(face.to_vec());
@@ -179,7 +189,7 @@ pub(crate) fn svg_options() -> usvg::Options<'static> {
     }
 }
 
-pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+pub fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
     if bytes.len() > slopty_view_proto::MAX_WORKSPACE_IMAGE_BYTES {
         return Err("Image exceeds preview size limit".into());
     }
@@ -208,7 +218,7 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
 }
 
 /// Repository icons retain only a small static thumbnail, even for large source logos.
-pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+pub fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
     if mime == "image/svg+xml" {
         decode_image(mime, bytes).map(|media| media.for_view((16.0, 16.0), 2.0, 4096))
     } else {
@@ -217,7 +227,7 @@ pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaIma
 }
 
 /// Validate generated raster metadata and retain a bounded static preview.
-pub(crate) fn decode_generated_image(
+pub fn decode_generated_image(
     bytes: Vec<u8>,
     mime: &str,
     max_bytes: usize,
@@ -234,14 +244,14 @@ pub(crate) fn decode_generated_image(
     decode_raster_image_bounded(bytes, max_bytes, Some(2048))
 }
 
-pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<MediaImage, String> {
+pub fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<MediaImage, String> {
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
 /// A raster image's size from its first bytes (PNG's header, JPEG's frame, GIF's and
 /// WebP's), so a preview can take its final room before the pixels arrive. `None` when the
 /// bytes say no size.
-pub(crate) fn header_size(head: &[u8]) -> Option<(u32, u32)> {
+pub fn header_size(head: &[u8]) -> Option<(u32, u32)> {
     let reader = image::ImageReader::new(Cursor::new(head)).with_guessed_format().ok()?;
     let (width, height) = reader.into_dimensions().ok()?;
     (width > 0 && height > 0).then_some((width, height))
@@ -249,7 +259,7 @@ pub(crate) fn header_size(head: &[u8]) -> Option<(u32, u32)> {
 
 /// Decoder bounds for every raster preview: 4096 px per side, 64 MiB of
 /// decoder allocation.
-pub(crate) fn raster_limits() -> image::Limits {
+pub fn raster_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(4096);
     limits.max_image_height = Some(4096);
@@ -321,8 +331,14 @@ mod tests {
             .image
             .to_image_data(gpui::SvgRenderer::new(Arc::new(crate::icons::Assets)))
             .unwrap();
-        let visible_pixels =
-            raster.as_bytes(0).unwrap().chunks_exact(4).filter(|pixel| pixel[3] > 128).count();
+        let visible_pixels = raster
+            .as_bytes(0)
+            .unwrap()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| pixel[3] > 128)
+            .count();
         assert!(
             visible_pixels > 100,
             "{family}: text disappeared ({visible_pixels} visible pixels)"
@@ -342,7 +358,7 @@ mod tests {
 
     #[test]
     fn svg_is_bounded_and_external_resources_are_removed() {
-        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="file:///etc/passwd" width="20" height="20"/><rect width="10" height="10"/></svg>"##;
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="file:///etc/passwd" width="20" height="20"/><rect width="10" height="10"/></svg>"#;
         let media = decode_image("image/svg+xml", svg.to_vec()).unwrap();
         assert!(!media.svg.unwrap().contains("file:///etc/passwd"));
         assert!(

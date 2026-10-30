@@ -23,6 +23,17 @@
 //! the machine's load chose, and a stop no rerun found again. A short fixed-seed run is part of
 //! the suite; [`a_long_fuzz_of_the_shell`] is the nightly's (`SLOPTY_FUZZ_RUNS`,
 //! `SLOPTY_FUZZ_STEPS`).
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::let_underscore_must_use,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::match_same_arms,
+    clippy::mem_forget,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unwrap_in_result,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -39,7 +50,7 @@ use super::*;
 
 /// The screens a run picks from.
 const SCREENS: [(&str, Screen); 4] = [
-    ("desktop", super::retention_tests::DESKTOP),
+    ("desktop", retention_tests::DESKTOP),
     ("narrow", Screen { size: (720.0, 800.0), scale: 2.0, touch: false, reduced: false }),
     ("phone", PHONE),
     ("ipad", Screen { size: (1366.0, 1024.0), scale: 2.0, touch: true, reduced: false }),
@@ -579,7 +590,7 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     let paced = matches!(steps.get(ix + 1), Some(Step::Frames(_) | Step::Pause));
                     let one_frame = |cx: &mut VisualTestContext| {
                         cx.executor().advance_clock(Duration::from_millis(16));
-                        cx.update(|window, cx| window.simulate_next_frame(cx));
+                        cx.update(Window::simulate_next_frame);
                         cx.run_until_parked();
                     };
                     match step {
@@ -726,18 +737,17 @@ fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
     for seed in first..first + runs {
         let steps = steps_of(seed, len);
         let Err(failure) = run(seed, &steps) else { continue };
-        if !shrink_it {
-            panic!(
-                "the shell fuzz failed on {} (seed {seed}) at step {} {:?}, {}: {}\n\nshrink it: \
-                 SLOPTY_FUZZ_FIRST={seed} SLOPTY_FUZZ_RUNS=1 SLOPTY_FUZZ_STEPS={len} cargo nextest run \
-                 -p slopty-shell --run-ignored all a_long_fuzz_of_the_shell",
-                SCREENS[screen_of(seed)].0,
-                failure.step,
-                steps.get(failure.step),
-                failure.kind,
-                failure.detail,
-            );
-        }
+        assert!(
+            shrink_it,
+            "the shell fuzz failed on {} (seed {seed}) at step {} {:?}, {}: {}\n\nshrink it: \
+             SLOPTY_FUZZ_FIRST={seed} SLOPTY_FUZZ_RUNS=1 SLOPTY_FUZZ_STEPS={len} cargo nextest run \
+             -p slopty-shell --run-ignored all a_long_fuzz_of_the_shell",
+            SCREENS[screen_of(seed)].0,
+            failure.step,
+            steps.get(failure.step),
+            failure.kind,
+            failure.detail,
+        );
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
         let keep = shrink(seed, &steps, failure.step, failure.kind);
@@ -796,7 +806,7 @@ fn a_long_fuzz_of_the_shell() {
 /// the fold once waited for whatever drew next.
 #[gpui::test]
 fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, super::retention_tests::DESKTOP);
+    let (shell, cx) = launch(cx, retention_tests::DESKTOP);
     let now = shell_now(cx);
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, cx| {
@@ -812,9 +822,9 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     cx.update(|window, _| window.set_a11y_active(true));
     frames(cx, Duration::from_millis(16), 60);
     // ⌘I opens the session's inspector, the timeline in it.
-    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.toggle_inspector(cx)));
+    cx.update(|_, cx| shell.update(cx, Shell::toggle_inspector));
     frames(cx, Duration::from_millis(16), 60);
-    assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "the inspector shows");
+    assert!(shell.read_with(cx, Shell::inspector_shown), "the inspector shows");
     // Under the 400 characters that fold a prompt before it is measured, on one line: only its
     // layout knows it wraps past five lines in the column.
     let prompt = format!("{}word", "word ".repeat(79));

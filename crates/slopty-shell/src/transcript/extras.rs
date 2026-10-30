@@ -2,6 +2,18 @@
 //! agent said behind its copy and can be tried again, a quiet divider no one wrote (a
 //! compaction, a subagent's news), a proposed plan as a card folded past its first lines, and
 //! the working line's current step.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::clone_on_ref_ptr,
+    clippy::format_collect,
+    clippy::naive_bytecount,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::rc_buffer,
+    clippy::unused_self,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -90,7 +102,7 @@ pub fn plan_rows(
     for (block_ix, top) in tree.blocks.iter().enumerate() {
         let end = top.range.end.min(text.len());
         let bytes = text.as_bytes().get(top.range.start.min(end)..end).unwrap_or_default();
-        let version = (fnv1a(bytes) << 1) | streaming as u64;
+        let version = (fnv1a(bytes) << 1) | u64::from(streaming);
         let kind = if streaming {
             RowKind::LiveMarkdown { tree: tree.clone(), block_ix }
         } else {
@@ -116,7 +128,7 @@ pub fn plan_rows(
         rows.push(row(
             fold.to_string(),
             hidden_lines as u64,
-            RowKind::PlanFold { fold: fold.clone(), hidden_lines },
+            RowKind::PlanFold { fold, hidden_lines },
         ));
     }
 }
@@ -641,7 +653,7 @@ impl Transcript {
                     }))
                     .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_extra(id.clone(), text.clone(), cx)
+                        this.copy_extra(id.clone(), text.clone(), cx);
                     }))
                     .child(
                         crate::icons::icon(if copied {
@@ -1018,7 +1030,7 @@ mod tests {
     #[test]
     fn an_error_says_a_title_and_one_sentence() {
         let words = |message: &str| {
-            let (title, sentence) = super::error_title(message);
+            let (title, sentence) = error_title(message);
             (title.to_string(), sentence.map(|s| s.to_string()))
         };
         assert_eq!(

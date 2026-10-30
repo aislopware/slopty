@@ -10,6 +10,15 @@
 //! The other way round, a path a person ⌘-clicks in a shell opens where a transcript's file link
 //! opens, in its chat's Files pane ([`open_file`]), and a web link one hands over opens where a
 //! transcript's web link opens ([`open_link`]): the shell serves both once its window is up.
+#![allow(
+    missing_debug_implementations,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::derive_partial_eq_without_eq,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
 
 pub mod chrome;
 pub mod key_row; // the touch key row's armed modifiers, and whether a keyboard stands in for it
@@ -141,7 +150,7 @@ impl TerminalLook {
 
 /// The shell's chrome as Slopty's own views draw theirs: zeron's face and colours, so a find
 /// bar or a window's controls read as the shell's own.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chrome {
     /// The dark appearance.
     pub dark: bool,
@@ -557,7 +566,7 @@ pub enum PageAct {
     },
 }
 
-type PageFn = dyn Fn(&str, &mut gpui::Window, &mut App) -> Option<HostedPage>;
+type PageFn = dyn Fn(&str, &mut Window, &mut App) -> Option<HostedPage>;
 type PageActFn = dyn Fn(&str, PageAct, &mut App);
 
 /// How the app hosts pages.
@@ -575,7 +584,7 @@ impl Global for Pages {}
 /// asked, live or not).
 pub fn serve_pages(
     cx: &mut App,
-    page: impl Fn(&str, &mut gpui::Window, &mut App) -> Option<HostedPage> + 'static,
+    page: impl Fn(&str, &mut Window, &mut App) -> Option<HostedPage> + 'static,
     act: impl Fn(&str, PageAct, &mut App) + 'static,
     watch: impl Fn(&str, Box<dyn FnMut(&mut App)>, &mut App) -> Option<Subscription> + 'static,
 ) {
@@ -583,7 +592,7 @@ pub fn serve_pages(
 }
 
 /// The page `key` as it stands in `window`; `None` with no host, or none for that key.
-pub fn page(key: &str, window: &mut gpui::Window, cx: &mut App) -> Option<HostedPage> {
+pub fn page(key: &str, window: &mut Window, cx: &mut App) -> Option<HostedPage> {
     let host = cx.try_global::<Pages>()?.page.clone();
     host(key, window, cx)
 }

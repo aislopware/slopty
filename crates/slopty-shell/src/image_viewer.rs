@@ -1,5 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared image geometry and native pointer gestures. Scaling reuses the texture.
+#![allow(
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice B"
+)]
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,7 +17,7 @@ use gpui::{
 };
 
 #[derive(Clone, Default)]
-pub(crate) struct ImageView(Rc<RefCell<ViewState>>);
+pub struct ImageView(Rc<RefCell<ViewState>>);
 
 #[derive(Default)]
 struct ViewState {
@@ -107,7 +113,7 @@ impl Geometry {
             return false;
         }
         let before = self.pan;
-        self.pan = self.pan + delta;
+        self.pan += delta;
         self.clamp_pan();
         self.pan != before
     }
@@ -190,7 +196,7 @@ impl ViewState {
     }
 }
 
-pub(crate) type ImageClick = Rc<dyn Fn(&mut Window, &mut App)>;
+pub type ImageClick = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl ImageView {
     pub fn begin_click(&self) {
@@ -325,10 +331,10 @@ impl ImageView {
                             window.defer(cx, move |_, cx| cx.notify(owner));
                         }
                     },
-                    move |_, _, window, _| {
+                    move |_, (), window, _| {
                         // Continue an image drag beyond its viewport without taking over
                         // other pointers. Release is handled inside and outside the hitbox.
-                        let movement = movement.clone();
+                        let movement = movement;
                         window.on_mouse_event(
                             move |event: &gpui::MouseMoveEvent, phase, _window, cx| {
                                 if phase == gpui::DispatchPhase::Bubble

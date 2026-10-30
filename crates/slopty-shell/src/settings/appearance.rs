@@ -1,10 +1,26 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
 //! Settings → Appearance: system behavior, independent light/dark variants,
 //! and the optional interactive accent overlay.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::default_trait_access,
+    clippy::float_cmp_const,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::too_many_arguments,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unused_self,
+    reason = "shell lint migration: slice D"
+)]
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Hsla, IntoElement,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable as _, Hsla, IntoElement,
     KeyDownEvent, Render, SharedString, Subscription, Window, div, px,
 };
 use slopty_shell_theme::{
@@ -37,7 +53,7 @@ pub enum AppearanceSettingsEvent {
 impl FontKind {
     const ALL: [Self; 3] = [Self::Ui, Self::Terminal, Self::Code];
 
-    fn slug(self) -> &'static str {
+    const fn slug(self) -> &'static str {
         match self {
             Self::Ui => "interface",
             Self::Terminal => "terminal",
@@ -45,7 +61,7 @@ impl FontKind {
         }
     }
 
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::Ui => "Interface font",
             Self::Terminal => "Terminal font",
@@ -53,7 +69,7 @@ impl FontKind {
         }
     }
 
-    fn description(self) -> &'static str {
+    const fn description(self) -> &'static str {
         match self {
             Self::Ui => "Menus and conversations",
             Self::Terminal => "Terminal output · monospace only",
@@ -103,7 +119,7 @@ impl FontKind {
     }
 
     // What each slot starts at, so its picker marks the default (M10).
-    fn default_family(self) -> UiFontFamily {
+    const fn default_family(self) -> UiFontFamily {
         match self {
             Self::Ui => UiFontFamily::Geist,
             Self::Terminal | Self::Code => UiFontFamily::GeistMono,
@@ -139,7 +155,7 @@ impl FontKind {
         }
     }
 
-    fn size_count(self) -> usize {
+    const fn size_count(self) -> usize {
         match self {
             Self::Ui => UiFontSize::ALL.len(),
             _ => MONO_FONT_SIZES.len(),
@@ -175,7 +191,7 @@ fn nearest_mono_ix(size: f32) -> usize {
 
 pub struct AppearancePage {
     conversation_width_select: widgets::SelectState,
-    scroll: crate::settings::widgets::PageScroll,
+    scroll: widgets::PageScroll,
     selected_font: UiFontFamily,
     selected_terminal_font: UiFontFamily,
     selected_code_font: UiFontFamily,
@@ -253,7 +269,7 @@ impl AppearancePage {
                 theme,
                 cx,
                 |_, _, cx| {
-                    crate::settings::set_conversation_width(ConversationWidth::default(), cx)
+                    crate::settings::set_conversation_width(ConversationWidth::default(), cx);
                 },
             ))
             .child(control)
@@ -273,7 +289,7 @@ impl AppearancePage {
         });
         Self {
             conversation_width_select: widgets::SelectState::default(),
-            scroll: crate::settings::widgets::PageScroll::default(),
+            scroll: widgets::PageScroll::default(),
             selected_font: typography::effective(cx),
             selected_terminal_font: typography::terminal_effective(cx),
             selected_code_font: typography::code_effective(cx),
@@ -300,7 +316,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_menu(&self, kind: FontKind) -> &Popup<()> {
+    const fn font_menu(&self, kind: FontKind) -> &Popup<()> {
         match kind {
             FontKind::Ui => &self.font_menu,
             FontKind::Terminal => &self.terminal_font_menu,
@@ -308,7 +324,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_menu_mut(&mut self, kind: FontKind) -> &mut Popup<()> {
+    const fn font_menu_mut(&mut self, kind: FontKind) -> &mut Popup<()> {
         match kind {
             FontKind::Ui => &mut self.font_menu,
             FontKind::Terminal => &mut self.terminal_font_menu,
@@ -316,7 +332,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_list_mut(&mut self, kind: FontKind) -> &mut widgets::PageScroll {
+    const fn font_list_mut(&mut self, kind: FontKind) -> &mut widgets::PageScroll {
         match kind {
             FontKind::Ui => &mut self.font_list,
             FontKind::Terminal => &mut self.terminal_font_list,
@@ -324,7 +340,7 @@ impl AppearancePage {
         }
     }
 
-    fn selected_font(&self, kind: FontKind) -> &UiFontFamily {
+    const fn selected_font(&self, kind: FontKind) -> &UiFontFamily {
         match kind {
             FontKind::Ui => &self.selected_font,
             FontKind::Terminal => &self.selected_terminal_font,
@@ -340,7 +356,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_focus(&self, kind: FontKind) -> &FocusHandle {
+    const fn font_focus(&self, kind: FontKind) -> &FocusHandle {
         match kind {
             FontKind::Ui => &self.font_focus,
             FontKind::Terminal => &self.terminal_font_focus,
@@ -348,7 +364,7 @@ impl AppearancePage {
         }
     }
 
-    fn font_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
+    const fn font_dismissed_at(&mut self, kind: FontKind) -> &mut Option<std::time::Instant> {
         match kind {
             FontKind::Ui => &mut self.font_menu_dismissed_at,
             FontKind::Terminal => &mut self.terminal_font_menu_dismissed_at,
@@ -367,7 +383,7 @@ impl AppearancePage {
         }
     }
 
-    fn size_select(&self, kind: FontKind) -> &widgets::SelectState {
+    const fn size_select(&self, kind: FontKind) -> &widgets::SelectState {
         match kind {
             FontKind::Ui => &self.size_select,
             FontKind::Terminal => &self.terminal_size_select,
@@ -375,7 +391,7 @@ impl AppearancePage {
         }
     }
 
-    fn size_select_mut(&mut self, kind: FontKind) -> &mut widgets::SelectState {
+    const fn size_select_mut(&mut self, kind: FontKind) -> &mut widgets::SelectState {
         match kind {
             FontKind::Ui => &mut self.size_select,
             FontKind::Terminal => &mut self.terminal_size_select,
@@ -664,7 +680,7 @@ fn last_available(
 
 /// Highlight target when a kind's catalog offers nothing: System UI is
 /// proportional, so the terminal cannot land there.
-fn fallback_selection(kind: FontKind) -> UiFontFamily {
+const fn fallback_selection(kind: FontKind) -> UiFontFamily {
     match kind {
         FontKind::Terminal => UiFontFamily::GeistMono,
         _ => UiFontFamily::System,
@@ -700,7 +716,7 @@ fn accent_helper(accent: AccentSelection) -> String {
     }
 }
 
-fn surface_label(surface: SurfacePreference) -> &'static str {
+const fn surface_label(surface: SurfacePreference) -> &'static str {
     match surface {
         SurfacePreference::ThemeDefault => "Theme default",
         SurfacePreference::Frosted => "Frosted",
@@ -708,14 +724,14 @@ fn surface_label(surface: SurfacePreference) -> &'static str {
     }
 }
 
-fn treatment_word(treatment: SurfaceTreatment) -> &'static str {
+const fn treatment_word(treatment: SurfaceTreatment) -> &'static str {
     match treatment {
         SurfaceTreatment::Frosted => "Frosted",
         SurfaceTreatment::Opaque => "Opaque",
     }
 }
 
-fn smooth_scrolling_helper(enabled: bool, reduced: bool) -> &'static str {
+const fn smooth_scrolling_helper(enabled: bool, reduced: bool) -> &'static str {
     if enabled && reduced {
         "Mouse wheels step instantly while motion is reduced."
     } else {
@@ -828,7 +844,7 @@ fn preview(
     }
 }
 
-fn model_appearance(appearance: Appearance) -> slopty_shell_theme::Appearance {
+const fn model_appearance(appearance: Appearance) -> slopty_shell_theme::Appearance {
     match appearance {
         Appearance::Dark => slopty_shell_theme::Appearance::Dark,
         Appearance::Light => slopty_shell_theme::Appearance::Light,
@@ -1023,10 +1039,9 @@ impl AppearancePage {
             // Only the closed state: once open, the card above owns these keys
             // and stops their propagation before they reach us.
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                if !this.font_menu(kind).is_open() {
-                    if this.on_font_key_down(kind, event, window, cx) {
-                        cx.stop_propagation();
-                    }
+                if !this.font_menu(kind).is_open() && this.on_font_key_down(kind, event, window, cx)
+                {
+                    cx.stop_propagation();
                 }
             }))
             .on_click(cx.listener(move |this, _, window, cx| {
@@ -1035,7 +1050,7 @@ impl AppearancePage {
             }))
             .child(widgets::select_value(value))
             .child(widgets::select_chevron(theme, open))
-            .when_some(self.font_menu(kind).get(), |trigger, _| {
+            .when_some(self.font_menu(kind).get(), |trigger, ()| {
                 trigger.child(widgets::dropdown(
                     SharedString::from(format!("{slug}-font-menu")),
                     menu,
@@ -1647,7 +1662,7 @@ mod tests {
             gpui_base::init(cx);
             crate::settings::init(Default::default(), dir.path(), cx);
             appearance::init(
-                appearance::AppearanceMode::Dark,
+                AppearanceMode::Dark,
                 ThemeSelection::default(),
                 AccentSelection::default(),
                 SurfacePreference::Opaque,
@@ -1864,7 +1879,7 @@ mod tests {
             gpui_base::init(cx);
             crate::settings::init(Default::default(), dir.path(), cx);
             appearance::init(
-                appearance::AppearanceMode::Dark,
+                AppearanceMode::Dark,
                 ThemeSelection::default(),
                 AccentSelection::default(),
                 SurfacePreference::Opaque,

@@ -1,6 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Device-local interface typography: bundled font registration, the persisted
 //! catalog choice, and the effective family installed into [`crate::theme::Theme`].
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::float_cmp,
+    clippy::partial_pub_fields,
+    clippy::return_self_not_must_use,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice D"
+)]
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -177,7 +190,7 @@ pub const FONT_SIZE_MIN: f32 = 8.0;
 pub const FONT_SIZE_MAX: f32 = 32.0;
 
 /// Clamp an absolute code/terminal pixel size into the supported range.
-pub fn clamp_font_size(size: f32) -> f32 {
+pub const fn clamp_font_size(size: f32) -> f32 {
     size.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX)
 }
 
@@ -229,14 +242,14 @@ impl FontAvailability {
         self.is_available(family) && self.fixed_width.contains(family)
     }
 
-    fn fallback(&self) -> UiFontFamily {
+    const fn fallback(&self) -> UiFontFamily {
         if self.geist { UiFontFamily::Geist } else { UiFontFamily::System }
     }
 
     /// Code and terminal degrade to the bundled mono face instead of the
     /// interface sans: a device-local pick that later disappears should not
     /// silently turn fixed-width surfaces proportional.
-    fn fallback_mono(&self) -> UiFontFamily {
+    const fn fallback_mono(&self) -> UiFontFamily {
         if self.geist_mono { UiFontFamily::GeistMono } else { self.fallback() }
     }
 
@@ -315,13 +328,14 @@ pub(crate) fn bundled_font_faces() -> impl Iterator<Item = &'static [u8]> {
     GEIST.iter().chain(GEIST_MONO.iter()).copied()
 }
 
-/// The native font backend, not TestAppContext's simulated metrics, with the
+/// The native font backend, not `TestAppContext`'s simulated metrics, with the
 /// bundled faces registered. Platforms can't be created concurrently, so the
 /// guard serializes the tests that use one.
 #[cfg(test)]
-pub(crate) fn native_text_system() -> (std::sync::MutexGuard<'static, ()>, gpui::WindowTextSystem) {
-    static NATIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = NATIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+pub(crate) fn native_text_system() -> (parking_lot::MutexGuard<'static, ()>, gpui::WindowTextSystem)
+{
+    static NATIVE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let guard = NATIVE.lock();
     // A headless platform still carries the native CoreText backend.
     let platform = gpui_platform::current_platform(true);
     let text_system = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
@@ -447,7 +461,7 @@ fn resolve_effective_mono(
 }
 
 /// Install typography state before appearance builds the first [`crate::theme::Theme`].
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn init(
     requested: UiFontFamily,
     size: UiFontSize,
@@ -490,14 +504,12 @@ pub fn effective_family_name(cx: &App) -> SharedString {
 
 pub fn terminal_requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.terminal_requested.clone())
-        .unwrap_or(UiFontFamily::GeistMono)
+        .map_or(UiFontFamily::GeistMono, |state| state.terminal_requested.clone())
 }
 
 pub fn terminal_effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.terminal_effective.clone())
-        .unwrap_or(UiFontFamily::GeistMono)
+        .map_or(UiFontFamily::GeistMono, |state| state.terminal_effective.clone())
 }
 
 pub fn terminal_effective_family_name(cx: &App) -> SharedString {
@@ -506,20 +518,17 @@ pub fn terminal_effective_family_name(cx: &App) -> SharedString {
 
 pub fn terminal_font_size(cx: &App) -> f32 {
     cx.try_global::<TypographyState>()
-        .map(|state| state.terminal_font_size)
-        .unwrap_or(TERMINAL_FONT_SIZE_DEFAULT)
+        .map_or(TERMINAL_FONT_SIZE_DEFAULT, |state| state.terminal_font_size)
 }
 
 pub fn code_requested(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.code_requested.clone())
-        .unwrap_or(UiFontFamily::GeistMono)
+        .map_or(UiFontFamily::GeistMono, |state| state.code_requested.clone())
 }
 
 pub fn code_effective(cx: &App) -> UiFontFamily {
     cx.try_global::<TypographyState>()
-        .map(|state| state.code_effective.clone())
-        .unwrap_or(UiFontFamily::GeistMono)
+        .map_or(UiFontFamily::GeistMono, |state| state.code_effective.clone())
 }
 
 pub fn code_effective_family_name(cx: &App) -> SharedString {
@@ -527,9 +536,7 @@ pub fn code_effective_family_name(cx: &App) -> SharedString {
 }
 
 pub fn code_font_size(cx: &App) -> f32 {
-    cx.try_global::<TypographyState>()
-        .map(|state| state.code_font_size)
-        .unwrap_or(CODE_FONT_SIZE_DEFAULT)
+    cx.try_global::<TypographyState>().map_or(CODE_FONT_SIZE_DEFAULT, |state| state.code_font_size)
 }
 
 pub fn font_size(cx: &App) -> UiFontSize {
@@ -612,7 +619,7 @@ enum Category {
 }
 
 impl Category {
-    fn fixed_width_only(self) -> bool {
+    const fn fixed_width_only(self) -> bool {
         matches!(self, Self::Terminal)
     }
 }

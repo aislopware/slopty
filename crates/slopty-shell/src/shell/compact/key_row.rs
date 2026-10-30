@@ -13,6 +13,15 @@
 //! up: the terminal holding the keyboard takes it as it takes a hardware key, and only what the
 //! person pressed is sent. The row stands only while the soft keyboard is up over the session's
 //! terminal and no hardware keyboard is attached.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::needless_pass_by_ref_mut,
+    clippy::or_fun_call,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -59,7 +68,7 @@ const FASTEST: Duration = Duration::from_millis(50);
 /// The row's measure (Blink's `KBSizes` by device): its height, a key's column and a wide key's,
 /// chosen so the keys stand on the system keyboard's own columns.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Measure {
+pub struct Measure {
     /// 44 pt in portrait, 38 in landscape.
     pub(crate) height: f32,
     /// A key's column.
@@ -77,7 +86,7 @@ impl Measure {
 
 /// The row's measure in a window `width` × `height` points: by orientation, then by the screen's
 /// width, as Blink sizes it per phone.
-pub(crate) fn measure(width: f32, height: f32) -> Measure {
+pub fn measure(width: f32, height: f32) -> Measure {
     if height >= width {
         // The 6.7-inch phones (428 pt wide and more) take a point more a key.
         let big = width >= 428.0;
@@ -101,7 +110,7 @@ pub(crate) fn measure(width: f32, height: f32) -> Measure {
 /// A keystroke a key sends: the key as gpui names it, the modifiers it carries, and whether it is
 /// a character, typed as text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Press {
+pub struct Press {
     key: &'static str,
     control: bool,
     shift: bool,
@@ -146,7 +155,7 @@ impl Press {
 
 /// What a single key does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Act {
+pub enum Act {
     /// Sends a keystroke.
     Press(Press),
     /// Arms a modifier.
@@ -157,7 +166,7 @@ pub(crate) enum Act {
 
 /// What a key shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Face {
+pub enum Face {
     /// Words or a glyph in the row's face.
     Text(&'static str),
     /// One of the shell's icons.
@@ -166,7 +175,7 @@ pub(crate) enum Face {
 
 /// A key on the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Key {
+pub enum Key {
     /// One act: its face, its spoken name, and whether it takes a wide column.
     One { face: Face, name: &'static str, act: Act, wide: bool },
     /// Two symbols: a tap gives the first, a flick down the second (Blink's `vertical2`).
@@ -185,7 +194,7 @@ impl Key {
     }
 
     /// Its column: a wide key's, or a key's.
-    fn width(self, measure: Measure) -> f32 {
+    const fn width(self, measure: Measure) -> f32 {
         match self {
             Self::Arrows | Self::One { wide: true, .. } => measure.wide,
             Self::One { .. } | Self::Two { .. } => measure.key,
@@ -267,7 +276,7 @@ const SHELL: [Key; 4] = [TAB, CONTROL_R, CONTROL_C, UP];
 
 /// The keys of what Slopty's records say runs in the session: the agent its chat was started
 /// with, by harness, or with none a shell. Never read from the screen.
-pub(crate) fn running(harness: Option<HarnessId>) -> &'static [Key] {
+pub fn running(harness: Option<HarnessId>) -> &'static [Key] {
     match harness {
         Some(HarnessId::CLAUDE_CODE) => &CLAUDE_CODE,
         Some(_) => &AGENT,
@@ -276,7 +285,7 @@ pub(crate) fn running(harness: Option<HarnessId>) -> &'static [Key] {
 }
 
 /// The strip: the ⌘ layer's function keys, or the keys of what runs then the symbols it lacks.
-pub(crate) fn strip(running: &[Key], layer: bool) -> Vec<Key> {
+pub fn strip(running: &[Key], layer: bool) -> Vec<Key> {
     if layer {
         return FUNCTIONS.to_vec();
     }
@@ -290,7 +299,7 @@ pub(crate) fn strip(running: &[Key], layer: bool) -> Vec<Key> {
 /// what runs, then the four arrows, trail. The bar takes taps only, so it keeps the keys that are
 /// one act: the symbols stay on the iPad's keyboard, which shows them, and its own key puts the
 /// keyboard away.
-pub(crate) fn bar(harness: Option<HarnessId>) -> armed::Bar {
+pub fn bar(harness: Option<HarnessId>) -> armed::Bar {
     let entry = |key: Key| {
         let Key::One { face: Face::Text(face), name, act, .. } = key else {
             return None;
@@ -321,7 +330,7 @@ fn sides(measure: Measure) -> ([Key; 3], [Key; 3]) {
 
 /// A key laid out: which, and its column's left edge and width.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Placed {
+pub struct Placed {
     pub(crate) key: Key,
     pub(crate) x: f32,
     pub(crate) width: f32,
@@ -330,7 +339,7 @@ pub(crate) struct Placed {
 /// The row laid out in its width: the keys at the sides from the row's left edge, the strip
 /// between them, and the strip's keys from its own left edge.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Laid {
+pub struct Laid {
     pub(crate) left: Vec<Placed>,
     pub(crate) right: Vec<Placed>,
     /// The strip's left edge and width.
@@ -342,7 +351,7 @@ pub(crate) struct Laid {
 
 /// Lay the row out across `width` (Blink's `KBView.layoutSubviews`): the left keys from the left
 /// edge, the right ones from the right, the strip between, its keys abutting.
-pub(crate) fn lay_out(width: f32, measure: Measure, strip: &[Key]) -> Laid {
+pub fn lay_out(width: f32, measure: Measure, strip: &[Key]) -> Laid {
     let (left_keys, right_keys) = sides(measure);
     let abutting = |keys: &[Key]| {
         let mut x = 0.0;
@@ -394,7 +403,7 @@ fn key_at(laid: &Laid, x: f32, scroll: f32) -> Option<(Placed, bool)> {
 
 /// One of the joystick's four ways.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Arrow {
+pub enum Arrow {
     Left,
     Down,
     Up,
@@ -446,7 +455,7 @@ impl Arrow {
 /// Where a finger at `offset` from the joystick's plate centre steers, the plate `size`, and how
 /// fast it repeats there (Blink's `KBKeyViewArrows`): nothing inside the dead zone, else the
 /// axis it leans along most.
-pub(crate) fn steer(offset: Point<f32>, size: (f32, f32)) -> Option<(Arrow, Duration)> {
+pub fn steer(offset: Point<f32>, size: (f32, f32)) -> Option<(Arrow, Duration)> {
     let (width, height) = size;
     let (dx, dy) = (offset.x.abs(), offset.y.abs());
     if dx < width * DEAD_ACROSS && dy < height * DEAD_DOWN {
@@ -511,7 +520,7 @@ fn soft_keyboard_up(window: &Window) -> bool {
 }
 
 /// The key row, as the phone's session page draws it above the soft keyboard.
-pub(crate) struct KeyRow {
+pub struct KeyRow {
     /// What runs in the session, the ground it stands on, and the terminal whose keyboard it
     /// stands over: the shell's to say as it draws ([`Self::set`]).
     running: &'static [Key],
@@ -1047,7 +1056,7 @@ fn draw_key(key: Key, look: &Look, ink: &Theme) -> gpui::Stateful<gpui::Div> {
         .debug_selector(move || selector)
         .role(if joystick { gpui::Role::Group } else { gpui::Role::Button })
         .aria_label(name)
-        .when_some(description, |el, description| el.aria_description(description))
+        .when_some(description, StatefulInteractiveElement::aria_description)
         .when(matches!(key, Key::One { act: Act::Modifier(_), .. }), |el| {
             el.aria_toggled(if look.armed { gpui::Toggled::True } else { gpui::Toggled::False })
         })
@@ -1093,15 +1102,15 @@ fn two_symbols(top: &'static str, below: &'static str, look: &Look, glyph: Hsla)
         .child(
             centred(below)
                 .top(px(travel.mul_add(flick, -travel)))
-                .text_size(px(size * 0.45f32.mul_add(flick, 0.55)))
-                .text_color(glyph.opacity(0.7f32.mul_add(flick, 0.3))),
+                .text_size(px(size * 0.45_f32.mul_add(flick, 0.55)))
+                .text_color(glyph.opacity(0.7_f32.mul_add(flick, 0.3))),
         )
         .child(
             centred(top)
-                .top(px(14.0f32.mul_add(flick, 1.0)))
+                .top(px(14.0_f32.mul_add(flick, 1.0)))
                 .text_size(px((size * (1.0 - flick)).max(0.01)))
                 .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(glyph.opacity((-0.5f32).mul_add(flick, 1.0))),
+                .text_color(glyph.opacity((-0.5_f32).mul_add(flick, 1.0))),
         )
         .into_any_element()
 }

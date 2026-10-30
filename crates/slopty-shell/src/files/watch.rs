@@ -1,4 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+#![allow(
+    let_underscore_drop,
+    clippy::clone_on_ref_ptr,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice C"
+)]
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -201,7 +209,7 @@ pub(super) fn sequence_needs_resync(previous: Option<u64>, next: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AppContext;
+    use gpui::AppContext as _;
 
     use super::*;
 

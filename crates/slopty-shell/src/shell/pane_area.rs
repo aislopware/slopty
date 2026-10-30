@@ -2,6 +2,12 @@
 //! given, in the frame it is given them (so a pane never trails the window by a frame), draws each
 //! pane at its rectangle, and draws and drags the dividers between them (Ghostty's craft:
 //! `docs/decisions/layout.md`, "One session per view, splits on demand").
+#![allow(
+    clippy::clone_on_ref_ptr,
+    clippy::expect_used,
+    clippy::renamed_function_params,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -22,7 +28,7 @@ type OnEqualize = Rc<dyn Fn(&mut Window, &mut App)>;
 type OnHold = Rc<dyn Fn(Pane, Pixels, &mut App)>;
 
 /// The panes of one view, drawn: see the module.
-pub(crate) struct PaneArea {
+pub struct PaneArea {
     id: ElementId,
     panes: Panes,
     grid: Option<Grid>,
@@ -46,7 +52,7 @@ const RING: f32 = 1.5;
 /// A divider being dragged: its split's place in the tree, its axis and the split's rectangle.
 type Dragging = Rc<RefCell<Option<(Vec<bool>, Axis, Bounds<Pixels>)>>>;
 
-pub(crate) struct Prepainted {
+pub struct Prepainted {
     laid: Laid,
     children: Vec<(Bounds<Pixels>, AnyElement)>,
     grabs: Vec<(Divider, Hitbox)>,

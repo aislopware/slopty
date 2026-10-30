@@ -1,6 +1,16 @@
 //! Finding sessions: by their titles, projects, branches and machines
 //! ([`Shell::thread_matches`]), and by what was said in them (`SearchChats`, [`ChatWordsQuery`]).
 //! The palette lists both today; the session picker is to take them up.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::string_slice,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice A"
+)]
 
 use super::*;
 use crate::state::EngineHandle;
@@ -122,7 +132,7 @@ impl ChatWordsQuery {
 
     /// Start a request; the returned generation identifies its answer. Rows from the last
     /// answer stay up meanwhile.
-    fn begin(&mut self) -> u64 {
+    const fn begin(&mut self) -> u64 {
         self.generation += 1;
         self.loading = true;
         self.generation
@@ -197,8 +207,10 @@ impl Shell {
             .filter_map(|chat| {
                 let fields = thread_search::ThreadFields {
                     title: chat.title.as_deref().unwrap_or("New session"),
-                    project: state.space_for_chat(chat).map(|s| s.display_name()).unwrap_or(""),
-                    branch: super::sidebar_status::branch_of(chat).unwrap_or(""),
+                    project: state
+                        .space_for_chat(chat)
+                        .map_or("", slopty_view_proto::Space::display_name),
+                    branch: sidebar_status::branch_of(chat).unwrap_or(""),
                     device: state.device_name(&chat.device_id).unwrap_or(""),
                     archived: chat.archived,
                 };

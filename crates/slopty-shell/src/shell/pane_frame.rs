@@ -2,6 +2,13 @@
 //! view, splits on demand" and "No permanent right column"): the tree each view holds
 //! ([`super::panes`]), the shells opened beside a session, the keys that split, zoom, walk and
 //! close, the views summoned beside the terminal, and each pane drawn with its header.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::needless_pass_by_ref_mut,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{Hsla, size};
 
@@ -210,7 +217,7 @@ impl Shell {
             Pane::Shell(n) => {
                 self.panes_mut(cx).close(pane);
                 if let Some(shell) = self.pane_shells.remove(&n) {
-                    shell.update(cx, |shell, cx| shell.close_shown(cx));
+                    shell.update(cx, TerminalPanel::close_shown);
                 }
                 self.pane_keyboard_pending = true;
                 cx.notify();
@@ -416,7 +423,7 @@ impl Shell {
             .flex_row()
             .items_center()
             .gap(px(2.0 + 2.0 * reach))
-            .when(!focused, |el| el.invisible().group_hover(group.clone(), |style| style.visible()))
+            .when(!focused, |el| el.invisible().group_hover(group.clone(), Styled::visible))
             .child(zoom)
             // Named by what it closes, so a screen reader tells one pane's from another's.
             .when(pane != Pane::Session, |el| {

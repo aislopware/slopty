@@ -1,7 +1,15 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! The keyboard among a session's panes, through the shell's real panes and key dispatch,
 //! without booting an engine.
-use gpui::{AppContext, TestAppContext, VisualTestContext};
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assertions_on_result_states,
+    clippy::cast_possible_wrap,
+    clippy::needless_pass_by_ref_mut,
+    reason = "shell lint migration: slice A"
+)]
+use gpui::{TestAppContext, VisualTestContext};
 
 use super::panes::{Direction, Pane};
 use super::*;
@@ -94,7 +102,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                     .into();
             });
             shell.active_chat = "parent".into();
-            crate::motion::set_reduced_motion(cx, true);
+            motion::set_reduced_motion(cx, true);
             shell
         });
         NavigationHost { shell, _data_dir: dir }
@@ -198,7 +206,7 @@ fn escape_in_a_view_gives_the_keyboard_back_to_the_terminal(cx: &mut TestAppCont
     draw(cx);
     keyboard_in(&shell, cx, Pane::Session);
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.panes_now(cx).views().len(), 2, "the views stay")
+        assert_eq!(shell.panes_now(cx).views().len(), 2, "the views stay");
     });
 }
 
@@ -214,7 +222,7 @@ fn a_press_on_a_pane_s_header_gives_it_the_keyboard(cx: &mut TestAppContext) {
     ] {
         let at = cx.debug_bounds(header).unwrap_or_else(|| panic!("{header} drawn"));
         cx.simulate_click(
-            gpui::point(at.left() + gpui::px(40.0), at.center().y),
+            gpui::point(at.left() + px(40.0), at.center().y),
             gpui::Modifiers::default(),
         );
         draw(cx);
@@ -268,7 +276,7 @@ fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
             shell.close_view(RightSurface::Diff(1), cx);
             assert_eq!(shell.panes_now(cx).views(), [RightSurface::Diff(2)]);
             assert_eq!(shell.closed_tabs.len(), 1);
-        })
+        });
     });
     draw(cx);
     cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
@@ -374,7 +382,7 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| state.set_test_engine(engine));
             shell.set_chat_archived("parent".into(), true, cx);
-        })
+        });
     });
     cx.run_until_parked();
     cx.update(|_, cx| {
@@ -441,7 +449,7 @@ fn a_diff_given_the_keyboard_has_the_diffs_keys(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(keyboard_in_changes(cx));
-    cx.simulate_keystrokes(&crate::settings::platform_combo("mod-f"));
+    cx.simulate_keystrokes(&platform_combo("mod-f"));
     cx.run_until_parked();
     let changes = cx.update(|_, cx| shell.read(cx).diffs.get(&2).cloned().unwrap());
     assert!(

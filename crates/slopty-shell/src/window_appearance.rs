@@ -10,6 +10,15 @@
 //! carries it as its own only while it is not already the application's. The theme follows the
 //! application, never a window ([`crate::appearance`]), so a window's own appearance never turns
 //! the theme, and over no session the window wears the theme's appearance.
+#![allow(
+    missing_copy_implementations,
+    clippy::default_trait_access,
+    clippy::option_option,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unreadable_literal,
+    reason = "shell lint migration: slice A"
+)]
 
 use gpui::{App, Hsla, Window, WindowAppearance};
 
@@ -136,11 +145,7 @@ mod tests {
         show(&view, Some(base03()), cx);
         assert_eq!(window_appearance(cx), Appearance::Dark, "the window wears the program's dark");
         assert_eq!(theme(cx), Appearance::Light, "the theme stays the app's");
-        assert_eq!(
-            cx.update(|_, cx| crate::appearance::app(cx)),
-            Appearance::Light,
-            "so does the app"
-        );
+        assert_eq!(cx.update(|_, cx| appearance::app(cx)), Appearance::Light, "so does the app");
 
         let own_ground = cx.update(|_, cx| Theme::of(cx).terminal.background);
         show(&view, Some(own_ground), cx);

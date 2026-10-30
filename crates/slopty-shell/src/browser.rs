@@ -1,5 +1,23 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Device-local browser tabs. GPUI owns chrome; the native host owns pages.
+#![allow(
+    let_underscore_drop,
+    missing_copy_implementations,
+    missing_debug_implementations,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assigning_clones,
+    clippy::derive_partial_eq_without_eq,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::partial_pub_fields,
+    clippy::unused_self,
+    clippy::unwrap_used,
+    reason = "shell lint migration: slice A"
+)]
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -9,7 +27,8 @@ pub(crate) mod profile;
 mod view;
 
 use gpui::{
-    App, AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, Subscription,
+    Window,
 };
 use model::{PageState, Presentation};
 
@@ -188,7 +207,7 @@ impl BrowserSurface {
         self.page.url.as_deref()
     }
 
-    pub fn set_remote(&mut self, remote: bool) {
+    pub const fn set_remote(&mut self, remote: bool) {
         self.remote = remote;
     }
 
@@ -258,17 +277,15 @@ impl BrowserSurface {
                     while let Some(value) = updates.recv().await {
                         if let Ok(snapshot) =
                             serde_json::from_value::<slopty_view_proto::PreviewSnapshot>(value)
-                        {
-                            if this
+                            && this
                                 .update(cx, |this, cx| {
                                     this.previews = snapshot;
                                     this.previews_loading = false;
                                     cx.notify();
                                 })
                                 .is_err()
-                            {
-                                return;
-                            }
+                        {
+                            return;
                         }
                     }
                 }
@@ -317,11 +334,11 @@ impl BrowserSurface {
                         native.present(self.presentation);
                         self.native = Some(native);
                     })
-                    .and_then(|_| self.native.as_ref().unwrap().load(&url))
+                    .and_then(|()| self.native.as_ref().unwrap().load(&url))
             };
             self.page.loading = result.is_ok();
             if let Err(error) = result {
-                self.page.error = Some(error.to_string());
+                self.page.error = Some(error);
             }
             window.focus(&self.focus, cx);
         }
@@ -432,10 +449,10 @@ impl BrowserSurface {
                     self.favicon_task = None;
                 }
                 if !self.address.focus_handle(cx).is_focused(window) {
-                    if let Some(url) = &page.url {
-                        if self.address.read(cx).text() != url {
-                            self.address.update(cx, |input, cx| input.set_text(url.clone(), cx));
-                        }
+                    if let Some(url) = &page.url
+                        && self.address.read(cx).text() != url
+                    {
+                        self.address.update(cx, |input, cx| input.set_text(url.clone(), cx));
                     }
                     self.address_edited = false;
                 }

@@ -3,10 +3,16 @@
 //! glows: the theme's accent high on the left, and a cool blue and a warm clay rising from
 //! beyond its right edge. In dark, a hairline of the text's own ink rings it. A high-contrast
 //! theme, or a system asked for more contrast or less transparency, keeps the flat wash.
+#![allow(
+    clippy::cfg_not_test,
+    clippy::float_cmp,
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "shell lint migration: slice B"
+)]
 
 use gpui::{
-    App, Background, Bounds, Hsla, IntoElement, Pixels, Styled, Window, canvas, fill, point, px,
-    size,
+    App, Background, Bounds, Hsla, IntoElement, Pixels, Styled as _, Window, canvas, fill, point,
+    px, size,
 };
 
 use crate::theme::{Appearance, Theme};
@@ -55,7 +61,7 @@ fn strength(scale: f32) -> f32 {
     if scale >= 2.0 { 1.0 } else { 0.3 }
 }
 
-fn light(light: Light, accent: Hsla) -> Hsla {
+const fn light(light: Light, accent: Hsla) -> Hsla {
     match light {
         Light::Accent => accent,
         Light::Cool => Hsla { h: COOL_HUE, ..accent },
@@ -107,7 +113,7 @@ fn lit_under(theme: &Theme, plain: bool) -> bool {
 
 /// The light over a bubble with corners `radius`, laid over its whole box and under its words,
 /// or nothing when the bubble stays flat.
-pub(crate) fn light_over(radius: Pixels, theme: &Theme) -> Option<impl IntoElement + use<>> {
+pub fn light_over(radius: Pixels, theme: &Theme) -> Option<impl IntoElement + use<>> {
     if !lit_under(theme, plain_display()) {
         return None;
     }

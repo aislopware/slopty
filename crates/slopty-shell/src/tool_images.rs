@@ -6,6 +6,21 @@
 //! Collapsing starts a short grace; when it lapses the CPU frame and the GPU
 //! atlas tiles are released. Rapid toggling inside the grace reuses the
 //! texture instead of re-reading and re-decoding the file.
+#![allow(
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::expect_used,
+    clippy::format_collect,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::unused_result_ok,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -18,12 +33,12 @@ use slopty_view_proto::ToolCall;
 use crate::state::EngineHandle;
 
 /// Previews per chip; further paths stay in the text output.
-pub(crate) const MAX_IMAGES_PER_TOOL: usize = 4;
+pub const MAX_IMAGES_PER_TOOL: usize = 4;
 /// Decoded thumbnail bounds: the 560×220 frame at 2× density (≤ 1.9 MiB
 /// BGRA per copy).
 const THUMB_MAX: (u32, u32) = (1120, 440);
 /// Collapsed chips keep pixels this long, so open/close spam never re-decodes.
-pub(crate) const RELEASE_GRACE: Duration = Duration::from_millis(600);
+pub const RELEASE_GRACE: Duration = Duration::from_millis(600);
 /// Expanded-but-offscreen previews may be dropped past this (CPU + GPU bytes).
 const BUDGET_BYTES: usize = 64 * 1024 * 1024;
 /// Only previews unpainted this long count as offscreen. List overdraw paints
@@ -34,7 +49,7 @@ const STALE_AFTER: Duration = Duration::from_secs(2);
 const IMAGE_EXTENSIONS: [&str; 9] =
     ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "tif", "tiff"];
 
-pub(crate) fn is_image_path(path: &str) -> bool {
+pub fn is_image_path(path: &str) -> bool {
     let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     name.rsplit_once('.').is_some_and(|(stem, ext)| {
         !stem.is_empty() && IMAGE_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e))
@@ -115,7 +130,7 @@ fn push_json_paths(out: &mut Vec<SharedString>, value: &serde_json::Value) {
 
 /// The image files a tool call touched, as reported (possibly relative to the
 /// chat's working directory). Computed once per row build, never per paint.
-pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedString]> {
+pub fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedString]> {
     let mut out = Vec::new();
     match call {
         ToolCall::ReadFile { path }
@@ -124,7 +139,7 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
         | ToolCall::ApplyPatch { path: Some(path) } => push_path(&mut out, path),
         ToolCall::Exec { command } => push_text_paths(&mut out, command),
         ToolCall::Mcp { input: Some(input), .. } | ToolCall::Unknown { input: Some(input), .. } => {
-            push_json_paths(&mut out, input)
+            push_json_paths(&mut out, input);
         }
         _ => {}
     }
@@ -136,7 +151,7 @@ pub(crate) fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedS
 
 /// Absolute path on the owning host. Relative paths join the chat's cwd in
 /// that host's separator style (the UI may run on another OS).
-pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
+pub fn resolve_path(path: &str, cwd: Option<&str>) -> String {
     let bytes = path.as_bytes();
     let absolute = path.starts_with(['/', '\\'])
         || (bytes.len() >= 3
@@ -156,14 +171,14 @@ pub(crate) fn resolve_path(path: &str, cwd: Option<&str>) -> String {
 
 /// One file on one device.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ImageKey {
+pub struct ImageKey {
     pub device: String,
     pub path: String,
 }
 
 /// What a frame paints for one key.
 #[derive(Clone)]
-pub(crate) enum Thumb {
+pub enum Thumb {
     /// Its shape once its first bytes said it, so its room can be the final one.
     Loading {
         aspect: Option<f32>,
@@ -177,7 +192,7 @@ pub(crate) enum Thumb {
 
 enum State {
     /// The read/decode task; dropping it cancels the load.
-    Loading(#[allow(dead_code)] Task<()>, Option<f32>),
+    Loading(#[expect(dead_code)] Task<()>, Option<f32>),
     Ready {
         image: Arc<RenderImage>,
         aspect: f32,
@@ -194,13 +209,13 @@ struct Entry {
 }
 
 /// Where loads go: the engine and this device's id (remote owners relay).
-pub(crate) struct Loader {
+pub struct Loader {
     pub engine: Option<EngineHandle>,
     pub local_device: Option<String>,
 }
 
 #[derive(Default)]
-pub(crate) struct ToolImages {
+pub struct ToolImages {
     entries: HashMap<ImageKey, Entry>,
     /// Expanded chip (`{row}#d{ix}`) → the keys it shows.
     holders: HashMap<SharedString, Vec<ImageKey>>,
@@ -214,7 +229,7 @@ impl ToolImages {
     }
 
     #[cfg(test)]
-    pub(crate) fn retained_bytes(&self) -> usize {
+    pub(crate) const fn retained_bytes(&self) -> usize {
         self.bytes
     }
 
@@ -225,7 +240,7 @@ impl ToolImages {
         chip: &SharedString,
         keys: Vec<ImageKey>,
         loader: &Loader,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) -> Vec<Thumb> {
         let now = cx.background_executor().now();
@@ -261,7 +276,7 @@ impl ToolImages {
     pub(crate) fn release<V: 'static>(
         &mut self,
         chip: &SharedString,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         let Some(keys) = self.holders.remove(chip) else {
@@ -274,7 +289,7 @@ impl ToolImages {
     fn start_grace<V: 'static>(
         &mut self,
         keys: Vec<ImageKey>,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         let at = cx.background_executor().now() + RELEASE_GRACE;
@@ -293,7 +308,7 @@ impl ToolImages {
     pub(crate) fn release_row<V: 'static>(
         &mut self,
         row: &str,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         if self.holders.is_empty() {
@@ -310,7 +325,7 @@ impl ToolImages {
     pub(crate) fn retain_rows<V: 'static>(
         &mut self,
         live: impl Fn(&str) -> bool,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         if self.holders.is_empty() {
@@ -336,7 +351,7 @@ impl ToolImages {
         &mut self,
         key: ImageKey,
         loader: &Loader,
-        get: fn(&mut V) -> &mut ToolImages,
+        get: fn(&mut V) -> &mut Self,
         cx: &mut Context<V>,
     ) {
         let Some(engine) = loader.engine.clone() else {
@@ -473,11 +488,7 @@ impl ToolImages {
 
     /// One timer for the earliest pending release. Grace is constant, so a
     /// later release never precedes the one already scheduled.
-    fn schedule_sweep<V: 'static>(
-        &mut self,
-        get: fn(&mut V) -> &mut ToolImages,
-        cx: &mut Context<V>,
-    ) {
+    fn schedule_sweep<V: 'static>(&mut self, get: fn(&mut V) -> &mut Self, cx: &mut Context<V>) {
         if self.sweeper.is_some() {
             return;
         }
@@ -507,7 +518,7 @@ fn retained_bytes(image: &RenderImage) -> usize {
     image.as_bytes(0).map_or(0, |b| b.len() * 2)
 }
 
-fn state_bytes(state: &State) -> usize {
+const fn state_bytes(state: &State) -> usize {
     match state {
         State::Ready { bytes, .. } => *bytes,
         _ => 0,
@@ -557,7 +568,7 @@ fn decode_thumbnail(mime: &str, bytes: Vec<u8>) -> Option<(Arc<RenderImage>, f32
         decoded
     };
     let mut pixels = decoded.into_rgba8();
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
     Some((
@@ -573,7 +584,7 @@ mod tests {
     use super::*;
 
     fn paths(call: ToolCall, output: Option<&str>) -> Vec<String> {
-        image_paths(&call, output).iter().map(|p| p.to_string()).collect()
+        image_paths(&call, output).iter().map(ToString::to_string).collect()
     }
 
     #[test]

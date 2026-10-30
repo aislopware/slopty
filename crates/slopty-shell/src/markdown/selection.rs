@@ -13,9 +13,18 @@
 //!
 //! This module is the pure state half (gpui-free, unit-tested); the
 //! registry, geometry and mouse listeners live in `render.rs`.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::significant_drop_tightening,
+    clippy::string_slice,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::ops::Range;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+use parking_lot::Mutex;
 
 /// One element's slice of the selection, in document order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,13 +64,13 @@ fn state() -> &'static Mutex<Option<MdSelection>> {
 /// Selection state is process-global; tests that exercise its lifecycle must
 /// not race each other.
 #[cfg(test)]
-pub(crate) fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_state_lock() -> parking_lot::MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
-    let held = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let held = LOCK.lock();
     // Each holder starts with no selection, as a new app does. The state is the
     // process's, which keeps it across a `#[gpui::test]`'s seeds: the drag one seed left open
     // read as the next one's (the nightly's GPUI seeds, 2026-10-29).
-    *state().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *state().lock() = None;
     held
 }
 
@@ -79,11 +88,7 @@ pub fn resolve_spans(elements: &[(&str, &str)], a: (usize, usize), b: (usize, us
         // fences register one element per source line, so a blank line must
         // contribute its newline when a selection crosses it.
         if from < to || (ei > start.0 && ei < end.0) {
-            spans.push(Span {
-                key: (*key).to_string(),
-                range: from..to,
-                text: (*text).to_string(),
-            });
+            spans.push(Span { key: (*key).to_owned(), range: from..to, text: (*text).to_owned() });
         }
     }
     spans
@@ -96,9 +101,9 @@ pub fn begin(key: &str, ix: usize) {
 
 /// `begin` on one of several surfaces painted in the same frame.
 pub(crate) fn begin_in(surface: u64, key: &str, ix: usize) {
-    *state().lock().unwrap() = Some(MdSelection {
+    *state().lock() = Some(MdSelection {
         surface,
-        anchor_key: key.to_string(),
+        anchor_key: key.to_owned(),
         anchor_ix: ix,
         dragging: true,
         forward: None,
@@ -113,35 +118,35 @@ pub fn begin_with_span(key: &str, text: &str, range: Range<usize>) {
 
 /// `begin_with_span` on one of several surfaces painted in the same frame.
 pub(crate) fn begin_with_span_in(surface: u64, key: &str, text: &str, range: Range<usize>) {
-    *state().lock().unwrap() = Some(MdSelection {
+    *state().lock() = Some(MdSelection {
         surface,
-        anchor_key: key.to_string(),
+        anchor_key: key.to_owned(),
         anchor_ix: range.start,
         dragging: true,
         forward: None,
-        spans: vec![Span { key: key.to_string(), range, text: text.to_string() }],
+        spans: vec![Span { key: key.to_owned(), range, text: text.to_owned() }],
     });
 }
 
 /// The live drag's anchor, if `key` owns it: `(anchor byte offset)`.
 pub fn drag_anchor(key: &str) -> Option<usize> {
-    let guard = state().lock().unwrap();
+    let guard = state().lock();
     let sel = guard.as_ref()?;
     (sel.dragging && sel.anchor_key == key).then_some(sel.anchor_ix)
 }
 
 pub(crate) fn anchor_key() -> Option<String> {
-    state().lock().unwrap().as_ref().map(|s| s.anchor_key.clone())
+    state().lock().as_ref().map(|s| s.anchor_key.clone())
 }
 
 /// The surface the selection lives in (0 when there is none).
 pub(crate) fn anchor_surface() -> u64 {
-    state().lock().unwrap().as_ref().map_or(0, |s| s.surface)
+    state().lock().as_ref().map_or(0, |s| s.surface)
 }
 
 /// Whether a markdown selection drag is currently in flight.
 pub fn is_dragging() -> bool {
-    state().lock().unwrap().as_ref().is_some_and(|selection| selection.dragging)
+    state().lock().as_ref().is_some_and(|selection| selection.dragging)
 }
 
 /// Resolve a drag head against this frame's visible elements.
@@ -152,7 +157,7 @@ pub fn is_dragging() -> bool {
 /// overlap preserves text that is no longer painted while allowing newly
 /// visible elements at the drag edge to join the selection.
 pub fn update_drag(elements: &[(&str, &str)], head: (usize, usize)) -> bool {
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock();
     let Some(selection) = guard.as_mut().filter(|selection| selection.dragging) else {
         return false;
     };
@@ -213,7 +218,7 @@ fn extend_virtualized_drag(
 
 /// Replace the resolved spans (drag update). Returns true if they changed.
 pub fn update_spans(spans: Vec<Span>) -> bool {
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock();
     let Some(sel) = guard.as_mut() else {
         return false;
     };
@@ -226,7 +231,7 @@ pub fn update_spans(spans: Vec<Span>) -> bool {
 
 /// End the drag for `key`'s claim; returns the joined text if non-empty.
 pub fn end_drag(key: &str) -> Option<String> {
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock();
     let sel = guard.as_mut()?;
     if sel.anchor_key != key || !sel.dragging {
         return None;
@@ -242,7 +247,7 @@ pub fn end_drag(key: &str) -> Option<String> {
 /// End whichever drag is active, even when virtualization has removed the
 /// anchor element (and therefore its frame-scoped mouse-up listener).
 pub fn end_active_drag() -> Option<String> {
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock();
     let sel = guard.as_mut()?;
     if !sel.dragging {
         return None;
@@ -258,7 +263,7 @@ pub fn end_active_drag() -> Option<String> {
 /// Clear if `key` owns a settled selection (a mouse-down landed outside the
 /// owner; the element the down landed IN claims right after). True if cleared.
 pub fn clear_if_owner(key: &str) -> bool {
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock();
     if guard.as_ref().is_some_and(|s| s.anchor_key == key && !s.dragging) {
         *guard = None;
         return true;
@@ -269,14 +274,14 @@ pub fn clear_if_owner(key: &str) -> bool {
 /// The wash range for `key` painted on `surface` this frame (empty ⇒ nothing
 /// to paint). Another surface showing the same key stays unwashed.
 pub fn wash_range(surface: u64, key: &str) -> Option<Range<usize>> {
-    let guard = state().lock().unwrap();
+    let guard = state().lock();
     let sel = guard.as_ref().filter(|sel| sel.surface == surface)?;
     sel.spans.iter().find(|s| s.key == key && !s.range.is_empty()).map(|s| s.range.clone())
 }
 
 /// The full selected text (Cmd+C), spans joined in document order.
 pub fn selected_text() -> Option<String> {
-    let guard = state().lock().unwrap();
+    let guard = state().lock();
     let sel = guard.as_ref()?;
     if sel.spans.iter().all(|s| s.range.is_empty()) {
         return None;
@@ -312,14 +317,12 @@ pub fn word_range(text: &str, ix: usize) -> Range<usize> {
         .rev()
         .take_while(|(_, c)| is_word(*c))
         .last()
-        .map(|(i, _)| i)
-        .unwrap_or(ix);
+        .map_or(ix, |(i, _)| i);
     let end = text[ix..]
         .char_indices()
         .take_while(|(_, c)| is_word(*c))
         .last()
-        .map(|(i, c)| ix + i + c.len_utf8())
-        .unwrap_or(ix);
+        .map_or(ix, |(i, c)| ix + i + c.len_utf8());
     start..end
 }
 

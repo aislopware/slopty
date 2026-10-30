@@ -11,6 +11,19 @@
 //! its group, its detail when the match lies there) and puts the trace's cursor on it. Two
 //! filters, failed steps only and steps of one kind, share the match: with either on, only the
 //! steps it keeps match, each one a match by itself while no words are typed.
+#![allow(
+    let_underscore_drop,
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_wrap,
+    clippy::derive_partial_eq_without_eq,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::unused_self,
+    clippy::used_underscore_binding,
+    reason = "shell lint migration: slice B"
+)]
 
 use gpui::prelude::*;
 use gpui::{
@@ -41,7 +54,7 @@ gpui::actions!(
 
 /// What kind of step the kind filter keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StepKind {
+pub enum StepKind {
     Command,
     Edit,
     Read,
@@ -98,7 +111,7 @@ impl StepKind {
 
 /// What the filters keep: failed steps only, steps of one kind only, or both.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Filter {
+pub struct Filter {
     pub(crate) failed: bool,
     pub(crate) kind: Option<StepKind>,
 }
@@ -118,7 +131,7 @@ impl Filter {
 
 /// One place find counts matches in: a row's text, one step of a group, or a subagent's row.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Hit {
+pub struct Hit {
     pub(crate) row: SharedString,
     /// The step's part id, when the matches are one step's of a group.
     pub(crate) step: Option<String>,
@@ -131,7 +144,7 @@ pub(crate) struct Hit {
 
 /// The open find of one transcript.
 #[derive(Default)]
-pub(crate) struct FindState {
+pub struct FindState {
     pub(super) open: bool,
     input: Option<Entity<ComposerInput>>,
     _events: Option<Subscription>,
@@ -180,7 +193,7 @@ impl FindState {
 }
 
 /// The texts a row paints, one per text element, in paint order (what find looks through).
-pub(crate) fn row_texts(row: &Row) -> Vec<String> {
+pub fn row_texts(row: &Row) -> Vec<String> {
     match &row.kind {
         RowKind::User { text, .. } => vec![text.to_string()],
         RowKind::Markdown { tree, block_ix } | RowKind::LiveMarkdown { tree, block_ix } => {
@@ -223,7 +236,7 @@ fn step_body(tool: &ToolItem) -> Vec<String> {
             }
             ToolDetail::Stats { stats } => out.extend(stats.iter().map(|stat| stat.path.clone())),
             ToolDetail::Json { lines, .. } => {
-                out.extend(lines.iter().map(|line| line.text.clone()))
+                out.extend(lines.iter().map(|line| line.text.clone()));
             }
         }
     }
@@ -263,7 +276,7 @@ fn step_hit(
 /// what each row says and each step's line and detail; with one, only the steps it keeps (and,
 /// for failed steps alone, the errors the turn met), each a match by itself when `needle` is
 /// empty.
-pub(crate) fn hits(rows: &[Row], needle: &str, filter: Filter) -> Vec<Hit> {
+pub fn hits(rows: &[Row], needle: &str, filter: Filter) -> Vec<Hit> {
     let mut out = Vec::new();
     for row in rows {
         match &row.kind {
@@ -335,7 +348,7 @@ impl Global for FindTarget {}
 
 /// Whether the transcript find's keys reach has its find open: ⇧⌘G steps back in it then, and
 /// is Go to Directory otherwise (`shell::picker`).
-pub(crate) fn find_open(cx: &App) -> bool {
+pub fn find_open(cx: &App) -> bool {
     cx.try_global::<FindTarget>()
         .and_then(|target| target.0.upgrade())
         .is_some_and(|transcript| transcript.read(cx).find.open)
@@ -378,10 +391,10 @@ impl Transcript {
         let app: &mut App = cx;
         app.on_action(|_: &FindInThread, cx| with_target(cx, Self::open_find));
         app.on_action(|_: &FindNext, cx| {
-            with_target(cx, |this, window, cx| this.find_step(1, window, cx))
+            with_target(cx, |this, window, cx| this.find_step(1, window, cx));
         });
         app.on_action(|_: &FindPrevious, cx| {
-            with_target(cx, |this, window, cx| this.find_step(-1, window, cx))
+            with_target(cx, |this, window, cx| this.find_step(-1, window, cx));
         });
     }
 
@@ -405,10 +418,10 @@ impl Transcript {
                         cx.notify();
                     }
                     ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
-                        this.find_step(1, window, cx)
+                        this.find_step(1, window, cx);
                     }
                     ComposerInputEvent::MentionNavigate(delta) => {
-                        this.find_step(*delta, window, cx)
+                        this.find_step(*delta, window, cx);
                     }
                     ComposerInputEvent::MentionDismiss => this.close_find(window, cx),
                     _ => {}
@@ -429,7 +442,7 @@ impl Transcript {
                 input.update(cx, |input, cx| input.set_text(selected, cx));
             }
         }
-        input.update(cx, |input, cx| input.select_all_text(cx));
+        input.update(cx, ComposerInput::select_all_text);
         window.focus(&input.focus_handle(cx), cx);
         self.refresh_find(cx);
         cx.notify();
@@ -574,7 +587,7 @@ impl Transcript {
     }
 
     /// Whether find is open, its card over the transcript's top right.
-    pub(super) fn finding(&self) -> bool {
+    pub(super) const fn finding(&self) -> bool {
         self.find.open
     }
 
@@ -904,16 +917,16 @@ mod tests {
     #[gpui::test]
     fn find_opens_from_the_windows_keys_key_or_not(cx: &mut gpui::TestAppContext) {
         use gpui::prelude::*;
-        struct Fixture(Entity<Transcript>, gpui::FocusHandle);
-        impl gpui::Render for Fixture {
+        struct Fixture(Entity<Transcript>, FocusHandle);
+        impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                gpui::div().size_full().track_focus(&self.1).child(self.0.clone())
+                div().size_full().track_focus(&self.1).child(self.0.clone())
             }
         }
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::dark());
+            cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             cx.set_reduce_motion(true);
         });

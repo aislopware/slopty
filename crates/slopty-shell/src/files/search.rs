@@ -1,4 +1,20 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+#![allow(
+    let_underscore_drop,
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::let_underscore_must_use,
+    clippy::let_underscore_untyped,
+    clippy::needless_pass_by_ref_mut,
+    clippy::partial_pub_fields,
+    clippy::suboptimal_flops,
+    reason = "shell lint migration: slice C"
+)]
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -89,7 +105,7 @@ impl SearchTreeModel {
                     })
                     .or_insert_with(|| SearchTreeNode {
                         path: path.clone(),
-                        name: if is_match { result.name.clone() } else { component.to_string() },
+                        name: if is_match { result.name.clone() } else { component.to_owned() },
                         kind: if is_match { result.kind } else { WorkspaceEntryKind::Directory },
                         score: is_match.then_some(result.score),
                         best_score: result.score,
@@ -124,11 +140,11 @@ impl SearchTreeModel {
     }
 
     fn toggle(&mut self, path: &str) -> bool {
-        if !self.nodes.get(path).is_some_and(|node| !node.children.is_empty()) {
+        if self.nodes.get(path).is_none_or(|node| node.children.is_empty()) {
             return false;
         }
         if !self.collapsed.remove(path) {
-            self.collapsed.insert(path.to_string());
+            self.collapsed.insert(path.to_owned());
         }
         self.rebuild_rows();
         true
@@ -265,7 +281,7 @@ impl FileSearchState {
 
 impl FilesSurface {
     pub(super) fn on_search_edited(&mut self, cx: &mut Context<Self>) {
-        let query = self.search.read(cx).text().trim().to_string();
+        let query = self.search.read(cx).text().trim().to_owned();
         if self.search_state.query == query {
             return;
         }
@@ -661,8 +677,8 @@ mod tests {
 
     fn search_match(path: &str, kind: WorkspaceEntryKind, score: i64) -> WorkspaceFileSearchMatch {
         WorkspaceFileSearchMatch {
-            path: path.to_string(),
-            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            path: path.to_owned(),
+            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
             kind,
             score,
         }
@@ -737,7 +753,7 @@ mod reveal_tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use gpui::{AppContext, TestAppContext};
+    use gpui::TestAppContext;
 
     use super::*;
     use crate::files::FilesEvent;

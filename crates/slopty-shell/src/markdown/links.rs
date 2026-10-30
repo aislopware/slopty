@@ -1,5 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Original content and validated navigation are deliberately separate.
+#![allow(missing_docs, reason = "shell lint migration: slice C")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkTarget {
     pub label: String,

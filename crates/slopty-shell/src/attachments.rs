@@ -6,16 +6,40 @@
 //! ([`parse_user_message_images`]); the decoded images are cached by `(deviceId, path)`.
 //!
 //! TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    rustdoc::private_intra_doc_links,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::assertions_on_result_states,
+    clippy::assigning_clones,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::default_trait_access,
+    clippy::field_scoped_visibility_modifiers,
+    clippy::implicit_hasher,
+    clippy::indexing_slicing,
+    clippy::needless_pass_by_value,
+    clippy::partial_pub_fields,
+    clippy::significant_drop_tightening,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    clippy::unreachable,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use gpui::prelude::*;
 use gpui::{AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Size, div, px};
+use parking_lot::Mutex;
 use slopty_view_rpc::methods;
 
 use crate::state::EngineHandle;
@@ -57,7 +81,7 @@ fn format_by_extension(path: &Path) -> Option<ImageFormat> {
 #[cfg(test)]
 pub(crate) fn with_attachments(text: &str, paths: &[String]) -> String {
     if paths.is_empty() {
-        return text.to_string();
+        return text.to_owned();
     }
     let refs: Vec<String> = paths.iter().map(|p| format!("- {p}")).collect();
     format!("{text}\n\nAttached images (local files — open them to view):\n{}", refs.join("\n"))
@@ -80,7 +104,7 @@ pub struct ParsedUserMessage {
 
 fn name_from_path(path: &str) -> String {
     let name = path.rsplit(['/', '\\']).next().map(str::trim).unwrap_or_default();
-    if name.is_empty() { "image".to_string() } else { name.to_string() }
+    if name.is_empty() { "image".to_owned() } else { name.to_owned() }
 }
 
 /// Find the refs trailer: a blank line, then a line starting (case-insensitive)
@@ -89,12 +113,11 @@ fn name_from_path(path: &str) -> String {
 fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
     let lower = content.to_ascii_lowercase();
     let needle = "\n\nattached images (local files";
-    let mut from = 0usize;
+    let mut from = 0_usize;
     while let Some(rel) = lower[from..].find(needle) {
         let gap = from + rel;
         let line_start = gap + 2;
-        let line_end =
-            content[line_start..].find('\n').map(|p| line_start + p).unwrap_or(content.len());
+        let line_end = content[line_start..].find('\n').map_or(content.len(), |p| line_start + p);
         let line = content[line_start..line_end].trim_end_matches('\r');
         if line.ends_with("):") {
             let refs_start = (line_end + 1).min(content.len());
@@ -108,14 +131,14 @@ fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
 /// Split the visible prompt from its attachment-ref trailer.
 pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
     let Some((body_end, refs_start)) = find_refs_marker(content) else {
-        return ParsedUserMessage { text: content.to_string(), attachments: Vec::new() };
+        return ParsedUserMessage { text: content.to_owned(), attachments: Vec::new() };
     };
     let body = content[..body_end].trim_end();
     let attachments: Vec<UserImageAttachment> = content[refs_start..]
         .lines()
         .filter_map(|line| {
             let path = line.trim_start().strip_prefix("- ")?.trim();
-            (!path.is_empty()).then(|| path.to_string())
+            (!path.is_empty()).then(|| path.to_owned())
         })
         .enumerate()
         .map(|(index, path)| UserImageAttachment {
@@ -125,9 +148,9 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         })
         .collect();
     if attachments.is_empty() {
-        return ParsedUserMessage { text: content.to_string(), attachments };
+        return ParsedUserMessage { text: content.to_owned(), attachments };
     }
-    ParsedUserMessage { text: body.to_string(), attachments }
+    ParsedUserMessage { text: body.to_owned(), attachments }
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +226,7 @@ pub(crate) async fn read_attachment_bytes_with(
     let mut name = String::new();
     let mut mime = String::new();
     let mut b64 = String::new();
-    let mut offset = 0u64;
+    let mut offset = 0_u64;
     let mut done = false;
     for _ in 0..MAX_READ_CHUNKS {
         let params =
@@ -217,8 +240,8 @@ pub(crate) async fn read_attachment_bytes_with(
         )
         .await
         .ok()?;
-        name = chunk.get("name")?.as_str()?.to_string();
-        mime = chunk.get("mimeType")?.as_str()?.to_string();
+        name = chunk.get("name")?.as_str()?.to_owned();
+        mime = chunk.get("mimeType")?.as_str()?.to_owned();
         if expected_raster_mime.is_some_and(|expected| expected != mime) {
             return None;
         }
@@ -324,7 +347,7 @@ enum CacheEntry {
 }
 
 fn retry_delay(attempts: u32) -> Duration {
-    Duration::from_millis((2_000u64 << attempts.min(3)).min(15_000))
+    Duration::from_millis((2_000_u64 << attempts.min(3)).min(15_000))
 }
 
 /// Retained encoded bytes plus estimated CPU/GPU pixels for normalized PNG images.
@@ -390,7 +413,7 @@ impl ImageCache {
         if generated {
             self.generated_bytes = self.generated_bytes.saturating_add(bytes);
         }
-        let shielded = protected().lock().unwrap().clone();
+        let shielded = protected().lock().clone();
         // Separate budgets prevent protected legacy attachments from repeatedly
         // evicting visible generated previews, or vice versa.
         while (if generated {
@@ -435,8 +458,8 @@ fn cache() -> &'static Mutex<ImageCache> {
 /// claimed read as this one's (the nightly's GPUI seeds, 2026-10-29).
 #[cfg(test)]
 pub(crate) fn forget_for_test() {
-    *cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner) = ImageCache::default();
-    protected().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    *cache().lock() = ImageCache::default();
+    protected().lock().clear();
 }
 
 /// Keys shielded from LRU eviction — the open transcript's attachments. The
@@ -453,11 +476,11 @@ fn protected() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
 
 /// Replace the eviction shield with the given keys (see [`protected`]).
 pub fn protect_attachments(keys: std::collections::HashSet<(String, String)>) {
-    *protected().lock().unwrap() = keys;
+    *protected().lock() = keys;
 }
 
 pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnapshot {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = cache().lock();
     let tick = {
         cache.tick += 1;
         cache.tick
@@ -481,7 +504,7 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
 /// calling from a render path, since that window is detached from
 /// `App::windows` during its own update. Cheap when nothing was evicted.
 pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) {
-    let evicted = std::mem::take(&mut cache().lock().unwrap().pending_free);
+    let evicted = std::mem::take(&mut cache().lock().pending_free);
     for image in evicted {
         gpui::ImageSource::Image(image).evict(window.as_deref_mut(), cx);
     }
@@ -491,7 +514,7 @@ pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) 
 /// (the entry is marked Loading so concurrent renders don't double-fetch).
 /// Errored sources hand out a retry only after their backoff has elapsed.
 pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = cache().lock();
     let entry = cache.map.entry(source.clone());
     match entry {
         std::collections::hash_map::Entry::Vacant(v) => {
@@ -517,7 +540,7 @@ pub(crate) struct AttachmentLoadGuard(pub AttachmentKey);
 
 impl Drop for AttachmentLoadGuard {
     fn drop(&mut self) {
-        let mut cache = cache().lock().unwrap();
+        let mut cache = cache().lock();
         if let Some(entry @ CacheEntry::Loading { .. }) = cache.map.get_mut(&self.0) {
             let CacheEntry::Loading { attempts } = entry else { unreachable!() };
             *entry = CacheEntry::Error {
@@ -529,11 +552,11 @@ impl Drop for AttachmentLoadGuard {
 }
 
 pub(crate) fn store_loaded_for(source: &AttachmentKey, name: SharedString, image: Arc<Image>) {
-    cache().lock().unwrap().insert_loaded(source.clone(), CachedAttachmentImage { name, image });
+    cache().lock().insert_loaded(source.clone(), CachedAttachmentImage { name, image });
 }
 
 pub(crate) fn store_error_for(source: &AttachmentKey) {
-    let mut cache = cache().lock().unwrap();
+    let mut cache = cache().lock();
     let attempts = match cache.map.get(source) {
         Some(CacheEntry::Loading { attempts }) => attempts + 1,
         Some(CacheEntry::Error { attempts, .. }) => *attempts,
@@ -567,7 +590,7 @@ impl PreviewImage {
         Self { name: name.into(), image, viewer: Default::default(), plate: None }
     }
 
-    pub(crate) fn with_plate(mut self, plate: gpui::Hsla) -> Self {
+    pub(crate) const fn with_plate(mut self, plate: gpui::Hsla) -> Self {
         self.plate = Some(plate);
         self
     }
@@ -732,11 +755,11 @@ mod tests {
         closed: std::rc::Rc<std::cell::Cell<bool>>,
     }
 
-    impl gpui::Render for Shown {
+    impl Render for Shown {
         fn render(
             &mut self,
             window: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
+            cx: &mut Context<Self>,
         ) -> impl IntoElement {
             let closed = self.closed.clone();
             div().size_full().child(lightbox(
@@ -797,11 +820,11 @@ mod tests {
     #[gpui::test]
     fn the_lightbox_names_its_picture_just_under_it(cx: &mut gpui::TestAppContext) {
         struct Sized(PreviewImage, gpui::FocusHandle);
-        impl gpui::Render for Sized {
+        impl Render for Sized {
             fn render(
                 &mut self,
                 window: &mut gpui::Window,
-                cx: &mut gpui::Context<Self>,
+                cx: &mut Context<Self>,
             ) -> impl IntoElement {
                 let natural = Some(gpui::size(px(640.0), px(400.0)));
                 div().size_full().child(lightbox_with_size(
@@ -835,7 +858,7 @@ mod tests {
 
     #[test]
     fn with_attachments_round_trips_through_parse() {
-        let paths = vec!["/data/uploads/ab-cat.png".to_string(), "/x/dog.jpg".into()];
+        let paths = vec!["/data/uploads/ab-cat.png".to_owned(), "/x/dog.jpg".into()];
         let content = with_attachments("look at these", &paths);
         let parsed = parse_user_message_images(&content);
         assert_eq!(parsed.text, "look at these");
@@ -848,7 +871,7 @@ mod tests {
 
     #[test]
     fn a_message_of_only_pictures_has_no_words() {
-        let content = with_attachments("", &["/a/b.png".to_string()]);
+        let content = with_attachments("", &["/a/b.png".to_owned()]);
         let parsed = parse_user_message_images(&content);
         assert_eq!(parsed.text, "");
         assert_eq!(parsed.attachments.len(), 1);
@@ -895,8 +918,8 @@ mod tests {
         assert_eq!(retry_delay(0), Duration::from_millis(2_000));
         assert_eq!(retry_delay(1), Duration::from_millis(4_000));
         assert_eq!(retry_delay(2), Duration::from_millis(8_000));
-        assert_eq!(retry_delay(3), Duration::from_millis(15_000));
-        assert_eq!(retry_delay(9), Duration::from_millis(15_000));
+        assert_eq!(retry_delay(3), Duration::from_secs(15));
+        assert_eq!(retry_delay(9), Duration::from_secs(15));
     }
 }
 
@@ -1030,7 +1053,7 @@ mod generated_image_tests {
             params: serde_json::Value,
         ) -> Result<slopty_view_rpc::RpcReply, slopty_view_rpc::RpcError> {
             assert_eq!(method, methods::READ_ATTACHMENT_CHUNK);
-            self.calls.lock().unwrap().push(params);
+            self.calls.lock().push(params);
             slopty_view_rpc::RpcReply::value(
                 &serde_json::json!({"name":"generated.png", "mimeType":"image/png", "data":BASE64.encode(&self.bytes), "nextOffset": self.bytes.len(), "done":true}),
             )
@@ -1096,7 +1119,7 @@ mod generated_image_tests {
             )
             .await;
             assert_eq!(loaded.is_some(), succeeds);
-            let calls = calls.lock().unwrap();
+            let calls = calls.lock();
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0]["path"], "/profile/uploads/image.png");
             assert_eq!(calls[0].get("targetDeviceId").and_then(|v| v.as_str()), target);

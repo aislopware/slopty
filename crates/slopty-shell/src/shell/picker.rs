@@ -15,6 +15,20 @@
 //!   ⏎ opens a terminal there, or the agent ⇥ picks; ⌘[ and ⌘] step the machine.
 //!
 //! It works from the keyboard alone and answers nothing for the person.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assert_is_empty,
+    clippy::derive_partial_eq_without_eq,
+    clippy::indexing_slicing,
+    clippy::large_enum_variant,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::suboptimal_flops,
+    clippy::too_many_arguments,
+    clippy::unused_self,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -86,7 +100,7 @@ pub(super) enum Row {
 
 impl Row {
     /// Whether the cursor stops on it: a header is not a row one picks.
-    fn pickable(&self) -> bool {
+    const fn pickable(&self) -> bool {
         !matches!(self, Self::Header(_) | Self::Note(_))
     }
 }
@@ -475,7 +489,7 @@ impl Shell {
     }
 
     /// Whether the card is up: it holds the keyboard.
-    pub(super) fn picker_open(&self) -> bool {
+    pub(super) const fn picker_open(&self) -> bool {
         self.picker.is_some()
     }
 
@@ -830,7 +844,7 @@ impl Shell {
         let task = self.begin_session(
             start,
             |this, cx| this.close_picker(None, cx),
-            |this, why, cx| this.picker_refused(why, cx),
+            Self::picker_refused,
             cx,
         );
         if let Some(picker) = self.picker.as_mut() {
@@ -1020,7 +1034,7 @@ impl Shell {
             ) else {
                 match row {
                     Row::Header(name) => {
-                        children.push(header(name.clone(), &theme).into_any_element())
+                        children.push(header(name.clone(), &theme).into_any_element());
                     }
                     Row::Note(why) => children.push(note(why.clone(), &theme).into_any_element()),
                     _ => {}
@@ -1080,17 +1094,16 @@ impl Shell {
             for (ix, (id, name)) in machines.iter().enumerate() {
                 let selected = device.as_deref() == Some(id.as_str());
                 let target = id.clone();
-                tabs =
-                    tabs.child(
-                        crate::surface_chrome::tab(("picker-machine", ix), selected, &theme)
-                            .px(px(8.0))
-                            .role(gpui::Role::Tab)
-                            .aria_label(SharedString::from(name.clone()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.pick_machine(target.clone(), cx)
-                            }))
-                            .child(SharedString::from(name.clone())),
-                    );
+                tabs = tabs.child(
+                    crate::surface_chrome::tab(("picker-machine", ix), selected, &theme)
+                        .px(px(8.0))
+                        .role(gpui::Role::Tab)
+                        .aria_label(SharedString::from(name.clone()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.pick_machine(target.clone(), cx);
+                        }))
+                        .child(SharedString::from(name.clone())),
+                );
             }
             tabs
         });
@@ -1770,7 +1783,8 @@ mod tests {
         assert_eq!(card(cx), None, "⇧⌘G steps back in Changes' find");
         assert!(find_has_keyboard(cx), "which keeps the keyboard");
         cx.update(|_, cx| {
-            shell.update(cx, |shell, cx| shell.close_view(super::super::RightSurface::Diff(id), cx))
+            shell
+                .update(cx, |shell, cx| shell.close_view(super::super::RightSurface::Diff(id), cx));
         });
         assert_eq!(card(cx), None);
         assert!(!in_changes(cx), "closed, the pane gives the keyboard back");

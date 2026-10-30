@@ -1,6 +1,19 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Isolated native Mermaid adapter. Call only on a background executor.
-use std::sync::Mutex;
+#![allow(
+    missing_debug_implementations,
+    missing_docs,
+    clippy::assertions_on_result_states,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::manual_midpoint,
+    clippy::suboptimal_flops,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice C"
+)]
+use parking_lot::Mutex;
 
 use crate::theme::Theme;
 
@@ -84,7 +97,7 @@ pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
     {
         return Err("Diagram exceeds preview complexity limit".into());
     }
-    let _guard = RENDER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = RENDER_LOCK.lock();
     std::panic::catch_unwind(|| {
         let renderer = merman::Renderer::new()
             .with_engine(merman::Engine::new().with_site_config(site_config(palette)));
@@ -341,7 +354,7 @@ mod tests {
                     std::fs::write(format!("{dir}/{name}-{mode}.svg"), svg).unwrap();
                     let size = prepared_raster.size(0);
                     let mut rgba = prepared_raster.as_bytes(0).unwrap().to_vec();
-                    for pixel in rgba.chunks_exact_mut(4) {
+                    for pixel in rgba.as_chunks_mut::<4>().0 {
                         pixel.swap(0, 2);
                     }
                     image::save_buffer(

@@ -1,5 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 85006f4), see THIRD_PARTY_NOTICES.md
 //! Slopty-owned styling and highlighting adapters for `gpui-base`.
+#![allow(trivial_casts, clippy::arithmetic_side_effects, reason = "shell lint migration: slice C")]
 
 use std::ops::Range;
 use std::rc::Rc;
@@ -217,7 +218,7 @@ pub(super) mod probe {
     use gpui::HighlightStyle;
 
     #[derive(Clone, Debug)]
-    pub(crate) enum Event {
+    pub enum Event {
         /// The installed factory built a highlighter from its captured source.
         FactoryBuilt { source: String },
         /// `update` applied an edit; `spans` are the ranges kept afterwards.
@@ -230,11 +231,11 @@ pub(super) mod probe {
         static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
     }
 
-    pub(crate) fn record(event: Event) {
+    pub fn record(event: Event) {
         EVENTS.with(|events| events.borrow_mut().push(event));
     }
 
-    pub(crate) fn take() -> Vec<Event> {
+    pub fn take() -> Vec<Event> {
         EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
     }
 }
@@ -268,7 +269,7 @@ fn absolute_spans(
     spans
 }
 
-fn name_for_kind(kind: HighlightKind) -> &'static str {
+const fn name_for_kind(kind: HighlightKind) -> &'static str {
     match kind {
         HighlightKind::Comment => "comment",
         HighlightKind::Keyword => "keyword",

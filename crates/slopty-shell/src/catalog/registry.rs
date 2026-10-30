@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! HarnessRegistry — the engine's harness catalog: eager instances (mock) plus lazy
+//! `HarnessRegistry` — the engine's harness catalog: eager instances (mock) plus lazy
 //! slots resolved on first use (claude-code spawns subprocess discovery; codex/cursor
 //! later). Lazy slots carry a static descriptor so `ListHarnesses` never forces a spawn.
 //!
@@ -10,6 +10,12 @@
 
 // An excerpt — the descriptor the interface reads. The registry
 // itself, its harness slots and prefs file are the engine's, which is Slopty's.
+#![allow(
+    missing_docs,
+    rustdoc::broken_intra_doc_links,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use serde::{Deserialize, Serialize};
 use slopty_view_proto::{HarnessId, ReasoningLevel, SteeringMode};
@@ -38,7 +44,7 @@ pub struct HarnessDescriptor {
     pub enabled: Option<bool>,
 }
 
-fn default_installed() -> bool {
+const fn default_installed() -> bool {
     true
 }
 

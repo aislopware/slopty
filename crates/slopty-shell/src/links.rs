@@ -1,7 +1,17 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Stable conversation links shared by sidebar copy actions and inbound URL routing.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::assertions_on_result_states,
+    clippy::default_trait_access,
+    clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
+    clippy::map_err_ignore,
+    reason = "shell lint migration: slice C"
+)]
 
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use slopty_view_proto::{Chat, HarnessId, WorkspaceScope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]

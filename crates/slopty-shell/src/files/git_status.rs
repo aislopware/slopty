@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared metadata-only Git subscription. Views hold leases; the last lease
 //! dropping cancels the RPC. Cached sources never own their consuming views.
+#![allow(clippy::expect_used, clippy::match_same_arms, reason = "shell lint migration: slice C")]
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -33,7 +34,7 @@ pub(super) struct Decoration {
 }
 
 impl Decoration {
-    pub(super) fn color(self, theme: &Theme) -> gpui::Hsla {
+    pub(super) const fn color(self, theme: &Theme) -> gpui::Hsla {
         match self.kind {
             DecorationKind::Untracked | DecorationKind::Added => theme.success,
             DecorationKind::Modified => theme.warning,
@@ -44,7 +45,9 @@ impl Decoration {
 }
 
 fn decoration(file: &GitFileStatus) -> Decoration {
-    use GitFileState::*;
+    use GitFileState::{
+        Added, Copied, Deleted, Modified, Renamed, TypeChanged, Unmerged, Untracked,
+    };
     let states = [file.index, file.worktree];
     let conflict = states.contains(&Unmerged)
         || matches!((file.index, file.worktree), (Added, Added) | (Deleted, Deleted));
@@ -213,7 +216,7 @@ impl GitStatusSource {
                                     .await;
                                 if this
                                     .update(cx, |source, cx| {
-                                        source.apply(snapshot, decorations, cx)
+                                        source.apply(snapshot, decorations, cx);
                                     })
                                     .is_err()
                                 {

@@ -17,6 +17,14 @@
 //!
 //! Names stay open: a region, a place or a chat is a word, and one the window does not know is
 //! answered with the ones it does ([`Code::Unknown`]).
+#![allow(
+    rustdoc::private_intra_doc_links,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::too_long_first_doc_paragraph,
+    clippy::too_many_arguments,
+    reason = "shell lint migration: slice A"
+)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -560,7 +568,7 @@ impl Shell {
             Target::Page(url) => {
                 self.agent_chat_here(None, cx)?;
                 self.agent_beside(cx, |this, cx| {
-                    this.add_browser_surface(Some(url.clone()), window, cx)
+                    this.add_browser_surface(Some(url.clone()), window, cx);
                 });
                 Ok(Some(format!("opened {url}")))
             }
@@ -649,7 +657,7 @@ impl Shell {
                 self.agent_beside(cx, |this, cx| this.show_changes(window, cx));
             }
             "inspector" => {
-                self.agent_beside(cx, |this, cx| this.open_view(RightSurface::Inspector, cx))
+                self.agent_beside(cx, |this, cx| this.open_view(RightSurface::Inspector, cx));
             }
             _ => {
                 if !self.splits_here() {
@@ -778,8 +786,7 @@ impl Shell {
             None => "opened a terminal".to_owned(),
         };
         cx.spawn(async move |this, cx| {
-            let (cols, rows) =
-                crate::terminal::panel::TerminalPanel::grid(&panel.downgrade(), cx).await;
+            let (cols, rows) = TerminalPanel::grid(&panel.downgrade(), cx).await;
             if let Some(object) = params.as_object_mut() {
                 object.insert("cols".into(), cols.into());
                 object.insert("rows".into(), rows.into());
@@ -985,7 +992,7 @@ mod tests {
         assert!(asked(cx, hide("a1")).unwrap().did.is_some());
         assert_eq!(
             cx.update(|_, cx| crate::toast::said(cx)),
-            Vec::<gpui::SharedString>::new(),
+            Vec::<SharedString>::new(),
             "a1 is on screen"
         );
         assert!(asked(cx, hide("b2")).unwrap().did.is_some());
@@ -1097,7 +1104,7 @@ mod tests {
         asked(cx, ask(inspector)).unwrap();
         let done = asked(cx, ask(Act::Split(None))).unwrap();
         assert_eq!(done.did.as_deref(), Some("put the session's panes at even shares"));
-        let panes = shell.read_with(cx, |shell, cx| shell.panes_now(cx));
+        let panes = shell.read_with(cx, Shell::panes_now);
         assert_eq!(panes.focused(), Pane::Session, "the keyboard stays in the session");
         assert_eq!(panes, {
             let mut even = panes.clone();

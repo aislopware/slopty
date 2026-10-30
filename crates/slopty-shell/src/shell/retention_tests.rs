@@ -4,6 +4,13 @@
 //! on every frame of them too (`Window::set_check_retained`). It also holds the shell window, the
 //! fixtures and the reading of the accessibility tree that the chrome's and the sidebar's tests
 //! share.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::format_push_string,
+    clippy::mem_forget,
+    reason = "shell lint migration: slice A"
+)]
 use std::collections::HashMap;
 
 use chrono::TimeDelta;
@@ -82,7 +89,7 @@ pub(super) fn stale(cx: &mut VisualTestContext) -> Option<String> {
 pub(super) fn wobble(cx: &mut VisualTestContext) -> Option<String> {
     cx.update(|window, cx| {
         let first = from_scratch(window, cx);
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(15));
         let second = from_scratch(window, cx);
         (first != second).then(|| {
             let cut =
@@ -97,7 +104,7 @@ pub(super) fn wobble(cx: &mut VisualTestContext) -> Option<String> {
     })
 }
 
-pub(super) fn turn(chat: &str, now: chrono::DateTime<Utc>) -> Vec<SessionMessageEntry> {
+pub(super) fn turn(chat: &str, now: DateTime<Utc>) -> Vec<SessionMessageEntry> {
     let entry = |id: &str, role, parts, status| SessionMessageEntry {
         id: id.into(),
         role,
@@ -169,7 +176,7 @@ pub(super) fn chat_row(
     id: &str,
     ago: i64,
     parent: Option<(&str, bool)>,
-    now: chrono::DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> slopty_view_proto::Chat {
     let mut chat = serde_json::json!({
         "id": id, "title": format!("Chat {id}"), "deviceId": "local", "archived": false,
@@ -185,7 +192,7 @@ pub(super) fn chat_row(
 }
 
 /// A chat's session in `status`.
-pub(super) fn session_row(id: &str, status: SessionStatus, now: chrono::DateTime<Utc>) -> Session {
+pub(super) fn session_row(id: &str, status: SessionStatus, now: DateTime<Utc>) -> Session {
     Session {
         last_completed_turn: None,
         chat_id: id.into(),
@@ -211,9 +218,9 @@ pub(super) fn launch(
     cx: &mut TestAppContext,
     screen: Screen,
 ) -> (Entity<Shell>, &mut VisualTestContext) {
-    crate::motion::forget_for_test(); // no hover from the last seed
+    motion::forget_for_test(); // no hover from the last seed
     let dir = tempfile::tempdir().unwrap();
-    compact::force_touch(screen.touch);
+    force_touch(screen.touch);
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::default());
@@ -229,7 +236,7 @@ pub(super) fn launch(
         let mut shell = Shell::new(
             state,
             EngineBootConfig {
-                data_dir: path.clone(),
+                data_dir: path,
                 default_harness: slopty_view_proto::HarnessId::MOCK,
             },
             cx,
@@ -238,7 +245,7 @@ pub(super) fn launch(
         shell.splash = SplashPhase::Gone;
         let now = Utc::now();
         shell.state.update(cx, |state, _| {
-            state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
+            state.connection = ConnectionStatus::Ready;
             state.workspace_scope = Some(WorkspaceScope::Local);
             state.local_device_id = Some("local".into());
             state.chats = vec![chat_row("a", 1, None, now), chat_row("b", 2, None, now)];
@@ -339,11 +346,11 @@ pub(super) fn device() -> slopty_view_proto::Device {
 
 /// Frames delivered `dt` apart, as the display asks for them, until none is asked for or `cap`
 /// were drawn; how many were.
-pub(super) fn frames(cx: &mut VisualTestContext, dt: std::time::Duration, cap: usize) -> usize {
+pub(super) fn frames(cx: &mut VisualTestContext, dt: Duration, cap: usize) -> usize {
     cx.run_until_parked();
     for drawn in 0..cap {
         cx.executor().advance_clock(dt);
-        if cx.update(|window, cx| window.simulate_next_frame(cx)) == 0 {
+        if cx.update(Window::simulate_next_frame) == 0 {
             cx.run_until_parked();
             return drawn;
         }
@@ -393,14 +400,14 @@ fn a_chat_opened_with_cmd_1_paints_as_from_scratch(cx: &mut TestAppContext) {
                 cx.notify();
             });
         });
-        cx.executor().advance_clock(std::time::Duration::from_millis(50));
+        cx.executor().advance_clock(Duration::from_millis(50));
         cx.run_until_parked();
         if step % 3 == 2 {
             assert_eq!(stale(cx), None, "streaming, step {step}");
         }
     }
     for step in 0..4 {
-        cx.executor().advance_clock(std::time::Duration::from_millis(250));
+        cx.executor().advance_clock(Duration::from_millis(250));
         cx.run_until_parked();
         assert_eq!(stale(cx), None, "the turn's spinner going on, step {step}");
     }
@@ -429,7 +436,7 @@ fn chats_switched_after_a_stream_paint_as_from_scratch(cx: &mut TestAppContext) 
                 cx.notify();
             });
         });
-        cx.executor().advance_clock(std::time::Duration::from_millis(16));
+        cx.executor().advance_clock(Duration::from_millis(16));
         cx.run_until_parked();
     }
     for (keys, chat) in [("cmd-2", "b"), ("cmd-1", "a")] {
@@ -460,7 +467,7 @@ fn a_rows_status_is_a_node_of_the_tree(cx: &mut TestAppContext) {
         update
             .nodes
             .iter()
-            .filter(|(_, node)| node.role() == gpui::accesskit::Role::Status)
+            .filter(|(_, node)| node.role() == Role::Status)
             .filter_map(|(_, node)| node.label().map(str::to_owned))
             .collect::<Vec<_>>()
     });
@@ -513,20 +520,20 @@ fn back_from_a_subagent(cx: &mut TestAppContext, screen: Screen) {
             cx.notify();
         });
     });
-    frames(cx, std::time::Duration::from_millis(16), 120);
+    frames(cx, Duration::from_millis(16), 120);
     assert!(shell.read_with(cx, |shell, _| shell.compact()), "the phone's own layout");
     assert_eq!(stale(cx), None, "the parent's session");
     shell.update(cx, |shell, cx| shell.open_chat("look".into(), cx));
-    frames(cx, std::time::Duration::from_millis(16), 120);
+    frames(cx, Duration::from_millis(16), 120);
     let selected = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
     assert_eq!(selected.as_deref(), Some("look"), "the subagent's timeline");
     assert_eq!(stale(cx), None, "the subagent's run");
     shell.update(cx, |shell, cx| shell.open_chat("b".into(), cx));
     for step in 0..40 {
-        cx.executor().advance_clock(std::time::Duration::from_millis(16));
-        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(Window::simulate_next_frame);
         cx.run_until_parked();
-        std::thread::sleep(std::time::Duration::from_millis(12));
+        std::thread::sleep(Duration::from_millis(12));
         assert_eq!(stale(cx), None, "frame {step} back from the subagent");
         assert_eq!(wobble(cx), None, "frame {step} back from the subagent");
     }

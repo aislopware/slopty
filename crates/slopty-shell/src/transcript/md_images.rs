@@ -9,6 +9,11 @@
 //! Each image is an a11y image node labelled with its alt text; its value says when it is
 //! "loading", "missing" (the file could not be read), "refused" (outside the folder) or
 //! "remote".
+#![allow(
+    clippy::assigning_clones,
+    clippy::field_scoped_visibility_modifiers,
+    reason = "shell lint migration: slice B"
+)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -186,7 +191,7 @@ fn placeholder(
             base.w_full().max_w(px(widest)).aspect_ratio(aspect)
         }
         None => base
-            .when(tile, |el| el.w_full())
+            .when(tile, Styled::w_full)
             .when(!tile, |el| el.w(px(PLACEHOLDER_HEIGHT * 4.0 / 3.0)))
             .h(px(PLACEHOLDER_HEIGHT)),
     };

@@ -5,6 +5,14 @@
 //!
 //! TUI-first (`docs/decisions/agents.md`), the composer's pickers (project, branch,
 //! agent and model, traits) are gone: an agent's TUI picks its own model and reasoning.
+#![allow(
+    missing_docs,
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    clippy::too_long_first_doc_paragraph,
+    reason = "shell lint migration: slice A"
+)]
 
 use slopty_view_proto::{FolderListing, HarnessId, ReasoningLevel};
 
@@ -14,7 +22,7 @@ use crate::catalog::registry::HarnessDescriptor;
 // Pure: labels
 // ---------------------------------------------------------------------------
 
-pub fn reasoning_label(level: ReasoningLevel) -> &'static str {
+pub const fn reasoning_label(level: ReasoningLevel) -> &'static str {
     match level {
         ReasoningLevel::Minimal => "Minimal",
         ReasoningLevel::Low => "Low",
@@ -42,7 +50,7 @@ struct WindowsBrowserPath<'a> {
 }
 
 impl WindowsBrowserPath<'_> {
-    fn is_separator(&self, ch: char) -> bool {
+    const fn is_separator(&self, ch: char) -> bool {
         ch == '\\' || (!self.extended && ch == '/')
     }
 
@@ -152,7 +160,7 @@ fn uppercase_drive_letter(mut root: String) -> String {
     let bytes = drive.as_bytes();
     if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_lowercase() {
         let at = root.len() - 2;
-        root[at..at + 1].make_ascii_uppercase();
+        root[at..=at].make_ascii_uppercase();
     }
     root
 }
@@ -176,7 +184,7 @@ pub fn parent_path(path: &str) -> Option<String> {
         return None; // was "/" (or empty)
     }
     match trimmed.rfind('/') {
-        Some(0) => Some("/".to_string()),
+        Some(0) => Some("/".to_owned()),
         Some(at) => Some(trimmed[..at].to_string()),
         None => None,
     }
@@ -263,14 +271,14 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
         }
         let home = home?.trim_end_matches('/');
         if rest.is_empty() {
-            return Some(home.to_string());
+            return Some(home.to_owned());
         }
         let rest = rest.strip_prefix('/')?.trim_end_matches('/');
-        return Some(if rest.is_empty() { home.to_string() } else { format!("{home}/{rest}") });
+        return Some(if rest.is_empty() { home.to_owned() } else { format!("{home}/{rest}") });
     }
     if query.starts_with('/') {
         let trimmed = query.trim_end_matches('/');
-        return Some(if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() });
+        return Some(if trimmed.is_empty() { "/".to_owned() } else { trimmed.to_owned() });
     }
     None
 }
@@ -409,13 +417,13 @@ pub fn breadcrumbs(path: &str) -> Vec<(String, String)> {
         }
         return out;
     }
-    let root = "/".to_string();
+    let root = "/".to_owned();
     let mut out = vec![(root.clone(), root)];
     let mut acc = String::new();
     for segment in path.split('/').filter(|s| !s.is_empty()) {
         acc.push('/');
         acc.push_str(segment);
-        out.push((segment.to_string(), acc.clone()));
+        out.push((segment.to_owned(), acc.clone()));
     }
     out
 }
@@ -485,9 +493,9 @@ mod tests {
 
     #[test]
     fn folder_paths_and_breadcrumbs() {
-        assert_eq!(parent_path("/home/w/dev"), Some("/home/w".to_string()));
-        assert_eq!(parent_path("/home"), Some("/".to_string()));
-        assert_eq!(parent_path("/home/"), Some("/".to_string()));
+        assert_eq!(parent_path("/home/w/dev"), Some("/home/w".to_owned()));
+        assert_eq!(parent_path("/home"), Some("/".to_owned()));
+        assert_eq!(parent_path("/home/"), Some("/".to_owned()));
         assert_eq!(parent_path("/"), None);
         assert_eq!(parent_path(""), None);
         assert_eq!(child_path("/home", "w"), "/home/w");
@@ -501,9 +509,9 @@ mod tests {
 
     #[test]
     fn windows_folder_paths_and_breadcrumbs() {
-        assert_eq!(parent_path(r"D:\Random\slopty"), Some(r"D:\Random".to_string()));
-        assert_eq!(parent_path(r"D:\Random"), Some(r"D:\".to_string()));
-        assert_eq!(parent_path(r"D:\Random\"), Some(r"D:\".to_string()));
+        assert_eq!(parent_path(r"D:\Random\slopty"), Some(r"D:\Random".to_owned()));
+        assert_eq!(parent_path(r"D:\Random"), Some(r"D:\".to_owned()));
+        assert_eq!(parent_path(r"D:\Random\"), Some(r"D:\".to_owned()));
         assert_eq!(parent_path(r"D:\"), None);
         assert_eq!(parent_path("D:"), None);
         assert_eq!(child_path(r"D:\", "Random"), r"D:\Random");
@@ -551,14 +559,14 @@ mod tests {
     #[test]
     fn windows_folder_identity_handles_prefixes_without_changing_posix_names() {
         assert!(same_folder_path(r"C:\Users\Ana\repo", r"\\?\C:\Users\Ana\repo"));
-        assert!(same_folder_path(r"C:/Users/Ana/repo/", r"\\?\C:\Users\Ana\repo"));
+        assert!(same_folder_path("C:/Users/Ana/repo/", r"\\?\C:\Users\Ana\repo"));
         assert!(same_folder_path(r"\\server\share\repo", r"\\?\UNC\server\share\repo"));
         assert!(!same_folder_path(r"\\server\share\repo", r"\\server\other\repo"));
         assert!(!same_folder_path(r"C:\repo", r"D:\repo"));
         assert!(!same_folder_path(r"C:\Repo", r"C:\repo"));
         // Only the drive letter is case-insensitive.
         assert!(same_folder_path(r"c:\Users\Ana", r"C:\Users\Ana"));
-        assert!(same_folder_path(r"c:/Users/Ana/", r"\\?\C:\Users\Ana"));
+        assert!(same_folder_path("c:/Users/Ana/", r"\\?\C:\Users\Ana"));
         assert!(same_folder_path(r"\\?\c:\repo.", r"\\?\C:\repo."));
         assert!(same_folder_path(r"d:\", r"D:\"));
         assert!(!same_folder_path(r"c:\users\ana", r"C:\Users\Ana"));

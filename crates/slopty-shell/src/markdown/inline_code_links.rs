@@ -15,6 +15,18 @@
 //! the linked tree is reused across frames. A directory span is not a link,
 //! but it becomes the context a later bare name in the same part resolves
 //! against.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::clone_on_ref_ptr,
+    clippy::collection_is_never_read,
+    clippy::indexing_slicing,
+    clippy::items_after_statements,
+    clippy::maybe_infinite_iter,
+    clippy::needless_for_each,
+    clippy::string_slice,
+    clippy::unused_self,
+    reason = "shell lint migration: slice C"
+)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -34,7 +46,7 @@ const CACHED_PARTS: usize = 32;
 /// Text parts already rewritten, keyed by their source tree and reset when
 /// the file-link roots change.
 #[derive(Default)]
-pub(crate) struct InlineCodeLinkCache {
+pub struct InlineCodeLinkCache {
     revision: u64,
     probes: PathProbes,
     parts: Vec<LinkedPart>,
@@ -224,7 +236,7 @@ fn link_runs(
 
 /// Only a plain code span stands for a file: an author's link, image, task
 /// marker or chat mention already means something else.
-fn is_plain_code_span(run: &InlineRun) -> bool {
+const fn is_plain_code_span(run: &InlineRun) -> bool {
     run.style.code
         && run.style.link.is_none()
         && run.style.image.is_none()
@@ -234,7 +246,7 @@ fn is_plain_code_span(run: &InlineRun) -> bool {
 /// Every plain code span's text in `block`, in document order.
 fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
     let mut push = |runs: &'a [InlineRun]| {
-        out.extend(runs.iter().filter(|run| is_plain_code_span(run)).map(|run| run.text.as_str()))
+        out.extend(runs.iter().filter(|run| is_plain_code_span(run)).map(|run| run.text.as_str()));
     };
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => push(runs),
@@ -244,7 +256,7 @@ fn code_spans<'a>(block: &'a Block, out: &mut Vec<&'a str>) {
         }
         Block::BlockQuote { children } => children.iter().for_each(|child| code_spans(child, out)),
         Block::List { items, .. } => {
-            items.iter().flatten().for_each(|child| code_spans(child, out))
+            items.iter().flatten().for_each(|child| code_spans(child, out));
         }
         Block::CodeBlock { .. } | Block::Math { .. } | Block::Rule => {}
     }
@@ -349,10 +361,7 @@ mod tests {
         }
 
         fn target(&self, tree: &BlockTree, text: &str) -> Option<String> {
-            runs(tree)
-                .into_iter()
-                .find(|run| run.text == text)
-                .and_then(|run| run.style.link.clone())
+            runs(tree).into_iter().find(|run| run.text == text).and_then(|run| run.style.link)
         }
 
         fn file_target(&self, relative: &str) -> String {
@@ -367,7 +376,7 @@ mod tests {
                 Block::Paragraph { runs } | Block::Heading { runs, .. } => out.extend(runs.clone()),
                 Block::BlockQuote { children } => children.iter().for_each(|c| walk(c, out)),
                 Block::List { items, .. } => {
-                    items.iter().flatten().for_each(|child| walk(child, out))
+                    items.iter().flatten().for_each(|child| walk(child, out));
                 }
                 Block::Table { header, rows, .. } => {
                     header.iter().for_each(|cell| out.extend(cell.clone()));
@@ -487,16 +496,16 @@ mod tests {
             let linked = fixture.linked(&fixture.tree(source), &fixture.roots(true), true);
             let flat = flatten_runs(&runs(&linked), &Theme::dark(), false);
             assert_eq!(flat.text, shown);
-            if shown != source.trim_matches('`') {
+            if shown == source.trim_matches('`') {
+                // Already the file name: what shows IS the source text.
+                assert!(flat.original.is_none());
+            } else {
                 // The display name stands in for the path; the raw span stays
                 // the copy source.
                 let original = flat.original.as_ref().expect("the raw span stays the copy source");
                 assert_eq!(original.text.as_ref(), source.trim_matches('`'));
                 assert_eq!(original.offsets.original(0), 0);
                 assert_eq!(original.offsets.original(flat.text.len()), original.text.len());
-            } else {
-                // Already the file name: what shows IS the source text.
-                assert!(flat.original.is_none());
             }
             assert_eq!(&flat.text[flat.links[0].0.clone()], shown);
         }
