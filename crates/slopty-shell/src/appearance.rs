@@ -22,14 +22,6 @@
 //! [`App::refresh_windows`] marks every window dirty *and* disables gpui's
 //! per-view prepaint cache for the frame, which is the only thing that forces
 //! already-laid-out elements to re-run their paint with the new palette.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::needless_pass_by_value,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{App, Global};
 use serde::{Deserialize, Serialize};
@@ -46,11 +38,14 @@ pub enum AppearanceMode {
     /// machine, including when the user has macOS set to switch at sunset.
     #[default]
     System,
+    /// Always light, whatever the system shows.
     Light,
+    /// Always dark, whatever the system shows.
     Dark,
 }
 
 impl AppearanceMode {
+    /// Every mode, in the order menus and pickers list them.
     pub const ALL: [Self; 3] = [Self::System, Self::Light, Self::Dark];
 
     /// Menu/label text.
@@ -72,14 +67,21 @@ impl AppearanceMode {
     }
 }
 
-/// Global state behind the current theme: what the person chose, and the
-/// application's appearance as the theme last took it. Kept separate from
-/// [`Theme`] itself, which is what the two resolve to.
+/// Global state behind the current theme.
+///
+/// What the person chose, and the application's appearance as the theme last
+/// took it. Kept separate from [`Theme`] itself, which is what the two resolve to.
+#[derive(Debug)]
 pub struct AppearanceState {
+    /// The person's light, dark or system choice.
     pub mode: AppearanceMode,
+    /// The application's appearance as the theme last took it.
     pub app: Appearance,
+    /// The theme variant picked for each appearance.
     pub themes: ThemeSelection,
+    /// The interactive accent.
     pub accent: AccentSelection,
+    /// Frosted, opaque, or the theme's own surfaces.
     pub surface: SurfacePreference,
 }
 
@@ -94,9 +96,10 @@ pub const fn resolve(mode: AppearanceMode, system: Appearance) -> Appearance {
     }
 }
 
-/// Install the appearance globals and the matching theme. Call once at boot,
-/// before any window opens, so the first frame is already the right palette
-/// (installing later produces a visible dark-to-light flash).
+/// Install the appearance globals and the matching theme.
+///
+/// Call once at boot, before any window opens, so the first frame is already
+/// the right palette (installing later produces a visible dark-to-light flash).
 pub fn init(
     mode: AppearanceMode,
     themes: ThemeSelection,
@@ -106,23 +109,19 @@ pub fn init(
 ) {
     cx.set_window_appearance(app_appearance(mode));
     let app = Appearance::from_window(cx.window_appearance());
-    cx.set_global(AppearanceState { mode, app, themes: themes.clone(), accent, surface });
+    let appearance = resolve(mode, app);
+    let variant_id = themes.variant_id(model_appearance(appearance)).to_owned();
+    cx.set_global(AppearanceState { mode, app, themes, accent, surface });
     // For as long as the app runs.
     cx.on_window_appearance_change(follow_app).detach();
-    let appearance = resolve(mode, app);
     tracing::debug!(?mode, ?app, ?appearance, "appearance: initial");
-    Theme::install_selection(
-        appearance,
-        themes.variant_id(model_appearance(appearance)),
-        accent,
-        surface,
-        cx,
-    );
+    Theme::install_selection(appearance, &variant_id, accent, surface, cx);
 }
 
-/// The application's appearance as the theme last took it: the pinned mode's
-/// where the platform pins it (macOS), else the system's. A window's own
-/// appearance is measured against it ([`crate::window_appearance`]).
+/// The application's appearance as the theme last took it.
+///
+/// The pinned mode's where the platform pins it (macOS), else the system's. A
+/// window's own appearance is measured against it ([`crate::window_appearance`]).
 pub fn app(cx: &App) -> Appearance {
     cx.try_global::<AppearanceState>()
         .map_or_else(|| Appearance::from_window(cx.window_appearance()), |state| state.app)
@@ -133,14 +132,17 @@ pub fn mode(cx: &App) -> AppearanceMode {
     cx.try_global::<AppearanceState>().map(|s| s.mode).unwrap_or_default()
 }
 
+/// The theme variant picked for each appearance (the defaults before [`init`]).
 pub fn themes(cx: &App) -> ThemeSelection {
     cx.try_global::<AppearanceState>().map(|state| state.themes.clone()).unwrap_or_default()
 }
 
+/// The interactive accent (the default before [`init`]).
 pub fn accent(cx: &App) -> AccentSelection {
     cx.try_global::<AppearanceState>().map(|state| state.accent).unwrap_or_default()
 }
 
+/// Frosted, opaque, or the theme's own surfaces (the default before [`init`]).
 pub fn surface(cx: &App) -> SurfacePreference {
     cx.try_global::<AppearanceState>().map(|state| state.surface).unwrap_or_default()
 }
@@ -163,7 +165,7 @@ pub fn set_mode(mode: AppearanceMode, cx: &mut App) {
     });
 }
 
-/// Change the interactive accent without changing any semantic theme roles.
+/// Pick the theme variant for one appearance, repaint, and save the choice.
 pub fn set_theme(appearance: Appearance, variant_id: impl Into<String>, cx: &mut App) {
     if !cx.has_global::<AppearanceState>() {
         return;
@@ -181,6 +183,7 @@ pub fn set_theme(appearance: Appearance, variant_id: impl Into<String>, cx: &mut
     });
 }
 
+/// Change the interactive accent without changing any semantic theme roles.
 pub fn set_accent(accent: AccentSelection, cx: &mut App) {
     if !cx.has_global::<AppearanceState>() {
         return;
@@ -252,7 +255,7 @@ fn follow_app(cx: &mut App) {
     apply_from(Appearance::from_window(cx.window_appearance()), cx);
 }
 
-/// [`follow_app`], with the application's appearance read from `window` as it opens.
+/// Follow the application's appearance, read from `window` as it opens.
 ///
 /// A window that just opened has no appearance of its own yet, so it wears the
 /// application's, and it has it even early in launch, when
@@ -319,8 +322,8 @@ const fn model_appearance(appearance: Appearance) -> slopty_shell_theme::Appeara
 pub fn reapply_window_background(cx: &mut App) {
     // The window handling a settings click is temporarily taken out of App,
     // so updating it synchronously fails — silently, leaving its native
-    // backdrop (macOS blur view, Windows Acrylic) on the old surface until a
-    // restart. Defer until every window is back, on every platform.
+    // backdrop (the macOS blur view) on the old surface until a restart.
+    // Defer until every window is back, on every platform.
     cx.defer(apply_window_background);
 }
 

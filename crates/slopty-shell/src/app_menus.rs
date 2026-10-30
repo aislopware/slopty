@@ -12,46 +12,61 @@
 //! [`bind_keys`] installs the fixed application shortcuts (re-run by
 //! `shell::apply_keymap`, which clears every binding first), and
 //! [`app_menus`] builds the menu bar handed to `cx.set_menus` in `run_app`.
-#![allow(
-    missing_docs,
-    clippy::cfg_not_test,
-    clippy::derive_partial_eq_without_eq,
-    clippy::multiple_unsafe_ops_per_block,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_long_first_doc_paragraph,
-    clippy::undocumented_unsafe_blocks,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice A"
-)]
 
-use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window, actions};
+use gpui::{Action, App, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, Window};
 
 use crate::appearance::{self, AppearanceMode};
 use crate::{composer, shell};
 
-actions!(
-    slopty,
-    [
-        About,
-        Quit,
-        Hide,
-        HideOthers,
-        ShowAll,
-        Minimize,
-        Zoom,
-        CloseWindow,
-        // ⌘W closes the tab, ⇧⌘W the window (`docs/decisions/ui.md`, "⌘W closes the tab").
-        CloseTab,
-        AppearanceSystem,
-        AppearanceLight,
-        AppearanceDark,
-    ]
-);
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
 
-/// Register the global handlers backing the menu bar and its shortcuts. Call
-/// once at boot, before `cx.set_menus`.
+    actions!(
+        slopty,
+        [
+            /// Show the About panel.
+            About,
+            /// Quit once every open file is saved.
+            Quit,
+            /// Hide the app.
+            Hide,
+            /// Hide every other app.
+            HideOthers,
+            /// Show every hidden app again.
+            ShowAll,
+            /// Minimize the active window to the Dock.
+            Minimize,
+            /// Zoom the active window, or restore it.
+            Zoom,
+            /// Close the active window.
+            CloseWindow,
+            /// Close the focused pane, or the window when only the session's is left.
+            // ⌘W closes the tab, ⇧⌘W the window (`docs/decisions/ui.md`, "⌘W closes the tab").
+            CloseTab,
+            /// Follow the system's light or dark appearance.
+            AppearanceSystem,
+            /// Always use the light appearance.
+            AppearanceLight,
+            /// Always use the dark appearance.
+            AppearanceDark,
+        ]
+    );
+}
+
+pub use actions::{
+    About, AppearanceDark, AppearanceLight, AppearanceSystem, CloseTab, CloseWindow, Hide,
+    HideOthers, Minimize, Quit, ShowAll, Zoom,
+};
+
+/// Register the global handlers backing the menu bar and its shortcuts.
+///
+/// Call once at boot, before `cx.set_menus`.
 pub fn init(cx: &mut App) {
-    #[cfg(all(target_os = "macos", not(test)))]
+    #[cfg(target_os = "macos")]
     native_quit::init(cx);
     cx.on_action(quit);
     #[cfg(target_os = "macos")]
@@ -78,7 +93,8 @@ pub fn init(cx: &mut App) {
 
 fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
     if let Some(window) = cx.active_window() {
-        window.update(cx, |_, window, _| f(window)).ok();
+        // A window closed meanwhile has nothing left to minimize or zoom.
+        let _gone = window.update(cx, |_, window, _| f(window));
     }
 }
 
@@ -105,7 +121,7 @@ fn prepare_quit(cx: &mut App) {
     }
 }
 
-pub(crate) fn quit_after_save(cx: &mut App) {
+pub(crate) fn quit_after_save(cx: &App) {
     #[cfg(target_os = "macos")]
     native_quit::allow();
     cx.quit();
@@ -125,26 +141,26 @@ fn close_tab(_: &CloseTab, cx: &mut App) {
 fn close_active_window(pane_first: bool, cx: &mut App) {
     if let Some(window) = cx.active_window() {
         if let Some(window) = window.downcast::<shell::Shell>() {
-            window
-                .update(cx, |shell, window, cx| {
-                    // ⌘W closes the focused pane first; the session's own pane falls through
-                    // to the window close, unsaved-file gate and all.
-                    if pane_first && shell.close_focused_pane(cx) {
-                        return;
-                    }
-                    if shell.prepare_window_close(cx) {
-                        window.remove_window();
-                    }
-                })
-                .ok();
+            // A window closed meanwhile has nothing left to close.
+            let _gone = window.update(cx, |shell, window, cx| {
+                // ⌘W closes the focused pane first; the session's own pane falls through
+                // to the window close, unsaved-file gate and all.
+                if pane_first && shell.close_focused_pane(cx) {
+                    return;
+                }
+                if shell.prepare_window_close(cx) {
+                    window.remove_window();
+                }
+            });
         } else {
-            window.update(cx, |_, window, _| window.remove_window()).ok();
+            let _gone = window.update(cx, |_, window, _| window.remove_window());
         }
     }
 }
 
-/// Fixed app-level shortcuts backing the menu key equivalents. These live
-/// outside the customizable keymap; `shell::apply_keymap` calls this after its
+/// Fixed app-level shortcuts backing the menu key equivalents.
+///
+/// These live outside the customizable keymap; `shell::apply_keymap` calls this after its
 /// `clear_key_bindings` so they survive keymap re-application. Settings follows
 /// the platform convention everywhere (Cmd+, on macOS, Ctrl+, elsewhere);
 /// window/application lifecycle shortcuts remain macOS-only.
@@ -584,15 +600,18 @@ mod about_panel {
         // AppKit would otherwise render "Version 0.2.61 (0.2.61)".
         let build = NSString::from_str("");
         let values: [&AnyObject; 3] = [&name, &version, &build];
+        // SAFETY: AppKit's about-panel option keys are immutable string
+        // constants that live as long as the process.
+        let keys = unsafe {
+            [
+                NSAboutPanelOptionApplicationName,
+                NSAboutPanelOptionApplicationVersion,
+                NSAboutPanelOptionVersion,
+            ]
+        };
+        let options = NSDictionary::from_slices(&keys, &values);
+        // SAFETY: each of these options takes a string, and every value is an NSString.
         unsafe {
-            let options = NSDictionary::from_slices(
-                &[
-                    NSAboutPanelOptionApplicationName,
-                    NSAboutPanelOptionApplicationVersion,
-                    NSAboutPanelOptionVersion,
-                ],
-                &values,
-            );
             NSApplication::sharedApplication(mtm).orderFrontStandardAboutPanelWithOptions(&options);
         }
     }
@@ -614,17 +633,14 @@ mod native_quit {
         ALLOWED.set(true);
     }
 
-    // Tests run without AppKit's application delegate, so only the app installs the hook.
-    #[cfg(not(test))]
     pub(super) use hook::init;
 
-    #[cfg(not(test))]
     mod hook {
         use std::cell::RefCell;
 
         // objc2; objc 0.2 is banned in the workspace (deny.toml).
         use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-        use objc2::{class, msg_send, sel};
+        use objc2::{msg_send, sel};
 
         use super::super::{App, request_quit};
         use super::ALLOWED;
@@ -645,7 +661,22 @@ mod native_quit {
             0 // NSTerminateCancel; re-request only after buffers are safe.
         }
 
-        pub(in crate::app_menus) fn init(cx: &mut App) {
+        unsafe extern "C" {
+            /// AppKit's shared application, nil until something starts it.
+            static NSApp: *mut AnyObject;
+        }
+
+        /// Catch AppKit's quit decision in GPUI's application delegate.
+        ///
+        /// Tests run on GPUI's test platform, which never starts AppKit: with
+        /// no shared application there is no delegate to extend, so they keep out.
+        pub(in crate::app_menus) fn init(cx: &App) {
+            // SAFETY: AppKit writes its global once, on the main thread, as the
+            // shared application starts; this main-thread read races nothing.
+            let ns_app = unsafe { NSApp };
+            if ns_app.is_null() {
+                return;
+            }
             let executor = cx.foreground_executor().clone();
             let app = cx.to_async();
             REQUEST.with_borrow_mut(|request| {
@@ -660,22 +691,33 @@ mod native_quit {
             });
             // AppKit invokes delegate methods on the main thread. Add only the
             // missing selector: never replace GPUI's existing quit observer.
-            unsafe {
-                let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-                let delegate: *mut AnyObject = msg_send![app, delegate];
-                assert!(!delegate.is_null(), "GPUI application delegate must exist");
-                let class = std::ptr::from_ref::<AnyClass>((*delegate).class()).cast_mut();
-                let added = objc2::ffi::class_addMethod(
+            // SAFETY: `ns_app` is the live NSApplication, whose `delegate` takes no
+            // arguments and returns an object or nil.
+            let delegate: *mut AnyObject = unsafe { msg_send![ns_app, delegate] };
+            assert!(!delegate.is_null(), "GPUI application delegate must exist");
+            // SAFETY: the delegate is non-nil, an object the application keeps
+            // alive for as long as it runs.
+            let delegate = unsafe { &*delegate };
+            let class = std::ptr::from_ref::<AnyClass>(delegate.class()).cast_mut();
+            // SAFETY: `Imp` is the untyped C function pointer the runtime stores;
+            // AppKit calls it back with the (self, _cmd, sender) -> NSUInteger
+            // shape `should_terminate` has and "Q@:@" declares.
+            let imp = unsafe {
+                std::mem::transmute::<extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize, Imp>(
+                    should_terminate,
+                )
+            };
+            // SAFETY: `class` is the delegate's live class, and the selector, the
+            // type encoding and `imp` agree on the method's signature.
+            let added = unsafe {
+                objc2::ffi::class_addMethod(
                     class,
                     sel!(applicationShouldTerminate:),
-                    std::mem::transmute::<
-                        extern "C" fn(&AnyObject, Sel, *mut AnyObject) -> usize,
-                        Imp,
-                    >(should_terminate),
+                    imp,
                     c"Q@:@".as_ptr(),
-                );
-                assert!(added.as_bool(), "GPUI termination delegate contract changed");
-            }
+                )
+            };
+            assert!(added.as_bool(), "GPUI termination delegate contract changed");
         }
     }
 }

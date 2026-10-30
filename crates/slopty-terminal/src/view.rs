@@ -1664,7 +1664,7 @@ impl TerminalView {
     }
 
     /// Start the block menu's closing motion, when it is open; it goes once that has played.
-    fn dismiss_block_menu(&mut self, cx: &mut Context<Self>) -> bool {
+    fn dismiss_block_menu(&mut self, cx: &Context<Self>) -> bool {
         if !self.block_menu.begin_close(slopty_shell::clock::now(cx)) {
             return false;
         }
@@ -2737,7 +2737,7 @@ impl TerminalView {
     /// What floats at the foot of the grid: that the worker is out of reach, that copy mode is
     /// on, that new lines arrived below a view scrolled away ([`Self::render_new_lines`]), or,
     /// in a view another client sizes, an offer to take the size ([`Self::render_take`]).
-    fn render_foot(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_foot(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         if let Some(away) = self.render_out_of_reach(cx) {
             return Some(away);
         }
@@ -2765,7 +2765,7 @@ impl TerminalView {
 
     /// While the link to the session's worker is gone, the foot says so with the shell's
     /// spinner, until the worker is back ([`Self::relink`]).
-    fn render_out_of_reach(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    fn render_out_of_reach(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         if !self.out.is_closed() || self.exited().is_some() {
             return None;
         }

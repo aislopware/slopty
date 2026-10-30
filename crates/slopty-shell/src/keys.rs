@@ -7,16 +7,6 @@
 //! key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓ and the word "Esc"); elsewhere it is words ("Ctrl+Shift+A"). The
 //! binding shown is the one the keymap holds when the hint draws, so a rebind shows at once and an
 //! unbound action shows nothing.
-#![allow(
-    rustdoc::private_intra_doc_links,
-    clippy::derive_partial_eq_without_eq,
-    clippy::fn_params_excessive_bools,
-    clippy::match_same_arms,
-    clippy::panic,
-    clippy::too_long_first_doc_paragraph,
-    clippy::trivially_copy_pass_by_ref,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{Action, App, FocusHandle, KeyBinding, Modifiers, SharedString, Window};
 
@@ -29,9 +19,11 @@ pub const MOD_IS_COMMAND: bool = cfg!(target_vendor = "apple");
 pub const OS: gpui::OperatingSystem =
     if cfg!(target_os = "macos") { gpui::OperatingSystem::Mac } else { gpui::OperatingSystem::Ios };
 
-/// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting): GPUI's
-/// `KeyBinding::new` takes a literal, and this parses the chord as GPUI's own keymap loading does.
-/// A chord that is no chord panics, as `KeyBinding::new`'s does.
+/// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting).
+///
+/// GPUI's `KeyBinding::new` takes a literal, and this parses the chord as GPUI's own keymap
+/// loading does. A chord that is no chord panics, as `KeyBinding::new`'s does.
+#[expect(clippy::panic, reason = "shell lint migration: seam, callers in slices B, C and D")]
 pub fn binding<A: Action>(chord: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
     let predicate = context.map(|context| match gpui::KeyBindingContextPredicate::parse(context) {
         Ok(predicate) => std::rc::Rc::new(predicate),
@@ -48,12 +40,16 @@ const CHORD_GAP: char = '\u{2009}';
 
 /// How a key reads in Slopty's chrome: Mac glyphs in ⌃⌥⇧⌘ order with no separators ("⇧⌘A"),
 /// Claude desktop's key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓, "Esc"); elsewhere "Ctrl+Shift+A".
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "shell lint migration: seam, callers in slopty-terminal"
+)]
 pub fn stroke_text(modifiers: &Modifiers, key: &str) -> String {
-    stroke_text_on(MOD_IS_COMMAND, modifiers, key)
+    stroke_text_on(MOD_IS_COMMAND, *modifiers, key)
 }
 
 /// [`stroke_text`] for an explicit platform, so both spellings are testable on any machine.
-pub fn stroke_text_on(mac: bool, modifiers: &Modifiers, key: &str) -> String {
+pub fn stroke_text_on(mac: bool, modifiers: Modifiers, key: &str) -> String {
     if mac {
         let mut out = String::new();
         for (on, glyph) in [
@@ -127,14 +123,16 @@ pub fn binding_text(binding: &KeyBinding) -> SharedString {
         if n > 0 {
             out.push(CHORD_GAP);
         }
-        out.push_str(&stroke_text(stroke.modifiers(), stroke.key()));
+        out.push_str(&stroke_text_on(MOD_IS_COMMAND, *stroke.modifiers(), stroke.key()));
     }
     out.into()
 }
 
-/// The binding `action` would fire on now: in `focus`'s key context when given, else the focused
-/// element's, else the window's (Zed's `KeyBinding::for_action_in` order), else any binding the
-/// keymap holds with no context. `None` when nothing binds it.
+/// The binding `action` would fire on now.
+///
+/// In `focus`'s key context when given, else the focused element's, else the window's (Zed's
+/// `KeyBinding::for_action_in` order), else any binding the keymap holds with no context. `None`
+/// when nothing binds it.
 pub fn binding_for_action(
     action: &dyn Action,
     focus: Option<&FocusHandle>,
@@ -159,8 +157,8 @@ pub fn for_action(
     binding_for_action(action, focus, window, cx).map(|binding| binding_text(&binding))
 }
 
-/// [`global_binding`] as [`binding_text`] writes it: the key a row away from any focus names
-/// (the command palette's).
+/// The last binding of `action` with no context, as [`binding_text`] writes it: the key a row
+/// away from any focus names (the command palette's).
 pub fn for_action_anywhere(action: &dyn Action, cx: &App) -> Option<SharedString> {
     global_binding(action, cx).map(|binding| binding_text(&binding))
 }
@@ -185,7 +183,7 @@ pub fn combo_text_on(mac: bool, combo: &str) -> String {
         .split_whitespace()
         .map(|chord| {
             let (modifiers, key) = parse_chord(mac, chord);
-            stroke_text_on(mac, &modifiers, key)
+            stroke_text_on(mac, modifiers, key)
         })
         .collect::<Vec<_>>()
         .join(&CHORD_GAP.to_string())
@@ -203,9 +201,13 @@ fn parse_chord(mac: bool, chord: &str) -> (Modifiers, &str) {
     };
     let mut modifiers = Modifiers::default();
     for part in prefix.split('-').filter(|part| !part.is_empty()) {
+        // "mod" is the primary key, ⌘ or Ctrl.
+        let part = match part {
+            "mod" if mac => "cmd",
+            "mod" => "ctrl",
+            part => part,
+        };
         match part {
-            "mod" if mac => modifiers.platform = true,
-            "mod" => modifiers.control = true,
             "cmd" | "super" | "win" | "platform" => modifiers.platform = true,
             "ctrl" | "control" => modifiers.control = true,
             "alt" | "opt" | "option" => modifiers.alt = true,
@@ -223,7 +225,7 @@ pub fn aria(binding: &KeyBinding) -> SharedString {
     binding
         .keystrokes()
         .iter()
-        .map(|stroke| aria_stroke(stroke.modifiers(), stroke.key()))
+        .map(|stroke| aria_stroke(*stroke.modifiers(), stroke.key()))
         .collect::<Vec<_>>()
         .join(" ")
         .into()
@@ -240,7 +242,7 @@ pub fn aria_combo_on(mac: bool, combo: &str) -> String {
         .split_whitespace()
         .map(|chord| {
             let (modifiers, key) = parse_chord(mac, chord);
-            aria_stroke(&modifiers, key)
+            aria_stroke(modifiers, key)
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -262,7 +264,7 @@ pub fn aria_for_action(action: &dyn Action, cx: &App) -> Option<SharedString> {
 
 /// One stroke in `aria-keyshortcuts` spelling: modifiers in the Mac's ⌃⌥⇧⌘ order, then the key
 /// by its DOM `key` name.
-fn aria_stroke(modifiers: &Modifiers, key: &str) -> String {
+fn aria_stroke(modifiers: Modifiers, key: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     for (on, word) in [
         (modifiers.control, "Control"),
@@ -304,29 +306,33 @@ fn aria_key(key: &str) -> String {
 mod tests {
     use super::*;
 
-    fn held(control: bool, alt: bool, shift: bool, platform: bool) -> Modifiers {
-        Modifiers { control, alt, shift, platform, function: false }
+    /// The modifiers whose Mac glyphs `glyphs` holds ("⇧⌘").
+    fn held(glyphs: &str) -> Modifiers {
+        Modifiers {
+            control: glyphs.contains('⌃'),
+            alt: glyphs.contains('⌥'),
+            shift: glyphs.contains('⇧'),
+            platform: glyphs.contains('⌘'),
+            function: false,
+        }
     }
 
     #[test]
     fn a_mac_stroke_is_glyphs_in_canonical_order() {
-        assert_eq!(stroke_text_on(true, &held(true, true, true, true), "a"), "⌃⌥⇧⌘A");
-        assert_eq!(stroke_text_on(true, &held(false, false, true, true), "enter"), "⇧⌘⏎");
-        assert_eq!(stroke_text_on(true, &held(false, false, false, false), "escape"), "Esc");
-        assert_eq!(stroke_text_on(true, &held(false, false, true, false), "tab"), "⇧⇥");
-        assert_eq!(stroke_text_on(true, &held(false, false, false, true), "["), "⌘[");
-        assert_eq!(stroke_text_on(true, &held(false, false, false, false), "f5"), "F5");
-        assert_eq!(stroke_text_on(true, &held(false, true, false, false), "up"), "⌥↑");
+        assert_eq!(stroke_text_on(true, held("⌃⌥⇧⌘"), "a"), "⌃⌥⇧⌘A");
+        assert_eq!(stroke_text_on(true, held("⇧⌘"), "enter"), "⇧⌘⏎");
+        assert_eq!(stroke_text_on(true, held(""), "escape"), "Esc");
+        assert_eq!(stroke_text_on(true, held("⇧"), "tab"), "⇧⇥");
+        assert_eq!(stroke_text_on(true, held("⌘"), "["), "⌘[");
+        assert_eq!(stroke_text_on(true, held(""), "f5"), "F5");
+        assert_eq!(stroke_text_on(true, held("⌥"), "up"), "⌥↑");
     }
 
     #[test]
     fn elsewhere_a_stroke_is_words() {
-        assert_eq!(stroke_text_on(false, &held(true, false, true, false), "a"), "Ctrl+Shift+A");
-        assert_eq!(stroke_text_on(false, &held(false, false, false, false), "escape"), "Esc");
-        assert_eq!(
-            stroke_text_on(false, &held(true, false, false, false), "backspace"),
-            "Ctrl+Backspace"
-        );
+        assert_eq!(stroke_text_on(false, held("⌃⇧"), "a"), "Ctrl+Shift+A");
+        assert_eq!(stroke_text_on(false, held(""), "escape"), "Esc");
+        assert_eq!(stroke_text_on(false, held("⌃"), "backspace"), "Ctrl+Backspace");
     }
 
     #[test]
@@ -367,7 +373,14 @@ mod tests {
         );
     }
 
-    gpui::actions!(keys_test, [Probe, Contextual, Unbound]);
+    mod probes {
+        #![expect(
+            clippy::derive_partial_eq_without_eq,
+            reason = "gpui::actions! derives PartialEq only"
+        )]
+        gpui::actions!(keys_test, [Probe, Contextual, Unbound]);
+    }
+    use probes::{Contextual, Probe, Unbound};
 
     #[gpui::test]
     fn an_action_reads_its_binding_now_and_nothing_unbound(cx: &mut gpui::TestAppContext) {

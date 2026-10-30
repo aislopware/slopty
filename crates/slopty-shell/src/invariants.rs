@@ -8,13 +8,6 @@
 //! makes it up (`slopty::invariant`), and under `SLOPTY_INVARIANTS=panic` (the e2e harness's) the
 //! app stops on it, so an e2e run that meets one fails where it happened instead of in a golden
 //! later.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::cloned_ref_to_slice_refs,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -37,9 +30,17 @@ pub const ENV: &str = "SLOPTY_INVARIANTS";
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Breach {
     /// The open chat holds two entries under one id.
-    TwiceInTranscript { chat: String, id: String },
+    TwiceInTranscript {
+        /// The open chat's id.
+        chat: String,
+        /// The id the two entries share.
+        id: String,
+    },
     /// The open chat, in the active window, reads as unread.
-    OpenChatUnread { chat: String },
+    OpenChatUnread {
+        /// The open chat's id.
+        chat: String,
+    },
 }
 
 /// Whether `state`, as the window is `active`, breaches anything.
@@ -89,7 +90,7 @@ impl Watch {
 }
 
 /// Check `state` every [`EVERY`] for as long as it lives, and tell what stands.
-pub fn watch(state: &Entity<AppState>, cx: &mut App) {
+pub fn watch(state: &Entity<AppState>, cx: &App) {
     let state = state.downgrade();
     let stop = std::env::var(ENV).is_ok_and(|mode| mode == "panic");
     tracing::info!(target: "slopty::invariant", stop, "the shell's invariants are watched");
@@ -118,7 +119,7 @@ mod tests {
     use super::*;
 
     fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_760_000_000 + seconds, 0).expect("a time")
+        DateTime::from_timestamp(1_760_000_000_i64.saturating_add(seconds), 0).expect("a time")
     }
 
     /// A breach counts once it has stood for the grace, is told once, and is told again only
@@ -129,7 +130,11 @@ mod tests {
         let mut watch = Watch::default();
         assert!(watch.standing(vec![breach.clone()], at(0)).is_empty(), "just seen");
         assert!(watch.standing(vec![breach.clone()], at(5)).is_empty(), "in its grace");
-        assert_eq!(watch.standing(vec![breach.clone()], at(6)), [breach.clone()], "stood");
+        assert_eq!(
+            watch.standing(vec![breach.clone()], at(6)),
+            std::slice::from_ref(&breach),
+            "stood"
+        );
         assert!(watch.standing(vec![breach.clone()], at(9)).is_empty(), "told already");
         assert!(watch.standing(Vec::new(), at(10)).is_empty(), "gone");
         assert!(watch.standing(vec![breach.clone()], at(11)).is_empty(), "back: its grace again");

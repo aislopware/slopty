@@ -271,7 +271,7 @@ impl ScreenView {
 
     /// The ring at a drop's point while the worker lands it: the shell's small spinner in a
     /// frosted disc.
-    pub(super) fn drop_ring(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+    pub(super) fn drop_ring(&self, cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
         let at = self.drop?.ring?;
         let theme = slopty_shell::live::chrome::theme(cx).for_popup();
         let view = cx.entity_id();

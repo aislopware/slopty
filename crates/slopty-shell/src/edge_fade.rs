@@ -1,24 +1,12 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! [`edge_faded`] — wraps a child so its whole subtree paints inside a
-//! [`gpui::EdgeFade`] scope: primitives fade by vertical distance to the
-//! wrapper's own top/bottom edges (per-pixel text opacity — a true static
-//! gradient, unlike whole-row opacity). Built for the GLASS sidebar's scroll
-//! fade: over a see-through blurred backdrop no painted overlay can fade
-//! content out, because "what is behind the window" is not a paintable color.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::return_self_not_must_use,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::type_complexity,
-    clippy::unreachable,
-    reason = "shell lint migration: slice A"
-)]
+//! [`gpui::EdgeFade`] scope.
+//!
+//! Primitives fade by vertical distance to the wrapper's own top/bottom edges
+//! (per-pixel text opacity — a true static gradient, unlike whole-row opacity).
+//! Built for the GLASS sidebar's scroll fade: over a see-through blurred
+//! backdrop no painted overlay can fade content out, because "what is behind
+//! the window" is not a paintable color.
 
 use std::cell::RefCell;
 
@@ -90,10 +78,11 @@ fn inherit_vertical_fade(mut label: EdgeFade, parent: EdgeFade) -> EdgeFade {
     label
 }
 
-/// Fade the child's content at its own edges: `top`/`bottom` select which
-/// edges (pass the "is there hidden overflow" flags), `band` is the ramp
-/// height in px. Horizontal edges via [`EdgeFaded::fade_left`] /
-/// [`EdgeFaded::fade_right`].
+/// Fade the child's content at its own edges.
+///
+/// `top`/`bottom` select which edges (pass the "is there hidden overflow"
+/// flags), `band` is the ramp height in px. Horizontal edges via
+/// [`EdgeFaded::fade_left`] / [`EdgeFaded::fade_right`].
 pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -> EdgeFaded {
     EdgeFaded {
         band,
@@ -101,7 +90,6 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
         band_bottom: None,
         inset_top: 0.0,
         inset_bottom: 0.0,
-        outset_bottom: 0.0,
         top,
         bottom,
         left: false,
@@ -117,34 +105,61 @@ pub fn edge_faded(band: f32, top: bool, bottom: bool, child: impl IntoElement) -
     }
 }
 
+/// Reads at paint time whether content lies past the top and the bottom.
+type OverflowY = Box<dyn Fn(&App) -> (bool, bool)>;
+
+/// Reads at paint time how much content lies past the top and the bottom.
+type HiddenY = Box<dyn Fn(&App) -> (f32, f32)>;
+
+/// A child painted inside an edge fade ([`edge_faded`]).
 pub struct EdgeFaded {
     band: f32,
     band_top: Option<f32>,
     band_bottom: Option<f32>,
     inset_top: f32,
     inset_bottom: f32,
-    outset_bottom: f32,
     top: bool,
     bottom: bool,
     left: bool,
     right: bool,
     scroll_y: Option<ScrollHandle>,
-    overflow_y: Option<Box<dyn Fn(&App) -> (bool, bool)>>,
+    overflow_y: Option<OverflowY>,
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
     /// How much content lies past the top and the bottom ([`Self::fade_scroll_y_with`]).
-    hidden_y: Option<Box<dyn Fn(&App) -> (f32, f32)>>,
+    hidden_y: Option<HiddenY>,
     clear_right: f32,
     child: AnyElement,
 }
 
+impl std::fmt::Debug for EdgeFaded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EdgeFaded")
+            .field("band", &self.band)
+            .field("band_top", &self.band_top)
+            .field("band_bottom", &self.band_bottom)
+            .field("inset_top", &self.inset_top)
+            .field("inset_bottom", &self.inset_bottom)
+            .field("top", &self.top)
+            .field("bottom", &self.bottom)
+            .field("left", &self.left)
+            .field("right", &self.right)
+            .field("clear_right", &self.clear_right)
+            .finish_non_exhaustive()
+    }
+}
+
 impl EdgeFaded {
+    /// Fade the left edge too, or not.
+    #[must_use]
     pub const fn fade_left(mut self, on: bool) -> Self {
         self.left = on;
         self
     }
 
+    /// Fade the right edge too, or not.
+    #[must_use]
     pub const fn fade_right(mut self, on: bool) -> Self {
         self.right = on;
         self
@@ -153,12 +168,14 @@ impl EdgeFaded {
     /// Override the ramp height at the TOP edge only. Asymmetric bands let
     /// content fade across chrome of different heights — a short titlebar
     /// above vs a tall composer stack below.
+    #[must_use]
     pub const fn band_top(mut self, px: f32) -> Self {
         self.band_top = Some(px);
         self
     }
 
     /// [`Self::band_top`], for the bottom edge.
+    #[must_use]
     pub const fn band_bottom(mut self, px: f32) -> Self {
         self.band_bottom = Some(px);
         self
@@ -171,6 +188,7 @@ impl EdgeFaded {
     /// prepaint clamps the offset to fit, nothing re-renders, and a fade with
     /// no overflow sticks on screen (user report). `top`/`bottom` become
     /// enables; the handle decides per frame.
+    #[must_use]
     pub fn fade_overflow_y(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_y = Some(handle.clone());
         self
@@ -178,6 +196,7 @@ impl EdgeFaded {
 
     /// Paint-time overflow for custom scrollable elements that do not use a
     /// `ScrollHandle`. Called after the child's prepaint has clamped scrolling.
+    #[must_use]
     pub fn fade_overflow_y_with(
         mut self,
         overflow: impl Fn(&App) -> (bool, bool) + 'static,
@@ -189,6 +208,7 @@ impl EdgeFaded {
     /// [`Self::fade_overflow_y`] for the HORIZONTAL edges — gates
     /// [`Self::fade_left`]/[`Self::fade_right`] on the handle's x overflow at
     /// paint time (the right-pane surface-tab strip).
+    #[must_use]
     pub fn fade_overflow_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self
@@ -198,6 +218,7 @@ impl EdgeFaded {
     /// as wide as the content hidden past it, up to the band. The ramp still
     /// reaches zero exactly at the clip edge, but a strip scrolled by 2 px
     /// dims 2 px instead of a whole band — no snap as the fade switches on.
+    #[must_use]
     pub fn fade_scroll_x(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self.grow_x = true;
@@ -207,6 +228,7 @@ impl EdgeFaded {
     /// [`Self::fade_scroll_x`] for the vertical edges: each ramp is as tall as the
     /// content hidden past it, up to its band, so a list scrolled by 4 px dims 4 px at its top
     /// rather than snapping a whole band on (`HextaUI`'s scroll area; design-inspiration item 4).
+    #[must_use]
     pub fn fade_scroll_y(self, handle: &ScrollHandle) -> Self {
         let handle = handle.clone();
         self.fade_scroll_y_with(move |_| {
@@ -217,6 +239,7 @@ impl EdgeFaded {
 
     /// [`Self::fade_scroll_y`] for a scroller without a [`ScrollHandle`] (a list):
     /// `hidden` says how much content lies past the top and the bottom, read at paint time.
+    #[must_use]
     pub fn fade_scroll_y_with(mut self, hidden: impl Fn(&App) -> (f32, f32) + 'static) -> Self {
         self.hidden_y = Some(Box::new(hidden));
         self
@@ -225,6 +248,7 @@ impl EdgeFaded {
     /// Ease a right-edge label fade into view as overflow grows from zero to
     /// one band. Unlike scroll chrome, a label should not suddenly dim its
     /// final characters as soon as it becomes a fraction too wide.
+    #[must_use]
     pub fn fade_label_overflow(mut self, handle: &ScrollHandle) -> Self {
         self.scroll_x = Some(handle.clone());
         self.smooth_overflow_x = true;
@@ -235,6 +259,7 @@ impl EdgeFaded {
     /// to 0 past an active edge, so content between the wrapper's real top
     /// and the inset edge paints fully transparent — content under opaque-ish
     /// chrome (titlebar TEXT) vanishes before it can overlap.
+    #[must_use]
     pub const fn inset_top(mut self, px: f32) -> Self {
         self.inset_top = px;
         self
@@ -243,19 +268,16 @@ impl EdgeFaded {
     /// [`Self::inset_top`], for the BOTTOM edge: content between the inset edge and
     /// the wrapper's real bottom paints fully transparent (the transcript under the composer's
     /// footer).
+    #[must_use]
     pub const fn inset_bottom(mut self, px: f32) -> Self {
         self.inset_bottom = px;
-        self
-    }
-
-    pub const fn outset_bottom(mut self, px: f32) -> Self {
-        self.outset_bottom = px;
         self
     }
 
     /// Keep the last `px` of the child clear, fading out over [`CLEAR_BAND`] before it,
     /// so something laid over the right end (a row's hover pill) reads alone without the child
     /// re-laying out under it.
+    #[must_use]
     pub const fn clear_right(mut self, px: f32) -> Self {
         self.clear_right = px.max(0.0);
         self
@@ -392,7 +414,6 @@ impl EdgeFaded {
             bounds.origin.y += inset;
             bounds.size.height -= inset;
             bounds.size.height -= px(self.inset_bottom).min(bounds.size.height);
-            bounds.size.height += px(self.outset_bottom);
             bounds.size.height = bounds.size.height.max(px(0.0));
             EdgeFade {
                 bounds,
@@ -423,7 +444,7 @@ pub const CLEAR_BAND: f32 = 16.0;
 fn label_fade_outset(overflow: f32, band: f32) -> f32 {
     let band = band.max(1.0);
     let progress = (overflow / band).clamp(0.0, 1.0);
-    let eased = progress * progress * (3.0 - 2.0 * progress);
+    let eased = progress * progress * (-2.0_f32).mul_add(progress, 3.0);
     band * (1.0 - eased)
 }
 
@@ -444,17 +465,20 @@ mod tests {
 
     use super::*;
 
+    /// What a fixture's probes saw at paint, shared with the test.
+    type Seen<T> = Rc<RefCell<Vec<T>>>;
+
     #[gpui::test]
     fn menu_fades_follow_scroll_and_disappear_when_content_fits(cx: &mut gpui::TestAppContext) {
         struct Menu {
             rows: usize,
             scroll: ScrollHandle,
-            observed: Rc<RefCell<Vec<(bool, Option<EdgeFade>)>>>,
+            observed: Seen<(bool, Option<EdgeFade>)>,
         }
         impl Render for Menu {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let probe = |inside| {
-                    let observed = self.observed.clone();
+                    let observed = Rc::clone(&self.observed);
                     gpui::canvas(
                         |_, _, _| (),
                         move |_, (), window, cx| {
@@ -472,7 +496,7 @@ mod tests {
                             .max_h(px(100.0))
                             .flex()
                             .flex_col()
-                            .children((0..self.rows).map(|_| probe(true))),
+                            .children(std::iter::repeat_with(|| probe(true)).take(self.rows)),
                     ),
                 )
             }
@@ -481,7 +505,7 @@ mod tests {
         let (menu, cx) = cx.add_window_view(|_, _| Menu {
             rows: 10,
             scroll: ScrollHandle::new(),
-            observed: observed.clone(),
+            observed: Rc::clone(&observed),
         });
         cx.run_until_parked();
         let scroll = menu.read_with(cx, |menu, _| menu.scroll.clone());
@@ -525,11 +549,11 @@ mod tests {
     fn a_vertical_ramp_grows_with_the_content_hidden_past_it(cx: &mut gpui::TestAppContext) {
         struct Fixture {
             hidden: (f32, f32),
-            observed: Rc<RefCell<Vec<Option<EdgeFade>>>>,
+            observed: Seen<Option<EdgeFade>>,
         }
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let observed = self.observed.clone();
+                let observed = Rc::clone(&self.observed);
                 let probe = gpui::canvas(
                     |_, _, _| (),
                     move |_, (), window, cx| observed.borrow_mut().push(active_fade(window, cx)),
@@ -543,7 +567,7 @@ mod tests {
         }
         let observed = Rc::new(RefCell::new(Vec::new()));
         let handle =
-            cx.add_window(|_, _| Fixture { hidden: (0.0, 0.0), observed: observed.clone() });
+            cx.add_window(|_, _| Fixture { hidden: (0.0, 0.0), observed: Rc::clone(&observed) });
         let mut ramps = |hidden: (f32, f32)| {
             handle
                 .update(cx, |view, _, cx| {
@@ -576,12 +600,12 @@ mod tests {
             width: f32,
             top: bool,
             bottom: bool,
-            observed: Rc<RefCell<Vec<Option<EdgeFade>>>>,
+            observed: Seen<Option<EdgeFade>>,
         }
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let probe = |width: f32| {
-                    let observed = self.observed.clone();
+                    let observed = Rc::clone(&self.observed);
                     gpui::canvas(
                         |_, _, _| (),
                         move |_, (), window, cx| {
@@ -617,8 +641,7 @@ mod tests {
                         )
                         .band_top(12.0)
                         .band_bottom(30.0)
-                        .inset_top(7.0)
-                        .outset_bottom(9.0),
+                        .inset_top(7.0),
                     )
                     .child(probe(20.0))
             }
@@ -628,7 +651,7 @@ mod tests {
             width: 80.0,
             top: true,
             bottom: true,
-            observed: observed.clone(),
+            observed: Rc::clone(&observed),
         });
         for (top, bottom) in [(true, true), (true, false), (false, true), (false, false)] {
             for width in [80.0, 240.0, 80.0] {
@@ -648,7 +671,9 @@ mod tests {
                 })
                 .unwrap();
                 let seen = observed.borrow();
-                let [label, sibling, outside] = &seen[seen.len() - 3..] else { unreachable!() };
+                let [.., label, sibling, outside] = seen.as_slice() else {
+                    panic!("the label, its sibling and the outside probe all paint")
+                };
                 assert!(outside.is_none(), "fade leaked outside scroll container");
                 let overflowing = width < 200.0;
                 if top || bottom {
@@ -685,8 +710,8 @@ mod tests {
         assert_eq!(label_fade_outset(100.0, band), 0.0);
         // Simulate resizing in 0.1 px increments across the old 1 px cutoff.
         let mut previous = 1.0;
-        for step in 0..=400 {
-            let overflow = step as f32 / 10.0;
+        for step in 0_u16..=400 {
+            let overflow = f32::from(step) / 10.0;
             let edge_alpha = (label_fade_outset(overflow, band) / band).powi(2);
             assert!(edge_alpha <= previous);
             assert!(previous - edge_alpha < 0.02);
