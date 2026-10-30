@@ -634,11 +634,8 @@ pub const RESTORED_DIVIDER: &str = "Restored after restart";
 
 /// Spawn the actor thread.
 pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
-    let (tx, rx) = mpsc::unbounded_channel();
     let id = start.id;
-    let (activity_tx, activity) =
-        watch::channel(Activity { exited: start.exited.is_some(), ..Activity::default() });
-    let handle = SessionHandle { id, tx, activity, marks: Arc::default() };
+    let (handle, rx, activity_tx) = handle_for(&start);
     thread::Builder::new()
         .name(format!("session-{id}"))
         .spawn(move || {
@@ -665,6 +662,28 @@ pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
             })
         })?;
     Ok(handle)
+}
+
+/// Run the actor as a task of the calling thread's `LocalSet`.
+///
+/// Not on a thread of its own, so its timers are the caller's runtime's: a test on tokio's
+/// paused clock runs the frame pace, the checkpoints and every other wait of the session on
+/// that clock.
+pub fn spawn_local(start: SessionStart) -> Result<SessionHandle, WorkerError> {
+    let (handle, rx, activity_tx) = handle_for(&start);
+    let actor = Actor::new(start, rx, activity_tx)?;
+    tokio::task::spawn_local(actor.run());
+    Ok(handle)
+}
+
+/// The handle of the session `start` begins, with the ends its actor keeps.
+fn handle_for(
+    start: &SessionStart,
+) -> (SessionHandle, mpsc::UnboundedReceiver<Cmd>, watch::Sender<Activity>) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (activity_tx, activity) =
+        watch::channel(Activity { exited: start.exited.is_some(), ..Activity::default() });
+    (SessionHandle { id: start.id, tx, activity, marks: Arc::default() }, rx, activity_tx)
 }
 
 struct Viewer {
@@ -978,12 +997,14 @@ pub const PROGRESS_EVERY: Duration = Duration::from_millis(250);
 
 /// A checkpoint follows this much quiet after output. Shorter means a crashed worker loses less
 /// of what a fresh one cannot replay from the ring; longer means fewer formatter runs.
-const CHECKPOINT_AFTER: Duration = Duration::from_millis(500);
-/// A quiet-spell checkpoint also waits this long after a viewer's input. The formatter runs on
-/// the actor's thread, a few milliseconds per 10k lines of history (13–19 ms for a full one), and
-/// a key typed while it runs waits for it with its echo and frame (MEASUREMENTS.md, "a key after
-/// a pause and the checkpoint"). Someone typing pauses for less than this between keys.
-const CHECKPOINT_AFTER_INPUT: Duration = Duration::from_secs(2);
+pub const CHECKPOINT_AFTER: Duration = Duration::from_millis(500);
+/// A quiet-spell checkpoint also waits this long after a viewer's input.
+///
+/// The formatter runs on the actor's thread, a few milliseconds per 10k lines of history
+/// (13–19 ms for a full one), and a key typed while it runs waits for it with its echo and
+/// frame (MEASUREMENTS.md, "a key after a pause and the checkpoint"). Someone typing pauses for
+/// less than this between keys.
+pub const CHECKPOINT_AFTER_INPUT: Duration = Duration::from_secs(2);
 /// A checkpoint is also taken once this many bytes were tapped since the last one, so ptyd's
 /// ring (4 MiB by default) never overflows under a flood and the replay stays bounded.
 const CHECKPOINT_EVERY_BYTES: usize = 1 << 20;

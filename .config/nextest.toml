@@ -98,16 +98,14 @@ not (
 # gate's are (`profile.gate`, whose own named ones `warm` inherits): a warm runner shares this
 # Mac with the person and the lanes at `Nice 10`, and its lints build beside its tests. In its
 # first run (40930812923, cold, the lanes building beside it) the two linear-time parses took
-# 3.2 s and 3.9 s against bounds of 2 s and 3 s, and a key after a pause waited 7.6 ms (p50)
-# against 3. A pass on a retry shows as FLAKY and stands; failing every try fails the gate.
-# Named, never a pattern. Virtual time (research rank 2) replaces these retries.
+# 3.2 s and 3.9 s against bounds of 2 s and 3 s. A pass on a retry shows as FLAKY and stands;
+# failing every try fails the gate. Named, never a pattern. Virtual time (research rank 2)
+# replaces these retries.
 [[profile.warm.overrides]]
 filter = '''
-(package(slopty-markdown) & (
+package(slopty-markdown) & (
     test(=parser::math_tests::hostile_dollars_cost_a_bounded_number_of_parses)
-    | test(=parser::math_tests::delimiter_rewrites_stay_linear)))
-| (package(slopty-worker) & binary(session_actor)
-    & test(=actor::a_key_after_a_pause_does_not_wait_for_the_checkpoint))
+    | test(=parser::math_tests::delimiter_rewrites_stay_linear))
 '''
 retries = { backoff = "fixed", count = 2, delay = "1s" }
 flaky-result = "pass"
@@ -186,15 +184,10 @@ priority = 100
 # cores is noise in that measurement. The keyframe test counts datagrams a socket holds, and the
 # rest of the suite's loopback traffic shares the kernel's buffers: on a loaded runner it held
 # 1162 of 1217 (run 38084916102). The beat's cadence is a deadline beside a spinning blocking
-# thread: with the suite on every core a beat waited 116 ms for one (run 38094953679). An owed
-# echo's latency is measured the same way: p50 3.51 ms under the suite (run 38101834661).
+# thread: with the suite on every core a beat waited 116 ms for one (run 38094953679).
 [[profile.default.overrides]]
 filter = '''
-(package(slopty-worker) & (test(an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
-    | test(a_key_after_a_pause_does_not_wait_for_the_checkpoint)
-    | test(a_slow_geometry_call_does_not_make_the_beat_late)))
-| (package(slopty-worker) & binary(session_actor)
-    & test(an_echo_owed_for_want_of_room_goes_when_room_returns))
+(package(slopty-worker) & test(a_slow_geometry_call_does_not_make_the_beat_late))
 | (package(slopty-workerd) & test(echo_is_not_held_behind_slow_requests))
 | (package(slopty-shape) & test(a_short_wait_ends_when_it_was_asked_to))
 | (package(slopty-net) & test(the_socket_holds_a_large_keyframe_while_nobody_reads))
@@ -268,22 +261,17 @@ filter = 'package(slopty-worker) & (binary(fswatch) | test(/^fsevents::tests::/)
 test-group = 'fsevents'
 
 # The gate's tests lane (`cargo gate`): the default profile, plus retries for the tests named
-# below. They time the session actor or the relay's timer against the machine's load: in a loaded
-# gate they have missed their deadline, even run alone in nextest (the gate's other lanes still
-# compile beside them), and alone they pass (2026-09-28, 2026-09-30). A pass on a retry shows as
-# FLAKY in the gate log; failing every try still fails the gate. Name a test here only when it is
+# below. They time the relay's timer against the machine's load: in a loaded gate they have
+# missed their deadline, even run alone in nextest (the gate's other lanes still compile beside
+# them), and alone they pass (2026-09-28, 2026-09-30). A pass on a retry shows as FLAKY in the
+# gate log; failing every try still fails the gate. Name a test here only when it is
 # timing-sensitive this way, never by pattern; each one's pass on a retry stands
-# (`flaky-result`), every other flake fails. Virtual time (research rank 2) replaces these retries.
+# (`flaky-result`), every other flake fails. Virtual time (research rank 2) replaces these
+# retries: the session actor's timing tests run on tokio's paused clock (2026-10-30).
 [profile.gate]
 
 [[profile.gate.overrides]]
-filter = '''
-(package(slopty-worker) & binary(session_actor) & (
-    test(=actor::a_slow_viewer_is_skipped_then_caught_up_never_dropped)
-    | test(=actor::a_silent_command_after_a_clear_is_seen_running_at_once)
-    | test(=actor::an_echo_beside_a_flood_is_not_held_to_the_frame_pace)))
-| (package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to))
-'''
+filter = 'package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to)'
 retries = { backoff = "fixed", count = 2, delay = "1s" }
 flaky-result = "pass"
 
@@ -297,12 +285,7 @@ flaky-result = "pass"
 inherits = "gate"
 default-filter = '''
 not (
-    (package(slopty-worker) & binary(session_actor) & (
-        test(=actor::a_slow_viewer_is_skipped_then_caught_up_never_dropped)
-        | test(=actor::a_silent_command_after_a_clear_is_seen_running_at_once)
-        | test(=actor::an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
-        | test(=actor::a_key_after_a_pause_does_not_wait_for_the_checkpoint)))
-    | (package(slopty-workerd) & test(=tests::echo_is_not_held_behind_slow_requests))
+    (package(slopty-workerd) & test(=tests::echo_is_not_held_behind_slow_requests))
     | (package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to))
     | (package(slopty-codec) & test(=audio::tests::player_starts_and_drains))
     | (package(slopty-client) & test(=screen::sound::tests::audio_waits_for_the_player_and_counts_gaps))

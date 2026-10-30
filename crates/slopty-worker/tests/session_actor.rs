@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod actor {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use slopty_client::term::{Effect, TermState};
@@ -85,6 +86,193 @@ mod actor {
         })
         .unwrap();
         (handle, child, tap_rx)
+    }
+
+    /// Holds tokio's paused clock where it stands while it lives: the runtime waits in real
+    /// time for the blocking task it keeps. It lets go after a minute of real time, so a byte
+    /// that never lands fails its test's own deadline rather than hanging it.
+    struct Still {
+        _release: std::sync::mpsc::Sender<()>,
+    }
+
+    fn still() -> Still {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        drop(tokio::task::spawn_blocking(move || {
+            let _released = released.recv_timeout(Duration::from_mins(1));
+        }));
+        Still { _release: release }
+    }
+
+    /// The bytes on their way across a played session's terminal ([`played`]): written at one
+    /// end and not yet read at the other. While any are, the paused clock stands still ([`Still`]).
+    /// Linux hands a pty's bytes across on a kernel worker after the write has returned, and an
+    /// idle runtime would otherwise jump to its next timer before they land; macOS hands them
+    /// across in the write.
+    #[derive(Clone, Default)]
+    struct InFlight(Arc<parking_lot::Mutex<Crossing>>);
+
+    #[derive(Default)]
+    struct Crossing {
+        /// Printed by the program, or echoed by the terminal, and not yet read by the actor.
+        to_actor: usize,
+        /// Typed and not yet read by the program.
+        to_program: usize,
+        /// Clears asked whose erase the actor taps itself, never having read it.
+        erases: usize,
+        still: Option<Still>,
+    }
+
+    impl InFlight {
+        fn change(&self, change: impl FnOnce(&mut Crossing)) {
+            let mut crossing = self.0.lock();
+            change(&mut crossing);
+            if crossing.to_actor == 0 && crossing.to_program == 0 {
+                crossing.still = None;
+            } else if crossing.still.is_none() {
+                crossing.still = Some(still());
+            }
+        }
+
+        /// `n` bytes are on their way to the actor.
+        fn to_actor(&self, n: usize) {
+            self.change(|c| c.to_actor = c.to_actor.checked_add(n).unwrap());
+        }
+
+        /// `n` bytes are on their way to the program.
+        fn to_program(&self, n: usize) {
+            self.change(|c| c.to_program = c.to_program.checked_add(n).unwrap());
+        }
+
+        /// The actor tapped `bytes`: read from the terminal, or the erase of a clear.
+        fn tapped(&self, bytes: &[u8]) {
+            self.change(|c| {
+                let erase = [&b"\x1b[3J"[..], b"\x1b[2J\x1b[3J"].contains(&bytes);
+                if let Some(left) = c.erases.checked_sub(1).filter(|_| erase) {
+                    c.erases = left;
+                } else {
+                    c.to_actor =
+                        c.to_actor.checked_sub(bytes.len()).expect("only what was sent lands");
+                }
+            });
+        }
+    }
+
+    /// The program on a played session's terminal ([`played`]), which the test plays: what it
+    /// prints goes in at the PTY's slave, and what is typed comes out there.
+    #[derive(Clone)]
+    struct Program {
+        tty: Arc<slopty_pty::PtyMaster>,
+        in_flight: InFlight,
+    }
+
+    impl Program {
+        async fn print(&self, bytes: impl AsRef<[u8]>) {
+            self.in_flight.to_actor(bytes.as_ref().len());
+            self.tty.write_all(bytes.as_ref()).await.expect("the terminal takes output");
+        }
+
+        /// What was typed since the last read, once something was.
+        async fn typed(&self) -> Vec<u8> {
+            let mut buf = vec![0; 4096];
+            let n = self.tty.read(&mut buf).await.expect("the terminal reads");
+            buf.truncate(n);
+            self.in_flight.change(|c| c.to_program = c.to_program.checked_sub(n).unwrap());
+            buf
+        }
+    }
+
+    /// A session whose program the test plays ([`Program`]), its actor on the test's `LocalSet`
+    /// ([`session::spawn_local`]). On tokio's paused clock every wait of the session, the
+    /// program and the viewers is virtual, and what one writes another reads at the same
+    /// instant ([`InFlight`]).
+    struct Played {
+        session: session::SessionHandle,
+        program: Program,
+        /// Whether the terminal echoes what is typed, as `cat`'s does; then the program never
+        /// reads it.
+        echoes: bool,
+        /// When each checkpoint was tapped, and whether its state holds `filled`.
+        checkpoints: mpsc::UnboundedReceiver<(tokio::time::Instant, bool)>,
+    }
+
+    impl Played {
+        /// Ask `request` of the session as viewer `me`, its bytes in flight until they land: at
+        /// the program, or back at the actor as their echo.
+        fn ask(&self, me: ClientId, request: TermRequest) {
+            let typed = match &request {
+                TermRequest::Key(key) => key.text.as_ref().map_or(0, String::len),
+                TermRequest::Raw(bytes) => bytes.len(),
+                TermRequest::Clear => {
+                    self.program.in_flight.change(|c| c.erases = c.erases.checked_add(1).unwrap());
+                    1
+                }
+                other => panic!("not typed: {other:?}"),
+            };
+            if self.echoes {
+                self.program.in_flight.to_actor(typed);
+            } else {
+                self.program.in_flight.to_program(typed);
+            }
+            self.session.request(me, request).unwrap();
+        }
+    }
+
+    /// A played session of `size` ([`Played`]) on a terminal that passes bytes as they are,
+    /// echoing what is typed when `echoes`. Its taps are read as ptyd would, so none is lost.
+    fn played(size: TermSize, echoes: bool) -> Played {
+        use rustix::fs::{Mode, OFlags};
+        use rustix::termios::{LocalModes, OptionalActions};
+        let pty = Pty::open(size).unwrap();
+        let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let tty = rustix::fs::open(pty.slave_path(), flags, Mode::empty()).unwrap();
+        let mut termios = rustix::termios::tcgetattr(&tty).unwrap();
+        termios.make_raw();
+        termios.local_modes.set(LocalModes::ECHO, echoes);
+        rustix::termios::tcsetattr(&tty, OptionalActions::Now, &termios).unwrap();
+        // Room for every tap of a burst: their reader runs on the test's one thread, between
+        // the actor's turns, where ptyd's runs beside it.
+        let (tap, mut taps) = mpsc::channel(1 << 16);
+        let session = session::spawn_local(SessionStart {
+            id: SessionId::new(),
+            master: pty.into_master(),
+            term: "xterm-256color".to_owned(),
+            checkpoint: Vec::new(),
+            backlog: Vec::new(),
+            tap,
+            size,
+            scrollback_lines: 1000,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
+            exited: None,
+            port_hints: None,
+            moves: None,
+            touched: None,
+            restored: None,
+            divide: false,
+            cwd: None,
+        })
+        .unwrap();
+        let in_flight = InFlight::default();
+        let landed = in_flight.clone();
+        let (checkpointed, checkpoints) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(tap) = taps.recv().await {
+                match tap {
+                    Tap::Output(frame) => landed.tapped(&tapped(&frame)),
+                    Tap::Checkpoint { state, .. } => {
+                        let filled = state.windows(b"filled".len()).any(|w| w == b"filled");
+                        let _sent = checkpointed.send((tokio::time::Instant::now(), filled));
+                    }
+                    Tap::Resize { .. } => {}
+                }
+            }
+        });
+        let tty = Arc::new(slopty_pty::PtyMaster::new(tty).unwrap());
+        Played { session, program: Program { tty, in_flight }, echoes, checkpoints }
+    }
+
+    /// Run `test` in a `LocalSet` on the test's runtime, where a played session's actor runs.
+    async fn local<F: Future>(test: F) -> F::Output {
+        tokio::task::LocalSet::new().run_until(test).await
     }
 
     /// The output a tap carries, decoded as ptyd decodes it.
@@ -1028,84 +1216,110 @@ mod actor {
         let _killed = child.kill().await;
     }
 
-    /// A raw-mode `sh` standing in for zsh with the integration: a three-row prompt with the
-    /// marks, ⌃L erases the screen and repaints it at the top, ↩ writes the linefeed and the
-    /// `133;C` separately (as zsh does), a `sleep 2` prints nothing while it runs and its
-    /// prompt comes ~80 ms after the `D` (a starship's precmd).
-    const MARKED_SHELL: &str = r#"
-stty raw -echo
-CR=$(printf '\r'); FF=$(printf '\f')
-p() { printf '\033]133;A\007\r\n~\r\n> \033]133;B\007'; }
-p
-line=''
-while c=$(dd bs=1 count=1 2>/dev/null); do
-  if [ "$c" = "$FF" ]; then printf '\033[H\033[2J'; p; line=''
-  elif [ "$c" = "$CR" ]; then
-    printf '\r\r\n'; sleep 0.02; printf '\033]133;C\007'
-    case "$line" in
-      sleep*) sleep 2 ;;
-      exit) exit 0 ;;
-      *) printf 'out\r\n' ;;
-    esac
-    printf '\033]133;D;0\007\r\033[J'; sleep 0.08; p; line=''
-  else printf '%s' "$c"; line="$line$c"; fi
-done
-"#;
+    /// A shell standing in for zsh with the integration, played on a raw terminal: a
+    /// three-row prompt with the marks, ⌃L erases the screen and repaints it at the top, ↩
+    /// writes the linefeed and, 20 ms later, the `133;C` separately (as zsh does), a `sleep`
+    /// prints nothing for the minute it runs, and its prompt comes 80 ms after the `D` (a
+    /// starship's precmd).
+    async fn marked_shell(program: Program) {
+        const PROMPT: &[u8] = b"\x1b]133;A\x07\r\n~\r\n> \x1b]133;B\x07";
+        program.print(PROMPT).await;
+        let mut line = Vec::new();
+        loop {
+            let typed = program.typed().await;
+            if typed.is_empty() {
+                return;
+            }
+            for c in typed {
+                match c {
+                    0x0c => {
+                        program.print(b"\x1b[H\x1b[2J").await;
+                        program.print(PROMPT).await;
+                        line.clear();
+                    }
+                    b'\r' => {
+                        program.print(b"\r\r\n").await;
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                        program.print(b"\x1b]133;C\x07").await;
+                        if line.starts_with(b"sleep") {
+                            tokio::time::sleep(Duration::from_mins(1)).await;
+                        } else {
+                            program.print(b"out\r\n").await;
+                        }
+                        program.print(b"\x1b]133;D;0\x07\r\x1b[J").await;
+                        tokio::time::sleep(Duration::from_millis(80)).await;
+                        program.print(PROMPT).await;
+                        line.clear();
+                    }
+                    c => {
+                        program.print([c]).await;
+                        line.push(c);
+                    }
+                }
+            }
+        }
+    }
 
     /// A command that prints nothing while it runs (the e2e's `sleep 6` after ⌘K) is seen
     /// running while it runs, not when its prompt comes back: the `133;C` reaches the client
-    /// as block news in a frame of its own, the cursor already below the command. The command
-    /// outlasts the wait, so only its end (or a hang) could come first, however slow the
-    /// machine.
-    #[tokio::test]
+    /// as block news in a frame of its own, the cursor already below the command. On tokio's
+    /// paused clock it is seen at the very instant the shell writes it.
+    #[tokio::test(start_paused = true)]
     async fn a_silent_command_after_a_clear_is_seen_running_at_once() {
         fn pump(events: &[TermEvent], state: &mut TermState, effects: &mut Vec<Effect>) {
             for ev in events {
                 effects.extend(state.apply(ev.clone()));
             }
         }
-        let (session, mut child) = start(&["/bin/sh", "-c", MARKED_SHELL]);
-        let me = ClientId::new();
-        let (tx, mut rx) = viewer(64);
-        session.attach(me, size(40, 6), tx).unwrap();
-        let mut state = TermState::new(size(40, 6));
-        let mut effects = Vec::new();
-        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("> ")).await;
-        pump(&events, &mut state, &mut effects);
-        session.request(me, TermRequest::Raw(b"echo hi\r".to_vec())).unwrap();
-        let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("out\n\n~\n> ")).await;
-        pump(&events, &mut state, &mut effects);
-        assert!(effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })), "{effects:?}");
-        effects.clear();
-        session.request(me, TermRequest::Clear).unwrap();
-        // The shell may draw the cleared screen's prompt in a read of its own, after the cursor
-        // has already moved to its row.
-        let (events, _) =
-            wait_for(&mut rx, |_, s| text(s).trim_end() == "\n~\n>" && s.cursor().row == 2).await;
-        pump(&events, &mut state, &mut effects);
-        effects.clear();
-        session.request(me, TermRequest::Raw(b"sleep 60\r".to_vec())).unwrap();
-        let typed = tokio::time::Instant::now();
-        let deadline = typed.checked_add(Duration::from_secs(50)).unwrap();
-        while !state.command_running() {
-            let ev = tokio::time::timeout_at(deadline, rx.rx.recv())
-                .await
-                .unwrap_or_else(|_| panic!("not seen running while it ran; {effects:?}"))
-                .expect("sink closed");
-            pump(&[event(&ev)], &mut state, &mut effects);
-        }
-        assert!(
-            effects.iter().any(|e| matches!(e, Effect::CommandStarted(c) if c == "sleep 60")),
-            "{effects:?}"
-        );
-        assert!(
-            !effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })),
-            "seen running before it ended: {effects:?}"
-        );
-        assert_eq!(state.cursor().row, 3, "the cursor sits below the command while it runs");
-        session.request(me, TermRequest::Raw(b"\x04".to_vec())).unwrap();
-        session.close();
-        let _killed = child.kill().await;
+        local(async {
+            let played = played(size(40, 6), false);
+            let shell = tokio::task::spawn_local(marked_shell(played.program.clone()));
+            let me = ClientId::new();
+            let (tx, mut rx) = viewer(64);
+            played.session.attach(me, size(40, 6), tx).unwrap();
+            let mut state = TermState::new(size(40, 6));
+            let mut effects = Vec::new();
+            let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("> ")).await;
+            pump(&events, &mut state, &mut effects);
+            played.ask(me, TermRequest::Raw(b"echo hi\r".to_vec()));
+            let (events, _) = wait_for(&mut rx, |_, s| text(s).contains("out\n\n~\n> ")).await;
+            pump(&events, &mut state, &mut effects);
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })),
+                "{effects:?}"
+            );
+            effects.clear();
+            played.ask(me, TermRequest::Clear);
+            // The shell may draw the cleared screen's prompt in a read of its own, after the
+            // cursor has already moved to its row.
+            let (events, _) =
+                wait_for(&mut rx, |_, s| text(s).trim_end() == "\n~\n>" && s.cursor().row == 2)
+                    .await;
+            pump(&events, &mut state, &mut effects);
+            effects.clear();
+            played.ask(me, TermRequest::Raw(b"sleep 60\r".to_vec()));
+            let typed = tokio::time::Instant::now();
+            while !state.command_running() {
+                let ev = tokio::time::timeout(Duration::from_secs(5), rx.rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("not seen running while it ran; {effects:?}"))
+                    .expect("sink closed");
+                pump(&[event(&ev)], &mut state, &mut effects);
+            }
+            assert_eq!(typed.elapsed(), Duration::from_millis(20), "seen as the shell wrote it");
+            assert!(
+                effects.iter().any(|e| matches!(e, Effect::CommandStarted(c) if c == "sleep 60")),
+                "{effects:?}"
+            );
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::CommandFinished { .. })),
+                "seen running before it ended: {effects:?}"
+            );
+            assert_eq!(state.cursor().row, 3, "the cursor sits below the command while it runs");
+            shell.abort();
+            played.session.close();
+        })
+        .await;
     }
 
     /// OSC 7 names the directory to every viewer; an OSC 52 write reaches them up to the
@@ -1312,32 +1526,53 @@ done"#
     /// A viewer that stops reading is not dropped and holds nobody back: it misses the diffs
     /// while its frames are on their way, then is sent one whole frame at the others' sequence
     /// number and the diffs after it. Only frames are skipped, so it is never introduced again.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_slow_viewer_is_skipped_then_caught_up_never_dropped() {
-        let (session, mut child) = start(&["/bin/sh", "-c", &flood(150, "0.01")]);
-        let fast = ClientId::new();
-        let (tx_fast, rx_fast) = viewer(4096);
-        session.attach(fast, size(40, 6), tx_fast).unwrap();
-        let fast_seen = until_done(rx_fast, Duration::ZERO);
-        let slow = ClientId::new();
-        let (tx_slow, rx_slow) = viewer(8);
-        session.attach(slow, size(40, 6), tx_slow).unwrap();
-        // Long enough for some fifty frames.
-        let slow_seen = until_done(rx_slow, Duration::from_millis(500));
-        session.request(fast, TermRequest::Raw(b"\r".to_vec())).unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(session.snapshot().await.unwrap().viewers, 2, "the slow viewer stays");
-        let (events, screen) = slow_seen.await.unwrap();
-        let seen = jumps(&frames(&events));
-        assert!(!seen.is_empty(), "the slow viewer skipped frames while it did not read");
-        assert!(seen.iter().all(|&(_, _, full)| full), "each skip ends in a whole frame: {seen:?}");
-        let introduced = events.iter().filter(|e| matches!(e, TermEvent::Driver { .. })).count();
-        assert_eq!(introduced, 0, "never introduced again: {events:?}");
-        assert!(text(&screen).contains("line 149\nDONE"), "{}", text(&screen));
-        let (events, _) = fast_seen.await.unwrap();
-        assert_eq!(jumps(&frames(&events)), [], "the fast viewer is not held back");
-        session.close();
-        let _killed = child.kill().await;
+        local(async {
+            let played = played(size(40, 6), false);
+            // `flood(150, "0.01")`, played.
+            let program = played.program.clone();
+            let flood = tokio::task::spawn_local(async move {
+                while !program.typed().await.contains(&b'\r') {}
+                for n in 0..150 {
+                    program.print(format!("line {n}\r\n")).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                program.print("DONE\r\n").await;
+            });
+            let fast = ClientId::new();
+            let (tx_fast, rx_fast) = viewer(4096);
+            played.session.attach(fast, size(40, 6), tx_fast).unwrap();
+            let fast_seen = until_done(rx_fast, Duration::ZERO);
+            let slow = ClientId::new();
+            let (tx_slow, rx_slow) = viewer(8);
+            played.session.attach(slow, size(40, 6), tx_slow).unwrap();
+            // Long enough for some fifty frames.
+            let slow_seen = until_done(rx_slow, Duration::from_millis(500));
+            played.ask(fast, TermRequest::Raw(b"\r".to_vec()));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert_eq!(
+                played.session.snapshot().await.unwrap().viewers,
+                2,
+                "the slow viewer stays"
+            );
+            let (events, screen) = slow_seen.await.unwrap();
+            let seen = jumps(&frames(&events));
+            assert!(!seen.is_empty(), "the slow viewer skipped frames while it did not read");
+            assert!(
+                seen.iter().all(|&(_, _, full)| full),
+                "each skip ends in a whole frame: {seen:?}"
+            );
+            let introduced =
+                events.iter().filter(|e| matches!(e, TermEvent::Driver { .. })).count();
+            assert_eq!(introduced, 0, "never introduced again: {events:?}");
+            assert!(text(&screen).contains("line 149\nDONE"), "{}", text(&screen));
+            let (events, _) = fast_seen.await.unwrap();
+            assert_eq!(jumps(&frames(&events)), [], "the fast viewer is not held back");
+            flood.await.unwrap();
+            played.session.close();
+        })
+        .await;
     }
 
     /// Viewers that stopped reading while a program wrote to one that kept reading, holding
@@ -1703,64 +1938,65 @@ done"#
 
     /// A key typed while the program keeps printing (a spinner, a TUI redrawing) has its echo
     /// framed as it is read, not at the next paced frame, while the printing itself stays
-    /// paced.
-    #[tokio::test]
+    /// paced. On tokio's paused clock: the echo's frame goes at the very instant of its key,
+    /// and the flood's frames one pace apart.
+    #[tokio::test(start_paused = true)]
     async fn an_echo_beside_a_flood_is_not_held_to_the_frame_pace() {
-        let (session, mut child) = start(&[
-            "/bin/sh",
-            "-c",
-            "i=0; while [ $i -lt 3000 ]; do printf .; sleep 0.002; i=$((i+1)); done & exec cat",
-        ]);
-        let me = ClientId::new();
-        let (tx, rx) = mpsc::channel(4096);
-        session.attach(me, size(40, 6), tx).unwrap();
-        let mut stamps = stamped(rx);
-        let next = async |stamps: &mut mpsc::UnboundedReceiver<_>| {
-            tokio::time::timeout(Duration::from_secs(5), stamps.recv())
-                .await
-                .expect("an event")
-                .expect("sink open")
-        };
-        let settled = tokio::time::Instant::now() + Duration::from_millis(300);
-        while next(&mut stamps).await.0 < settled {}
-        let counted_until = tokio::time::Instant::now() + Duration::from_millis(400);
-        let mut paced = 0_u32;
-        loop {
-            let (at, ev) = next(&mut stamps).await;
-            if at >= counted_until {
-                break;
-            }
-            paced += u32::from(matches!(ev, TermEvent::Frame(_)));
-        }
-        let mut waits = Vec::new();
-        for seq in 1..=40_u64 {
-            // Keys land at every phase of the pace.
-            tokio::time::sleep(Duration::from_millis(11 + seq % 7)).await;
-            let asked = tokio::time::Instant::now();
-            session.request(me, key(seq, KeyCode::X, "x")).unwrap();
+        local(async {
+            // A dot every 2 ms, and the terminal echoing what is typed, as `cat`'s does.
+            let played = played(size(40, 6), true);
+            let program = played.program.clone();
+            let flood = tokio::task::spawn_local(async move {
+                // 2 s of them, past the test's end.
+                for _ in 0..1000 {
+                    program.print(b".").await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            });
+            let me = ClientId::new();
+            let (tx, rx) = mpsc::channel(4096);
+            played.session.attach(me, size(40, 6), tx).unwrap();
+            let mut stamps = stamped(rx);
+            let next = async |stamps: &mut mpsc::UnboundedReceiver<_>| {
+                tokio::time::timeout(Duration::from_secs(5), stamps.recv())
+                    .await
+                    .expect("an event")
+                    .expect("sink open")
+            };
+            let settled = tokio::time::Instant::now() + Duration::from_millis(300);
+            while next(&mut stamps).await.0 < settled {}
+            let counted_until = tokio::time::Instant::now() + Duration::from_millis(400);
+            let mut paced = 0_u32;
             loop {
                 let (at, ev) = next(&mut stamps).await;
-                if let TermEvent::Frame(f) = ev
-                    && f.input_ack >= seq
-                {
-                    waits.push(at.duration_since(asked));
+                if at >= counted_until {
                     break;
                 }
+                paced += u32::from(matches!(ev, TermEvent::Frame(_)));
             }
-        }
-        let (p50, p90, max) = spread(&mut waits);
-        eprintln!(
-            "MEASURE echo beside a flood: key -> acking frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms; flood frames in 400 ms: {paced}"
-        );
-        // Held for the 8 ms pace, waits spread evenly over it: a median near 4 ms. Framed as
-        // read, the median is a fraction of a millisecond, and it stays under half the pace on
-        // a loaded machine where the tail does not.
-        // The flood only has to be on: on a machine loaded by other work its own frames come
-        // slower than the pace, which says nothing about the echo: a loaded gate saw 4 in 400 ms.
-        assert!((2..=55).contains(&paced), "the flood is on and paced to 8 ms: {paced}");
-        assert!(p50 < 2.5, "an echo is not held for the pace: p50 {p50:.2} ms");
-        session.close();
-        let _killed = child.kill().await;
+            let mut waits = Vec::new();
+            for seq in 1..=40_u64 {
+                // Keys land at every phase of the pace.
+                tokio::time::sleep(Duration::from_millis(11 + seq % 7)).await;
+                let asked = tokio::time::Instant::now();
+                played.ask(me, key(seq, KeyCode::X, "x"));
+                loop {
+                    let (at, ev) = next(&mut stamps).await;
+                    if let TermEvent::Frame(f) = ev
+                        && f.input_ack >= seq
+                    {
+                        waits.push(at.duration_since(asked));
+                        break;
+                    }
+                }
+            }
+            // A frame each 8 ms pace over the 400 ms, give or take the one at an edge.
+            assert!((49..=51).contains(&paced), "the flood is paced to 8 ms: {paced} frames");
+            assert!(waits.iter().all(Duration::is_zero), "an echo waited for the pace: {waits:?}");
+            flood.abort();
+            played.session.close();
+        })
+        .await;
     }
 
     /// Read `rx` until a frame acknowledging key `seq` arrives, keeping every event in `held`
@@ -1786,138 +2022,114 @@ done"#
 
     /// An echo read while its viewer has both frames in flight is owed, and goes as soon as the
     /// connection is done with one of them, not at the next paced frame: the input exemption
-    /// holds past the credit.
-    #[tokio::test]
+    /// holds past the credit. On tokio's paused clock it goes at the very instant the place is
+    /// given back.
+    #[tokio::test(start_paused = true)]
     async fn an_echo_owed_for_want_of_room_goes_when_room_returns() {
-        let (session, mut child) = start(&["/bin/sh", "-c", "exec cat"]);
-        let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
-        session.attach(me, size(40, 6), tx).unwrap();
-        let mut held = Vec::new();
-        let _attached = hold_until_acked(&mut rx, &mut held, 0).await;
-        held.clear();
-        let mut seq = 0;
-        let mut waits = Vec::new();
-        for _ in 0..12 {
-            // Two keys, each echo framed as it is read: both places taken, the last frame new.
-            for _ in 0..2 {
-                seq += 1;
-                session.request(me, key(seq, KeyCode::A, "a")).unwrap();
-                let _shown = hold_until_acked(&mut rx, &mut held, seq).await;
-            }
-            seq += 1;
-            session.request(me, key(seq, KeyCode::X, "x")).unwrap();
-            // Its echo is read while no place is free, well inside the pace.
-            tokio::time::sleep(Duration::from_millis(2)).await;
-            let first = held.iter().position(Outbound::is_frame).expect("a frame in flight");
-            let freed = tokio::time::Instant::now();
-            drop(held.remove(first));
-            let shown = hold_until_acked(&mut rx, &mut held, seq).await;
-            waits.push(shown.duration_since(freed));
+        local(async {
+            let played = played(size(40, 6), true);
+            let me = ClientId::new();
+            let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+            played.session.attach(me, size(40, 6), tx).unwrap();
+            let mut held = Vec::new();
+            let _attached = hold_until_acked(&mut rx, &mut held, 0).await;
             held.clear();
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
-        let (p50, p90, max) = spread(&mut waits);
-        eprintln!(
-            "MEASURE owed echo: room back -> acking frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms"
-        );
-        // Paced, the echo would wait out the 8 ms from the last frame: about 6 ms here.
-        assert!(p50 < 2.5, "an owed echo is not held to the pace: p50 {p50:.2} ms");
-        session.close();
-        let _killed = child.kill().await;
+            let mut seq = 0;
+            let mut waits = Vec::new();
+            for _ in 0..12 {
+                // Two keys, each echo framed as it is read: both places taken, the last frame
+                // new.
+                for _ in 0..2 {
+                    seq += 1;
+                    played.ask(me, key(seq, KeyCode::A, "a"));
+                    let _shown = hold_until_acked(&mut rx, &mut held, seq).await;
+                }
+                seq += 1;
+                played.ask(me, key(seq, KeyCode::X, "x"));
+                // Its echo is read while no place is free, well inside the pace.
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                let first = held.iter().position(Outbound::is_frame).expect("a frame in flight");
+                let freed = tokio::time::Instant::now();
+                drop(held.remove(first));
+                let shown = hold_until_acked(&mut rx, &mut held, seq).await;
+                waits.push(shown.duration_since(freed));
+                held.clear();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            // Paced, the echo would wait out the 8 ms from the last frame: 6 ms here.
+            assert!(waits.iter().all(Duration::is_zero), "an owed echo waited: {waits:?}");
+            played.session.close();
+        })
+        .await;
     }
 
-    /// A key typed after a pause, just as the quiet spell's checkpoint comes due, is answered
-    /// at once: the checkpoint formats the whole history on the actor's thread, which is where
-    /// the key's write, its echo and its frame wait.
-    #[tokio::test]
+    /// A key typed after a pause, just as the quiet spell's checkpoint comes due, finds no
+    /// checkpoint in its way: one waits while someone types ([`session::CHECKPOINT_AFTER_INPUT`]),
+    /// since it formats the whole history on the actor's thread, where the key's write, its
+    /// echo and its frame would wait for it (13–19 ms for a full history, MEASUREMENTS.md). On
+    /// tokio's paused clock: each key's echo is framed at its key's instant, no checkpoint is
+    /// taken while the keys come, and the one owed is taken that long after the last.
+    #[tokio::test(start_paused = true)]
     async fn a_key_after_a_pause_does_not_wait_for_the_checkpoint() {
-        // A full default history of coloured lines (as the engine's `checkpoint_cost` writes
-        // them), then `cat`.
-        let script = "read x; seq 50000 | awk '{printf \"\\033[3%dmline %05d\\033[0m the quick \
-                      brown fox jumps over the lazy dog\\n\", $1 % 8, $1}'; echo filled; exec cat";
-        let (session, mut child, mut taps) =
-            start_keeping(&["/bin/sh", "-c", script], Vec::new(), None, 50_000);
-        let me = ClientId::new();
-        let (tx, rx) = mpsc::channel(4096);
-        session.attach(me, size(100, 30), tx).unwrap();
-        let mut stamps = stamped(rx);
-        let (checkpoints_tx, mut checkpoints) = mpsc::unbounded_channel();
-        tokio::spawn(async move {
-            while let Some(tap) = taps.recv().await {
-                if let Tap::Checkpoint { state, .. } = tap {
-                    let whole = state.windows(b"filled".len()).any(|w| w == b"filled");
-                    let _sent = checkpoints_tx.send((state.len(), whole));
+        local(async {
+            let mut played = played(size(100, 30), true);
+            let me = ClientId::new();
+            let (tx, rx) = mpsc::channel(4096);
+            played.session.attach(me, size(100, 30), tx).unwrap();
+            let mut stamps = stamped(rx);
+            // A history of coloured lines, as the engine's `checkpoint_cost` writes them.
+            for n in 0..2000_u32 {
+                let colour = n % 8;
+                played
+                    .program
+                    .print(format!(
+                        "\x1b[3{colour}mline {n:05}\x1b[0m the quick brown fox jumps over the lazy dog\r\n"
+                    ))
+                    .await;
+            }
+            played.program.print("filled\r\n").await;
+            let printed = tokio::time::Instant::now();
+            // The quiet spell after it is checkpointed, whole, after the one the session starts
+            // with.
+            let (start, filled) = played.checkpoints.recv().await.expect("the start's checkpoint");
+            assert!(!filled && start <= printed, "the session's first checkpoint is at its start");
+            let (at, filled) = played.checkpoints.recv().await.expect("the history checkpointed");
+            assert!(filled, "the checkpoint holds the history");
+            assert_eq!(at, printed + session::CHECKPOINT_AFTER, "a quiet spell's checkpoint");
+            while tokio::time::timeout(Duration::from_millis(100), stamps.recv()).await.is_ok() {}
+            let mut waits = Vec::new();
+            let mut last_echo = tokio::time::Instant::now();
+            let mut typed = last_echo;
+            for seq in 1..=10_u64 {
+                // Each key lands as the last echo's quiet spell runs out, or just after.
+                tokio::time::sleep_until(last_echo + session::CHECKPOINT_AFTER).await;
+                tokio::time::sleep(Duration::from_millis(seq % 5)).await;
+                typed = tokio::time::Instant::now();
+                played.ask(me, key(seq, KeyCode::X, "x"));
+                loop {
+                    let (at, ev) = tokio::time::timeout(Duration::from_secs(5), stamps.recv())
+                        .await
+                        .expect("an event")
+                        .expect("sink open");
+                    if let TermEvent::Frame(f) = ev
+                        && f.input_ack >= seq
+                    {
+                        waits.push(at.duration_since(typed));
+                        last_echo = at;
+                        break;
+                    }
                 }
             }
-        });
-        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
-        // The history is in once the quiet spell after it is checkpointed.
-        let filling = tokio::time::Instant::now();
-        let deadline = filling + Duration::from_secs(120);
-        loop {
-            if let session::Text::Screen { screen, .. } =
-                session.read(session::Read::Screen).await.unwrap()
-                && screen.rows.iter().any(|r| r.starts_with("filled"))
-            {
-                break;
-            }
-            assert!(tokio::time::Instant::now() < deadline, "the history never filled");
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let filled = filling.elapsed();
-        // The checkpoint holding the whole history can land before the screen shows it (the
-        // last 1 MiB one, or a quiet spell ending before the next poll), and none follows it.
-        let full = loop {
-            let (len, whole) = tokio::time::timeout_at(deadline, checkpoints.recv())
-                .await
-                .expect("the filled history checkpointed")
-                .unwrap();
-            if whole {
-                break len;
-            }
-        };
-        // One quiet spell for a checkpoint of output that followed the one taken.
-        tokio::time::sleep(Duration::from_millis(600)).await;
-        while checkpoints.try_recv().is_ok() {}
-        while tokio::time::timeout(Duration::from_millis(100), stamps.recv()).await.is_ok() {}
-        let mut waits = Vec::new();
-        let mut seq = 0_u64;
-        let mut last_echo = tokio::time::Instant::now();
-        for round in 0..10_u32 {
-            // Each key lands just after the last echo's quiet spell ran out.
-            let pause = Duration::from_millis(500 + u64::from(round % 5));
-            tokio::time::sleep_until(last_echo + pause).await;
-            seq += 1;
-            let asked = tokio::time::Instant::now();
-            session.request(me, key(seq, KeyCode::X, "x")).unwrap();
-            loop {
-                let (at, ev) = tokio::time::timeout(Duration::from_secs(5), stamps.recv())
-                    .await
-                    .expect("an event")
-                    .expect("sink open");
-                if let TermEvent::Frame(f) = ev
-                    && f.input_ack >= seq
-                {
-                    waits.push(at.duration_since(asked));
-                    last_echo = at;
-                    break;
-                }
-            }
-        }
-        let mut taken = 0_u32;
-        while checkpoints.try_recv().is_ok() {
-            taken += 1;
-        }
-        let (p50, p90, max) = spread(&mut waits);
-        eprintln!(
-            "MEASURE key after a pause, {full} B checkpoint (filled in {filled:.1?}): key -> acking frame p50 {p50:.2} p90 {p90:.2} max {max:.2} ms; checkpoints while typing: {taken}"
-        );
-        // Formatted, a full history holds the key for 13–19 ms; the tail left is the machine's.
-        assert_eq!(taken, 0, "no checkpoint while someone types");
-        assert!(p50 < 3.0, "a key does not wait for the checkpoint: p50 {p50:.2} ms");
-        session.close();
-        let _killed = child.kill().await;
+            assert!(waits.iter().all(Duration::is_zero), "a key's echo waited: {waits:?}");
+            let (at, _) = played.checkpoints.recv().await.expect("the typing checkpointed");
+            assert_eq!(
+                at.duration_since(typed),
+                session::CHECKPOINT_AFTER_INPUT,
+                "no checkpoint while someone types, and the one owed after the last key"
+            );
+            played.session.close();
+        })
+        .await;
     }
 
     /// A state too large for ptyd to keep is formatted and thrown away, so it is not formatted
@@ -2450,7 +2662,6 @@ done"#
     /// promised: the read never waits on the client, however long a promise would.
     #[tokio::test]
     async fn a_programs_clipboard_read_gets_the_text_only_while_it_is_shared() {
-        use std::sync::Arc;
         use std::time::Instant;
 
         use slopty_core::WorkerId;
@@ -2540,7 +2751,6 @@ exec sleep 60"#;
     /// it wants with the event's password and gets their bytes.
     #[tokio::test]
     async fn a_paste_to_a_program_asking_for_events_carries_the_pasters_copy() {
-        use std::sync::Arc;
         use std::time::Instant;
 
         use slopty_core::WorkerId;

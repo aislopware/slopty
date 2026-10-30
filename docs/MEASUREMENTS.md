@@ -23,6 +23,10 @@ side.
   `-p slopty-terminal` where an entry says `-p slopty-ui`. `failed_blocks_cost` is gone with the
   blocks' heads, rules, washes and hovered facts it timed (2026-10-16, `docs/decisions/ui.md`,
   "Slopty's own views draw with the shell's helpers"); the entries that ran it stay as history.
+- The `session_actor` timing tests (`a_key_after_a_pause_does_not_wait_for_the_checkpoint`,
+  `an_echo_owed_for_want_of_room_goes_when_room_returns`, the echo beside a flood) run on
+  tokio's paused clock since 2026-10-30 and print no `MEASURE` line. The latencies the entries
+  before it quote from them were measured on the wall clock, and stay as history.
 
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
@@ -18335,3 +18339,30 @@ cat /Volumes/Lacie/vms/locks/slopty-27-e2e*.lock; TART_HOME=/Volumes/Lacie/vms/t
 jq -c 'select(.name == "D" or .name == "F")' target/remote/e2e-history.jsonl
 df -g /Volumes/Lacie
 ```
+
+## 2026-10-30 — the session actor's timing tests on tokio's paused clock
+
+mac-studio, the lane's warm tree after `cargo xtask remote -p slopty-worker` (the debug test
+profile), each test alone. Before: the wall-clock tests of f771f5a68. After: the same five on
+the paused clock, the program played by the test (`docs/decisions/testing.md`, "The session
+actor's timing tests run on tokio's paused clock").
+
+```sh
+cd target/local/K/tree
+cargo test -q -p slopty-worker --test session_actor -- --exact actor::<test>
+B=$(cargo test -p slopty-worker --test session_actor --no-run 2>&1 | grep -o '/[^ )]*session_actor-[0-9a-f]*')
+for i in $(seq 50); do for j in 1 2 3 4; do $B --exact actor::<each of the five> & done; wait; done
+```
+
+| test | before | after |
+| --- | --- | --- |
+| `a_key_after_a_pause_does_not_wait_for_the_checkpoint` | 7.82 s | 0.02 s |
+| `an_echo_beside_a_flood_is_not_held_to_the_frame_pace` | 1.37 s | 0.04 s |
+| `an_echo_owed_for_want_of_room_goes_when_room_returns` | 0.45 s | 0.00 s |
+| `a_slow_viewer_is_skipped_then_caught_up_never_dropped` | 2.62 s | 0.01 s |
+| `a_silent_command_after_a_clear_is_seen_running_at_once` | 0.24 s | 0.00 s |
+| the five | **12.5 s** | **0.07 s** |
+
+Before, three of them took every test thread in every run (`threads-required`), and the gate
+and the warm runners retried four. After, 200 runs of the five, four processes at once, all
+passed in 22 s; a Linux runner passed them too (run 41006228450, `ubuntu-24.04`).

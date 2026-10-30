@@ -1640,11 +1640,11 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     mod whose relay marks the newest draft sent when it sent an older one, which the weekly
     seeded model must catch. Each job also checks first that a failed pipeline fails its step,
     the lesson of run 38001943825.
-  - **A flake fails** (`flaky-result = "fail"`). A pass on a retry stands only for the seven
-    tests the `gate` and `warm` profiles name, which time themselves against the machine's
-    load (the session actor's frame pace and checkpoint wait, the relay's short wait, the
-    markdown parser's linear-time bounds). Virtual time (rank 2) replaces them; a test holds
-    the config to exact names and no blanket retry.
+  - **A flake fails** (`flaky-result = "fail"`). A pass on a retry stands only for the tests
+    the `gate` and `warm` profiles name, which time themselves against the machine's load (the
+    relay's short wait, the markdown parser's linear-time bounds). Virtual time (rank 2)
+    replaces them, as it did the session actor's four (below); a test holds the config to exact
+    names and no blanket retry.
   - **`ThreadSanitizer` hears `SIGCHLD` through a pump.** The runtime runs a handler at once
     only on a thread inside a call it intercepts as blocking, and the kernel handed `SIGCHLD` to
     libtest's main thread, which waits in one it does not intercept and wakes for its 60-second
@@ -1687,6 +1687,31 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `.cargo/mutants.toml` with a reason, and `Debug`/`Display` bodies are excluded there.
     Coverage moved to the weekly run: it held a Mac for over an hour a night, and the mutation
     score is the strength measure now.
+
+- ✅ **The session actor's timing tests run on tokio's paused clock** (2026-10-30). Five tests
+  timed the actor against the wall clock: an echo beside a flood, an echo owed for want of room,
+  a key after a pause, a slow viewer's catch-up and a silent command after a clear. Three
+  claimed every test thread in every run, four were retried, and `land` left four out. Their
+  actor now runs as a task of the test's `LocalSet` (`session::spawn_local`), and the program
+  on its terminal is the test, playing the PTY's slave end (`Played` in `tests/session_actor.rs`).
+  Every wait is then virtual and each check exact. An echo is framed at its key's instant, and
+  the flood is paced to 8 ms. No checkpoint is taken while someone types, and the one owed comes
+  `CHECKPOINT_AFTER_INPUT` after the last key. The command's `133;C` is seen the moment the
+  shell writes it.
+  - **The clock stands still while bytes cross the kernel.** An idle runtime moves the paused
+    clock to its next timer. On Linux a pty's bytes cross on a kernel worker after the write
+    has returned, so the runtime could be idle with bytes still on their way and jump past the
+    instant they belong to. The harness counts the bytes written at one end and not yet read at
+    the other: the actor's taps tell what it read, and the program's reads tell what it took.
+    While any are in flight, a blocking task holds the clock, because tokio's paused clock waits
+    for one. A clear's erase, which the actor taps without having read it, is told apart. The
+    terminal passes bytes as they are (raw, echoing or not), so a count written is the count
+    read.
+  - **What it costs and keeps.** The five ran 12.5 s and now take 0.07 s; 200 runs, four at
+    once, all passed (MEASUREMENTS 2026-10-30, "the session actor's timing tests"). Their
+    retries, thread claims and `land` exclusions are gone. They no longer measure the machine:
+    the latencies they printed are history, and the keystroke path's real latency is
+    `slopty-probe echo`'s.
 
 - ✅ **Two e2e guests, one in each of this Mac's two macOS slots** (2026-10-30). One guest,
   `slopty-27-e2e`, served every lane's `--e2e app|ios`, and a lane waited up to an hour while
