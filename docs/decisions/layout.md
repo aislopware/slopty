@@ -354,3 +354,57 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     menu names both. The bottom terminal panel's ⌘J toggle is gone with the panel's shortcut.
   - Tests: `shell::inbox::tests::the_inbox_lists_by_urgency_then_age` and
     `shell::inbox::tests::typing_filters_the_inbox`.
+
+- ✅ **The panes as built (2026-10-30)** (terminal-craft §§3-5; Ghostty's split tree). A view's
+  panes are a binary split tree per session, the new-session canvas one per project
+  (`shell::panes`); `shell::pane_area` lays them out and draws the dividers, and
+  `shell::pane_frame` and `shell::views` put the session's terminal, its shells and the summoned
+  views in them.
+  - Splits: ⌘D to the right, ⇧⌘D down, ⌘⏎ where there is most room. Each is a fresh shell on
+    the session's machine in its folder, which takes the keyboard once it draws; over the canvas
+    it opens on the project's machine, and the canvas's panes are not kept across launches. A
+    phone never splits; an iPad splits from 1024 pt wide.
+  - The keyboard: ⌥⌘arrows walk the panes by direction and ⌘] ⌘[ in reading order, from a
+    terminal too, which never takes them. A press anywhere in a pane hands it the keyboard
+    unless what it landed on took it. Panes without the keyboard dim by brightness in the
+    terminal's own element, and an unfocused session pane whose agent needs the person wears
+    the needs-you ring.
+  - Dividers are Ghostty's: a 1 pt hairline with a 7 pt grab, panes snapped to whole cells, none
+    under 80 pt, a split held between 10 and 90 %, a double-click evening every split.
+  - A header shows only while the view holds more than one pane: the program's icon (a page's
+    own icon for a browser), its title and where it runs, then zoom and close on the focused pane
+    and the one under the pointer. Close is named for its pane ("Close lib.rs"), so a screen
+    reader tells one from another.
+  - ⇧⌘⏎ fills the view with the focused pane and puts the panes back; filled, no header shows.
+  - ⌘W closes the focused pane before the window: a shell's ends what runs in it, a view's goes
+    on ⇧⌘T's list, the session's own is never closed so, and the keyboard goes to the nearest
+    neighbour.
+  - Views are summoned: the inspector by ⌘I, Files by ⌘E, Changes by ⌘R, a browser and a remote
+    window from the palette. The first docks at the session's right at the person's last share,
+    later ones stack in a column under the focused or last view, and a file picked in Files opens
+    as a pane of its own. A view's key again, or an Esc nothing in the view takes, gives the
+    keyboard back to the session's terminal. A session's panes are kept across launches, Files
+    among them; a page an agent showed is not.
+  - The sidebar's glide reflows each terminal pane once: the pane area tells each pane how much
+    narrower it stands at the glide's end, and its terminal holds that grid until the glide lands.
+  - A running program's progress (`OSC 9;4`), which the dock's tab wore, is Ghostty's 2 pt bar
+    along the top edge of its pane (terminal-craft §9: the bar where there is no tab): the
+    accent, the danger hue on a failure and the warning's on a pause, a quarter-wide segment
+    sweeping a faint track when it gives no figure, on the loaders' 30 Hz clock rather than every
+    frame and still under Reduce Motion; a screen reader hears its share.
+  - On a touch screen a header's zoom and close take a finger's 44 pt, the header as tall, and
+    the titlebar keeps the room at its edge for its outermost control's press.
+  - An agent's `ui terminal` and `show terminal` open a shell beside the session, the keyboard
+    left where it was; hiding the shells is refused, since closing one ends what runs in it.
+  - Deleted: the right tab strip with its drag reorder and its takeover, the terminal dock with
+    its tabs (⌘T), its height and ToggleTerminal, and the pane's offers.
+  - Tests: `shell::panes::tests`, `shell::pane_area::tests`,
+    `shell::panel_interaction_tests::{the_panes_fill_the_room_the_sidebar_leaves_through_its_glide,
+    a_subagent_shows_its_agents_panes_and_the_panes_come_back}`, `shell::navigation_tests`
+    (`a_press_on_a_pane_s_header_gives_it_the_keyboard`,
+    `escape_in_a_view_gives_the_keyboard_back_to_the_terminal`,
+    `a_closed_view_hands_the_keyboard_to_its_neighbour` among them),
+    `shell::compact::tests::an_ipads_controls_take_a_fingers_press`,
+    `terminal::panel::tests::a_running_programs_progress_and_ground_reach_its_tab`, and e2e
+    `app::walk::{split_shells_keep_up_with_a_person, the_files_and_changes_keep_up_with_a_person}`
+    and `app::interface::a_closed_view_comes_back_with_cmd_shift_t`.
