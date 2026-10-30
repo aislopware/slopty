@@ -23,6 +23,10 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The system's language and region, for a child's locale (`pty::give_a_locale`).
+objc2-core-foundation = { workspace = true, features = [ "CFLocale" ] }
+
 [dev-dependencies]
 # A live test's skip, a failure in the VM lane (`slopty_testkit::live::skip`).
 slopty-testkit.workspace = true

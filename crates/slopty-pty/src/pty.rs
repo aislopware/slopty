@@ -154,6 +154,7 @@ fn prepare(
         None => env.remove("TERMINFO"),
     }
     forget_parent_agent(&mut env);
+    give_a_locale(&mut env);
     // Web pages and editors go to the client, unless the session's own variables say
     // otherwise (they come after).
     let handoff = integration.map(|si| {
@@ -565,6 +566,79 @@ fn forget_parent_agent(env: &mut Env) {
     }
 }
 
+/// Name a UTF-8 locale for a child whose environment names none (`LC_ALL`, `LC_CTYPE` and
+/// `LANG` unset or empty), as Terminal.app and Ghostty do. A daemon started by launchd or
+/// systemd has no locale, and a program run without one takes text for ASCII or, through
+/// macOS's `pbcopy`, for `MacRoman`, not the UTF-8 the terminal speaks: Claude Code copying a
+/// selection turned Vietnamese into mojibake. A locale the environment names, even one that
+/// is not UTF-8, is the person's and stays; a session's own variables come after and win.
+fn give_a_locale(env: &mut Env) {
+    let named = ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .any(|name| env.0.get(OsStr::new(name)).is_some_and(|value| !value.is_empty()));
+    if !named && let Some(locale) = utf8_locale() {
+        env.set("LANG", locale);
+    }
+}
+
+/// The locale [`give_a_locale`] names: the system's own when the C library has it, else the
+/// first of [`FALLBACK_LOCALES`] it has.
+fn utf8_locale() -> Option<String> {
+    system_locale()
+        .into_iter()
+        .chain(FALLBACK_LOCALES.iter().map(|&name| name.to_owned()))
+        .find(|name| has_locale(name))
+}
+
+/// What a child is given when the system's locale is not one the C library has: on macOS
+/// what Terminal.app and Ghostty fall back to; elsewhere the C library's built-in UTF-8
+/// locale (glibc since 2.35, musl), then the one most systems generate.
+#[cfg(target_os = "macos")]
+const FALLBACK_LOCALES: &[&str] = &["en_US.UTF-8"];
+#[cfg(not(target_os = "macos"))]
+const FALLBACK_LOCALES: &[&str] = &["C.UTF-8", "en_US.UTF-8"];
+
+/// The language and region System Settings chose, as the UTF-8 locale Ghostty names for its
+/// shells: `en_VN.UTF-8` for English in Vietnam (which macOS's C library does not have).
+#[cfg(target_os = "macos")]
+fn system_locale() -> Option<String> {
+    use objc2_core_foundation::{
+        CFLocale, CFLocaleKey, CFString, kCFLocaleCountryCode, kCFLocaleLanguageCode,
+    };
+    let locale = CFLocale::current()?;
+    let code = |key: Option<&CFLocaleKey>| {
+        let value = locale.value(key)?.downcast::<CFString>().ok()?;
+        Some(value.to_string()).filter(|code| !code.is_empty())
+    };
+    // SAFETY: CoreFoundation's constant keys, set when the framework loads and never written.
+    let (language, region) = unsafe { (kCFLocaleLanguageCode, kCFLocaleCountryCode) };
+    Some(format!("{}_{}.UTF-8", code(language)?, code(region)?))
+}
+
+/// No system setting names a locale outside a login session there: a Linux daemon without
+/// `LANG` runs where none is configured, and gets the C library's own.
+#[cfg(not(target_os = "macos"))]
+fn system_locale() -> Option<String> {
+    None
+}
+
+/// Whether the C library has `name` in every category `LANG` sets.
+fn has_locale(name: &str) -> bool {
+    let Ok(name) = std::ffi::CString::new(name) else {
+        return false;
+    };
+    // SAFETY: `name` is a C string that outlives the call; a null base asks for a new locale.
+    let locale = unsafe { libc::newlocale(libc::LC_ALL_MASK, name.as_ptr(), std::ptr::null_mut()) };
+    if locale.is_null() {
+        return false;
+    }
+    // SAFETY: `locale` came from `newlocale` above and is freed once.
+    unsafe {
+        libc::freelocale(locale);
+    }
+    true
+}
+
 /// The names a Claude Code this process runs under set in its environment.
 ///
 /// What every terminal's child is started without (the variables of a Claude Code the daemon
@@ -738,6 +812,51 @@ mod tests {
         assert!(text.contains("10 40"), "stty should see our size: {text}");
         let status = child.wait().await.unwrap();
         assert!(status.success());
+    }
+
+    fn env_of(vars: &[(&str, &str)]) -> Env {
+        Env(vars.iter().map(|&(k, v)| (k.into(), v.into())).collect())
+    }
+
+    /// A child whose environment names no locale (launchd's and systemd's daemons have none)
+    /// gets a UTF-8 one the C library has, so its programs read and write the terminal's text.
+    #[test]
+    fn a_child_with_no_locale_is_given_a_utf8_one() {
+        for vars in [&[][..], &[("LANG", ""), ("LC_ALL", ""), ("LC_CTYPE", "")][..]] {
+            let mut env = env_of(vars);
+            give_a_locale(&mut env);
+            let lang = env.get("LANG").expect("a LANG").to_owned();
+            assert!(lang.ends_with(".UTF-8"), "{lang}");
+            assert!(has_locale(&lang), "{lang}");
+            assert_eq!(env.get("LC_ALL").unwrap_or_default(), "", "only LANG is named");
+        }
+    }
+
+    /// A locale the environment names is the person's, UTF-8 or not, in any of the variables.
+    #[test]
+    fn a_locale_the_environment_names_stays() {
+        for vars in [
+            &[("LANG", "fr_FR.ISO8859-1")][..],
+            &[("LC_ALL", "C")][..],
+            &[("LC_CTYPE", "UTF-8")][..],
+        ] {
+            let mut env = env_of(vars);
+            give_a_locale(&mut env);
+            assert_eq!(env.0, env_of(vars).0);
+        }
+    }
+
+    /// The system's language and region are named only when the C library has them: a name it
+    /// lacks, or one no C string can hold, is never a child's locale.
+    #[test]
+    fn a_locale_the_c_library_lacks_is_never_named() {
+        assert!(!has_locale("xx_ZZ.UTF-8"));
+        assert!(!has_locale("en_US\0.UTF-8"));
+        let locale = utf8_locale().expect("a UTF-8 locale on this machine");
+        assert!(has_locale(&locale), "{locale}");
+        if let Some(system) = system_locale() {
+            assert_eq!(has_locale(&system), locale == system, "{system} → {locale}");
+        }
     }
 
     /// The `TERM` a child is given is the one reported with it: the default, or the spec's own.

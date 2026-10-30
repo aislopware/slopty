@@ -4076,3 +4076,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `fast::typed::tests::a_key_types_the_text_its_event_carries`, and `slopty-engine`
   `key_encoding_follows_terminal_modes`, where `ê` on the A key reaches the program as `ê`,
   with and without the Kitty protocol's disambiguation.
+
+- ✅ **A terminal's child always has a UTF-8 locale (2026-10-30).** Copying a selection in
+  Claude Code put mojibake on the clipboard: Vietnamese came back as "ch·ªâ" for "chỉ". ptyd
+  runs under launchd, which starts it with no `LANG`, `LC_ALL` or `LC_CTYPE`, so every child
+  ran in the C locale. Claude Code copies through `pbcopy`, and `pbcopy` without a locale reads
+  its input as MacRoman. Terminal.app and Ghostty give a child with no locale one built from
+  the system's language and region, and so does ptyd now (`pty::give_a_locale`):
+  `<language>_<region>.UTF-8` from CoreFoundation's current locale when the C library has it,
+  else `en_US.UTF-8` on macOS (English in Vietnam is `en_VN`, which macOS's C library lacks),
+  and `C.UTF-8`, then `en_US.UTF-8`, on Linux. A locale the environment names, UTF-8 or not, is
+  the person's and stays, and a session's own variables still win. Sessions started before
+  the update keep their old environment until they are started again. Tests: `slopty-pty`
+  `pty::tests::a_child_with_no_locale_is_given_a_utf8_one`,
+  `a_locale_the_environment_names_stays`, `a_locale_the_c_library_lacks_is_never_named`.
