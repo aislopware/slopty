@@ -30,7 +30,7 @@ use crate::managed::ManagedSettings;
 pub const PICTURE_MAX: usize = 20 * 1024 * 1024;
 
 /// The Claude Code the mod's relays were recorded with.
-pub const CHECKED_WITH: &str = "2.1.312";
+pub const CHECKED_WITH: &str = "2.1.314";
 
 /// The flag a plugin's folder is loaded with, for one run.
 pub const PLUGIN_DIR_FLAG: &str = "--plugin-dir";

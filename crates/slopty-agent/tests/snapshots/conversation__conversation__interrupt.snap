@@ -6,7 +6,7 @@ expression: "decode(\"interrupt\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1793275243936
+      at_ms: 1793345932690
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"interrupt\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1793275245643
+      at_ms: 1793345934715
       body:
         Tool:
           name: Bash
@@ -40,29 +40,31 @@ expression: "decode(\"interrupt\").snapshot()"
           result:
             status: Rejected
             text:
-              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+              text: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed. Correction to the text above: this call was stopped while running, not refused before it ran. It may have run in part or in full, and its changes may have been written. No permission prompt was involved. Work it started elsewhere (a remote command, a background process) may still be running, so check before starting the same work again. The instruction to stop and wait still stands."
               lines: 1
-              chars: 225
+              chars: 611
               full: ~
-            at_ms: 1793275248666
+            at_ms: 1793345937766
             images: []
             said: ~
           title: ~
     - id: 00000000-0000-4000-8000-000000000019
-      at_ms: 1793275248668
+      at_ms: 1793345937768
       body:
         Interrupted:
           during_tool: true
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1793275243936
-      ended_ms: 1793275248668
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000002
+      started_ms: 1793345932690
+      ended_ms: 1793345937768
       models:
         - claude-haiku-5-5
       usage:
         input: 2
-        cache_read: 18465
-        cache_write: 0
+        cache_read: 11384
+        cache_write: 7081
         output: 79
         thinking: 0

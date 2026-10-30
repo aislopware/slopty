@@ -6,7 +6,7 @@ expression: "decode(\"edit\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1793273671601
+      at_ms: 1793345886461
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"edit\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1793273674131
+      at_ms: 1793345888630
       body:
         Tool:
           name: Read
@@ -32,12 +32,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793273674204
+            at_ms: 1793345888833
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1793273675479
+      at_ms: 1793345890863
       body:
         Tool:
           name: Edit
@@ -65,12 +65,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793273675520
+            at_ms: 1793345890913
             images: []
             said: ~
           title: ~
     - id: toolu_03
-      at_ms: 1793273677043
+      at_ms: 1793345893384
       body:
         Tool:
           name: Write
@@ -91,7 +91,6 @@ expression: "decode(\"edit\").snapshot()"
                       - " BETA"
                       - " gamma"
                       - +delta
-                      - "\\ No newline at end of file"
                 added: 1
                 removed: 0
                 clipped_lines: 0
@@ -99,12 +98,12 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793273677093
+            at_ms: 1793345893417
             images: []
             said: ~
           title: ~
     - id: toolu_04
-      at_ms: 1793273678765
+      at_ms: 1793345894990
       body:
         Tool:
           name: Read
@@ -115,16 +114,16 @@ expression: "decode(\"edit\").snapshot()"
               limit: 2
               start_line: 2
               lines: 2
-              total_lines: 4
+              total_lines: 5
           result:
             status: Ok
             text: ~
-            at_ms: 1793273678815
+            at_ms: 1793345895010
             images: []
             said: ~
           title: Read notes.txt · lines 2-3
-    - id: "00000000-0000-4000-8000-000000000035:0"
-      at_ms: 1793273681038
+    - id: "00000000-0000-4000-8000-000000000036:0"
+      at_ms: 1793345896778
       body:
         Text:
           text: done
@@ -134,13 +133,15 @@ expression: "decode(\"edit\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1793273671601
-      ended_ms: 1793273681057
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000002
+      started_ms: 1793345886461
+      ended_ms: 1793345896794
       models:
         - claude-haiku-5-5
       usage:
         input: 10
-        cache_read: 86859
-        cache_write: 7935
-        output: 531
-        thinking: 119
+        cache_read: 87127
+        cache_write: 8179
+        output: 775
+        thinking: 361

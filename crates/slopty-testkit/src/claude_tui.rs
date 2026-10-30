@@ -6,7 +6,7 @@
 //!
 //! - **Its record of itself**, `<config>/sessions/<pid>.json` (`pid`, `sessionId`, `cwd`, `kind`
 //!   `interactive`, `version`), where `<config>` is `CLAUDE_CONFIG_DIR` or `~/.claude`, written as
-//!   it starts and again for each session it moves to, and removed as it ends. As 2.1.312 does, it
+//!   it starts and again for each session it moves to, and removed as it ends. As 2.1.314 does, it
 //!   says there what it does (`status`: `idle`, `busy` through a turn, `waiting` while a question
 //!   waits on the person, `waitingFor` `input needed`) and since when (`statusUpdatedAt`,
 //!   `updatedAt`, milliseconds since the epoch), written again as that changes.
@@ -15,8 +15,9 @@
 //!   results, and its end (`system`/`turn_duration`), as Claude Code writes them. A session is the
 //!   one `--session-id` names, or the one `--resume` takes up (its file goes on), else a new one.
 //! - **Its hooks**, the `command` entries its `--settings` registers, each run with the event's
-//!   JSON on its standard input (`hook_event_name`, `session_id`, `transcript_path`, `cwd`, and the
-//!   event's own fields), to its end before the next, as a model's own pace keeps them apart.
+//!   JSON on its standard input (`hook_event_name`, `session_id`, `transcript_path`, `cwd`, from a
+//!   turn's first line on the `prompt_id` its user records name as `promptId`, and the event's own
+//!   fields), to its end before the next, as a model's own pace keeps them apart.
 //! - **Its terminal**: raw, with bracketed paste turned on, so a paste arrives whole between its
 //!   markers and the Enter that sends it is a key of its own.
 //! - **Its prompt box, through Slopty's mod**: given `--plugin-dir=<dir>`, it runs the relay
@@ -66,7 +67,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 /// What it says its version is.
-pub const VERSION: &str = "2.1.312";
+pub const VERSION: &str = "2.1.314";
 
 /// The longest a hook is waited for when its entry names no timeout, in seconds.
 const HOOK_TIMEOUT_S: u64 = 60;
@@ -278,6 +279,8 @@ struct Tui {
     turns: Value,
     /// The last record written, which the next one follows.
     last: Option<String>,
+    /// The prompt the turn under way answers, as its hooks and user records name it.
+    prompt: Option<String>,
     state: State,
     /// Lines typed while a turn ran, each run once it ends.
     waiting: Vec<String>,
@@ -329,6 +332,7 @@ impl Tui {
                 .and_then(|text| serde_json::from_str(&text).ok())
                 .unwrap_or(Value::Null),
             last: None,
+            prompt: None,
             state: State::Idle,
             waiting: Vec::new(),
             record,
@@ -475,6 +479,7 @@ impl Tui {
         let last_line = line.lines().last().unwrap_or_default().trim().to_owned();
         let word = last_line.split_whitespace().next().unwrap_or_default();
         self.doing(BUSY, None);
+        self.prompt = Some(uuid());
         self.hook("UserPromptSubmit", &json!({ "prompt": line }));
         let prompt = self.write("user", json!({ "role": "user", "content": line }));
         let since = Instant::now();
@@ -586,6 +591,7 @@ impl Tui {
         self.hook("SessionEnd", &json!({ "reason": "clear" }));
         self.session = uuid();
         self.last = None;
+        self.prompt = None;
         if let Some(sessions) = self.doc.get_mut("sessions").and_then(Value::as_array_mut) {
             sessions.push(Value::String(self.session.clone()));
         }
@@ -643,6 +649,9 @@ impl Tui {
             "cwd": self.cwd,
             "permission_mode": "default",
         });
+        if let (Some(payload), Some(prompt)) = (payload.as_object_mut(), &self.prompt) {
+            payload.insert("prompt_id".to_owned(), Value::from(prompt.as_str()));
+        }
         merge(&mut payload, fields);
         let entries: Vec<Value> = self
             .hooks
@@ -687,13 +696,17 @@ impl Tui {
         self.note("wrote", noted);
     }
 
-    /// The fields every record of `kind` has.
+    /// The fields every record of `kind` has; a user record names the prompt it answers to.
     fn base(&self, kind: &str) -> Value {
-        json!({
+        let mut record = json!({
             "parentUuid": self.last, "isSidechain": false, "userType": "external",
             "cwd": self.cwd, "sessionId": self.session, "version": VERSION, "gitBranch": "",
             "type": kind, "uuid": uuid(), "timestamp": timestamp(),
-        })
+        });
+        if let (Some(fields), Some(prompt), "user") = (record.as_object_mut(), &self.prompt, kind) {
+            fields.insert("promptId".to_owned(), Value::from(prompt.as_str()));
+        }
+        record
     }
 
     /// Append `record` to the transcript: its id.

@@ -1040,20 +1040,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the JSONL. Clients get typed entries. It skips unknown record types, fields and lines that
   do not parse, and keeps an unknown tool as its name and clipped input.
   - Golden fixtures pin it: `crates/slopty-agent/tests/fixtures/conversation/<scenario>/`
-    holds `transcript.jsonl`, `subagents/agent-<id>.jsonl` and `hooks.jsonl`, and insta
-    snapshots hold the decoded threads. `cargo xtask fixtures claude [--only <name>]`
-    recaptures them. It runs the installed `claude` on haiku in a scratch directory with no
-    user or project settings, takes the records from the `transcript_mirror` frames of
-    `--session-mirror` (never from files under `~/.claude`), registers itself as the hook to
-    record payloads, and scrubs paths, the user name, e-mail addresses and every id to
-    numbered placeholders. Attachments keep only their type. In those scratch runs alone its
-    sink stands in for the person at the permission dialogs `-p` would otherwise refuse
-    (`permission`: one command refused, the rest allowed); in a Slopty session nothing answers
-    one. Nine scenarios as of 2.1.312: `edit` (read, edit, overwrite, ranged read), `tools`
-    (tasks, glob, grep, bash, a failing bash, a background bash, a create, a subagent),
-    `interrupt`, `compact`, `permission` (a command refused, then a command, an edit and a
-    write allowed), `background` (canned), `auto`, `fork` and `notebook`. A snapshot that moves
-    after a recapture is the format moving.
+    holds `transcript.jsonl`, `subagents/agent-<id>.jsonl`, `hooks.jsonl` and
+    `arrivals.jsonl`, and insta snapshots hold the decoded threads.
+    `cargo xtask fixtures claude [--only <name>]` recaptures them. It runs the official build
+    (`xtask::claude`) on haiku in a scratch directory with no user or project settings, takes
+    the records from the `transcript_mirror` frames of `--session-mirror` (never from files
+    under `~/.claude`), registers itself as each hook the relay registers, `async` as the relay
+    is, to record payloads, and scrubs paths, the user name, e-mail addresses and every id to
+    numbered placeholders. Attachments keep only their type. It lets Claude Code go only once
+    no hook it started still runs (Claude Code cancels those as it exits), and keeps in
+    `arrivals.jsonl` the order and time the transcript's writes and the hooks reached it, so a
+    test can replay what Slopty heard. In those scratch runs alone its sink stands in for the
+    person at the permission dialogs `-p` would otherwise refuse, and only there does Claude
+    Code wait on it (`permission`: one command refused, the rest allowed); in a Slopty session
+    nothing answers one. Nine scenarios as of 2.1.314: `edit` (read, edit, overwrite, ranged
+    read), `tools` (tasks, glob, grep, bash, a failing bash, a background bash, a create, a
+    subagent), `interrupt`, `compact` (a prompt, `/rename`, then `/compact`), `permission` (a
+    command refused, then a command, an edit and a write allowed), `background` (canned),
+    `auto`, `fork` and `notebook`. A snapshot that moves after a recapture is the format moving.
   - Entries: prompt (a slash command or `!` keeps its name), answer text, thinking, a tool call
     paired with its result, compaction with its summary, Esc, and Claude Code's notes (API
     errors, command output, informational lines). Tool details are typed for Edit/MultiEdit
@@ -2647,8 +2651,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     declarations, oxlint with its type-aware rules, `claude plugin validate --strict`,
     `claude plugin test` on the engine's mocked clock (`tests/draft.test.ts`), and Stryker,
     which must kill every mutant not disabled inline with its reason (39 killed, 4 disabled,
-    and the 3 known endless relay loops timed out). `--deep` adds the seeded model-based
-    property (`deep/model.ts`). A check whose inputs match its last pass is skipped.
+    and the 3 known endless relay loops timed out). Each mutant's run gets 10 s beyond the
+    dry run's time (`timeoutMS`): a killed mutant's kit took 3.0 s at load 72, which the 3 s
+    it had first turned into a fourth timeout. `--deep` adds the seeded model-based property
+    (`deep/model.ts`). A check whose inputs match its last pass is skipped.
   - **The pictures are Claude Code's own.** A picture pasted into the box stands in its words
     as `[Image #N]`, and Claude Code writes its bytes at the paste to
     `realpath(<CLAUDE_CODE_TMPDIR or /tmp>)/claude-<uid>/<project key>/<session>/images/<N>.<ext>`
@@ -2724,3 +2730,76 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and efforts, the pending messages, the GUI composer's shared draft (`ThreadRow::draft`,
     `Intent::Draft`) and the words it said, the start's attachments, the kept review, and the
     GUI-first actions no worker sends any more (`agents.md`, "TUI-first", *What went*).
+
+- ✅ **Claude Code 2.1.314 is the version recorded** (2026-10-30, from 2.1.312; no 2.1.313 was
+  published). The recordings (every scenario and the mod's), the registry samples,
+  `xtask::claude::VERSION`, `draft::CHECKED_WITH` and the stand-in
+  (`slopty_testkit::claude_tui::VERSION`) are its. What changed that reaches Slopty, by the
+  changelog, the SDK's types and the recordings:
+  - **No record, field or hook payload the decoder reads moved.** The SDK's types add a startup
+    failure (`sandbox_required_unavailable`), a Bash result's `backgroundWakesOwner`, the
+    setting `permissions.blockWritesOutsideWorkingDirectories`, and idle compaction on by
+    default. A recapture of every scenario holds no record type, field or hook field that was
+    not there before.
+  - **A prompt that only mentions a command's tags is a prompt.** "Fixed prompts containing
+    tags such as `<bash-stdout>` or `<local-command-stdout>` not being acknowledged to a local
+    stream-json host." The decoder had read a prompt holding `<command-name>` anywhere as a
+    command, `<bash-input>` as a shell line and an output tag as a command's output. A tag now
+    counts only where the message opens with it, as Claude Code writes them
+    (`conversation::leads`).
+  - **The registry says `shell`.** Measured in tmux: a session at rest while a shell it started
+    in the background runs records `"status":"shell"` until the shell ends, then `busy` for the
+    turn on its notice, then `idle`. Claude Code's own list counts it as working. It is no
+    wait, so `Live::waiting` says none. `asksForConvertedSkills` (null) is new and unread.
+    Samples: `registry/shell.json` beside the four measured again.
+  - **A call stopped while it ran says so to the model.** "Fixed Claude being told only that a
+    command was declined after you stopped it with Esc or Stop in a cloud session or the IDE; it
+    now also hears that the command may have run": the refusal's words gain "Correction to the
+    text above: this call was stopped while running, not refused before it ran. …" (the
+    `interrupt` recording). They still open as a refusal's do, so the decoder still reads the
+    call as stopped, and the inspector words it as before.
+  - **Glob and Grep found nothing.** In the person's managed 2.1.314 build both answered "No
+    files found" for a folder holding `main.rs`, with a path or without, with settings or
+    without (three probes), where 2.1.312 found it; so the `tools` recording pins their empty
+    results, in the same records. Record it again once they find files.
+  - **Fixes only, otherwise**, among them a `PreCompact` hook's output cut at 10 000
+    characters (the relay prints none), `--setting-sources` now excluding all a file holds
+    (auto mode rules and saved consents too, so a recording depends less on the machine), and a
+    `/rename`'s name kept while a dialog is up (the `custom-title` and `agent-name` records the
+    `compact` recording now holds read as before).
+
+- ✅ **A turn ends by the prompt its `Stop` names, and a command's turn with its output**
+  (2026-10-30, recorded with 2.1.314). The relay's hooks run `async`, so a `Stop` reaches the
+  worker 50 to 100 ms after Claude Code ran it, and a command Claude Code runs itself
+  (`/compact`, `/rename`, `/model`, `!`) fires no `UserPromptSubmit` and no `Stop`: its records
+  come at once, `/compact`'s all together once the summary is written. In the `compact`
+  recording turn 1's `Stop` came 1 ms before that turn's own answer; in a probe it came after
+  the next command's records. `History` ended whichever turn was open when a `Stop` came, so a
+  command's turn stayed at work, or took turn 1's end and left turn 1 open.
+  - **The end is keyed, not ordered.** A hook's `prompt_id` (`Hook::prompt_id`) is a
+    `promptId` the turn's records carry: its prompt's, then the one a notice or a prompt queued
+    behind the turn and taken in mid-turn moves it on to, which its tool results carry from then
+    on (`Turn::prompt_ids`; this Mac's transcripts hold 1 452 such moves, each after a
+    `dequeue`). `History::turn_ended` ends the turn of the prompt it names: one the transcript
+    has not shown yet waits for it (`History::engine`, kept across a reset), and one heard after
+    a later turn began ends its own. The state is the
+    hook's (completed, or failed in the transcript's words), else the records'; the time is the
+    records' end where they have one, else the hook's. A `Stop` that names no prompt ends the
+    turn open, as before.
+  - **A command's turn ends with its output** (`conversation::end_command`): a `local_command`
+    system record (`/rename`, `/model`, `/color`), or the `<local-command-stdout>` and
+    `<bash-stdout>` records after `/compact` and `!`, end the turn whose prompt is that command,
+    at their time. A prompt's turn stays open on such output.
+  - **The worker hands the id on.** The `Stop` and `StopFailure` signals carry the hook's
+    `prompt_id` to `History::turn_ended` (`slopty-worker` `thread::claude`).
+  - Left as it was: a typed `/compact` writes its boundary and summary before its command's
+    record, so they land in the turn before it.
+  - Tests: `slopty-agent` `history::tests`
+    `a_turn_ends_the_same_however_its_hook_and_records_arrive` (every scenario replayed as
+    recorded, twice over, transcript first and hooks first: the same turns, none at work, each
+    ended at its records' time),
+    `a_late_stop_ends_its_own_turn_and_a_command_ends_with_its_output`,
+    `a_failure_heard_before_or_after_its_records_reads_the_same` and
+    `a_stop_ends_the_turn_a_notice_moved_on`;
+    `conversation::tests::a_command_s_turn_ends_with_its_output`; `slopty-worker` `threads.rs`
+    `hooks`, which holds each turn's state and end as well as the status.

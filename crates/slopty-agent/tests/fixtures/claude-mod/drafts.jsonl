@@ -7,7 +7,6 @@
 {"act":"recall","payload":{"hook_event_name":"PromptDraft","prompt":"hell one\ntwo[Pasted text #1 +5 lines][Image #2]","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
 {"act":"back","payload":{"hook_event_name":"PromptDraft","prompt":"","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
 {"act":"submit","payload":{"hook_event_name":"PromptDraft","prompt":"scenario","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
-{"act":"submit","payload":{"hook_event_name":"PromptDraft","prompt":"scenario:hold","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
 {"act":"submit","payload":{"hook_event_name":"PromptDraft","prompt":"","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
 {"act":"pull back","payload":{"hook_event_name":"PromptDraft","prompt":"queued","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}
 {"act":"queue again","payload":{"hook_event_name":"PromptDraft","prompt":"","session_id":"session-1","tmpdir":"/tmp/slopty-claude-mod-record/tmp"}}

@@ -6,7 +6,7 @@ expression: "decode(\"compact\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1793273712987
+      at_ms: 1793347964062
       body:
         Prompt:
           text:
@@ -17,38 +17,61 @@ expression: "decode(\"compact\").snapshot()"
           images: []
           command: ~
     - id: "00000000-0000-4000-8000-000000000016:0"
-      at_ms: 1793273714590
+      at_ms: 1793347965983
       body:
         Text:
           text: ready
           lines: 1
           chars: 5
           full: ~
-    - id: 00000000-0000-4000-8000-000000000020
-      at_ms: 1793273719008
-      body:
-        Compact:
-          trigger: manual
-          pre_tokens: 18445
-          post_tokens: 3343
-          summary:
-            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready,\" which I did; no other task was requested.\n\n2. Key Technical Concepts:\n   - None relevant to work performed. The session has no code, build, or test activity.\n\n3. Files and Code Sections:\n   - None read, modified, or created.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - No problems encountered. No ongoing troubleshooting.\n\n6. All user messages:\n   - \"Reply with the single word \"ready\".\"\n   - \"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\" followed by the compaction instructions asking for an <analysis> block and a <summary> block, with the additional instruction: \"Summarize only the user's requests, in one sentence.\"\n\n7. Pending Tasks:\n   - None.\n\n8. Current Work:\n   - Producing this compaction summary as text only, with no tool calls.\n\n9. Optional Next Step:\n   - None. The requested reply (\"ready\") is complete, and the compaction summary is the final output of this turn. Await further instructions from the user.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened."
-            lines: 33
-            chars: 1713
-            full: ~
-    - id: 00000000-0000-4000-8000-000000000024
-      at_ms: 1793273714644
+    - id: 00000000-0000-4000-8000-000000000022
+      at_ms: 1793347966038
       body:
         Prompt:
           text:
-            text: "Summarize only the user's requests, in one sentence."
+            text: Fixture session
             lines: 1
-            chars: 52
+            chars: 15
+            full: ~
+          images: []
+          command: /rename
+    - id: 00000000-0000-4000-8000-000000000023
+      at_ms: 1793347966043
+      body:
+        Note:
+          kind: Command
+          text:
+            text: "Session renamed to: Fixture session"
+            lines: 1
+            chars: 35
+            full: ~
+          retry: ~
+          stop: ~
+    - id: 00000000-0000-4000-8000-000000000025
+      at_ms: 1793347970553
+      body:
+        Compact:
+          trigger: manual
+          pre_tokens: 18536
+          post_tokens: 3391
+          summary:
+            text: "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\n1. Primary Request and Intent:\n   The user asked me to reply with the single word \"ready,\" which I did. No other work was requested.\n\n2. Key Technical Concepts:\n   - None. The conversation contains no technical work.\n\n3. Files and Code Sections:\n   - None examined, modified, or created.\n\n4. Errors and fixes:\n   - None.\n\n5. Problem Solving:\n   - Nothing to solve. No ongoing troubleshooting.\n\n6. All user messages:\n   - \"Reply with the single word 'ready'.\"\n   - Local-command caveat followed by a summarization request asking for a one-sentence statement of what the user asked for, omitting the environment and non-user instructions.\n\n7. Pending Tasks:\n   - None.\n\n8. Current Work:\n   - Producing this compaction summary. The only prior substantive output was the word \"ready.\"\n\n9. Optional Next Step:\n   - None. The user has not requested any further action.\n\nIf you need specific details from before compaction (like exact code snippets, error messages, or content you generated), read the full transcript at: /home/user/.claude/projects/-work/00000000-0000-4000-8000-000000000001.jsonl\nContinue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, do not preface with \"I'll continue\" or similar. Pick up the last task as if the break never happened.\n\nThe messages after this summary are the most recent messages from before compaction, kept verbatim. The summary was written without seeing them, so something it says has not happened yet may already have happened in them."
+            lines: 35
+            chars: 1757
+            full: ~
+    - id: 00000000-0000-4000-8000-000000000028
+      at_ms: 1793347966052
+      body:
+        Prompt:
+          text:
+            text: "Keep one sentence: what the user asked for. Leave out the environment and every instruction that did not come from the user."
+            lines: 1
+            chars: 124
             full: ~
           images: []
           command: /compact
-    - id: 00000000-0000-4000-8000-000000000025
-      at_ms: 1793273719135
+    - id: 00000000-0000-4000-8000-000000000029
+      at_ms: 1793347970667
       body:
         Note:
           kind: Command
@@ -62,19 +85,35 @@ expression: "decode(\"compact\").snapshot()"
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1793273712987
-      ended_ms: 1793273714628
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000002
+      started_ms: 1793347964062
+      ended_ms: 1793347966011
       models:
         - claude-haiku-5-5
       usage:
         input: 2
-        cache_read: 11384
-        cache_write: 7055
+        cache_read: 18439
+        cache_write: 0
         output: 4
         thinking: 0
-    - prompt: 00000000-0000-4000-8000-000000000024
-      started_ms: 1793273714644
-      ended_ms: ~
+    - prompt: 00000000-0000-4000-8000-000000000022
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000020
+      started_ms: 1793347966038
+      ended_ms: 1793347966043
+      models: []
+      usage:
+        input: 0
+        cache_read: 0
+        cache_write: 0
+        output: 0
+        thinking: 0
+    - prompt: 00000000-0000-4000-8000-000000000028
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000026
+      started_ms: 1793347966052
+      ended_ms: 1793347970667
       models: []
       usage:
         input: 0

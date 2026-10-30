@@ -107,7 +107,8 @@ mod claude_mod {
     }
 
     /// The prompts queued behind a turn, as the transcript of the same run says them: the one
-    /// queued while the turn ran, then none once the person pulled it back into the box.
+    /// queued while the turn ran, none once the person pulled it back into the box, it again
+    /// once they sent it behind the same turn, and none once the agent took it.
     #[test]
     fn the_queue_is_the_transcript_s() {
         let dir = tempfile::tempdir().expect("a folder");
@@ -123,7 +124,8 @@ mod claude_mod {
                 }
             }
         }
-        assert_eq!(told, [vec!["queued".to_owned()], vec![]]);
+        let queued = vec!["queued".to_owned()];
+        assert_eq!(told, [queued.clone(), vec![], queued, vec![]]);
     }
 
     /// The smallest PNG: one pixel.

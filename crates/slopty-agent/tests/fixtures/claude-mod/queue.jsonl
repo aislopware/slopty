@@ -1,6 +1,8 @@
 {"text":"scenario:hold","type":"user"}
 {"content":"queued","operation":"enqueue","type":"queue-operation"}
 {"content":"queued","operation":"popAll","type":"queue-operation"}
+{"content":"queued","operation":"enqueue","type":"queue-operation"}
+{"content":null,"operation":"dequeue","type":"queue-operation"}
 {"text":"queued","type":"user"}
 {"text":"scenario:ask","type":"user"}
 {"text":"[Request interrupted by user for tool use]","type":"user"}

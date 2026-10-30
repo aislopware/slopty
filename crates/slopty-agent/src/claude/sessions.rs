@@ -596,8 +596,9 @@ pub struct Live {
     /// The session's name as its TUI shows it (Claude Code's title, or the person's), when it
     /// has one.
     pub name: Option<String>,
-    /// What it says it does, when it says: `idle` at rest, `busy` at work, `waiting` on the
-    /// person at a dialog.
+    /// What it says it does, when it says: `idle` at rest, `busy` at work, `shell` at rest
+    /// with a shell of its own still running in the background, `waiting` on the person at a
+    /// dialog.
     pub status: Option<String>,
     /// What a wait is for, in its words: `permission prompt` (a tool's permission, a plan's
     /// approval, and any dialog that says nothing else), `input needed` (a question),
@@ -919,11 +920,11 @@ mod tests {
         assert_eq!(live[1].cwd.as_deref(), Some("/w"));
     }
 
-    /// What Claude Code 2.1.312 records of itself at rest, at work and at its two dialogs (its
-    /// own records, scrubbed): waiting on the person at a dialog alone, for a permission or a
-    /// question as it says, since when it says. A dialog that says what it needs is said in
-    /// those words, another dialog is input, and a record of a Claude Code from before it said
-    /// any of this waits on nothing.
+    /// What Claude Code 2.1.314 records of itself at rest, at work, at rest with a background
+    /// shell running and at its two dialogs (its own records, scrubbed): waiting on the person
+    /// at a dialog alone, for a permission or a question as it says, since when it says. A
+    /// dialog that says what it needs is said in those words, another dialog is input, and a
+    /// record of a Claude Code from before it said any of this waits on nothing.
     #[test]
     fn a_live_claude_code_says_when_it_waits_on_the_person() {
         let home = tempfile::tempdir().expect("tempdir");
@@ -937,6 +938,7 @@ mod tests {
         let samples = [
             (include_str!("../../tests/fixtures/registry/idle.json"), "idle", None),
             (include_str!("../../tests/fixtures/registry/busy.json"), "busy", None),
+            (include_str!("../../tests/fixtures/registry/shell.json"), "shell", None),
             (permission, "waiting", Some(("permission", "Wants permission"))),
             (
                 include_str!("../../tests/fixtures/registry/waiting-question.json"),

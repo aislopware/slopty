@@ -6,7 +6,7 @@ expression: "decode(\"permission\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1793276993822
+      at_ms: 1793345948744
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"permission\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1793276996305
+      at_ms: 1793345951204
       body:
         Tool:
           name: Bash
@@ -44,12 +44,12 @@ expression: "decode(\"permission\").snapshot()"
               lines: 1
               chars: 23
               full: ~
-            at_ms: 1793276996383
+            at_ms: 1793345951283
             images: []
             said: ~
           title: ~
     - id: toolu_02
-      at_ms: 1793276998015
+      at_ms: 1793345952806
       body:
         Tool:
           name: Bash
@@ -72,12 +72,12 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793276998631
+            at_ms: 1793345953043
             images: []
             said: Done
           title: ~
     - id: toolu_03
-      at_ms: 1793277000167
+      at_ms: 1793345954553
       body:
         Tool:
           name: Read
@@ -92,12 +92,12 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793277000224
+            at_ms: 1793345954571
             images: []
             said: ~
           title: ~
     - id: toolu_04
-      at_ms: 1793277002041
+      at_ms: 1793345956348
       body:
         Tool:
           name: Edit
@@ -124,12 +124,12 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793277002124
+            at_ms: 1793345956372
             images: []
             said: ~
           title: ~
     - id: toolu_05
-      at_ms: 1793277003376
+      at_ms: 1793345956488
       body:
         Tool:
           name: Write
@@ -147,28 +147,30 @@ expression: "decode(\"permission\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793277003444
+            at_ms: 1793345956510
             images: []
             said: ~
           title: ~
-    - id: "00000000-0000-4000-8000-000000000044:0"
-      at_ms: 1793277004708
+    - id: "00000000-0000-4000-8000-000000000042:0"
+      at_ms: 1793345958023
       body:
         Text:
-          text: done
-          lines: 1
-          chars: 4
+          text: "done\n\nThe first `touch refused.txt` was refused, so I moved on. `touch allowed.txt` succeeded. `notes.txt` now has `BETA` in place of `beta`, and `todo.txt` was created containing `ship`."
+          lines: 3
+          chars: 187
           full: ~
   tasks: []
   turns:
     - prompt: 00000000-0000-4000-8000-000000000003
-      started_ms: 1793276993822
-      ended_ms: 1793277004732
+      prompt_ids:
+        - 00000000-0000-4000-8000-000000000002
+      started_ms: 1793345948744
+      ended_ms: 1793345958079
       models:
         - claude-haiku-5-5
       usage:
         input: 12
-        cache_read: 106070
-        cache_write: 8061
-        output: 627
-        thinking: 167
+        cache_read: 105767
+        cache_write: 8193
+        output: 912
+        thinking: 169
