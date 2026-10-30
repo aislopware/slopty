@@ -18,8 +18,13 @@ retries = 0
 # a green must not hide (.research/testing-rust-modern-2026-10-29.md §7, rank 1). Only the named
 # overrides below that retry a test against the machine's load let such a pass stand.
 flaky-result = "fail"
-# A test that leaves a child (ptyd, a worker, a shell) holding its output fails.
-leak-timeout = { period = "500ms", result = "fail" }
+# A test that leaves a child (ptyd, a worker, a shell) holding its output fails. Such a child
+# lives until something kills it, far past 2 s; a test whose output closes in time pays nothing
+# for the wait. 500 ms failed tests that leave no child: pure ones (slopty-proto's
+# `the_screens_are_the_last_said`, at load 19.8) and ten shell tests at load 79.6, each out by
+# 0.53 s, none holding a handle when run alone, and a probe of 3 200 short children spawned
+# beside 8 threads of long ones at load 53 found no pipe inherited (2026-10-30).
+leak-timeout = { period = "2s", result = "fail" }
 slow-timeout = { period = "30s", terminate-after = 4, grace-period = "5s" }
 fail-fast = false
 status-level = "fail"

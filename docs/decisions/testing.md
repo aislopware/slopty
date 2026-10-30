@@ -1861,3 +1861,15 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     the libraries' too (noq's handshakes, idle timeouts and pacing), which a trait of ours
     would never reach.
   - Numbers in MEASUREMENTS.md, 2026-10-30, "the daemons and clients on tokio's paused clock".
+
+- ✅ **A test's output gets 2 s to close after it exits** (2026-10-30, from 500 ms). nextest's
+  leak check fails a test whose output stays open past its exit, which is how a test that leaves
+  ptyd, a worker or a shell behind shows: such a child holds the pipe until something kills it.
+  At 500 ms the check also failed tests that leave nothing: slopty-proto's
+  `the_screens_are_the_last_said`, which starts no thread or process, at load 19.8, and ten shell
+  tests at load 79.6, each out by 0.53 s. Run alone those closed their output before they were
+  reaped and left no process behind (5 runs of 4 of them), and std's macOS pipe, close-on-exec
+  only a moment after it exists, was not the way in either: 3 200 short children spawned beside 8
+  threads spawning long ones, at load 53, never had a pipe held past their exit. What is left is
+  the run's own lateness under load, so the window widens past it; a test whose output closes in
+  time waits for none of it.
