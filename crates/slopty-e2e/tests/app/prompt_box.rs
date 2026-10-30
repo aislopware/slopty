@@ -107,7 +107,8 @@ async fn the_inspector_mirrors_the_tuis_prompt_box() {
         node(d, "Paragraph", SHOWN).is_some() && node(d, "Button", "Image #1").is_some()
     })
     .await;
-    drv.ok(&Command::Move { x: 1300.0, y: 60.0 }).await.unwrap();
+    // The pointer off the window: no hover or tooltip in the renders.
+    drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "prompt-box", &[]).await;
 

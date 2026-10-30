@@ -135,6 +135,17 @@ async fn a_session_is_its_terminal_and_its_inspector_opens_a_call_whole() {
         "the call's own line opened it: {pressed:?}\n{}",
         slopty_e2e::frame_text(&opened.a11y)
     );
+    // The record's values are the run machine's own (its load and memory, the build, the moment
+    // it was last seen), which no golden can hold: the record folds at its root's press to its
+    // preview, the call's lines and its format menu kept.
+    let root = crate::served::node(&opened, "TreeItem", "[1]").cloned().expect("the record's root");
+    let (x, y) = middle(&root);
+    drv.click(x, y).await.unwrap();
+    seen(drv, "the record folded", STEP, |d| {
+        crate::served::node(d, "TreeItem", "(1) [{\u{2026}}]").is_some()
+            && !inspector_says(d, RESULT_WORDS)
+    })
+    .await;
     drv.ok(&slopty_e2e::Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     // The result's size counts the facts of the machine the run is on (its address, load,
