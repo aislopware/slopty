@@ -16,7 +16,7 @@ use tokio::time::Instant;
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
-use crate::restore::{Keeper, Recipe};
+use crate::restore::{Keeper, Recipe, Started};
 use crate::session::{self, Probe, SessionHandle, SessionStart, Tap};
 
 /// Scrollback lines the engine retains per session.
@@ -65,7 +65,44 @@ struct Entry {
     pid: u32,
     /// The terminfo name the child was given as `TERM`.
     term: String,
+    /// Held for a person's restart ([`Worker::restarting`]), with how it was started.
+    restart: Option<Held>,
 }
+
+impl Entry {
+    /// Hold this session for a restart ([`Worker::restarting`]), `recipe` saying how it was
+    /// started, or say why not.
+    fn hold(&mut self, recipe: Option<Recipe>) -> Result<Recipe, WorkerError> {
+        let refused = |why: &str| Err(WorkerError::NotRestarted(why.to_owned()));
+        if self.restart.is_some() {
+            return refused(RESTARTING);
+        }
+        if self.exited.is_none() {
+            return refused(STILL_RUNS);
+        }
+        let Some(recipe) = recipe else { return refused(NOT_KEPT) };
+        self.restart = Some(Held { recipe: recipe.clone(), exit: None });
+        Ok(recipe)
+    }
+}
+
+/// A session held for a restart, from [`Worker::restarting`] to [`Worker::restarted`].
+struct Held {
+    /// How it was started.
+    recipe: Recipe,
+    /// The exit its new program had meanwhile, applied once the restart is over: the actor
+    /// would take it for the old program's otherwise, and the session would read as running.
+    exit: Option<Exit>,
+}
+
+/// Why a restart was refused, as the person is told.
+pub const STILL_RUNS: &str = "its program still runs";
+
+/// A restart held already, as the person is told: two clients pressed ↩ at once.
+pub const RESTARTING: &str = "it is starting again already";
+
+/// Nothing kept of how a session was started, as the person is told.
+pub const NOT_KEPT: &str = "nothing is kept of how it was started";
 
 /// What a session is adopted with besides what ptyd hands over.
 #[derive(Clone, Debug, Default)]
@@ -326,9 +363,15 @@ impl Worker {
         &*self.inner.agents
     }
 
-    /// Record a child exit reported by ptyd, and tell the session's viewers.
+    /// Record a child exit reported by ptyd, and tell the session's viewers. One that comes
+    /// while the session starts again is its new program's, held until the restart is over
+    /// ([`Self::restarted`]).
     pub fn on_exit(&self, id: SessionId, exit: Exit) {
         if let Some(e) = self.inner.sessions.lock().get_mut(&id) {
+            if let Some(held) = &mut e.restart {
+                held.exit = Some(exit);
+                return;
+            }
             e.exited = Some(exit);
             e.handle.exited(exit);
         }
@@ -393,6 +436,17 @@ impl Worker {
         id: SessionId,
         req: &OpenSession,
     ) -> Result<SessionHandle, WorkerError> {
+        self.open_for(id, req, None).await
+    }
+
+    /// [`Self::open_as`] for the agent `started`, when a start opens it: starting it again
+    /// takes the agent's thread up again ([`Self::restart`]).
+    pub async fn open_for(
+        &self,
+        id: SessionId,
+        req: &OpenSession,
+        started: Option<Started>,
+    ) -> Result<SessionHandle, WorkerError> {
         let _opening = Opening::new(&self.inner, id);
         let env = self.env_for(id, &req.env);
         let spec = SpawnSpec {
@@ -410,6 +464,7 @@ impl Worker {
             size: req.size,
             saved_ms: WallMs::ZERO,
             restored: None,
+            started,
         };
         let pid = self.inner.ptyd.lock().await.spawn(id, spec).await?;
         let cwd = recipe.cwd.clone();
@@ -520,10 +575,9 @@ impl Worker {
             cwd,
         })?;
         let started_ms = attached.started_ms;
-        self.inner
-            .sessions
-            .lock()
-            .insert(id, Entry { handle: handle.clone(), command, exited, started_ms, pid, term });
+        let entry =
+            Entry { handle: handle.clone(), command, exited, started_ms, pid, term, restart: None };
+        self.inner.sessions.lock().insert(id, entry);
         // Read after the insert: a reader shared meanwhile reaches the session one way or the
         // other.
         let clip = self.inner.clipboard.lock().clone();
@@ -705,6 +759,90 @@ impl Worker {
             // ptyd has already forgotten it: closed is what was asked for.
             Ok(()) | Err(PtyError::Daemon(PtydError::NoSuchSession)) => Ok(()),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Hold session `id`, whose program ended, for the person's restart, and say how it was
+    /// started: [`Self::restart`] runs it again, and [`Self::restarted`] lets go of it whatever
+    /// came of that. Refused while its program runs, while another restart holds it, and when
+    /// nothing is kept of how it was started.
+    pub async fn restarting(&self, id: SessionId) -> Result<Recipe, WorkerError> {
+        let recipe = self.inner.keeper.recipe(id).await;
+        let held = self.inner.sessions.lock().get_mut(&id).map(|entry| entry.hold(recipe));
+        held.unwrap_or(Err(WorkerError::NoSuchSession))
+    }
+
+    /// Run `req` in session `id`, held for a restart ([`Self::restarting`]): under the same id,
+    /// so its items, its row and its tab stay, below the old screen and a divider, at the size
+    /// the session has now and with every session's variables afresh. Its viewers stay attached
+    /// and hear it runs ([`slopty_proto::terminal::TermEvent::Restarted`]). It is kept as `req`
+    /// says from then on, for the agent `started` when a start's agent runs again.
+    pub async fn restart(
+        &self,
+        id: SessionId,
+        req: &OpenSession,
+        started: Option<Started>,
+    ) -> Result<(), WorkerError> {
+        let found = self.inner.sessions.lock().get(&id).map(|entry| {
+            (entry.handle.clone(), entry.restart.as_ref().map(|held| held.recipe.clone()))
+        });
+        let (handle, kept) = found.ok_or(WorkerError::NoSuchSession)?;
+        let kept = kept.ok_or_else(|| WorkerError::NotRestarted(STILL_RUNS.to_owned()))?;
+        let size = handle.snapshot().await?.size;
+        let cwd = req.cwd.as_deref().map(|cwd| crate::file::expand_home(Path::new(cwd)));
+        let env = self.env_for(id, &req.env);
+        let spec = SpawnSpec { command: req.command.clone(), cwd: cwd.clone(), env, size };
+        let (pid, attached) = {
+            let mut ptyd = self.inner.ptyd.lock().await;
+            // A close takes the session out of the table before it asks ptyd, so one under way
+            // now waits for this lock and ends the program started here.
+            if !self.inner.sessions.lock().contains_key(&id) {
+                return Err(WorkerError::NoSuchSession);
+            }
+            // ptyd keeps a session whose child ended until it is closed, and refuses its id.
+            match ptyd.close(id).await {
+                Ok(()) | Err(PtyError::Daemon(PtydError::NoSuchSession)) => {}
+                Err(e) => return Err(e.into()),
+            }
+            let pid = ptyd.spawn(id, spec).await?;
+            (pid, ptyd.attach(id).await?)
+        };
+        if attached.dropped > 0 {
+            tracing::warn!(session = %id, dropped = attached.dropped, "output lost before the backlog of a restart");
+        }
+        let term = attached.term.clone();
+        handle.restart(attached.master, attached.term, attached.backlog).await?;
+        let ran = self.inner.sessions.lock().get_mut(&id).map(|entry| {
+            entry.exited = None;
+            entry.pid = pid;
+            entry.started_ms = attached.started_ms;
+            entry.term = term;
+            entry.command.clone_from(&req.command);
+        });
+        // Closed meanwhile: nothing of it is kept.
+        ran.ok_or(WorkerError::NoSuchSession)?;
+        let recipe = Recipe {
+            command: req.command.clone(),
+            env: req.env.clone(),
+            cwd: cwd.map(|cwd| cwd.to_string_lossy().into_owned()),
+            title: req.title.clone(),
+            size,
+            started,
+            ..kept
+        };
+        self.inner.keeper.opened(id, recipe);
+        tracing::info!(session = %id, command = ?req.command, "started again");
+        Ok(())
+    }
+
+    /// Let go of session `id`, held for a restart, whatever came of it. An exit its new program
+    /// had meanwhile is applied now, after the restart, so the session reads as ended again.
+    pub fn restarted(&self, id: SessionId) {
+        if let Some(entry) = self.inner.sessions.lock().get_mut(&id)
+            && let Some(exit) = entry.restart.take().and_then(|held| held.exit)
+        {
+            entry.exited = Some(exit);
+            entry.handle.exited(exit);
         }
     }
 }

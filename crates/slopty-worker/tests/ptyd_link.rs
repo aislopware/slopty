@@ -8,13 +8,18 @@ mod ptyd_link {
     use std::time::Duration;
 
     use slopty_agent::status::SessionAgent;
+    use slopty_client::term::{Exit as Ended, TermState};
     use slopty_core::{ClientId, SessionId};
-    use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
+    use slopty_proto::input::CellMetrics;
+    use slopty_proto::terminal::{OpenSession, SessionState, TermEvent, TermRequest, TermSize};
     use slopty_pty::protocol::Exit;
     use slopty_pty::{PtydClient, SpawnSpec};
-    use slopty_worker::Worker;
+    use slopty_worker::manager::{RESTARTING, STILL_RUNS};
     use slopty_worker::orchestrate::Agents;
+    use slopty_worker::session::{Outbound, RESTARTED_DIVIDER, SessionHandle};
+    use slopty_worker::{Worker, WorkerError};
     use tokio::process::{Child, Command};
+    use tokio::sync::mpsc;
 
     const WAIT: Duration = Duration::from_secs(20);
 
@@ -360,5 +365,187 @@ mod ptyd_link {
 
         worker.close(id).await.unwrap();
         assert!(worker.get(id).is_err(), "gone from the table");
+    }
+
+    const SIZE: TermSize =
+        TermSize { cols: 40, rows: 8, metrics: CellMetrics { cell_width: 8, cell_height: 16 } };
+
+    /// A client attached to a session, and the state its events build as the app applies them.
+    struct Viewer {
+        client: ClientId,
+        rx: mpsc::Receiver<Outbound>,
+        state: TermState,
+        seen: Vec<TermEvent>,
+    }
+
+    impl Viewer {
+        fn attach(session: &SessionHandle) -> Self {
+            let (sink, rx) = mpsc::channel(1024);
+            let client = ClientId::new();
+            session.attach(client, SIZE, sink).unwrap();
+            Self { client, rx, state: TermState::new(SIZE), seen: Vec::new() }
+        }
+
+        /// Apply events until `pred` holds of every one seen so far.
+        async fn until(&mut self, pred: impl Fn(&[TermEvent]) -> bool) {
+            tokio::time::timeout(WAIT, async {
+                while !pred(&self.seen) {
+                    let out = self.rx.recv().await.expect("the sink stays open");
+                    let mut wire = bytes::BytesMut::from(out.wire());
+                    let ev: TermEvent =
+                        slopty_proto::codec::try_decode(&mut wire).unwrap().expect("an event");
+                    let _effects = self.state.apply(ev.clone());
+                    self.seen.push(ev);
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("events: {:?}\n{}", self.seen, self.screen()));
+        }
+
+        fn screen(&self) -> String {
+            let lines = self.state.screen().lines();
+            lines.iter().map(|l| l.text().trim_end().to_owned()).collect::<Vec<_>>().join("\n")
+        }
+
+        /// The row of the screen that holds `text`.
+        fn row(&self, text: &str) -> usize {
+            let screen = self.screen();
+            let found = screen.lines().position(|line| line.contains(text));
+            found.unwrap_or_else(|| panic!("{text:?} not on the screen:\n{screen}"))
+        }
+    }
+
+    fn exits(events: &[TermEvent]) -> usize {
+        events.iter().filter(|ev| matches!(ev, TermEvent::Exited { .. })).count()
+    }
+
+    /// The state session `id`'s summary says.
+    async fn state(worker: &Worker, id: SessionId) -> SessionState {
+        worker.summary(id).await.expect("the session is listed").state
+    }
+
+    /// The next exit ptyd reports, recorded as the daemon records it.
+    async fn ended(
+        worker: &Worker,
+        exits: &mut mpsc::UnboundedReceiver<(SessionId, Exit)>,
+    ) -> Exit {
+        let (id, exit) = tokio::time::timeout(WAIT, exits.recv()).await.unwrap().unwrap();
+        worker.on_exit(id, exit);
+        exit
+    }
+
+    /// A session whose program ended starts again at the person's word, and only then: under the
+    /// same id, with its viewer attached throughout, the same command with the same variables in
+    /// the same directory, below its old screen and a divider. Its summary runs again and the
+    /// viewer's ended state goes; the new run's end is told as the first's was. A second word
+    /// while the first holds the session is refused.
+    #[tokio::test]
+    async fn an_ended_session_starts_again_below_its_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
+                .await
+                .unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let open = OpenSession {
+            size: SIZE,
+            cwd: Some(work.display().to_string()),
+            command: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                r#"read x; echo "said $x $WORD $(basename "$(pwd -P)")"; exit 3"#.into(),
+            ],
+            env: vec![("WORD".into(), "kept".into())],
+            title: None,
+            attach: false,
+        };
+        let session = worker.open(&open).await.unwrap();
+        let id = session.id();
+        let mut viewer = Viewer::attach(&session);
+        let refused = worker.restarting(id).await.expect_err("its program runs");
+        assert_eq!(refused.to_string(), STILL_RUNS);
+
+        let typed = |word: &str| TermRequest::Raw(format!("{word}\r").into_bytes());
+        session.request(viewer.client, typed("one")).unwrap();
+        assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(3));
+        viewer.until(|seen| exits(seen) == 1).await;
+        assert_eq!(viewer.state.exited(), Some(Ended(Some(3))));
+        assert_eq!(state(&worker, id).await, SessionState::Exited { status: Some(3) });
+
+        let recipe = worker.restarting(id).await.expect("its program ended");
+        let twice = worker.restarting(id).await.expect_err("held by the first");
+        assert_eq!(twice.to_string(), RESTARTING);
+        worker.restart(id, &recipe.again(), None).await.unwrap();
+        worker.restarted(id);
+        assert_eq!(state(&worker, id).await, SessionState::Running);
+        viewer.until(|seen| seen.contains(&TermEvent::Restarted)).await;
+        assert_eq!(viewer.state.exited(), None, "the viewer's ended bar goes");
+
+        session.request(viewer.client, typed("two")).unwrap();
+        assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(3));
+        viewer.until(|seen| exits(seen) == 2).await;
+        let (first, divider, second) = (
+            viewer.row("said one kept work"),
+            viewer.row(RESTARTED_DIVIDER),
+            viewer.row("said two kept work"),
+        );
+        assert!(first < divider && divider < second, "{}", viewer.screen());
+        assert_eq!(state(&worker, id).await, SessionState::Exited { status: Some(3) });
+        assert_eq!(worker.session_count(), 1, "the same session, not another");
+        worker.close(id).await.unwrap();
+    }
+
+    /// The new program's end that comes while the restart still holds the session is its own,
+    /// told once the restart lets go: the session reads as ended again rather than running for
+    /// good, and its viewer hears the run start and end in order. A session the worker does not
+    /// hold is not started again.
+    #[tokio::test]
+    async fn a_run_that_ends_at_once_ends_after_the_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
+                .await
+                .unwrap();
+        let unknown = worker.restarting(SessionId::new()).await.expect_err("no such session");
+        assert!(matches!(unknown, WorkerError::NoSuchSession), "{unknown}");
+        let ran = dir.path().join("ran");
+        let script = format!("[ -e '{0}' ] && exit 5; touch '{0}'; read x; exit 3", ran.display());
+        let open = OpenSession {
+            size: SIZE,
+            cwd: None,
+            command: vec!["/bin/sh".into(), "-c".into(), script],
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        let session = worker.open(&open).await.unwrap();
+        let id = session.id();
+        let mut viewer = Viewer::attach(&session);
+        session.request(viewer.client, TermRequest::Raw(b"go\r".to_vec())).unwrap();
+        assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(3));
+
+        let recipe = worker.restarting(id).await.unwrap();
+        worker.restart(id, &recipe.again(), None).await.unwrap();
+        assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(5));
+        assert_eq!(state(&worker, id).await, SessionState::Running, "held: not the first end");
+        worker.restarted(id);
+        assert_eq!(state(&worker, id).await, SessionState::Exited { status: Some(5) });
+        viewer.until(|seen| exits(seen) == 2).await;
+        let told: Vec<&TermEvent> = viewer
+            .seen
+            .iter()
+            .filter(|ev| matches!(ev, TermEvent::Exited { .. } | TermEvent::Restarted))
+            .collect();
+        let expected = [
+            TermEvent::Exited { status: Some(3) },
+            TermEvent::Restarted,
+            TermEvent::Exited { status: Some(5) },
+        ];
+        assert_eq!(told, expected.iter().collect::<Vec<_>>());
+        assert_eq!(viewer.state.exited(), Some(Ended(Some(5))));
+        worker.close(id).await.unwrap();
     }
 }

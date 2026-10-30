@@ -163,6 +163,15 @@ impl Drop for Credit {
     }
 }
 
+/// A new child's PTY for a session whose program ended ([`SessionHandle::restart`]).
+struct Again {
+    master: OwnedFd,
+    /// Its terminfo name.
+    term: String,
+    /// Its first output, which ptyd read before the worker attached.
+    backlog: Vec<u8>,
+}
+
 /// Commands into the actor.
 enum Cmd {
     Attach { client: ClientId, size: TermSize, sink: ClientSink },
@@ -179,6 +188,7 @@ enum Cmd {
     ShareClipboard { clip: Arc<dyn ForSessions> },
     Read { read: Read, reply: oneshot::Sender<Result<Text, WorkerError>> },
     Exited { exit: Exit },
+    Restart { again: Again, reply: oneshot::Sender<Result<(), WorkerError>> },
     Master { reply: oneshot::Sender<std::io::Result<OwnedFd>> },
     TapLost,
     Close,
@@ -348,6 +358,7 @@ impl std::fmt::Debug for Cmd {
             Self::ShareClipboard { .. } => "ShareClipboard",
             Self::Read { .. } => "Read",
             Self::Exited { .. } => "Exited",
+            Self::Restart { .. } => "Restart",
             Self::Master { .. } => "Master",
             Self::TapLost => "TapLost",
             Self::Close => "Close",
@@ -533,6 +544,21 @@ impl SessionHandle {
         let _ignored = self.tx.send(Cmd::Exited { exit });
     }
 
+    /// Run the session again on `master`, a new child's whose terminfo name is `term`, once its
+    /// program ended: below the old screen and a divider, `backlog` (its first output) read as
+    /// output is. The viewers stay attached and hear it runs ([`TermEvent::Restarted`]).
+    /// Refused while the program runs.
+    pub async fn restart(
+        &self,
+        master: OwnedFd,
+        term: String,
+        backlog: Vec<u8>,
+    ) -> Result<(), WorkerError> {
+        let (reply, done) = oneshot::channel();
+        self.send(Cmd::Restart { again: Again { master, term, backlog }, reply })?;
+        done.await.map_err(|_gone| WorkerError::SessionClosed)?
+    }
+
     /// A copy of the session's PTY master, to hand a ptyd that started afresh
     /// ([`slopty_pty::PtydClient::adopt`]).
     pub async fn master(&self) -> Result<OwnedFd, WorkerError> {
@@ -631,6 +657,10 @@ pub struct SessionStart {
 
 /// The divider between a lost shell's screen and the new shell's.
 pub const RESTORED_DIVIDER: &str = "Restored after restart";
+
+/// The divider between the screen of a program that ended and the same program started again
+/// ([`SessionHandle::restart`]).
+pub const RESTARTED_DIVIDER: &str = "Started again";
 
 /// Spawn the actor thread.
 pub fn spawn(start: SessionStart) -> Result<SessionHandle, WorkerError> {
@@ -1165,7 +1195,7 @@ impl Actor {
 
     async fn run(mut self) {
         let mut buf = vec![0_u8; READ_BUF];
-        let pty = Arc::clone(&self.master);
+        let mut pty = Arc::clone(&self.master);
         let room = Arc::clone(&self.room);
         // A session adopted in a repository has its changes counted before its next prompt.
         self.touch_repo();
@@ -1176,6 +1206,10 @@ impl Actor {
         self.after_output();
         self.checkpoint(true);
         loop {
+            // A restart put a new child's master in place of the one whose program ended.
+            if !Arc::ptr_eq(&pty, &self.master) {
+                pty = Arc::clone(&self.master);
+            }
             let writing = !self.input.pending.is_empty() && !self.pty_closed;
             tokio::select! {
                 biased;
@@ -2321,6 +2355,9 @@ impl Actor {
                 }
                 self.broadcast(&TermEvent::Exited { status: exit.status });
             }
+            Cmd::Restart { again, reply } => {
+                let _ignored = reply.send(self.restart(again));
+            }
             Cmd::Read { read, reply } => {
                 let _ignored = reply.send(self.read(read));
             }
@@ -2335,6 +2372,47 @@ impl Actor {
             Cmd::Close => return false,
         }
         true
+    }
+
+    /// [`SessionHandle::restart`].
+    fn restart(&mut self, again: Again) -> Result<(), WorkerError> {
+        if self.exited.is_none() {
+            return Err(WorkerError::NotRestarted(crate::manager::STILL_RUNS.to_owned()));
+        }
+        let master = Arc::new(PtyMaster::new(again.master)?);
+        self.engine.set_terminfo_name(&again.term)?;
+        // What the program that ended left switched on is switched off, as for a lost shell.
+        self.engine.mark_restored(RESTARTED_DIVIDER)?;
+        self.master = master;
+        self.exited = None;
+        self.pty_closed = false;
+        // What still waited for the program that ended is not the new one's.
+        self.input.pending.clear();
+        self.input.ends.clear();
+        self.input.written = self.input.queued;
+        self.input_taken();
+        self.activity.send_if_modified(|a| std::mem::replace(&mut a.exited, false));
+        // Its results went with it; the new run reports its own.
+        if !self.program.is_empty() {
+            self.program.clear();
+            self.moved();
+            self.broadcast(&TermEvent::ProgramStatus(Vec::new()));
+        }
+        self.broadcast(&TermEvent::Restarted);
+        self.after_output();
+        // Its first output is the new program's: its queries are this worker's to answer. ptyd
+        // holds it in the ring already, which the checkpoint below replaces.
+        if !again.backlog.is_empty() {
+            self.engine.write(&again.backlog);
+            self.read_line_discipline();
+            self.after_output();
+        }
+        self.flush_frame();
+        self.dirty_since_checkpoint = true;
+        self.tapped_since_checkpoint = 0;
+        self.tap_lost = false;
+        self.checkpoint(true);
+        Ok(())
     }
 
     fn read(&self, read: Read) -> Result<Text, WorkerError> {
@@ -2392,7 +2470,11 @@ impl Actor {
         let mut bytes = Vec::new();
         let mut key = None;
         let result = match req {
-            TermRequest::Attach { .. } | TermRequest::Detach | TermRequest::Close => Ok(()),
+            // The connection acts on these with the session table.
+            TermRequest::Attach { .. }
+            | TermRequest::Detach
+            | TermRequest::Close
+            | TermRequest::Restart => Ok(()),
             // The connection puts the picture on the pasteboard first; here it is the chord.
             TermRequest::PastePicture(chord) => {
                 return self.request(client, chord.into_request(), at);

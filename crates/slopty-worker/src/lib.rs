@@ -72,6 +72,10 @@ pub enum WorkerError {
     /// Remote window pipeline.
     #[error(transparent)]
     Screen(#[from] ScreenError),
+    /// A session was not started again ([`manager::Worker::restarting`]): why, in the person's
+    /// words.
+    #[error("{0}")]
+    NotRestarted(String),
 }
 
 impl WorkerError {
@@ -89,6 +93,7 @@ impl WorkerError {
             Self::Engine(_) | Self::NoSuchItem | Self::Items(_) | Self::Screen(_) => {
                 TermError::Engine(self.to_string())
             }
+            Self::NotRestarted(why) => TermError::Restart(why.clone()),
         }
     }
 }

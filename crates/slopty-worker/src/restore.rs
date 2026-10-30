@@ -12,6 +12,10 @@
 //! was running is never started again: an agent the person ran in a terminal is theirs to take
 //! up, and the threads Slopty drives come back on their own (`docs/decisions/agents.md`).
 //!
+//! The recipe is also what a session whose program ended starts again from, when the person asks
+//! ([`crate::manager::Worker::restart`]): its command, run again where it was, below the old screen
+//! and a divider; an agent a start opened it for, by its thread ([`Started`]).
+//!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written off the
 //! session's thread, paced by its size (`pace`): a small screen is on disk within
 //! [`KEEP_SOON`] of the last, and a full scrollback, megabytes, no more often than
@@ -24,7 +28,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::terminal::{Restored, TermSize};
+use slopty_proto::terminal::{OpenSession, Restored, TermSize};
+use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::Start;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
@@ -73,6 +79,30 @@ pub struct Recipe {
     pub saved_ms: WallMs,
     /// It was itself reopened after a loss, and what it ran before that.
     pub restored: Option<Restored>,
+    /// The agent a start opened it for, which starting it again takes up by its thread.
+    pub started: Option<Started>,
+}
+
+/// The agent a start opened a session for (`crate::thread::start`).
+///
+/// Starting the session again takes the agent's thread up again, its conversation and the
+/// choices the start made, rather than running its command afresh, which would begin a new
+/// conversation with the first prompt.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Started {
+    /// The thread.
+    pub thread: ThreadId,
+    /// The start, without its first prompt and its worktree: what was said is in the
+    /// conversation, and the worktree is made.
+    pub start: Start,
+}
+
+impl Started {
+    /// What of `start`, which opened `thread`, is kept.
+    #[must_use]
+    pub fn of(thread: ThreadId, start: &Start) -> Self {
+        Self { thread, start: Start { prompt: None, worktree: None, ..start.clone() } }
+    }
 }
 
 /// How a lost session starts again ([`Recipe::reopen`]).
@@ -99,6 +129,26 @@ impl Recipe {
             size,
             saved_ms: WallMs::ZERO,
             restored: None,
+            started: None,
+        }
+    }
+
+    /// What a session whose program ended runs when it starts again: its own command with its
+    /// own environment, in the directory its shell was last in while that is there (else at
+    /// home), under its last title.
+    #[must_use]
+    pub fn again(&self) -> OpenSession {
+        OpenSession {
+            size: self.size,
+            cwd: self
+                .cwd
+                .as_deref()
+                .and_then(existing_dir)
+                .map(|d| d.to_string_lossy().into_owned()),
+            command: self.command.clone(),
+            env: self.env.clone(),
+            title: self.title.clone(),
+            attach: false,
         }
     }
 
@@ -159,6 +209,7 @@ enum Job {
     Checkpoint(SessionId, Vec<u8>, Place),
     Forget(SessionId),
     Flush(oneshot::Sender<()>),
+    Recipe(SessionId, oneshot::Sender<Option<Recipe>>),
 }
 
 /// The sessions kept on disk. Cheap to clone; its writer runs on a task of its own until
@@ -230,6 +281,14 @@ impl Keeper {
         if self.jobs.send(Job::Flush(reply)).is_ok() {
             let _written = done.await;
         }
+    }
+
+    /// Session `id`'s recipe as it stands now, with the directory and title its checkpoints
+    /// carried since it was opened; `None` when nothing is kept of it.
+    pub async fn recipe(&self, id: SessionId) -> Option<Recipe> {
+        let (reply, recipe) = oneshot::channel();
+        self.jobs.send(Job::Recipe(id, reply)).ok()?;
+        recipe.await.ok().flatten()
     }
 
     /// Session `id`'s kept screen: VT bytes to replay, empty when none was written.
@@ -335,6 +394,9 @@ async fn write_loop(
                     next.insert(id, next_write(Instant::now(), size));
                 }
                 let _told = reply.send(());
+            }
+            Some(Job::Recipe(id, reply)) => {
+                let _told = reply.send(recipes.get(&id).cloned());
             }
         }
     }
