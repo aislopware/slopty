@@ -521,8 +521,9 @@ fn a_session_replays_from_its_records() {
 
 /// A fork subagent (on by default in `-p` since 2.1.302), recorded from Claude Code: its card
 /// says "Fork" and its description, and its drilled view starts at its own first record, the
-/// directive it was given, never the parent's call it inherited nor that call's "Fork started";
-/// the parent's call keeps its own result, the fork's hand-back.
+/// directive the parent's call gave it (the model's words), never the parent's call it
+/// inherited nor that call's "Fork started"; the parent's call keeps its own result, the fork's
+/// hand-back.
 #[test]
 fn a_fork_starts_at_its_own_first_record() {
     use slopty_proto::thread::{ItemBody, ToolDetail as Detail};
@@ -544,7 +545,8 @@ fn a_fork_starts_at_its_own_first_record() {
     let fork = host.thread(observed.main().subagent("a0000000000000001"));
     let first = fork.items.first().expect("the fork's records");
     let ItemBody::User(prompt) = &first.body else { panic!("its directive first: {first:?}") };
-    assert_eq!(prompt.text.text, "Read main.rs and reply with just the number of lines.");
+    assert_eq!(prompt.text.text, agent.prompt.text);
+    assert!(prompt.text.text.starts_with("Read main.rs"), "the directive: {prompt:?}");
     assert!(
         !fork.items.iter().any(|i| matches!(&i.body, ItemBody::Tool(c) if c.name == "Agent")),
         "nothing inherited: {:#?}",
@@ -821,4 +823,254 @@ fn a_task_stopped_by_a_call_ends() {
     );
     let tasks = &host.thread(history.main()).tasks;
     assert!(tasks.iter().all(|t| !t.is_live()), "{tasks:?}");
+}
+
+/// How a recorded scenario's hooks and transcripts reach the observer.
+#[derive(Clone, Copy, Debug)]
+enum Arrival {
+    /// In the order the recording heard them (`arrivals.jsonl`), a write at a time.
+    Recorded,
+    /// So, each hook twice at once, as a relay run again would bring it.
+    RecordedTwice,
+    /// Every transcript whole, then every hook.
+    TranscriptFirst,
+    /// Every hook, then every transcript whole.
+    HooksFirst,
+}
+
+/// What the worker makes of a hook heard at `at`: the status it says, and the turn of the
+/// prompt its `Stop` names ended.
+fn hear(history: &mut History, payload: &str, at: WallMs) -> Vec<Out> {
+    use crate::hooks::{Hook, Signal};
+    let hook = Hook::parse(payload).expect("a recorded hook");
+    let (live, prompt) = (Liveness::Live, hook.prompt_id.as_deref());
+    match hook.signal() {
+        Signal::Began => history.status(Phase::Idle, None, live, at),
+        Signal::Working => history.status(Phase::Working, None, live, at),
+        Signal::Asks { kind, text } => {
+            history.status(Phase::NeedsYou, Some(Wait { kind: kind.to_owned(), text }), live, at)
+        }
+        Signal::Done => {
+            let mut outs = history.turn_ended(prompt, &End::Complete, at);
+            outs.extend(history.status(Phase::Done, None, live, at));
+            outs
+        }
+        Signal::Failed(error) => {
+            let mut outs = history.turn_ended(prompt, &End::Failed(error), at);
+            outs.extend(history.status(Phase::Failed, None, live, at));
+            outs
+        }
+        Signal::Compacting(on) => history.compacting(on),
+        Signal::Ended | Signal::Nothing | Signal::Draft { .. } => Vec::new(),
+    }
+}
+
+/// Recorded `scenario`'s main thread as it settles when its files arrive as `arrival` says:
+/// its turns and its phase. The `n`th hook is heard at the same moment however it arrives,
+/// long after anything the transcript says, so a time the hook gave a turn shows as one.
+fn arrived(scenario: &str, arrival: Arrival) -> (Vec<Turn>, Phase) {
+    let dir = dir("conversation", scenario);
+    let lines_of = |name: &str| -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join(name)).expect("a recorded file");
+        text.lines().filter(|l| !l.trim().is_empty()).map(str::to_owned).collect()
+    };
+    let mut transcripts = vec!["transcript.jsonl".to_owned()];
+    for agent in subagents(&dir) {
+        let name = agent.file_name().expect("a file").to_string_lossy().into_owned();
+        transcripts.push(format!("subagents/{name}"));
+    }
+    let whole = |names: &[String]| -> Vec<(String, usize)> {
+        names.iter().map(|name| (name.clone(), lines_of(name).len())).collect()
+    };
+    let hooks = vec!["hooks.jsonl".to_owned()];
+    let order: Vec<(String, usize)> = match arrival {
+        Arrival::Recorded | Arrival::RecordedTwice => lines_of("arrivals.jsonl")
+            .iter()
+            .map(|line| {
+                let at: serde_json::Value = serde_json::from_str(line).expect("an arrival");
+                let file = at["file"].as_str().expect("a file").to_owned();
+                (file, usize::try_from(at["lines"].as_u64().expect("lines")).expect("a count"))
+            })
+            .collect(),
+        Arrival::TranscriptFirst => [whole(&transcripts), whole(&hooks)].concat(),
+        Arrival::HooksFirst => [whole(&hooks), whole(&transcripts)].concat(),
+    };
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let main = scratch.path().join("00000000-0000-4000-8000-000000000001.jsonl");
+    let agents = conv::subagents_dir(&main);
+    std::fs::create_dir_all(&agents).expect("the subagents' folder");
+    let path = |name: &str| match name.strip_prefix("subagents/") {
+        Some(agent) => agents.join(agent),
+        None => main.clone(),
+    };
+    let mut decoder = Transcripts::default();
+    let mut history = observed();
+    let mut host = Host::default();
+    host.take(history.drain());
+    let mut read: BTreeMap<String, usize> = BTreeMap::new();
+    let mut heard = 0_u64;
+    for (name, count) in order {
+        let lines = lines_of(&name);
+        let from = read.get(&name).copied().unwrap_or(0);
+        let to = from.saturating_add(count).min(lines.len());
+        let came = lines.get(from..to).expect("lines recorded");
+        read.insert(name.clone(), to);
+        if name == "hooks.jsonl" {
+            for payload in came {
+                let at = 1_800_000_000_000_u64.saturating_add(heard.saturating_mul(1_000));
+                let at = WallMs::from_millis(at);
+                heard = heard.saturating_add(1);
+                for _ in 0..if matches!(arrival, Arrival::RecordedTwice) { 2 } else { 1 } {
+                    let input = serde_json::from_str::<serde_json::Value>(payload).expect("a hook")
+                        ["input"]
+                        .to_string();
+                    host.take(hear(&mut history, &input, at));
+                }
+            }
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path(&name))
+                .expect("open");
+            for line in came {
+                writeln!(file, "{line}").expect("written");
+            }
+            let known: Vec<PathBuf> = transcripts.iter().skip(1).map(|name| path(name)).collect();
+            host.take(history.transcript(&decoder.read(&main, &known), &[]));
+        }
+    }
+    let thread = host.thread(history.main());
+    (thread.turns.clone(), thread.status.phase)
+}
+
+/// However a recorded session's hooks and transcripts arrive (as they came, each hook twice,
+/// the transcript first, the hooks first), every turn ends the same: as its `Stop` says, when
+/// its records say. None is left running, a command Claude Code ran itself neither, and the
+/// session rests in the same phase.
+#[test]
+fn a_turn_ends_the_same_however_its_hook_and_records_arrive() {
+    for scenario in CONVERSATIONS {
+        let recorded = arrived(scenario, Arrival::Recorded);
+        for arrival in [Arrival::RecordedTwice, Arrival::TranscriptFirst, Arrival::HooksFirst] {
+            assert_eq!(arrived(scenario, arrival), recorded, "{scenario}: {arrival:?}");
+        }
+        let (turns, _) = &recorded;
+        assert!(!turns.is_empty(), "{scenario}");
+        for turn in turns {
+            assert_ne!(turn.state, TurnState::Active, "{scenario}: {turn:#?}");
+            let at = turn.ended_ms.expect("an end");
+            assert!(at.as_millis() < 1_800_000_000_000, "{scenario}: the records' time: {turn:#?}");
+        }
+    }
+}
+
+/// A prompt, then `/rename` and `/compact`, recorded with the relay's hooks: however late the
+/// prompt's `Stop` comes (as recorded, or once the whole transcript was read), it ends the
+/// prompt's turn alone. Each command's turn ends with its output, when the transcript says,
+/// though no hook begins or ends it.
+#[test]
+fn a_late_stop_ends_its_own_turn_and_a_command_ends_with_its_output() {
+    let transcript = dir("conversation", "compact").join("transcript.jsonl");
+    let mut ends: Vec<(String, Option<WallMs>)> = Transcripts::default()
+        .read(&transcript, &[])
+        .into_iter()
+        .filter_map(|change| match change {
+            Change::Turn { turn, .. } => Some((turn.prompt, turn.ended_ms)),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>()
+        .into_iter()
+        .collect();
+    ends.sort_by_key(|(_, at)| *at);
+    let want: Vec<Option<WallMs>> = ends.into_iter().map(|(_, at)| at).collect();
+    assert_eq!(want.len(), 3, "a prompt and two commands: {want:?}");
+    for arrival in [Arrival::Recorded, Arrival::TranscriptFirst, Arrival::HooksFirst] {
+        let (turns, _) = arrived("compact", arrival);
+        let states: Vec<&TurnState> = turns.iter().map(|t| &t.state).collect();
+        assert_eq!(states, [&TurnState::Complete; 3], "{arrival:?}");
+        let at: Vec<Option<WallMs>> = turns.iter().map(|t| t.ended_ms).collect();
+        assert_eq!(at, want, "{arrival:?}: each turn ends when its records say");
+    }
+}
+
+/// A turn's failure reads the same whichever comes first, its `StopFailure` or its records:
+/// in the transcript's words once it has them, ended when the records say; and the hook ends
+/// the turn of the prompt it names, not the one after it.
+#[test]
+fn a_failure_heard_before_or_after_its_records_reads_the_same() {
+    let mut records = stopped_turn(conv::Stop::RATE_LIMIT);
+    records[0]["promptId"] = serde_json::json!("q1");
+    let next = serde_json::json!({"type": "user", "uuid": "p2", "parentUuid": "d1",
+        "timestamp": "2026-09-27T05:00:00.000Z", "promptId": "q2",
+        "message": {"role": "user", "content": "Try again"}});
+    let failed = End::Failed(Some("rate_limit".to_owned()));
+    let at = WallMs::from_millis(1_800_000_000_000);
+    // When the hook comes: before the records, between them and the next prompt, after both.
+    let run = |heard: usize| {
+        let (mut history, mut host, mut decoder) =
+            (observed(), Host::default(), Conversation::default());
+        host.take(history.drain());
+        let all: Vec<serde_json::Value> = records.iter().chain([&next]).cloned().collect();
+        for (n, record) in all.iter().enumerate() {
+            if n == heard {
+                host.take(history.turn_ended(Some("q1"), &failed, at));
+            }
+            feed(&mut history, &mut host, &mut decoder, std::slice::from_ref(record));
+        }
+        if heard >= all.len() {
+            host.take(history.turn_ended(Some("q1"), &failed, at));
+        }
+        host.thread(history.main()).turns.clone()
+    };
+    let first = run(0);
+    for heard in [records.len(), records.len().saturating_add(1)] {
+        assert_eq!(run(heard), first, "heard after {heard} records");
+    }
+    let [stopped, again] = first.as_slice() else { panic!("two turns: {first:#?}") };
+    assert_eq!(
+        stopped.state,
+        TurnState::Failed { error: "You've hit your limit · resets 6pm".to_owned() }
+    );
+    assert_eq!(stopped.ended_ms, conv::parse_ms("2026-09-27T03:15:41.000Z"), "the records' end");
+    assert_eq!(again.state, TurnState::Active, "the next prompt's turn runs");
+}
+
+/// A notice taken in mid-turn moves the turn on to its own prompt id, which its tool results
+/// carry from then on and its `Stop` names: that `Stop` ends the turn, heard before or after
+/// those results.
+#[test]
+fn a_stop_ends_the_turn_a_notice_moved_on() {
+    let records = [
+        serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null, "promptId": "q1",
+            "timestamp": "2026-09-27T03:15:25.849Z",
+            "message": {"role": "user", "content": "Fix the build"}}),
+        serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "p1",
+            "timestamp": "2026-09-27T03:15:30.000Z",
+            "message": {"role": "assistant", "model": "claude-haiku-5-5", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]}}),
+        serde_json::json!({"type": "user", "uuid": "r1", "parentUuid": "a1", "promptId": "n1",
+            "timestamp": "2026-09-27T03:16:00.000Z", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "a"}]}}),
+    ];
+    let at = WallMs::from_millis(1_800_000_000_000);
+    let run = |heard: usize| {
+        let (mut history, mut host, mut decoder) =
+            (observed(), Host::default(), Conversation::default());
+        host.take(history.drain());
+        for (n, record) in records.iter().enumerate() {
+            if n == heard {
+                host.take(history.turn_ended(Some("n1"), &End::Complete, at));
+            }
+            feed(&mut history, &mut host, &mut decoder, std::slice::from_ref(record));
+        }
+        if heard >= records.len() {
+            host.take(history.turn_ended(Some("n1"), &End::Complete, at));
+        }
+        host.thread(history.main()).turns.clone()
+    };
+    let first = run(0);
+    assert_eq!(run(records.len()), first, "heard after the result");
+    let [turn] = first.as_slice() else { panic!("one turn: {first:#?}") };
+    assert_eq!((&turn.state, turn.ended_ms), (&TurnState::Complete, Some(at)), "the hook's end");
 }

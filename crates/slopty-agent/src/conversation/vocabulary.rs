@@ -758,10 +758,15 @@ pub struct ThreadState {
 pub struct Turn {
     /// The prompt entry that opened it; empty for work before a thread's first prompt.
     pub prompt: String,
+    /// What Claude Code's hooks name the turn by (their `prompt_id`, its `Stop`'s too): the
+    /// `promptId` its prompt's record carries, then each other one its tool results carry. A
+    /// notice or a prompt queued behind the turn and taken in mid-turn moves it on to its own.
+    #[serde(default)]
+    pub prompt_ids: Vec<String>,
     /// When the prompt was sent.
     pub started_ms: WallMs,
-    /// When Claude Code closed the turn (its end-of-turn record); `None` while it runs, or
-    /// when the transcript never says.
+    /// When Claude Code closed the turn (its end-of-turn record, or the output of a command it
+    /// ran itself); `None` while it runs, or when the transcript never says.
     pub ended_ms: Option<WallMs>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,

@@ -506,6 +506,21 @@ impl Conversation {
             }
             _ => {}
         }
+        if kind == "user" && has_tool_result(record) {
+            self.name_turn(&thread, record, batch);
+        }
+    }
+
+    /// A tool's result names the prompt the open turn goes on under (`promptId`): one queued
+    /// behind it and taken in mid-turn moves it on to that one's id, and its hooks name it so.
+    fn name_turn(&mut self, thread: &ThreadId, record: &Value, batch: &mut Batch) {
+        let Some(id) = str_at(record, "promptId").filter(|id| !id.is_empty()) else { return };
+        let Some(t) = self.threads.get_mut(thread) else { return };
+        let Some(open) = t.turns.last_mut().filter(|t| t.ended_ms.is_none()) else { return };
+        if !open.prompt_ids.iter().any(|known| known == id) {
+            open.prompt_ids.push(id.to_owned());
+            batch.turn(thread, open.clone());
+        }
     }
 
     fn add(&mut self, ctx: &Ctx<'_>, id: String, body: Body, batch: &mut Batch) {
@@ -600,7 +615,9 @@ impl Conversation {
                 self.task_row(ctx.thread, Some(ctx.made_at), &notice, batch);
                 self.notice(notice, batch);
                 continue;
-            } else if let Some(name) = tag(text, "command-name") {
+            } else if let Some(name) =
+                tag(text, "command-name").filter(|_| leads(text, &COMMAND_TAGS))
+            {
                 Body::Prompt(Prompt {
                     text: Clipped::head(
                         tag(text, "command-args").unwrap_or_default().trim(),
@@ -610,16 +627,14 @@ impl Conversation {
                     images: Vec::new(),
                     command: Some(name.trim().to_owned()),
                 })
-            } else if let Some(input) = tag(text, "bash-input") {
+            } else if let Some(input) = tag(text, "bash-input").filter(|_| leads(text, &SHELL_TAGS))
+            {
                 Body::Prompt(Prompt {
                     text: Clipped::head(input.trim(), PROSE, Some(reference())),
                     images: Vec::new(),
                     command: Some("!".to_owned()),
                 })
-            } else if ["local-command-stdout", "local-command-stderr", "bash-stdout", "bash-stderr"]
-                .iter()
-                .any(|name| tag(text, name).is_some())
-            {
+            } else if leads(text, &OUTPUT_TAGS) {
                 // What it printed, then its errors apart, as the TUI draws them in red.
                 let printed = |names: [&str; 2]| {
                     let said = names.iter().find_map(|name| tag(text, name)).unwrap_or_default();
@@ -650,6 +665,7 @@ impl Conversation {
                     };
                     self.add(ctx, at, Body::Note(note), batch);
                 }
+                self.end_command(ctx, batch);
                 continue;
             } else if let Some(update) = mcp_update(text) {
                 Body::Note(Note {
@@ -682,7 +698,7 @@ impl Conversation {
             let ends_turn = matches!(body, Body::Interrupted { .. });
             self.add(ctx, id.clone(), body, batch);
             if opens_turn {
-                self.start_turn(ctx, &id, batch);
+                self.start_turn(ctx, &id, str_at(record, "promptId"), batch);
             } else if ends_turn {
                 self.end_turn(ctx, batch);
             }
@@ -695,22 +711,54 @@ impl Conversation {
                 command: None,
             });
             self.add(ctx, ctx.uuid.to_owned(), body, batch);
-            self.start_turn(ctx, ctx.uuid, batch);
+            self.start_turn(ctx, ctx.uuid, str_at(record, "promptId"), batch);
         }
     }
 
-    /// A prompt opens a turn: what the thread's records say from here on is its. One the person
-    /// sent while the turn before it still ran ends that turn here, if Claude Code did not
-    /// close it first: no turn stays running behind a later one.
-    fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, batch: &mut Batch) {
+    /// A prompt opens a turn, named `prompt_id` for the hooks: what the thread's records say
+    /// from here on is its. One the person sent while the turn before it still ran ends that
+    /// turn here, if Claude Code did not close it first: no turn stays running behind a later
+    /// one.
+    fn start_turn(
+        &mut self,
+        ctx: &Ctx<'_>,
+        prompt: &str,
+        prompt_id: Option<&str>,
+        batch: &mut Batch,
+    ) {
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
         if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
             open.ended_ms = Some(ctx.at_ms);
             batch.turn(ctx.thread, open.clone());
         }
-        let turn = Turn { prompt: prompt.to_owned(), started_ms: ctx.at_ms, ..Turn::default() };
+        let turn = Turn {
+            prompt: prompt.to_owned(),
+            prompt_ids: prompt_id
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            started_ms: ctx.at_ms,
+            ..Turn::default()
+        };
         thread.turns.push(turn.clone());
         batch.turn(ctx.thread, turn);
+    }
+
+    /// A command Claude Code ran itself (`/model`, `/compact`, a `!` shell line) printed what it
+    /// had to say: its turn ends there. No model answers such a command and no hook ends its
+    /// turn, so this record is the only end it has. Output in a turn a command did not open
+    /// leaves the turn as it is.
+    fn end_command(&mut self, ctx: &Ctx<'_>, batch: &mut Batch) {
+        let Some(thread) = self.threads.get(ctx.thread) else { return };
+        let Some(open) = thread.turns.last().filter(|t| t.ended_ms.is_none()) else { return };
+        let by_command = matches!(
+            thread.get(&open.prompt).map(|e| &e.body),
+            Some(Body::Prompt(Prompt { command: Some(_), .. }))
+        );
+        if by_command {
+            self.end_turn(ctx, batch);
+        }
     }
 
     /// An assistant record's model and usage, counted in its turn. The records of one request
@@ -928,6 +976,7 @@ impl Conversation {
                 })
             }
             Some("local_command") => {
+                self.end_command(ctx, batch);
                 let inner = ["local-command-stdout", "local-command-stderr"]
                     .iter()
                     .find_map(|name| tag(content, name))
@@ -2141,6 +2190,15 @@ fn exit_code_in_summary(summary: &str) -> Option<i32> {
     rest.split(|c: char| !c.is_ascii_digit() && c != '-').next()?.parse().ok()
 }
 
+/// Whether `record` carries a tool's result.
+fn has_tool_result(record: &Value) -> bool {
+    record
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .is_some_and(|blocks| blocks.iter().any(|b| str_at(b, "type") == Some("tool_result")))
+}
+
 /// Whether a record is something the person typed: a user record with words of theirs, not a
 /// tool result, an interrupt marker, a notice or text Claude Code injected.
 fn is_prompt(record: &Value) -> bool {
@@ -2230,6 +2288,27 @@ fn peer_message(text: &str) -> Option<String> {
     let after = open.get(head.len().saturating_add(1)..).unwrap_or_default();
     let body = after.split_once("</cross-session-message>").map_or(after, |(body, _)| body).trim();
     Some(format!("Message from another session · {from}\n{body}").trim_end().to_owned())
+}
+
+/// The tags a slash command's record opens with (`command-message` first in older versions).
+const COMMAND_TAGS: [&str; 2] = ["command-name", "command-message"];
+
+/// The tag a shell line typed in the TUI (`!`) is recorded in.
+const SHELL_TAGS: [&str; 1] = ["bash-input"];
+
+/// The tags what a command Claude Code ran itself printed is recorded in.
+const OUTPUT_TAGS: [&str; 4] =
+    ["local-command-stdout", "local-command-stderr", "bash-stdout", "bash-stderr"];
+
+/// Whether `text` opens with one of the tags `names`, as Claude Code writes its own records: a
+/// prompt that only mentions one is the person's words.
+fn leads(text: &str, names: &[&str]) -> bool {
+    let text = text.trim_start();
+    names.iter().any(|name| {
+        text.strip_prefix('<')
+            .and_then(|t| t.strip_prefix(name))
+            .is_some_and(|t| t.starts_with('>'))
+    })
 }
 
 /// The text between `<name>` and `</name>`.

@@ -651,6 +651,98 @@ fn a_prompt_ends_the_turn_still_open_before_it() {
     assert_eq!(next.ended_ms, None, "the new turn runs");
 }
 
+/// A command Claude Code runs itself ends its turn with what it printed, as a line
+/// (`<local-command-stdout>`), a record of its own (`local_command`, empty or not) or a shell
+/// line's output; a command's printing in a turn a prompt opened leaves that turn running.
+/// Each turn carries the prompt ids its hooks name it by: its prompt's, then the one a tool's
+/// result moves it on to (a notice taken in mid-turn). A prompt that only mentions the tags those
+/// records open with is a prompt.
+#[test]
+fn a_command_s_turn_ends_with_its_output() {
+    let at = |stamp: &str, mut record: Value| {
+        record["timestamp"] = json!(stamp);
+        record
+    };
+    let named = |mut record: Value, prompt_id: &str| {
+        record["promptId"] = json!(prompt_id);
+        record
+    };
+    let mut c = Conversation::default();
+    let command = "<command-name>/rename</command-name>\n<command-args>Fixes</command-args>";
+    c.ingest(&MAIN, &named(user("p1", None, &json!(command)), "q1"));
+    let printed = json!({"type": "system", "subtype": "local_command", "uuid": "o1",
+        "parentUuid": "p1", "timestamp": "2026-09-27T03:15:30.000Z",
+        "content": "<local-command-stdout>Session renamed to: Fixes</local-command-stdout>"});
+    c.ingest(&MAIN, &printed);
+    let compact = "<command-name>/compact</command-name>\n<command-args></command-args>";
+    c.ingest(
+        &MAIN,
+        &at("2026-09-27T03:16:00.000Z", named(user("p2", Some("o1"), &json!(compact)), "q2")),
+    );
+    let compacted = json!("<local-command-stdout>Compacted</local-command-stdout>");
+    c.ingest(&MAIN, &at("2026-09-27T03:16:05.000Z", user("o2", Some("p2"), &compacted)));
+    let silent = json!({"type": "system", "subtype": "local_command", "uuid": "o3",
+        "parentUuid": "p3", "timestamp": "2026-09-27T03:16:11.000Z", "content": ""});
+    c.ingest(
+        &MAIN,
+        &at(
+            "2026-09-27T03:16:10.000Z",
+            user("p3", Some("o2"), &json!("<command-name>/color</command-name>")),
+        ),
+    );
+    c.ingest(&MAIN, &silent);
+    c.ingest(
+        &MAIN,
+        &at(
+            "2026-09-27T03:17:00.000Z",
+            user("p4", Some("o3"), &json!("<bash-input>ls</bash-input>")),
+        ),
+    );
+    c.ingest(
+        &MAIN,
+        &at(
+            "2026-09-27T03:17:01.000Z",
+            user(
+                "o4",
+                Some("p4"),
+                &json!("<bash-stdout>a</bash-stdout><bash-stderr></bash-stderr>"),
+            ),
+        ),
+    );
+    c.ingest(
+        &MAIN,
+        &at("2026-09-27T03:18:00.000Z", named(user("p5", Some("o4"), &json!("go on")), "q5")),
+    );
+    c.ingest(&MAIN, &at("2026-09-27T03:18:01.000Z", user("o5", Some("p5"), &compacted)));
+    let result = |n: &str| json!([{"type": "tool_result", "tool_use_id": n, "content": "ok"}]);
+    c.ingest(&MAIN, &named(user("r1", Some("o5"), &result("t1")), "q5"));
+    c.ingest(&MAIN, &named(user("r2", Some("r1"), &result("t2")), "n5"));
+    c.ingest(&MAIN, &named(user("r3", Some("r2"), &result("t3")), "n5"));
+    let ends: Vec<(&str, Vec<&str>, Option<WallMs>)> = c
+        .turns(&MAIN)
+        .iter()
+        .map(|t| (t.prompt.as_str(), t.prompt_ids.iter().map(String::as_str).collect(), t.ended_ms))
+        .collect();
+    assert_eq!(
+        ends,
+        [
+            ("p1", vec!["q1"], parse_ms("2026-09-27T03:15:30.000Z")),
+            ("p2", vec!["q2"], parse_ms("2026-09-27T03:16:05.000Z")),
+            ("p3", vec![], parse_ms("2026-09-27T03:16:11.000Z")),
+            ("p4", vec![], parse_ms("2026-09-27T03:17:01.000Z")),
+            ("p5", vec!["q5", "n5"], None),
+        ]
+    );
+    // Words that only mention Claude Code's tags are the person's prompt.
+    let asked = "Why does <local-command-stdout> show after <command-name>/model</command-name>?";
+    c.ingest(&MAIN, &user("p6", Some("r3"), &json!(asked)));
+    let Some(Entry { body: Body::Prompt(prompt), .. }) = c.entries(&MAIN).last() else {
+        panic!("a prompt: {:#?}", c.entries(&MAIN).last())
+    };
+    assert_eq!((prompt.text.text.as_str(), prompt.command.as_deref()), (asked, None));
+    assert_eq!(c.turns(&MAIN).last().map(|t| t.prompt.as_str()), Some("p6"));
+}
+
 /// An assistant record with a model and usage, as Claude Code writes one per content block of a
 /// request (every block of the request repeats the request's usage).
 fn answered(uuid: &str, message: &str, blocks: &Value, usage: &Value, stop: Option<&str>) -> Value {

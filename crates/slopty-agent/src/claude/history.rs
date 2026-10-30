@@ -14,9 +14,14 @@
 //!   `--resume`. Each subagent is a thread of its own, derived from the session's and its agent id,
 //!   linked to the `Agent` call that started it.
 //! - **Turns.** A prompt starts the next turn of its thread; every entry after it is in that turn.
-//!   Claude Code's `Stop` ([`History::ended`]) or the transcript's turn record ends it, and a
-//!   prompt that comes while a turn is open ends that one. A branch (a rewind, an edited prompt)
-//!   truncates the thread back to before the dropped prompt.
+//!   Claude Code's `Stop` ([`History::turn_ended`]) or the transcript's turn record ends it, and a
+//!   prompt that comes while a turn is open ends that one. A `Stop` ends the turn of the prompt it
+//!   names (its `prompt_id`, the transcript's `promptId`), whenever either arrives: heard before
+//!   the transcript shows that prompt, it waits for it, and heard after a later turn began, it ends
+//!   its own. So a turn ends the same however its hook and its records arrive: as the hook says
+//!   (completed, failed, stopped), at the time the records say, else the hook's. A command Claude
+//!   Code runs itself (`/compact`, `/model`) has no hook; its records end its turn. A branch (a
+//!   rewind, an edited prompt) truncates the thread back to before the dropped prompt.
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
 //! - **Status.** The phase is told from outside ([`History::status`]): the session's hooks, or its
@@ -46,7 +51,7 @@ pub enum Out {
     Actions(ThreadId, Vec<Action>),
 }
 
-/// How Claude Code ended a turn ([`History::ended`]).
+/// How Claude Code ended a turn ([`History::turn_ended`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum End {
     /// It answered.
@@ -57,6 +62,9 @@ pub enum End {
     /// go again (a usage limit's reset).
     Failed(Option<String>),
 }
+
+/// A turn's failure when neither Claude Code's hook nor its transcript said why.
+const FAILED_WORDS: &str = "Claude Code's request failed";
 
 /// The words a thread waits with while it is compacted.
 pub const COMPACTING_TEXT: &str = "Compacting the conversation";
@@ -203,9 +211,13 @@ struct Mapped {
     stopped: HashMap<TurnId, (conv::Stop, String)>,
     /// Turns whose end was sent.
     ended: HashSet<TurnId>,
-    /// Turns Claude Code's hooks ended, as they ended them: the transcript's record of one
-    /// changes it no more.
-    by_engine: HashMap<TurnId, TurnState>,
+    /// Turns Claude Code's hooks ended, as and when they said: how one ended is theirs to say,
+    /// whatever the transcript says.
+    by_engine: HashMap<TurnId, (End, WallMs)>,
+    /// When the transcript's records end each turn they end.
+    closed: HashMap<TurnId, WallMs>,
+    /// Each turn by the prompt id its hooks name it by (`promptId`).
+    prompt_ids: HashMap<String, TurnId>,
     /// Each turn as last sent.
     turns: HashMap<TurnId, Turn>,
     /// Background commands as last sent, for their output to land on.
@@ -231,6 +243,8 @@ impl Mapped {
             stopped: HashMap::new(),
             ended: HashSet::new(),
             by_engine: HashMap::new(),
+            closed: HashMap::new(),
+            prompt_ids: HashMap::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
             tasks: Vec::new(),
@@ -295,6 +309,40 @@ impl Mapped {
             task.usage = Some(usage);
         }
         *task != before
+    }
+
+    /// How and when `turn` ended, if it did: as its hook said, else as its records do (an
+    /// interrupt, the error it stopped on, else complete); at the time its records end it, else
+    /// when its hook was heard. A failure says what the transcript said of it, else the hook.
+    fn end_of(&self, turn: TurnId) -> Option<(TurnState, WallMs)> {
+        let engine = self.by_engine.get(&turn);
+        let at = self.closed.get(&turn).copied().or_else(|| engine.map(|(_, at)| *at))?;
+        let stopped = self.stopped.get(&turn).map(|(_, error)| error.clone());
+        let state = match engine.map(|(end, _)| end) {
+            Some(End::Complete) => TurnState::Complete,
+            Some(End::Interrupted) => TurnState::Interrupted,
+            Some(End::Failed(said)) => TurnState::Failed {
+                error: stopped.or_else(|| said.clone()).unwrap_or_else(|| FAILED_WORDS.to_owned()),
+            },
+            None if self.interrupted.contains(&turn) => TurnState::Interrupted,
+            None => stopped.map_or(TurnState::Complete, |error| TurnState::Failed { error }),
+        };
+        Some((state, at))
+    }
+
+    /// `turn` as [`Self::end_of`] says it ended, when that is not what was sent: the action
+    /// that tells it, and its state.
+    fn settle(&mut self, turn: TurnId) -> Option<(Action, TurnState)> {
+        let (state, ended_ms) = self.end_of(turn)?;
+        let held = self.turns.get_mut(&turn)?;
+        let same = held.state == state && held.ended_ms == Some(ended_ms);
+        if !self.ended.insert(turn) && same {
+            return None;
+        }
+        held.state = state.clone();
+        held.ended_ms = Some(ended_ms);
+        let usage = held.usage.clone();
+        Some((Action::TurnEnded { turn, state: state.clone(), usage, ended_ms }, state))
     }
 
     fn changed(&self, turn: TurnId) -> Changed {
@@ -410,6 +458,9 @@ pub struct History {
     /// transcript has none.
     status: Option<Status>,
     out: Vec<Out>,
+    /// How Claude Code's hooks ended the main thread's turns, by the prompt id they named, and
+    /// when: kept for a prompt the transcript has not shown yet, and for the records read again.
+    engine: HashMap<String, (End, WallMs)>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
     /// When the Claude Code that ran the session last went ([`Self::gone`]).
@@ -464,6 +515,7 @@ impl History {
             threads,
             spawned: HashMap::new(),
             status: None,
+            engine: HashMap::new(),
             failed: false,
             went: None,
             rested: None,
@@ -588,46 +640,45 @@ impl History {
         self.drain()
     }
 
-    /// Claude Code said the main loop's turn under way ended (its `Stop` hook), as `end` says,
-    /// at `now`: the turn open ends so, and a transcript record of it that comes after changes
-    /// that no more. The thread rests: stopped after an interruption, failed after an error,
-    /// else done.
-    pub fn ended(&mut self, end: &End, now: WallMs) -> Vec<Out> {
+    /// Claude Code said the main loop's turn of prompt `prompt` ended (its `Stop` hook, whose
+    /// `prompt_id` names it), as `end` says, at `now`; with no prompt named, the turn open.
+    /// That turn ends so whenever its records come, before or after: one the transcript has not
+    /// shown yet ends once it does, and the records' time of its end stands over `now`. The
+    /// thread rests: stopped after an interruption, failed after an error, else done.
+    pub fn turn_ended(&mut self, prompt: Option<&str>, end: &End, now: WallMs) -> Vec<Out> {
         let phase = match end {
             End::Interrupted => Phase::Stopped,
             End::Failed(_) => Phase::Failed,
             End::Complete => Phase::Done,
         };
         let id = self.meta.id;
-        let mut actions = Vec::new();
-        if let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) {
-            let turn = mapped.turn;
-            if turn != TurnId::BEFORE && !mapped.ended.contains(&turn) {
-                let state = match end {
-                    End::Interrupted => TurnState::Interrupted,
-                    End::Failed(said) => {
-                        let error = mapped.stopped.get(&turn).map_or_else(
-                            || {
-                                said.clone()
-                                    .unwrap_or_else(|| "Claude Code's request failed".to_owned())
-                            },
-                            |(_, error)| error.clone(),
-                        );
-                        TurnState::Failed { error }
-                    }
-                    End::Complete => TurnState::Complete,
-                };
-                mapped.ended.insert(turn);
-                mapped.by_engine.insert(turn, state.clone());
-                let usage = mapped.turns.get(&turn).map(|t| t.usage.clone()).unwrap_or_default();
-                if let Some(t) = mapped.turns.get_mut(&turn) {
-                    t.state = state.clone();
-                    t.ended_ms = Some(now);
+        let prompt = prompt.filter(|p| !p.is_empty());
+        let told = match prompt {
+            // The latest word of a prompt's end stands: a hook that kept the turn going (a
+            // `Stop` that blocked) is followed by the one that ended it.
+            Some(prompt) => {
+                let held =
+                    self.engine.entry(prompt.to_owned()).or_insert_with(|| (end.clone(), now));
+                if held.1 <= now {
+                    *held = (end.clone(), now);
                 }
-                actions.push(Action::TurnEnded { turn, state, usage, ended_ms: now });
+                held.clone()
+            }
+            None => (end.clone(), now),
+        };
+        let mut action = None;
+        if let Some(mapped) = self.threads.get_mut(&conv::ThreadId::Main) {
+            let turn = match prompt {
+                Some(prompt) => mapped.prompt_ids.get(prompt).copied(),
+                None => Some(mapped.turn)
+                    .filter(|turn| *turn != TurnId::BEFORE && !mapped.ended.contains(turn)),
+            };
+            if let Some(turn) = turn {
+                mapped.by_engine.insert(turn, told);
+                action = mapped.settle(turn).map(|(action, _)| action);
             }
         }
-        for action in actions {
+        if let Some(action) = action {
             self.push(id, action);
         }
         self.failed = phase == Phase::Failed;
@@ -639,6 +690,11 @@ impl History {
             self.reshow();
         }
         self.drain()
+    }
+
+    /// [`Self::turn_ended`] for a hook that named no prompt: the turn open ends.
+    pub fn ended(&mut self, end: &End, now: WallMs) -> Vec<Out> {
+        self.turn_ended(None, end, now)
     }
 
     /// The Claude Code that runs the session is version `version`.
@@ -1128,6 +1184,9 @@ impl History {
             mapped.ended.retain(|t| *t < turn);
             mapped.interrupted.retain(|t| *t < turn);
             mapped.stopped.retain(|t, _| *t < turn);
+            mapped.by_engine.retain(|t, _| *t < turn);
+            mapped.closed.retain(|t, _| *t < turn);
+            mapped.prompt_ids.retain(|_, t| *t < turn);
             actions.push(Action::Truncated { after: Some(after) });
         }
         for action in actions {
@@ -1137,16 +1196,24 @@ impl History {
 
     fn turn(&mut self, thread: &conv::ThreadId, record: &conv::Turn) {
         let id = self.ensure(thread);
+        let main = *thread == conv::ThreadId::Main;
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let Some(&turn) = mapped.prompts.get(&record.prompt) else { return };
-        let state = match (record.ended_ms, mapped.stopped.get(&turn)) {
-            (None, _) => TurnState::Active,
-            (Some(_), _) if mapped.interrupted.contains(&turn) => TurnState::Interrupted,
-            (Some(_), Some((_, error))) => TurnState::Failed { error: error.clone() },
-            (Some(_), None) => TurnState::Complete,
-        };
-        let usage = usage(&record.usage);
-        let mut updated = mapped.turns.get(&turn).cloned().unwrap_or_else(|| Turn {
+        for prompt in &record.prompt_ids {
+            mapped.prompt_ids.insert(prompt.clone(), turn);
+        }
+        // A hook that ended it came first: the latest it heard stands.
+        let told = record.prompt_ids.iter().filter_map(|p| self.engine.get(p)).max_by_key(|t| t.1);
+        if let Some(told) = told.filter(|_| main) {
+            mapped.by_engine.insert(turn, told.clone());
+        }
+        if let Some(at) = record.ended_ms {
+            mapped.closed.insert(turn, at);
+        } else {
+            mapped.closed.remove(&turn);
+        }
+        let before = mapped.turns.get(&turn).cloned();
+        let mut updated = before.clone().unwrap_or_else(|| Turn {
             id: turn,
             input: Some(ItemId(record.prompt.clone())),
             state: TurnState::Active,
@@ -1157,37 +1224,25 @@ impl History {
             changed: Changed::default(),
         });
         updated.models.clone_from(&record.models);
-        updated.usage = usage.clone();
+        updated.usage = usage(&record.usage);
         updated.changed = mapped.changed(turn);
-        let state = mapped.by_engine.get(&turn).cloned().unwrap_or(state);
-        if let Some(ended_ms) = record.ended_ms {
-            updated.state = state.clone();
-            // A turn the engine ended ends when it said; one the records alone end, when the
-            // last of them says.
-            updated.ended_ms = if mapped.by_engine.contains_key(&turn) {
-                updated.ended_ms.or(Some(ended_ms))
-            } else {
-                Some(ended_ms)
-            };
-        } else if let Some(by_engine) = mapped.by_engine.get(&turn) {
-            updated.state = by_engine.clone();
-        }
+        mapped.turns.insert(turn, updated);
+        let settled = mapped.settle(turn);
         let mut actions = Vec::new();
-        if mapped.turns.get(&turn) != Some(&updated) {
-            mapped.turns.insert(turn, updated.clone());
-            actions.push(Action::TurnStarted(updated));
-        }
-        let mut failed = None;
-        if let Some(ended_ms) = record.ended_ms
-            && mapped.ended.insert(turn)
+        let now = mapped.turns.get(&turn).cloned();
+        if before != now
+            && let Some(now) = now
         {
-            failed = Some(matches!(state, TurnState::Failed { .. }));
-            actions.push(Action::TurnEnded { turn, state, usage, ended_ms });
+            actions.push(Action::TurnStarted(now));
         }
+        let latest = turn == mapped.turn;
+        let failed = settled.as_ref().map(|(_, state)| matches!(state, TurnState::Failed { .. }));
+        actions.extend(settled.map(|(action, _)| action));
         for action in actions {
             self.push(id, action);
         }
-        if *thread == conv::ThreadId::Main
+        if main
+            && latest
             && let Some(failed) = failed
         {
             self.failed = failed;

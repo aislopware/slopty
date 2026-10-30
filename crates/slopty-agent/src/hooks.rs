@@ -171,6 +171,11 @@ pub struct Hook {
     /// What a `StopFailure` failed on.
     #[serde(default)]
     pub error: Option<String>,
+    /// The prompt whose turn the hook is of: every hook from a prompt up to the next names it,
+    /// as the transcript's records of the turn do (`promptId`), so a `Stop` says which turn it
+    /// ended ([`crate::claude::history::History::turn_ended`]). None before the first prompt.
+    #[serde(default)]
+    pub prompt_id: Option<String>,
     /// The prompt: the one sent, on `UserPromptSubmit`; what the box holds, on a
     /// [`DRAFT_EVENT`].
     #[serde(default)]
