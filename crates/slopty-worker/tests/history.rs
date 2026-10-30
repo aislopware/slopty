@@ -217,6 +217,74 @@ mod history {
         assert_eq!(at("s-2"), Some(slopty_core::WallMs::from_millis(2_000)), "its last prompt");
     }
 
+    /// A session found by its prompts carries the branch it was on, as its folder's listing
+    /// does: the one the last record of its transcript's tail that names one was written on. One
+    /// whose transcript is there but cannot be read is found with nothing to take up, and the
+    /// search says why in the system's words, until it can be read again; so does a search
+    /// whose prompt history cannot be read.
+    #[test]
+    fn a_found_session_carries_its_branch_and_an_unreadable_one_says_why() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude");
+        let project = dir.join("projects").join("-w");
+        fs::create_dir_all(&project).unwrap();
+        let id = "6f1c9a52-3b7e-4c1d-9a0e-2f5b8c7d1e40";
+        fs::write(dir.join("history.jsonl"), line("explain the parser", id, 1_000)).unwrap();
+        let said = |branch: &str| {
+            serde_json::json!({
+                "type": "user", "sessionId": id, "gitBranch": branch,
+                "timestamp": "2026-10-15T10:01:00.000Z",
+                "message": { "role": "user", "content": "explain the parser" },
+            })
+        };
+        // Moved to `main` since it began, and a last record that names no branch.
+        let noted = serde_json::json!({"type": "last-prompt", "lastPrompt": "explain the parser",
+            "sessionId": id});
+        let records = [said("start"), said("main"), noted];
+        let mut transcript = records.map(|record| record.to_string()).join("\n");
+        transcript.push('\n');
+        fs::write(project.join(format!("{id}.jsonl")), transcript).unwrap();
+        let history = History::new(claude_only(home.path()), Limits::default());
+        let branch = |found: &Found| {
+            found.sessions[0].facts.get(slopty_agent::claude::history::BRANCH_FACT).cloned()
+        };
+
+        let found = search(&history, "parser");
+        assert_eq!(branch(&found).as_deref(), Some("main"), "{:?}", found.sessions);
+        assert_eq!(found.sessions[0].resume, [slopty_agent::claude::RESUME_FLAG, id]);
+        assert_eq!(found.cut, None);
+
+        let mode = |mode: u32| fs::set_permissions(&project, fs::Permissions::from_mode(mode));
+        mode(0o000).unwrap();
+        let denied = fs::File::open(project.join(format!("{id}.jsonl"))).err();
+        let locked = search(&history, "parser");
+        mode(0o755).unwrap();
+        // One who may read anything (root) is denied nothing.
+        let Some(denied) = denied else { return };
+        assert_eq!(locked.sessions.len(), 1, "found by its prompt");
+        assert_eq!(locked.sessions[0].resume, Vec::<String>::new(), "with nothing to take up");
+        assert_eq!(branch(&locked), None);
+        let why = locked.cut.unwrap_or_default();
+        assert!(why.contains(&denied.to_string()) && why.contains("/w"), "{why}");
+
+        let again = search(&history, "parser");
+        assert_eq!((branch(&again).as_deref(), again.cut), (Some("main"), None), "readable again");
+
+        let prompts = dir.join("history.jsonl");
+        fs::set_permissions(&prompts, fs::Permissions::from_mode(0o000)).unwrap();
+        let fresh = History::new(claude_only(home.path()), Limits::default());
+        let locked = search(&fresh, "parser");
+        fs::set_permissions(&prompts, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(locked.sessions, []);
+        let why = locked.cut.unwrap_or_default();
+        assert!(
+            why.contains("Claude Code's prompts") && why.contains(&denied.to_string()),
+            "{why}"
+        );
+        assert_eq!(search(&fresh, "parser").sessions.len(), 1, "read once it can be");
+    }
+
     /// A cold search and a warm one over this machine's own records: how long each takes and
     /// how much they hold, as counts only; no prompt is printed.
     ///

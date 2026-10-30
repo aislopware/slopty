@@ -5,8 +5,11 @@
 //! The prompts come from each agent's own record of them ([`slopty_agent::history`]): Claude
 //! Code's prompt history, Codex's prompt history and the rollouts of threads its TUI did not run,
 //! and pi's session files. Nothing is written to them. Of a Claude Code transcript only the
-//! tail of a session found is read, for when it was last active: its last record's time, which
-//! every surface says of a past session ([`slopty_agent::claude::sessions::last_active`]).
+//! tail of a session found is read, for what its folder's listing says of it too: when it was
+//! last active, its last record's time, which every surface says of a past session
+//! ([`slopty_agent::claude::sessions::last_active`]), and the branch it was on
+//! ([`BRANCH_FACT`]). A transcript there that cannot be read leaves its session nothing to take
+//! up; it, and any record that cannot be read, is said in the system's words ([`Found::cut`]).
 //!
 //! **The index.** Every file read is kept in memory with how far it was read and what it held.
 //! The records are only ever appended to, so a later search reads only what was added since,
@@ -33,6 +36,8 @@ use nucleo_matcher::chars::{graphemes, normalize, to_lower_case};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use parking_lot::Mutex;
+use slopty_agent::claude::history::BRANCH_FACT;
+use slopty_agent::claude::sessions::GLANCE_BYTES;
 use slopty_agent::history::{self, Prompt, claude, codex, pi};
 use slopty_core::WallMs;
 use slopty_proto::search::Span;
@@ -183,6 +188,16 @@ impl Kind {
             Self::PiSession => Agent::Pi,
         }
     }
+
+    /// What a file of it holds, as a search names one it cannot read.
+    const fn holds(self) -> &'static str {
+        match self {
+            Self::ClaudeHistory => "Claude Code's prompts",
+            Self::CodexHistory => "Codex's prompts",
+            Self::CodexRollout => "Codex's sessions",
+            Self::PiSession => "pi's sessions",
+        }
+    }
 }
 
 /// What tells a file changed: its identity, size and modification time.
@@ -282,7 +297,7 @@ impl History {
             until: Instant::now().checked_add(self.limits.scan_time).unwrap_or_else(Instant::now),
             skipped: Vec::new(),
         };
-        let files = self.files(&present);
+        let files = self.files(&present, &mut budget.skipped);
         let listed: HashSet<&PathBuf> = files.iter().map(|(path, ..)| path).collect();
         let wanted = wanted_folders(ask.cwd);
         let mut index = self.index.lock();
@@ -296,8 +311,12 @@ impl History {
             }
             self.read(&mut index, path, *kind, meta, &mut budget);
         }
+        let (sessions, unreadable) =
+            self.rank(&index, &present, wanted.as_deref(), ask.query, ask.limit);
+        for why in unreadable {
+            say(&mut budget.skipped, why);
+        }
         let cut = cut_words(&mut budget.skipped, &index, &present);
-        let sessions = self.rank(&index, &present, wanted.as_deref(), ask.query, ask.limit);
         drop(index);
         Found { sessions, absent: None, cut }
     }
@@ -310,15 +329,19 @@ impl History {
         }
     }
 
-    /// Every record file of `agents`, the newest first so a scan cut short has read those.
-    fn files(&self, agents: &[Agent]) -> Vec<(PathBuf, Kind, fs::Metadata)> {
+    /// Every record file of `agents`, the newest first so a scan cut short has read those; one
+    /// there that cannot be looked at is said in `unreadable`, in the system's words.
+    fn files(
+        &self,
+        agents: &[Agent],
+        unreadable: &mut Vec<String>,
+    ) -> Vec<(PathBuf, Kind, fs::Metadata)> {
         let mut files: Vec<(Option<SystemTime>, PathBuf, Kind, fs::Metadata)> = Vec::new();
-        let mut add = |path: PathBuf, kind| {
-            if let Ok(meta) = fs::metadata(&path)
-                && meta.is_file()
-            {
-                files.push((meta.modified().ok(), path, kind, meta));
-            }
+        let mut add = |path: PathBuf, kind: Kind| match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() => files.push((meta.modified().ok(), path, kind, meta)),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => say(unreadable, format!("{}: {e}", kind.holds())),
         };
         for agent in agents {
             let Some(dir) = self.dir(*agent) else { continue };
@@ -370,7 +393,15 @@ impl History {
             *record = Record::new(kind, stamp.ino);
         }
         if record.head.is_none() && matches!(kind, Kind::CodexRollout | Kind::PiSession) {
-            record.head = first_line(path).and_then(|line| match kind {
+            let line = match first_line(path) {
+                Ok(line) => line,
+                // Looked at again next time: one readable then is read.
+                Err(e) => {
+                    say(&mut budget.skipped, format!("{}: {e}", kind.holds()));
+                    return;
+                }
+            };
+            record.head = line.and_then(|line| match kind {
                 Kind::CodexRollout => codex::meta(&line).map(Head::Rollout),
                 _ => pi::header(&line).map(|(id, cwd)| Head::Pi { id, cwd }),
             });
@@ -402,7 +433,7 @@ impl History {
         let bytes = match read_at(path, from, take) {
             Ok(bytes) => bytes,
             Err(e) => {
-                tracing::debug!(path = %path.display(), "a record could not be read: {e}");
+                say(&mut budget.skipped, format!("{}: {e}", kind.holds()));
                 return;
             }
         };
@@ -426,7 +457,8 @@ impl History {
         record.read_whole = (take == want).then_some(stamp);
     }
 
-    /// The sessions of `agents` in `folders` that `query` finds, the best `limit`.
+    /// The sessions of `agents` in `folders` that `query` finds, the best `limit`, and why any
+    /// of them cannot be taken up, in the system's words, each said once.
     fn rank(
         &self,
         index: &Index,
@@ -434,7 +466,7 @@ impl History {
         folders: Option<&[String]>,
         query: &str,
         limit: usize,
-    ) -> Vec<PastSession> {
+    ) -> (Vec<PastSession>, Vec<String>) {
         let rollouts: HashMap<&str, (&Path, Option<&str>)> = index
             .records
             .iter()
@@ -483,16 +515,23 @@ impl History {
             sessions.into_iter().filter(|(_, session)| !session.hits.is_empty()).collect();
         found.sort_by(|a, b| b.1.key().cmp(&a.1.key()).then_with(|| a.0.1.cmp(b.0.1)));
         found.truncate(limit);
-        found
+        let mut unreadable: Vec<String> = Vec::new();
+        let sessions = found
             .into_iter()
             .map(|((agent, native), session)| {
-                let (resume, active) = match agent {
-                    Agent::Claude => self.claude_resumes(native, session.cwd),
-                    Agent::Codex if rollouts.contains_key(native) => {
-                        (slopty_agent::codex::resume_args(native), None)
+                let resumable = |resume| Taken { resume, ..Taken::default() };
+                let taken = match agent {
+                    Agent::Claude => {
+                        self.claude_transcript(native, session.cwd).unwrap_or_else(|why| {
+                            say(&mut unreadable, why);
+                            Taken::default()
+                        })
                     }
-                    Agent::Codex => (Vec::new(), None),
-                    Agent::Pi => (slopty_agent::pi::sessions::resume_args(native), None),
+                    Agent::Codex if rollouts.contains_key(native) => {
+                        resumable(slopty_agent::codex::resume_args(native))
+                    }
+                    Agent::Codex => Taken::default(),
+                    Agent::Pi => resumable(slopty_agent::pi::sessions::resume_args(native)),
                 };
                 let (cwd, first, last) = (session.cwd, session.first, session.last);
                 let prompts = session
@@ -505,31 +544,82 @@ impl History {
                     native: native.to_owned(),
                     cwd: cwd.map(str::to_owned),
                     title: first.map(|p| slopty_agent::title::title_of(&p.text)),
-                    updated_ms: active.or_else(|| last.and_then(|p| p.at_ms)),
+                    updated_ms: taken.active.or_else(|| last.and_then(|p| p.at_ms)),
                     thread: None,
-                    resume,
-                    facts: std::collections::BTreeMap::new(),
+                    resume: taken.resume,
+                    facts: taken
+                        .branch
+                        .map(|branch| (BRANCH_FACT.to_owned(), branch))
+                        .into_iter()
+                        .collect(),
                     prompts,
                 }
             })
-            .collect()
+            .collect();
+        (sessions, unreadable)
     }
 
-    /// The words that take Claude Code session `native` up again, when its transcript is
-    /// there to take up, and when it was last active, from its transcript's tail.
-    fn claude_resumes(&self, native: &str, cwd: Option<&str>) -> (Vec<String>, Option<WallMs>) {
+    /// What Claude Code session `native`'s transcript gives it, when the transcript is there
+    /// to take up: the words that take it up again, and from its tail when it was last active
+    /// and the branch it was on. A transcript that is there but cannot be read gives the
+    /// system's words for why, since Claude Code could not take the session up either.
+    fn claude_transcript(&self, native: &str, cwd: Option<&str>) -> Result<Taken, String> {
         let (Some(dir), Some(cwd)) = (self.stores.claude.as_deref(), cwd) else {
-            return (Vec::new(), None);
+            return Ok(Taken::default());
         };
+        if !slopty_agent::claude::is_session_id(native) {
+            return Ok(Taken::default());
+        }
         let escaped = slopty_agent::claude::sessions::escape(Path::new(cwd));
         let transcript = dir.join("projects").join(escaped).join(format!("{native}.jsonl"));
-        if slopty_agent::claude::is_session_id(native) && transcript.is_file() {
-            let resume = vec![slopty_agent::claude::RESUME_FLAG.to_owned(), native.to_owned()];
-            (resume, slopty_agent::claude::sessions::last_active(&transcript))
-        } else {
-            (Vec::new(), None)
+        let unreadable = |e: std::io::Error| format!("Claude Code's sessions in {cwd}: {e}");
+        let mut file = match fs::File::open(&transcript) {
+            Ok(file) => file,
+            // Gone, as Claude Code clears old sessions away: found, with nothing to take up.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Taken::default()),
+            Err(e) => return Err(unreadable(e)),
+        };
+        let meta = file.metadata().map_err(unreadable)?;
+        if !meta.is_file() {
+            return Ok(Taken::default());
         }
+        Ok(Taken {
+            resume: vec![slopty_agent::claude::RESUME_FLAG.to_owned(), native.to_owned()],
+            active: slopty_agent::claude::sessions::last_active(&transcript),
+            branch: tail_branch(&mut file, meta.len()),
+        })
     }
+}
+
+/// What a session found takes from its agent's record of it beyond its prompts.
+#[derive(Default)]
+struct Taken {
+    /// The words that take it up again; none when there is nothing to take up.
+    resume: Vec<String>,
+    /// When it was last active, its last record's time.
+    active: Option<WallMs>,
+    /// The branch it was on.
+    branch: Option<String>,
+}
+
+/// The branch the last record in the tail of transcript `file`, `len` bytes long, was written on
+/// (`gitBranch`), as its folder's listing reads it: the tail is the last [`GLANCE_BYTES`], its
+/// first line passed over when the window cuts it; a record outside a repository names none.
+fn tail_branch(file: &mut fs::File, len: u64) -> Option<String> {
+    let from = len.saturating_sub(GLANCE_BYTES);
+    file.seek(SeekFrom::Start(from)).ok()?;
+    let mut tail = Vec::new();
+    file.take(GLANCE_BYTES).read_to_end(&mut tail).ok()?;
+    let mut lines = tail.split(|&b| b == b'\n');
+    if from > 0 {
+        lines.next();
+    }
+    let key = b"\"gitBranch\"";
+    lines.rev().filter(|line| line.windows(key.len()).any(|w| w == key)).find_map(|line| {
+        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+        let branch = record.get("gitBranch")?.as_str()?;
+        (!branch.is_empty()).then(|| branch.to_owned())
+    })
 }
 
 impl Record {
@@ -833,12 +923,20 @@ fn read_at(path: &Path, from: u64, len: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The first line of the file at `path`, from its first [`HEAD_BYTES`].
-fn first_line(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
+/// The first line of the file at `path`, from its first [`HEAD_BYTES`]; none when they hold no
+/// whole line.
+fn first_line(path: &Path) -> std::io::Result<Option<String>> {
+    let file = fs::File::open(path)?;
     let mut line = Vec::new();
-    BufReader::new(file.take(HEAD_BYTES)).read_until(b'\n', &mut line).ok()?;
-    (line.last() == Some(&b'\n')).then(|| String::from_utf8_lossy(&line).into_owned())
+    BufReader::new(file.take(HEAD_BYTES)).read_until(b'\n', &mut line)?;
+    Ok((line.last() == Some(&b'\n')).then(|| String::from_utf8_lossy(&line).into_owned()))
+}
+
+/// Add `why` to what a search says it could not read, once.
+fn say(words: &mut Vec<String>, why: String) {
+    if !words.contains(&why) {
+        words.push(why);
+    }
 }
 
 /// The entries of directory `dir`, or none.
