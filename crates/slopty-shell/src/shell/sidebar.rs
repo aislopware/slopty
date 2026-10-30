@@ -89,22 +89,6 @@ pub(super) fn sidebar_row_height(reason: bool) -> f32 {
     29.0 + if reason { 16.0 } else { 0.0 }
 }
 
-/// slopty: the state a sidebar row's status mark says, if one: a send that never left fails, one
-/// waiting its turn wears the clock, and a row at rest says nothing.
-pub(super) fn sidebar_mark_state(
-    status: slopty_view_proto::ChatIndicator,
-) -> Option<crate::loaders::status_mark::MarkState> {
-    use crate::loaders::status_mark::MarkState;
-    use slopty_view_proto::ChatIndicator;
-    match status {
-        ChatIndicator::Working => Some(MarkState::Working),
-        ChatIndicator::AwaitingInput => Some(MarkState::Waiting),
-        ChatIndicator::Errored => Some(MarkState::Failed),
-        ChatIndicator::Completed => Some(MarkState::Done),
-        ChatIndicator::Idle => None,
-    }
-}
-
 pub(super) const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
@@ -389,75 +373,39 @@ impl Shell {
         // (`spaces::Shell::sidebar_chat_data`), so a row never draws a reason line its slot was
         // not measured for; the palette's copy reads the shell's.
         let now = if search_query.is_none() { self.sidebar_clock } else { crate::clock::utc(cx) };
-        let status_color = spaces::status_dot_color(status, theme);
-        let status_label: Option<&'static str> = match status {
-            slopty_view_proto::ChatIndicator::Working => Some("Working"),
-            // slopty: what it asks of the person, as the row's amber says it.
-            slopty_view_proto::ChatIndicator::AwaitingInput => Some("Needs you"),
-            slopty_view_proto::ChatIndicator::Errored => Some("Failed"),
-            slopty_view_proto::ChatIndicator::Completed => Some("Done"),
-            slopty_view_proto::ChatIndicator::Idle => None,
-        };
+        // slopty: the row stands in one of the five states (`marks`): its word, its hue and its
+        // mark, one mark that morphs between them (`loaders::status_mark`), the tick cut through
+        // its disc in the row's own ground. An agent at rest on its own work (a background
+        // command, a subagent it left running) is at work; a result nobody has seen sets the
+        // title in the heavier weight.
+        let mark = super::marks::Mark::of(status, self.state.read(cx).session_for(&id), now);
+        let status_label = mark.word();
+        let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
         let shows_metadata = branch.is_some() || change_request.is_some();
-        // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on,
-        // an agent waiting on its own work, a finished result nobody has seen.
-        let (reason, waiting_self) = {
-            let state = self.state.read(cx);
-            let session = state.session_for(&id);
-            let settled = !archived && search_query.is_none();
-            (
-                settled
-                    .then(|| sidebar_status::reason(status, session, now))
-                    .flatten()
-                    .map(SharedString::from),
-                settled
-                    && matches!(
-                        status,
-                        slopty_view_proto::ChatIndicator::Idle
-                            | slopty_view_proto::ChatIndicator::Completed
-                    )
-                    && sidebar_status::waiting_on_itself(session, now),
-            )
-        };
-        let unread = sidebar_status::unread(status) && !archived;
-        // slopty: an agent waiting on its own background command, never read as waiting on you.
-        // slopty: a finished turn whose agent still works on its own reads as that work, not
-        // as done.
-        let status_label = if waiting_self && matches!(status_label, None | Some("Done")) {
-            Some("Background work")
-        } else {
-            status_label
-        };
-        // slopty: no "● N" pill on the row (Amp's prune): a subagent left at work reads as the
-        // agent's own work (`sidebar_status::waiting_on_itself`), and the hover card counts them.
-        // slopty: one mark morphs between working, waiting, done and failed
-        // (`loaders::status_mark`), where a spinner, a check and a dot cut; the tick is cut
-        // through its disc in the row's own ground.
-        let mark_state = sidebar_mark_state(status)
-            .filter(|state| !(waiting_self && *state == crate::loaders::status_mark::MarkState::Done));
+        // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on, or
+        // the work of its own it waits on.
+        let reason = (!archived && search_query.is_none())
+            .then(|| sidebar_status::reason(status, self.state.read(cx).session_for(&id), now))
+            .flatten()
+            .map(SharedString::from);
+        let unread = mark.heavy() && !archived;
         let mark_ground = if selected {
             crate::theme::flatten(crate::theme::glass_selected_bg(), theme.bg)
         } else {
             theme.bg
         };
-        let status_mark = |state| {
-            let id = id.clone();
-            div()
-                .debug_selector(move || format!("chat-mark-{id}")) // slopty: for the tests
-                .flex_none()
-                .child(
-                    crate::loaders::status_mark::StatusMark::new(
-                        SharedString::from(format!("{row_id}-mark")),
-                        state,
-                    )
-                    .size(crate::loaders::status_mark::MARK_SMALL)
-                    .ground(mark_ground),
-                )
-                .into_any_element()
+        let status_mark = || {
+            super::marks::mark_element(
+                SharedString::from(format!("{row_id}-mark")),
+                format!("chat-mark-{id}"), // slopty: for the tests
+                &mark,
+                crate::loaders::status_mark::MARK_SMALL,
+                mark_ground,
+            )
         };
-        // slopty: one leading slot says the row's state (opencode's avatar slot): the status
-        // mark while it works, waits, failed or finished unseen, the clock while it works on its
-        // own, and the agent's mark at rest, where a status slot, the agent's mark and an unread
+        // slopty: one leading slot says the row's state (opencode's avatar slot): the state's
+        // mark while it is at work, needs the person, failed or finished unseen, and the agent's
+        // mark at rest, where a status slot, the agent's mark and an unread
         // dot crowded three marks before the title. The agent's mark keeps its full colour; only
         // an archived row dims it, with the rest of the row.
         let subline = if search_query.is_some() {
@@ -478,24 +426,8 @@ impl Shell {
                 })
         };
         let compact_status = compact.then(|| {
-            let glyph = if let Some(state) = mark_state {
-                status_mark(state)
-            } else if waiting_self {
-                // slopty: at rest on its own work: a calm clock, not a live state.
-                icon(icons::CLOCK_CIRCLE)
-                    .size(px(12.0))
-                    .text_color(theme.text_muted)
-                    .into_any_element()
-            } else if status_label.is_some() {
-                div()
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("chat-dot-{id}") // slopty: for the tests
-                    })
-                    .size(px(6.0))
-                    .rounded_full()
-                    .bg(status_color)
-                    .into_any_element()
+            let glyph = if let Some(mark) = status_mark() {
+                mark
             } else if let Some(brand) = brand {
                 div()
                     .debug_selector({
@@ -532,26 +464,8 @@ impl Shell {
         } else {
             match status_label {
                 Some(label) => {
-                    // Glyph slot: Working wears the preset's animated pixel
-                    // glyph beside its label, Done wears the check, and the
-                    // remaining statuses use a compact dot.
-                    let glyph: AnyElement = if waiting_self {
-                        // slopty: at rest on its own work.
-                        icon(icons::CLOCK_CIRCLE)
-                            .size(px(11.0))
-                            .flex_none()
-                            .text_color(theme.text_muted)
-                            .into_any_element()
-                    } else if let Some(state) = mark_state {
-                        status_mark(state)
-                    } else {
-                        div()
-                            .size(px(6.0))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(status_color)
-                            .into_any_element()
-                    };
+                    // slopty: the state's mark beside its word (`marks`).
+                    let glyph = status_mark().unwrap_or_else(|| div().into_any_element());
                     div()
                         .flex()
                         .flex_row()
@@ -583,11 +497,7 @@ impl Shell {
                                     div()
                                         .text_size(crate::typography::ui_rems(10.0))
                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(if waiting_self {
-                                            theme.text_muted
-                                        } else {
-                                            status_color
-                                        })
+                                        .text_color(status_color)
                                         .child(SharedString::from(label)),
                                 ),
                         )

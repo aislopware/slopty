@@ -154,3 +154,15 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     and mutation, and the pin glyph. A settings file that still holds the field loads.
   - Tests: `settings::tests::a_file_holding_deleted_settings_still_loads` and
     `shell::compact::tests::a_rows_swipe_archives_past_its_travel`.
+- ✅ **The five states, as built (2026-10-30).** `shell::marks` holds them: one `Mark` read from
+  the view model's display status and session, one hue table that every mark
+  `loaders::status_mark` draws takes (the inspector's, the subagent cards' and Add device's
+  too), and the need in the words the agent's records give ("Has a question", "Plan ready for
+  review", "Needs approval · run cargo test"), which the row's reason line says as well.
+  - At work is the Blue accent's own tone in each appearance, whatever the accent: an amber or
+    green accent would read as needs you or done.
+  - An agent at rest on its own work (a background command, a subagent it left running) is at
+    work: the row's clock glyph and its "Background work" status go, and its reason line says
+    what it waits on. The row's old dot hues go with them, so done unseen is green everywhere,
+    no longer the accent's blue.
+  - Tests: `shell::marks::tests::{every_status_reads_as_one_of_five_states, one_hue_per_state}`.

@@ -149,7 +149,7 @@ async fn every_state_reads_at_a_glance() {
     for status in ["Needs you", "Working"] {
         assert!(said("Status", status), "a row says {status}:\n{text}");
     }
-    assert!(said("Label", "Waiting for your answer"), "the asking row says why:\n{text}");
+    assert!(said("Label", "Has a question"), "the asking row says why:\n{text}");
     assert!(crate::served::unread(&dump, "hello, slopty"), "an answer nobody read:\n{text}");
     // The pointer off the sidebar, so no row is lit and no hover card floats.
     drv.ok(&slopty_e2e::Command::Move { x: 800.0, y: 400.0 }).await.unwrap();

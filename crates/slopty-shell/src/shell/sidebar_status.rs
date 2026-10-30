@@ -6,13 +6,12 @@
 //!   their sessions started in, so nothing moves on its own while the person reads. A finished
 //!   chat nobody has touched for [`INACTIVE_AFTER_HOURS`] folds into Inactive, last and shut at
 //!   first (Amp's "Inactive last 72h"), so Done holds the work of the last days.
-//! - **Reasons.** A row that waits says why, from what the agent holds open: "Waiting for your
-//!   answer", "Plan ready for review", "Needs your approval · run cargo test"; an agent waiting
-//!   on its own work says "Background work", or "1 subagent running" for a subagent it left at
-//!   work; one summarising its context says so.
+//! - **Reasons.** A row that waits says why, from what the agent holds open, in the words its
+//!   mark's need says (`marks`): "Has a question", "Plan ready for review", "Needs approval ·
+//!   run cargo test"; an agent waiting on its own work says "Background work", or "1 subagent
+//!   running" for a subagent it left at work; one summarising its context says so.
 //! - **Times.** A row's time says how long it has stood as it is ([`row_since`]): at work since
 //!   its turn began, waiting since it started to, at rest since its last answer.
-//! - **Unread weight.** A finished result nobody has seen sets its title in the heavier weight.
 //! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
 //!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
 //!   and how many subagents it has running.
@@ -76,7 +75,7 @@ impl StatusGroup {
             ChatIndicator::AwaitingInput | ChatIndicator::Errored => Self::NeedsYou,
             ChatIndicator::Working => Self::Working,
             ChatIndicator::Completed | ChatIndicator::Idle => {
-                if waiting_on_itself(session, now) {
+                if super::marks::works_on_its_own(session, now) {
                     Self::Working
                 } else {
                     Self::Done
@@ -376,14 +375,14 @@ pub(super) fn reason(status: ChatIndicator, session: Option<&Session>, now: Date
     let session = live(session, now);
     let wait = session.and_then(|s| s.waiting_on.as_ref());
     match status {
-        ChatIndicator::AwaitingInput => Some(awaiting_words(wait)),
+        ChatIndicator::AwaitingInput => Some(super::marks::need(wait).to_string()),
         ChatIndicator::Working => wait
             .filter(|wait| wait.kind == SessionWait::COMPACTING)
             .map(|_| "Compacting its context".to_owned()),
         ChatIndicator::Errored => None,
         // slopty: the row's time says for how long (`row_since`), so the line says only what.
         ChatIndicator::Completed | ChatIndicator::Idle => {
-            let session = session.filter(|_| waiting_on_itself(session, now))?;
+            let session = session.filter(|_| super::marks::works_on_its_own(session, now))?;
             Some(match (session.status, running_subagents(Some(session), now)) {
                 (SessionStatus::Waiting, _) | (_, 0) => "Background work".to_owned(),
                 (_, 1) => "1 subagent running".to_owned(),
@@ -408,47 +407,12 @@ pub(super) fn row_since(
     let since = match status {
         ChatIndicator::Working => session.and_then(|s| s.started_at.or(s.status_since)),
         ChatIndicator::AwaitingInput => session.and_then(|s| s.status_since),
-        ChatIndicator::Completed | ChatIndicator::Idle if waiting_on_itself(session, now) => {
+        ChatIndicator::Completed | ChatIndicator::Idle if super::marks::works_on_its_own(session, now) => {
             session.and_then(|s| s.status_since)
         }
         ChatIndicator::Completed | ChatIndicator::Idle | ChatIndicator::Errored => None,
     };
     since.unwrap_or(at_rest)
-}
-
-/// What an agent waiting on the person waits for, in its words.
-fn awaiting_words(wait: Option<&SessionWait>) -> String {
-    let Some(wait) = wait else { return "Awaiting input".to_owned() };
-    let summary = wait
-        .summary
-        .as_deref()
-        .map(crate::transcript::single_line)
-        .filter(|summary| !summary.trim().is_empty());
-    match wait.kind.as_str() {
-        SessionWait::QUESTION => "Waiting for your answer".to_owned(),
-        SessionWait::PLAN => "Plan ready for review".to_owned(),
-        SessionWait::APPROVAL => match summary {
-            Some(summary) => format!("Needs your approval \u{b7} {summary}"),
-            None => "Needs your approval".to_owned(),
-        },
-        _ => summary.unwrap_or_else(|| "Awaiting input".to_owned()),
-    }
-}
-
-/// A finished result nobody has seen: its title takes the heavier weight.
-pub(super) fn unread(status: ChatIndicator) -> bool {
-    status == ChatIndicator::Completed
-}
-
-/// The agent at rest waiting on its own work (a background task, a wakeup, a subagent it left
-/// running), not on the person.
-pub(super) fn waiting_on_itself(session: Option<&Session>, now: DateTime<Utc>) -> bool {
-    live(session, now).is_some_and(|s| {
-        s.status == SessionStatus::Waiting
-            || (s.status != SessionStatus::Working
-                && s.status != SessionStatus::AwaitingInput
-                && running_subagents(Some(s), now) > 0)
-    })
 }
 
 /// What a row's hover card says beyond zeron's, line by line.
@@ -564,7 +528,7 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
         ChatIndicator::Errored => {
             when(format!("Failed {} ago", ago(last)).replace("now ago", "just now"))
         }
-        ChatIndicator::Completed | ChatIndicator::Idle if waiting_on_itself(session, now) => {
+        ChatIndicator::Completed | ChatIndicator::Idle if super::marks::works_on_its_own(session, now) => {
             match since.map(ago) {
                 Some(age) if age != "now" => format!("Waiting on its own work for {age}"),
                 _ => "Waiting on its own work".to_owned(),
@@ -631,14 +595,14 @@ mod tests {
         held.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
         assert_eq!(
             reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(),
-            Some("Needs your approval \u{b7} run cargo test")
+            Some("Needs approval \u{b7} run cargo test")
         );
         held.waiting_on = wait(SessionWait::QUESTION, None);
-        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Waiting for your answer"));
+        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Has a question"));
         held.waiting_on = wait(SessionWait::PLAN, None);
         assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Plan ready for review"));
         held.waiting_on = None;
-        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Awaiting input"));
+        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Needs input"));
         let mut busy = session("a", SessionStatus::Working, now);
         assert_eq!(reason(ChatIndicator::Working, Some(&busy), now), None, "the status word says it");
         busy.waiting_on = wait(SessionWait::COMPACTING, None);
@@ -687,18 +651,18 @@ mod tests {
         .unwrap();
         let mut done = session("a", SessionStatus::Done, now);
         done.running_subagents = 2;
-        assert!(waiting_on_itself(Some(&done), now));
+        assert!(super::super::marks::works_on_its_own(Some(&done), now));
         assert_eq!(StatusGroup::of(ChatIndicator::Completed, &chat, Some(&done), now), StatusGroup::Working);
         assert_eq!(reason(ChatIndicator::Completed, Some(&done), now).as_deref(), Some("2 subagents running"));
         done.running_subagents = 1;
         assert_eq!(reason(ChatIndicator::Idle, Some(&done), now).as_deref(), Some("1 subagent running"));
         let mut busy = session("a", SessionStatus::Working, now);
         busy.running_subagents = 1;
-        assert!(!waiting_on_itself(Some(&busy), now), "at work itself");
+        assert!(!super::super::marks::works_on_its_own(Some(&busy), now), "at work itself");
         assert_eq!(reason(ChatIndicator::Working, Some(&busy), now), None);
         let mut stale = done.clone();
         stale.updated_at = now - TimeDelta::minutes(2);
-        assert!(!waiting_on_itself(Some(&stale), now));
+        assert!(!super::super::marks::works_on_its_own(Some(&stale), now));
         assert_eq!(reason(ChatIndicator::Completed, Some(&stale), now), None, "its machine went quiet");
     }
 

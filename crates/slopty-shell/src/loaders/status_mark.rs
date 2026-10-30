@@ -11,7 +11,8 @@
 //!
 //! Every move is on [`motion::EASE_OUT_QUINT`] and the colour crossfades over 150 ms. Under
 //! reduced motion each state is drawn at once and the working ring stands still with its gaps.
-//! On light every hue takes the tone of itself that clears 3:1 ([`Theme::spinner_ink`]).
+//! Its hues are the one table of the session states (`shell::marks`): at work blue, waiting
+//! amber, done green and failed red, each on light in the tone of itself that clears 3:1.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
@@ -112,15 +113,10 @@ pub(crate) struct MarkFrame {
     pub color: Hsla,
 }
 
-/// The colour a state is drawn in.
+/// The colour a state is drawn in: the one hue table every surface's mark reads
+/// (`shell::marks::hue`).
 fn hue(state: MarkState, theme: &Theme) -> Hsla {
-    let hue = match state {
-        MarkState::Working => theme.glyph.mid,
-        MarkState::Waiting => theme.warning,
-        MarkState::Done => theme.success,
-        MarkState::Failed => theme.danger,
-    };
-    theme.spinner_ink(hue)
+    crate::shell::marks::hue(state, theme)
 }
 
 /// Eased progress `elapsed` into a move of `duration` that starts `delay` in; whole under

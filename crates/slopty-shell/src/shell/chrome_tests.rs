@@ -221,7 +221,7 @@ fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
     });
     draw(cx);
     assert!(cx.debug_bounds("chat-mark-a").is_some(), "a row that needs you has its mark");
-    assert!(cx.debug_bounds("chat-mark-b").is_none() && cx.debug_bounds("chat-dot-b").is_none(), "a row at rest has none");
+    assert!(cx.debug_bounds("chat-mark-b").is_none(), "a row at rest has none");
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, _| {
             state.apply_sessions(vec![
@@ -235,20 +235,6 @@ fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
     let (a, b) = (cx.debug_bounds("chat-status-a").unwrap(), cx.debug_bounds("chat-status-b").unwrap());
     assert_eq!(a.left(), b.left(), "the slot stays");
     assert_eq!(a.size, b.size, "the slot stays");
-}
-
-/// slopty: a row's one mark says working, waiting, done and failed, and morphs between them in
-/// its slot; a row at rest says nothing.
-#[test]
-fn a_rows_mark_follows_its_state() {
-    use crate::loaders::status_mark::MarkState;
-    use slopty_view_proto::ChatIndicator;
-    let mark = super::sidebar::sidebar_mark_state;
-    assert_eq!(mark(ChatIndicator::Working), Some(MarkState::Working));
-    assert_eq!(mark(ChatIndicator::AwaitingInput), Some(MarkState::Waiting));
-    assert_eq!(mark(ChatIndicator::Completed), Some(MarkState::Done));
-    assert_eq!(mark(ChatIndicator::Errored), Some(MarkState::Failed));
-    assert_eq!(mark(ChatIndicator::Idle), None);
 }
 
 /// A selected row under the pointer goes a step past its selection, never back toward the

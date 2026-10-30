@@ -3,7 +3,7 @@ Button │ Filter projects: All projects
 Button │ Needs you, 1
 Button │ ask which accent reads best on glass
 Status │ Needs you
-Label │ Waiting for your answer
+Label │ Has a question
 Button │ Working, 2
 Button │ hold a survey of the crates for dead code
 Status │ Working

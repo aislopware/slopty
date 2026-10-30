@@ -84,6 +84,7 @@ mod retention_tests; // slopty: the whole shell under retention against a frame 
 mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
+pub(crate) mod marks; // the five states, their mark and hues, on every surface
 mod sidebar; // the sidebar column, its list, rows and the server foot
 mod sidebar_status; // slopty: status groups, reasons and the hover card
 mod search_warm;
