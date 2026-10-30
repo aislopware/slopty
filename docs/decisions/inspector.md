@@ -181,12 +181,11 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
   The plan card, find's landing flash, the hover strip, compaction rows with their summary,
   retry countdowns, the "Claude Code too old" banner, inline pages, visuals and pictures, and the
   prompt box's lightbox are kept (ours §3).
-- ✅ **Codex and pi get the same trace (2026-10-30).** The proto's thread model is agent-neutral
-  (traces §8.1), and the inspector draws whatever thread a session has. What is missing is a
-  decoder of each agent's own records into that thread: Codex's rollout files and pi's session
-  files, published by each, as `conversation.rs` decodes Claude Code's transcript. Each gets one,
-  pinned by recorded fixtures as Claude Code's is. Until then the inspector serves only Claude
-  Code (`inspector.rs:959-968`; ours §4).
+- ✅ **Only Claude Code has an inspector (2026-10-30).** The person chose to keep the inspector
+  simple: it decodes Claude Code's transcript and no other agent's records. A Codex or pi session
+  is its terminal and its row, with no inspector and no decoder of Codex's rollout files or pi's
+  session files (`inspector.rs`, `inspects`). This withdraws an earlier entry of the same day
+  that gave them the same trace.
 - ✅ **How the stable base is built (2026-10-30).** Choices the ruling left open, made while
   building "Stable above all":
   - **A group is keyed by its first record.** A run of calls and thoughts is one row keyed
