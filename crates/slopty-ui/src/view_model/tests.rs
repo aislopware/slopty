@@ -22,8 +22,6 @@ fn device(
         last_seen_at: linked.then_some(now),
         created_at: None,
         version: None,
-        cursor_sdk_version: None,
-        capabilities: Vec::new(),
         actions: Vec::new(),
         ssh_host: None,
         turned_away: None,
@@ -302,7 +300,7 @@ fn an_open_turn_of_a_thread_at_rest_reads_as_finished() {
 /// A scratch folder is no project, as written or expanded; a folder of its own is one.
 #[test]
 fn a_scratch_folder_is_no_project() {
-    let scratch = slopty_view_proto::projectless::scratch_cwd("c-1", Utc::now());
+    let scratch = format!("{}/2026-10-11-c1", slopty_view_proto::projectless::SCRATCH_ROOT);
     assert_eq!(rows::place(Some(&scratch), None, Some("/Users/me"), &[]), None, "as written");
     let expanded = scratch.replacen('~', "/Users/me", 1);
     assert_eq!(rows::place(Some(&expanded), None, Some("/Users/me"), &[]), None, "expanded");

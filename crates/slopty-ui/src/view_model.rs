@@ -400,8 +400,6 @@ impl ViewModel {
             device_id: device,
             // Slopty has no sign-in of its own: the tailnet decides who reaches what.
             workspace_scope: WorkspaceScope::Local,
-            cursor_sdk_version: None,
-            capabilities: Vec::new(),
         };
         (Arc::new(Self { info, feed: Arc::clone(&feed), asks }), feed, asked)
     }

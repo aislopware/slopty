@@ -147,8 +147,6 @@ impl WorkspaceView {
             last_seen_at: if linked { Some(now) } else { away },
             created_at: None,
             version: caps.and_then(|caps| version(&caps.build)),
-            cursor_sdk_version: None,
-            capabilities: Vec::new(),
             actions,
             // An editor reaches a folder there over SSH by it; this machine's own needs none.
             ssh_host: worker.address.clone().filter(|_| !self.surface_is_local(key)),

@@ -430,7 +430,6 @@ impl WorkspaceView {
                     harness_session_cwd: None,
                     space_id: place.map(|path| self.view_space_id(&device, &path)),
                     last_seen_at: None,
-                    room_gen: None,
                     parent_chat_id: None,
                     subagent: false,
                     in_parent: false,
