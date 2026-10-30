@@ -1275,7 +1275,6 @@ impl Shell {
             ConnectionStatus::Ready | ConnectionStatus::Failed(_) => SplashPhase::Gone,
         };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-        transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)

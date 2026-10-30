@@ -2,7 +2,7 @@
 //! The conversation view: virtualized transcript with block-granularity rows,
 //! the follow rule, tool-group folding, and streaming markdown.
 //!
-//! Row model (docs/research/mugen-pretext.md §3):
+//! Row model:
 //! - one row per BLOCK: user message = one bubble row; assistant messages split
 //!   into one row per markdown top-level block, plus consecutive-tool groups
 //!   (agent/spawn chips split out so they never collapse) and input/error chips;
@@ -203,9 +203,8 @@ pub const USER_COLLAPSE_CHARS: usize = 400;
 const USER_TOGGLE_GAP: f32 = 4.0;
 /// The expander's line, at its 12 pt (#6).
 const USER_TOGGLE_LINE_HEIGHT: f32 = 18.0;
-/// User-bubble attachment thumbnails (user-attachments.tsx): 112×80 thumbs in
-/// a wrapping strip. Fixed thumbnail sizes keep load-state flips from
-/// shifting the virtualizer.
+/// User-bubble attachment thumbnails: 112×80 thumbs in a wrapping strip. Fixed
+/// thumbnail sizes keep load-state flips from shifting the virtualizer.
 pub const ATT_THUMB_W: f32 = 112.0;
 pub const ATT_THUMB_H: f32 = 80.0;
 
@@ -1069,7 +1068,7 @@ pub enum RowKind {
         /// `text` parsed as Markdown, when it uses any. `None` shows `text`
         /// as typed.
         markdown: Option<UserMarkdown>,
-        /// Image refs parsed out of the message text (message-attachments.ts):
+        /// Image refs parsed out of the message text:
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// The figures of the turn this prompt opened, which its row says under it
@@ -1109,8 +1108,8 @@ pub enum RowKind {
     InputChip {
         /// What kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
         label: SharedString,
-        /// What the chip shows beside its label: a question's header, an approval's command
-        /// (chat-view.tsx `InputChip`). An open ask's label says what it waits for
+        /// What the chip shows beside its label: a question's header, an approval's command.
+        /// An open ask's label says what it waits for
         /// ("Waiting for your answer"), which stays TRUE even across a run death: the composer
         /// keeps the panel up until the user answers, and the engine delivers a dead run's
         /// answer as a resumed turn.
@@ -1172,11 +1171,11 @@ pub struct Row {
     pub turn_start: bool,
     pub kind: RowKind,
     /// The owning message entry — hover anywhere on the entry's rows reveals
-    /// its timestamp strip (slopty chat-view.tsx `group`/`group-hover`).
+    /// its timestamp strip.
     pub entry_id: SharedString,
     /// Epoch-ms for the 16px hover-timestamp strip UNDER this row: set on the
     /// LAST row of a completed entry (user rows always; assistant rows only
-    /// once streaming ends — "the turn isn't at a time yet", chat-view.tsx).
+    /// once streaming ends, when the turn has a time).
     pub timestamp: Option<i64>,
     /// Text copied by the entry-level hover action. Present only on the last
     /// settled row, beside the timestamp; tools and transport-only metadata
@@ -1483,8 +1482,7 @@ pub fn rows_for_entry(
                 turn,
             },
             entry_id,
-            // User rows always carry the strip (chat-view.tsx: whenever
-            // `createdAt` exists — the optimistic echo included).
+            // User rows always carry the strip, the optimistic echo included.
             timestamp: Some(entry.created_at),
             copy_text,
             compact_fold: None,
@@ -1813,8 +1811,8 @@ pub fn rows_for_entry(
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
     }
-    // Timestamp strip under the entry's LAST row once the turn has settled
-    // (chat-view.tsx: "No timestamp hover mid-stream"). The version bit keeps
+    // Timestamp strip under the entry's LAST row once the turn has settled, never
+    // mid-stream. The version bit keeps
     // the diff key honest for last-row kinds whose own version wouldn't
     // change when streaming flips off (chips).
     if !streaming && let Some(last) = rows.last_mut() {
@@ -3280,9 +3278,6 @@ pub struct Transcript {
     rows: Vec<Row>,
     last_source: Option<(Option<String>, TranscriptReplayState, u64)>,
     chat_id: Option<String>,
-    /// The shell may retain this already-laid-out view briefly for its exit.
-    /// Cleared as soon as the exit is invisible; never used for another chat.
-    retain_on_deselect: bool,
     /// What the list ends with, under its last row (the inspector's mirror of the TUI's
     /// prompt box, [`Self::set_footer`]).
     footer: Option<gpui::AnyView>,
@@ -3444,10 +3439,10 @@ pub struct Transcript {
     /// out, when asking the list itself would borrow it twice.
     page_viewport: gpui::Bounds<Pixels>,
     /// `(row id, entry id)` under the pointer — reveals the entry's timestamp
-    /// strip (slopty chat-view.tsx `group-hover`; the rows report hover
-    /// themselves). Keyed by ROW so a row→row move within one entry can't
-    /// clear the reveal when the old row's leave event arrives after the new
-    /// row's enter (enter/leave order across rows is not guaranteed).
+    /// strip (the rows report hover themselves). Keyed by ROW so a row→row move
+    /// within one entry can't clear the reveal when the old row's leave event
+    /// arrives after the new row's enter (enter/leave order across rows is not
+    /// guaranteed).
     hovered_entry: Option<(SharedString, SharedString)>,
     /// Each drawn strip's controls' focus (Copy, Rewind), by its entry, and what redraws
     /// the strip as one gains or loses it: a focused control shows its strip as a hover does
@@ -3760,7 +3755,6 @@ impl Transcript {
             // Pre-set so `sync` never sees an attach edge — an override
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
-            retain_on_deselect: false,
             footer: None,
             footer_press: false,
             alt: false,
@@ -4403,24 +4397,9 @@ impl Transcript {
         self.list.logical_scroll_top().item_ix >= self.rows.len()
     }
 
-
-    pub(crate) fn retain_for_route_exit(&mut self) {
-        self.retain_on_deselect = true;
-    }
-
     /// Rebuild rows from app state; splice minimal ranges into the list.
     pub(crate) fn sync(&mut self, cx: &mut Context<Self>) {
         self.clock = crate::clock::utc(cx);
-        if self.retain_on_deselect
-            && self.doc_override.is_none()
-            && self.state.read(cx).selected_chat.is_none()
-            && self.chat_id.is_some()
-        {
-            // A quick return can reuse this entity before the exit finishes.
-            // Its next snapshot is still a replay, not newly arriving tools.
-            self.veil_attach_pending = true;
-            return;
-        }
         let (selected, replay) = {
             let s = self.state.read(cx);
             match &self.doc_override {
@@ -5184,7 +5163,7 @@ impl Transcript {
         }
     }
 
-    // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
+    // ---- attachment read-back (user attachments + transcript cache) ----
 
     /// Shield the open transcript's attachments from image-cache eviction —
     /// rebuilt on every row sync so a chat switch swaps the set. Without it,
@@ -6765,9 +6744,8 @@ impl Transcript {
                 let attachments = attachments.clone();
                 let text = text.clone();
                 let markdown = markdown.clone();
-                // Attachment thumbnails ride ABOVE the bubble, right-aligned
-                // (chat-view.tsx RowView: UserAttachmentStrip then the text
-                // HStack); image-only sends show no bubble at all.
+                // Attachment thumbnails ride ABOVE the bubble, right-aligned;
+                // image-only sends show no bubble at all.
                 let mut column = div().w_full().flex().flex_col();
                 if !attachments.is_empty() {
                     column = column.child(self.render_user_attachments(
@@ -7740,7 +7718,7 @@ impl Transcript {
             // Quiet even when children failed: agents routinely have failed
             // probes mid-work, and a red HEADER read as "this whole step
             // broke" (user report). Failures still show on the individual
-            // chips (destructive tint, slopty tool-chip.tsx) and in the
+            // chips (destructive tint) and in the
             // clause's "(N failed)".
             .text_color(theme.text_muted)
             .hover(|s| s.text_color(theme.text))
@@ -8470,14 +8448,13 @@ fn user_file_pill(name: &str, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A passive one-line chip marking a question the agent asked — the
-/// interactive controls live in the composer (chat-view.tsx `InputChip`):
-/// 34px row, `rounded-[10px] border-white/[0.08] bg-white/[0.045] px-2
-/// text-[12px]`, a 20px `bg-white/[0.09]` icon tile, the medium label, then the
-/// truncating value. Neutral tones throughout; resolution never recolors the chip.
-/// The tile's icon says the ask's kind, an open ask's label says what it waits for in
-/// the sidebar's words, and assistive tech reads it as a status (#8); its corner and hairline
-/// are the column's cards' (#19).
+/// A passive one-line chip marking a question the agent asked, which the person
+/// answers in the agent's own TUI: 34px row, `rounded-[10px] border-white/[0.08]
+/// bg-white/[0.045] px-2 text-[12px]`, a 20px `bg-white/[0.09]` icon tile, the medium
+/// label, then the truncating value. Neutral tones throughout; resolution never
+/// recolors the chip. The tile's icon says the ask's kind, an open ask's label says
+/// what it waits for in the sidebar's words, and assistive tech reads it as a status
+/// (#8); its corner and hairline are the column's cards' (#19).
 fn input_chip(
     id: &SharedString,
     label: SharedString,
@@ -8598,9 +8575,7 @@ fn input_chip_words(questions: &[slopty_view_proto::UserInputQuestion]) -> (Shar
     (label.into(), single_line(value).into())
 }
 
-/// A small glyph standing in for the tool's icon (slopty uses an icon set; a
-/// quiet monochrome character keeps the tile without shipping SVGs).
-/// The glyph for a tool call (slopty tool-chip.tsx `toolIcon`, Solar set).
+/// The glyph for a tool call, from the Solar set.
 fn tool_icon_path(call: &ToolCall) -> &'static str {
     match call {
         ToolCall::Exec { .. } => crate::icons::TERMINAL,
@@ -10253,7 +10228,6 @@ mod tests {
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             let state = cx.new(|_| AppState::new());
             let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
-            transcript.update(cx, |this, _| this.retain_for_route_exit());
             replay_tool_group(&state, &transcript, "chat-a", cx);
             run(state, transcript, cx);
         });
@@ -10372,6 +10346,49 @@ mod tests {
                     "back from {away}, no strip is lit by a pointer that left with the chat",
                 );
             }
+        });
+    }
+
+    /// A session left with nothing selected keeps none of its trace while nothing is: the
+    /// transcript lets its rows go and reads the state again, rather than holding the last
+    /// session's rows for an exit that no longer plays. Come back to it and it reads as it was
+    /// left, the work the person opened open again, its replay history that never fades in.
+    #[gpui::test]
+    fn a_session_left_with_nothing_selected_and_come_back_to_reads_as_it_was_left(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let work: SharedString = "tools#g:call".into();
+            transcript.update(cx, |this, cx| this.toggle_fold(work.clone(), 0.0, cx));
+
+            state.update(cx, |state, cx| state.select_chat(None, cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            let left = transcript.read(cx);
+            assert!(left.rows.is_empty(), "no row of the session left stays drawn");
+            assert_eq!(left.chat_id, None, "nothing selected, the transcript shows nothing");
+
+            state.update(cx, |state, cx| state.select_chat(Some("chat-a".into()), cx));
+            transcript.update(cx, |this, cx| this.sync(cx));
+            replay_tool_group(&state, &transcript, "chat-a", cx);
+            transcript.update(cx, |this, cx| {
+                assert_eq!(this.chat_id.as_deref(), Some("chat-a"));
+                let opened = this.folds.get(&work).and_then(|fold| fold.open);
+                assert_eq!(opened, Some(true), "the work the person opened is open again");
+                let row = this
+                    .rows
+                    .iter()
+                    .find(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
+                    .expect("the session's work, drawn again")
+                    .clone();
+                let RowKind::ToolGroup { tools, summary } = &row.kind else { unreachable!() };
+                let _ = this.render_tool_group(&row.id, tools, summary, &Theme::dark(), cx);
+                let reveal = &this.tool_group_reveals[&row.id];
+                assert_eq!(reveal.rendered_open, Some(true));
+                assert!(
+                    reveal.header_started_at.is_none() && reveal.starts.iter().all(Option::is_none),
+                    "the replayed steps are history: none arrives as new",
+                );
+            });
         });
     }
 
@@ -14109,7 +14126,7 @@ mod tests {
         assert!(rows[..rows.len() - 1].iter().all(|r| r.timestamp.is_none()));
         assert!(rows[..rows.len() - 1].iter().all(|r| r.copy_text.is_none()));
 
-        // …but never mid-stream (chat-view.tsx: no hover under a moving reply).
+        // …but never mid-stream: no hover under a moving reply.
         let live = assistant(
             "a2",
             MessageStatus::Streaming,
