@@ -1,7 +1,8 @@
 //! slopty: background work as the transcript shows it, Slopty's own (not in zeron): a
 //! background task's notice as a quiet row, the agent's quiet notices (a request tried again
 //! counts down to its next attempt in place), and what a tool call says beyond zeron's chip: its
-//! result in the TUI's words and its timer.
+//! result in the TUI's words, and each step's time in a lane of its own at the row's trailing
+//! edge (`docs/decisions/inspector.md`, "A step row reads at a glance").
 //!
 //! The words are the view model's (`slopty_view_doc::part_kinds`); this module only draws them
 //! and ticks what runs from the times they carry. It reads, never acts: moving a call to the
@@ -12,7 +13,7 @@ use std::time::Duration;
 
 use gpui::{AnyElement, Context, SharedString, Task, div, prelude::*, px};
 use serde::Serialize;
-use slopty_view_doc::{NoteLine, NoteRow, TaskRow, ToolFacts, ToolTimer};
+use slopty_view_doc::{NoteLine, NoteRow, StepTime, TaskRow, ToolFacts, ToolTimer, ran_for_words};
 
 use super::{Row, RowKind, Transcript, fnv1a};
 use crate::settings::widgets::ActionHint as _;
@@ -82,16 +83,6 @@ pub fn notice_row(entry_id: &str, part_id: &str, note: &NoteRow) -> Row {
     )
 }
 
-/// How long a call has run by `now`, and its limit: "12s", "1m 5s · timeout 2m".
-pub fn timer_words(timer: &ToolTimer, now: i64) -> String {
-    let since = u64::try_from(now.saturating_sub(timer.at)).unwrap_or(0);
-    let elapsed = slopty_view_doc::duration_words(timer.elapsed_ms.saturating_add(since));
-    match timer.timeout_ms {
-        Some(limit) => format!("{elapsed} · timeout {}", slopty_view_doc::duration_words(limit)),
-        None => elapsed,
-    }
-}
-
 /// What a notice says at `now`: a request tried again counts down to its next attempt.
 pub fn notice_words(note: &NoteRow, now: i64) -> String {
     match &note.retry {
@@ -123,10 +114,119 @@ fn tone_tint(tone: &str, theme: &Theme) -> gpui::Hsla {
     }
 }
 
-/// What a tool chip's header adds from its call's facts: the result line and the timer.
+/// The width of a step's time lane, reserved on every step row and group line, so its words
+/// coming, ticking, and giving way to the time of day while ⌥ is held move nothing.
+pub(super) const TIME_LANE: f32 = 56.0;
+
+/// The time of day as a step's lane says it while ⌥ is held: to the second, on the system's
+/// clock, without the day period the lane has no room for ("3:42:05", "15:42:05").
+fn lane_clock() -> &'static str {
+    if super::clock_format().contains('p') { "%-I:%M:%S" } else { "%H:%M:%S" }
+}
+
+/// `ms` as a time of day in `tz` by `format`.
+fn clock_at<Tz: chrono::TimeZone>(ms: i64, format: &str, tz: &Tz) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    chrono::DateTime::from_timestamp_millis(ms).map(|utc| utc.with_timezone(tz).format(format).to_string())
+}
+
+/// What a step's time lane says at `now`: its time, ticking from its start while it runs ("12s",
+/// "1m 05s"), or what it took once it ended ("<1s", "1m 5s"); with ⌥ held (`alt`), the time of
+/// day it began, in `tz`. A step whose records say no time says nothing.
+pub(super) fn lane_words<Tz: chrono::TimeZone>(
+    time: Option<&StepTime>,
+    timer: Option<&ToolTimer>,
+    resolved: bool,
+    now: i64,
+    alt: bool,
+    tz: &Tz,
+) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    if alt {
+        return clock_at(time?.started, lane_clock(), tz);
+    }
+    if let Some(wall) = time.and_then(StepTime::wall_ms) {
+        return Some(ran_for_words(wall));
+    }
+    if resolved {
+        return None;
+    }
+    let ran_ms = match (time, timer) {
+        (Some(time), _) => now.saturating_sub(time.started),
+        // A clock behind the agent's never runs its time backwards.
+        (None, Some(timer)) => {
+            i64::try_from(timer.elapsed_ms).unwrap_or(i64::MAX).saturating_add(now.saturating_sub(timer.at).max(0))
+        }
+        (None, None) => return None,
+    };
+    Some(super::ticking_elapsed(ran_ms / 1_000))
+}
+
+/// What a step's time lane says on hover, in `tz`: when it began, to the second, and how far
+/// into its turn; when it ended; and, where its agent said its run apart, the wait for the
+/// person's permission apart from the run.
+pub(super) fn lane_tip<Tz: chrono::TimeZone>(time: &StepTime, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let full = if super::clock_format().contains('p') { "%-I:%M:%S %p" } else { "%H:%M:%S" };
+    let mut lines = Vec::new();
+    if let Some(began) = clock_at(time.started, full, tz) {
+        lines.push(match time.turn_started.map(|turn| time.started.saturating_sub(turn)) {
+            Some(into) if into >= 0 => {
+                format!("Started {began}, {} into the turn", ran_for_words(u64::try_from(into).unwrap_or(0)))
+            }
+            _ => format!("Started {began}"),
+        });
+    }
+    if let Some(ended) = time.ended.and_then(|ended| clock_at(ended, full, tz)) {
+        lines.push(format!("Ended {ended}"));
+    }
+    if let (Some(ran), Some(waited)) = (time.ran_ms, time.waited_ms()) {
+        if waited > 0 {
+            lines.push(format!("Ran {}, after {} waiting for permission", ran_for_words(ran), ran_for_words(waited)));
+        }
+    }
+    lines.join("\n")
+}
+
+/// What an open step's Timing says: when it started (and how far into its turn), when it ended,
+/// and what it took, its run told apart from the wait for the person's permission where the
+/// agent says it (`inspector.md`, "Any step opens to its whole detail").
+pub(super) fn timing_words<Tz: chrono::TimeZone>(time: &StepTime, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let tip = lane_tip(time, tz);
+    let split = time.ran_ms.is_some() && time.waited_ms().is_some_and(|waited| waited > 0);
+    let took = time.wall_ms().filter(|_| !split).map(|wall| format!("Took {}", ran_for_words(wall)));
+    tip.lines().map(str::to_owned).chain(took).collect::<Vec<_>>().join(" · ")
+}
+
+/// The span of steps `times`: from the first start to the last end, open while any still runs
+/// (`running`); `None` when none says when it began.
+pub(super) fn span<'a>(times: impl IntoIterator<Item = &'a StepTime>, running: bool) -> Option<StepTime> {
+    let mut started: Option<i64> = None;
+    let mut ended: Option<i64> = None;
+    let mut turn_started = None;
+    for time in times {
+        started = Some(started.map_or(time.started, |s| s.min(time.started)));
+        ended = ended.max(time.ended);
+        turn_started = turn_started.or(time.turn_started);
+    }
+    Some(StepTime { started: started?, ended: ended.filter(|_| !running), ran_ms: None, turn_started })
+}
+
+/// What a tool chip's header adds from its call's facts: the result line and the time lane.
 pub(super) struct ChipFacts {
-    /// slopty: the time a running timer reads (`Transcript::clock`), ms since the epoch.
+    /// slopty: the time a running step reads (`Transcript::clock`), ms since the epoch.
     pub now: i64,
+    /// ⌥ is held: every lane says the time of day its step began.
+    pub alt: bool,
 }
 
 impl ChipFacts {
@@ -138,9 +238,10 @@ impl ChipFacts {
         resolved: bool,
         theme: &Theme,
     ) -> Option<AnyElement> {
+        // slopty: a running step's time is its lane's; its trail keeps only its limit.
         let running_timer = facts.timer.as_ref().filter(|_| !resolved);
         let words = match (running_timer, &facts.result) {
-            (Some(timer), _) => Some(timer_words(timer, self.now)),
+            (Some(timer), _) => timer.timeout_ms.map(|limit| format!("timeout {}", slopty_view_doc::duration_words(limit))),
             (None, Some(result)) => Some(result.clone()),
             (None, None) => None,
         };
@@ -168,6 +269,33 @@ impl ChipFacts {
     }
 }
 
+impl ChipFacts {
+    /// The time lane of step `id` (its records' `time`, else its running `timer`), always drawn
+    /// at its fixed width; its tooltip says when it began, how far into its turn, when it ended
+    /// and any wait for permission.
+    pub fn lane(&self, id: &str, time: Option<&StepTime>, timer: Option<&ToolTimer>, resolved: bool, theme: &Theme) -> AnyElement {
+        let words = lane_words(time, timer, resolved, self.now, self.alt, &chrono::Local);
+        let tip = time.map(|time| lane_tip(time, &chrono::Local)).filter(|tip| !tip.is_empty());
+        div()
+            .id(SharedString::from(format!("{id}-time")))
+            .w(px(TIME_LANE))
+            .flex_none()
+            .flex()
+            .justify_end()
+            .whitespace_nowrap()
+            .overflow_hidden()
+            .text_size(crate::typography::ui_rems(11.0))
+            .font_features(crate::typography::tabular())
+            .text_color(theme.text_faint)
+            .when_some(tip, |lane, tip| {
+                lane.tooltip(move |window, cx| crate::settings::widgets::text_tooltip(tip.clone())(window, cx))
+                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
+            })
+            .children(words.map(SharedString::from))
+            .into_any_element()
+    }
+}
+
 impl Transcript {
     /// The chat this transcript shows, which its pages and charts name.
     pub(crate) fn work_chat(&self) -> Option<String> {
@@ -176,7 +304,7 @@ impl Transcript {
 
     /// What a chip's header adds from its call's facts, for this transcript.
     pub(super) fn chip_facts(&self) -> ChipFacts {
-        ChipFacts { now: self.clock.timestamp_millis() }
+        ChipFacts { now: self.clock.timestamp_millis(), alt: self.alt }
     }
 
     /// Draw again in a second: something drawn runs (a timer, a countdown). Each frame that
@@ -291,12 +419,11 @@ impl Transcript {
 
     /// A quiet notice of the agent's: a dot in its tone, its words; a request tried again
     /// counts down to its next attempt with the working spinner, and reads recovered once it
-    /// went through. `trailing` (a done line's Copy) follows its words.
+    /// went through.
     pub(super) fn render_notice(
         &mut self,
         row: &Row,
         note: &NoteRow,
-        trailing: Option<AnyElement>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -307,7 +434,7 @@ impl Transcript {
         }
         let words = notice_words(note, self.clock.timestamp_millis());
         let tint = tone_tint(&note.tone, theme);
-        // slopty: a plain notice (the done line, "+N more tasks") is no list item: no dot (#4).
+        // slopty: a plain notice ("+N more tasks") is no list item: no dot (#4).
         let plain = !matches!(note.tone.as_str(), NoteLine::ERROR | NoteLine::WARNING | NoteRow::SUCCESS);
         let lead: Option<AnyElement> = if retrying {
             Some(
@@ -354,14 +481,7 @@ impl Transcript {
                 theme.text_muted
             })
             .child(lead_slot(lead))
-            .child(
-                div()
-                    .min_w_0()
-                    .when(trailing.is_none(), |words| words.flex_1())
-                    .truncate()
-                    .child(SharedString::from(words)),
-            )
-            .children(trailing)
+            .child(div().min_w_0().flex_1().truncate().child(SharedString::from(words)))
             .children(toggle);
         div()
             .w_full()
@@ -451,21 +571,44 @@ mod tests {
     use super::*;
     use slopty_view_doc::RetryLine;
 
-    /// A timer reads its elapsed time from when the agent said it, and its limit.
+    /// A step's lane ticks from its start while it runs (from the agent's timer when its records
+    /// say no start), says what it took once it ended, nothing when its records say no time, and
+    /// the time of day it began while ⌥ is held; its tooltip says how far into its turn it began
+    /// and any wait for permission.
     #[test]
-    fn a_timer_runs_on_from_when_it_was_said() {
-        let timer = ToolTimer {
-            elapsed_ms: 10_000,
-            at: 1_000,
-            timeout_ms: Some(120_000),
-        };
-        assert_eq!(timer_words(&timer, 3_000), "12s · timeout 2m");
-        let open = ToolTimer {
-            elapsed_ms: 0,
-            at: 5_000,
-            timeout_ms: None,
-        };
-        assert_eq!(timer_words(&open, 4_000), "0s", "a clock behind never runs backwards");
+    fn a_steps_lane_says_its_time() {
+        let utc = chrono::Utc;
+        // 2026-07-01 15:42:05 UTC.
+        let started = 1_782_920_525_000;
+        let running = StepTime { started, ended: None, ran_ms: None, turn_started: Some(started - 12_000) };
+        assert_eq!(lane_words(Some(&running), None, false, started + 65_000, false, &utc).as_deref(), Some("1m 05s"));
+        let timer = ToolTimer { elapsed_ms: 10_000, at: 1_000, timeout_ms: Some(120_000) };
+        assert_eq!(lane_words(None, Some(&timer), false, 3_000, false, &utc).as_deref(), Some("12s"));
+        assert_eq!(lane_words(None, Some(&timer), false, 0, false, &utc).as_deref(), Some("10s"), "a clock behind");
+        assert_eq!(lane_words(None, Some(&timer), true, 3_000, false, &utc), None, "ended, with no time said");
+        let ended = StepTime { ended: Some(started + 400), ..running };
+        assert_eq!(lane_words(Some(&ended), None, true, 0, false, &utc).as_deref(), Some("<1s"));
+        let clock = if crate::transcript::clock_format().contains('p') { "3:42:05" } else { "15:42:05" };
+        assert_eq!(lane_words(Some(&ended), None, true, 0, true, &utc).as_deref(), Some(clock));
+        let tip = lane_tip(&StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running }, &utc);
+        assert!(tip.contains("12s into the turn"), "{tip}");
+        assert!(tip.contains("Ran 1s, after 8s waiting for permission"), "{tip}");
+        // An open step's Timing: the same, on one line, with what it took when no wait is said.
+        let timing = timing_words(&StepTime { ended: Some(started + 9_000), ran_ms: Some(1_000), ..running }, &utc);
+        assert!(timing.contains(" · Ran 1s, after 8s waiting for permission"), "{timing}");
+        assert!(!timing.contains("Took"), "the wait apart says what it took: {timing}");
+        let timing = timing_words(&StepTime { ended: Some(started + 9_000), ..running }, &utc);
+        assert!(timing.starts_with("Started ") && timing.ends_with(" · Took 9s"), "{timing}");
+    }
+
+    /// Steps' span runs from the first start to the last end, open while one still runs.
+    #[test]
+    fn a_groups_span_runs_from_its_first_start_to_its_last_end() {
+        let at = |started, ended| StepTime { started, ended, ran_ms: None, turn_started: None };
+        let steps = [at(5_000, Some(9_000)), at(2_000, Some(4_000)), at(6_000, Some(12_000))];
+        assert_eq!(span(&steps, false).map(|s| (s.started, s.ended)), Some((2_000, Some(12_000))));
+        assert_eq!(span(&steps, true).map(|s| s.ended), Some(None));
+        assert_eq!(span(&[], false), None);
     }
 
     /// A retry counts down to its next attempt and reads as the agent's words once recovered.

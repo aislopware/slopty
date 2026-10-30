@@ -234,9 +234,9 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     split in a terminal takes it, and a drill then puts the keyboard on the way back, because the
     row or Open that held it goes with the trace it was in. Esc there goes back a level and
     never reaches the TUI, where it would interrupt the agent. After a way back the keyboard
-    lands on the way back still shown, or on the header's line. A drill asked while the terminal
-    holds the keyboard leaves it there. A press on the prompt box's mirror, which is no row,
-    leaves the view following the end.
+    lands on the way back still shown, or on the session's trace, where its keys reach it. A
+    drill asked while the terminal holds the keyboard leaves it there. A press on the prompt
+    box's mirror, which is no row, leaves the view following the end.
   - **What the person opens comes into view.** The view holds still under what grows by
     itself, but a group, a step's detail or a run the person opens at the end of the trace would
     open out of sight below it, since the trace's reading place is its end. Once what opened has
@@ -254,3 +254,39 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     is already on the stack goes back to it instead of pushing it twice.
   - **The prompt box's mirror moves to the trace shown.** It stays the session's prompt box, the
     one the person types into, so it stands at the foot of whatever trace is shown.
+- ✅ **How the steps, the depth, the keys and find are built (2026-10-30).** Choices the ruling
+  left open, made while building its rows, "One fold depth", "Any step opens" and "Keys and
+  find":
+  - **The turn's figures ride under its prompt.** The prompt stays the turn's root row, and a
+    fixed 20 pt line under it, at its trailing edge, says the turn's models, its tokens in,
+    cached and out, and its time, ticking while it runs; how it ended shows only when it did not
+    end well. The line's tooltip holds its start, its end and the tokens by kind. The done line
+    under the turn's last reply is deleted: it said the same time a second time.
+  - **A step's time is a lane.** Each step and each group's line end in a 56 pt lane: what the
+    step took once it ended, ticking while it runs, a group's span from its first start to its
+    last end. ⌥ held turns every lane into the time of day it began, to the second. Its tooltip
+    says when it began and how far into the turn, when it ended, and its run apart from the wait
+    for permission. A group's line wears the failed mark only when every call in it failed; a
+    failed step wears its own.
+  - **The depth is three chips at the header's edge.** Prompts, Steps and All, `[` and `]`
+    stepping between them. All opens every group the person never pressed, and a group the
+    person pressed keeps its way at every depth. Prompts keeps each prompt and its turn's last
+    reply. A drilled run opens at the depth shown, and going back carries the depth back.
+  - **The keyboard's cursor is a bar in the gutter.** The trace has a place for the keyboard of
+    its own, which a press in the inspector gives it. A press on a row puts the cursor there.
+    The bar is in the accent while the trace holds the keyboard and faint when it does not. E
+    and ⇧E go through the failures of the whole trace, what the depth hides included, opening
+    what hides the one they land on.
+  - **Find looks through every step.** A step matches by what its line says and what its
+    detail holds: its whole call, its output, its thought and its diff. Landing on one opens
+    what hides it: the depth, its group, and its detail when the match lies there. The cursor
+    goes on it and its row flashes, since the washes mark only prompts' and answers' text. The
+    filters stand under the field in the find card: a "Failed" toggle and a kind dropdown
+    (commands, edits, reads, searches, fetches, subagents, thinking, other tools). With either
+    on, only the steps it keeps match, each one by itself while no words are typed, and the
+    tally counts them. The errors a turn met count as failed steps.
+  - **An open step ends on its Timing.** Under its call and its output, one line says when the
+    step started and how far into its turn, when it ended, and what it took, its run apart from
+    the wait for permission. A step that ended with nothing to show says "No output". An output
+    past its size gate ends on "+ N lines" over "Show full output", and a fetch that fails says
+    why ("Couldn't load output: …") beside its Retry.

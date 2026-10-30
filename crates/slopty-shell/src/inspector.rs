@@ -33,6 +33,7 @@ use crate::loaders::status_mark::{MARK_SMALL, StatusMark};
 use crate::motion::{HoverFade as _, hover_blend};
 use crate::state::AppState;
 use crate::theme::Theme;
+use crate::transcript::trace::Depth;
 use crate::transcript::{Run, SubagentDrill, Transcript};
 use crate::typography::ui_rems;
 
@@ -248,12 +249,12 @@ pub struct Inspector {
     /// The runs drilled into, the last one shown.
     stack: Vec<Drilled>,
     /// The inspector's own place for the keyboard, which a press in it takes (as a split in a
-    /// terminal does); the way back, the keyboard's after a drill while the inspector holds it,
-    /// so Esc goes back a level and never reaches the TUI; and the header's line, where it waits
-    /// once the last way back is gone. A drill never takes the keyboard from the terminal.
+    /// terminal does); and the way back, the keyboard's after a drill while the inspector holds
+    /// it, so Esc goes back a level and never reaches the TUI. Once the last way back is gone the
+    /// keyboard waits on the session's trace, where its keys reach it. A drill never takes the
+    /// keyboard from the terminal.
     root: FocusHandle,
     back: FocusHandle,
-    home: FocusHandle,
     focus_back: bool,
     /// The wake-up that moves a running run's time on in the header.
     tick: Option<Task<()>>,
@@ -295,7 +296,6 @@ impl Inspector {
             stack: Vec::new(),
             root: cx.focus_handle(),
             back: cx.focus_handle().tab_stop(true),
-            home: cx.focus_handle(),
             focus_back: false,
             tick: None,
             _drills: drills,
@@ -332,12 +332,20 @@ impl Inspector {
         let running = run.as_ref().is_none_or(|run| run.running);
         self.state.update(cx, |state, cx| state.watch_subagent_doc(chat.clone(), cx));
         let (state, doc) = (self.state.clone(), chat.clone());
-        let transcript = cx.new(|cx| Transcript::for_doc(state, doc, running, cx));
+        let depth = self.shown().read(cx).depth();
+        let transcript = cx.new(|cx| {
+            let mut transcript = Transcript::for_doc(state, doc, running, cx);
+            transcript.set_depth(depth, cx);
+            transcript
+        });
         let drills = cx.subscribe(&transcript, |this: &mut Self, from, event: &SubagentDrill, cx| {
             this.drill(from, event.chat_id.clone(), Some(event.row.clone()), None, cx);
         });
         let mirror = self.mirror.clone();
-        self.shown().clone().update(cx, |shown, cx| shown.set_footer(None, cx));
+        self.shown().clone().update(cx, |shown, cx| {
+            shown.set_footer(None, cx);
+            shown.hold_alt(false, cx);
+        });
         transcript.update(cx, |transcript, cx| transcript.set_footer(Some(mirror.into()), cx));
         self.stack.push(Drilled { chat, from, row, title, transcript, _drills: drills });
         self.card = None;
@@ -352,12 +360,15 @@ impl Inspector {
         if self.stack.len() <= depth {
             return;
         }
+        // The trace shown last sets the fold depth for the one shown now: find may have moved it.
+        let fold_depth = self.shown().read(cx).depth();
         let left: Vec<Drilled> = self.stack.drain(depth..).collect();
         let mut gone = Vec::new();
         for drilled in &left {
             gone.push(drilled.chat.clone());
             gone.extend(drilled.transcript.update(cx, |transcript, cx| {
                 transcript.set_footer(None, cx);
+                transcript.hold_alt(false, cx);
                 transcript.release_spawns()
             }));
         }
@@ -375,7 +386,51 @@ impl Inspector {
         });
         let mirror = self.mirror.clone();
         self.shown().clone().update(cx, |shown, cx| shown.set_footer(Some(mirror.into()), cx));
+        self.set_depth(fold_depth, cx);
         cx.notify();
+    }
+
+    /// Show every trace on the stack at `depth` (`inspector.md`, "One fold depth for the whole
+    /// trace").
+    fn set_depth(&mut self, depth: Depth, cx: &mut Context<Self>) {
+        let traces: Vec<Entity<Transcript>> = std::iter::once(self.transcript.clone())
+            .chain(self.stack.iter().map(|drilled| drilled.transcript.clone()))
+            .collect();
+        for trace in traces {
+            trace.update(cx, |trace, cx| trace.set_depth(depth, cx));
+        }
+        cx.notify();
+    }
+
+    /// Whether the inspector's own keys reach it: the keyboard is on the inspector itself, its
+    /// header or its way back, never in a field.
+    fn keys_here(&self, window: &Window, cx: &App) -> bool {
+        [&self.root, &self.back].into_iter().any(|handle| handle.is_focused(window))
+            || self.shown().read(cx).holds_keys(window)
+    }
+
+    /// The fold depth's control, at the header's trailing edge: each depth a press away, the one
+    /// shown marked, `[` and `]` stepping it.
+    fn render_depth(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.shown().read(cx).depth();
+        div()
+            .id("inspector-depth")
+            .aria_label("Fold depth")
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .children(Depth::ALL.into_iter().map(|depth| {
+                crate::surface_chrome::tab(SharedString::from(format!("inspector-depth-{}", depth.name())), depth == shown, theme)
+                    .px(px(6.0))
+                    .aria_label(depth.name())
+                    .tooltip(crate::settings::widgets::text_tooltip(format!("{} · [ and ] step the depth", depth.name())))
+                    .child(depth.name())
+                    // A press here keeps the keyboard where it was.
+                    .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_depth(depth, cx)))
+            }))
+            .into_any_element()
     }
 
     /// Whether the keyboard is the inspector's: on it or inside it, or on the pane that holds it.
@@ -384,10 +439,11 @@ impl Inspector {
     }
 
     /// After a way back, where the inspector holds the keyboard, it goes to the way back still
-    /// shown, or to the header's line: what held it went with the trace it was in.
+    /// shown, or to the session's trace: what held it went with the trace it was in.
     fn refocus(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.holds_keyboard(window, cx) {
-            window.focus(if self.stack.is_empty() { &self.home } else { &self.back }, cx);
+            let to = if self.stack.is_empty() { self.transcript.read(cx).keys_handle() } else { self.back.clone() };
+            window.focus(&to, cx);
         }
     }
 
@@ -603,8 +659,7 @@ impl Inspector {
         let branch = chat.as_ref().and_then(|chat| chat.branch.clone());
         self.line("inspector-header", None, theme, cx)
             .gap(px(10.0))
-            // The keyboard's place after the last way back: a press here keeps it where it was.
-            .track_focus(&self.home)
+            // A press here keeps the keyboard where it was.
             .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
             .children(mark.word().zip(mark.drawn()).map(|(words, mark)| {
                 div()
@@ -627,6 +682,8 @@ impl Inspector {
                     .child(icon(icons::GIT_BRANCH).size(px(11.0)).flex_none().text_color(theme.text_faint))
                     .child(div().min_w_0().truncate().text_size(ui_rems(12.0)).text_color(theme.text_muted).child(branch))
             }))
+            .child(div().flex_1())
+            .child(self.render_depth(theme, cx))
             .into_any_element()
     }
 
@@ -1226,12 +1283,27 @@ impl gpui::Render for Inspector {
             // Esc goes back a run where the keyboard is in the inspector; in the terminal it is
             // the TUI's.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" && !this.stack.is_empty() {
-                    cx.stop_propagation();
-                    let depth = this.stack.len() - 1;
-                    this.pop_to(depth, cx);
-                    this.refocus(window, cx);
+                let plain = !event.keystroke.modifiers.modified();
+                match event.keystroke.key.as_str() {
+                    "escape" if !this.stack.is_empty() => {
+                        cx.stop_propagation();
+                        let depth = this.stack.len() - 1;
+                        this.pop_to(depth, cx);
+                        this.refocus(window, cx);
+                    }
+                    // `[` and `]` step the fold depth of the whole trace.
+                    key @ ("[" | "]") if plain && this.keys_here(window, cx) => {
+                        cx.stop_propagation();
+                        let depth = this.shown().read(cx).depth().step(if key == "[" { -1 } else { 1 });
+                        this.set_depth(depth, cx);
+                    }
+                    _ => {}
                 }
+            }))
+            // ⌥ held where the inspector holds the keyboard shows when every step began.
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                let held = event.modifiers.alt;
+                this.shown().clone().update(cx, |shown, cx| shown.hold_alt(held, cx));
             }))
             .child(header)
             .child(now)
@@ -1495,7 +1567,7 @@ mod tests {
     /// leaves the selection and the prompt box's mirror (which moves under the trace shown)
     /// alone; a run inside it drills a level deeper, drilling one already on the stack goes back
     /// to it, and Esc goes back a level. A crumb goes back to its level and lets go of the runs'
-    /// feeds, the keyboard waiting on the header's line. Enter on a run's row drills too.
+    /// feeds, the keyboard waiting on the session's trace. Enter on a run's row drills too.
     #[gpui::test]
     fn a_drill_stays_inside_the_inspector(cx: &mut gpui::TestAppContext) {
         let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
@@ -1548,7 +1620,8 @@ mod tests {
             })
         };
         let depth = |cx: &mut gpui::VisualTestContext| inspector.read_with(cx, |inspector, _| inspector.stack.len());
-        let (back, home) = inspector.read_with(cx, |inspector, _| (inspector.back.clone(), inspector.home.clone()));
+        let (back, home) =
+            inspector.read_with(cx, |inspector, cx| (inspector.back.clone(), inspector.transcript.read(cx).keys_handle()));
         let holds = |handle: &FocusHandle, cx: &mut gpui::VisualTestContext| cx.update(|window, _| handle.is_focused(window));
 
         // Asked while the terminal holds the keyboard, a drill leaves it there.
@@ -1595,13 +1668,13 @@ mod tests {
         assert_eq!(depth(cx), 1, "back to the run already drilled");
         assert!(at(&draw(cx), "Counting in the child.").is_some());
 
-        // Esc goes back a level, the keyboard to the header's line once at the session.
+        // Esc goes back a level, the keyboard to the session's trace once at the session.
         cx.simulate_keystrokes("escape");
         let nodes = draw(cx);
         assert_eq!(depth(cx), 0, "Esc goes back");
         assert!(at(&nodes, "Sending a scout.").is_some(), "the session's timeline again");
         assert_eq!(footers(cx), [true], "the mirror is under the session's timeline again");
-        assert!(holds(&home, cx), "the keyboard waits on the header");
+        assert!(holds(&home, cx), "the keyboard waits on the session's trace");
         assert!(state.read_with(cx, |state, _| state.sub_transcript("child").is_empty()), "the run's feed is let go");
 
         // A crumb goes back to its level.
@@ -1613,7 +1686,7 @@ mod tests {
         let nodes = draw(cx);
         assert_eq!(depth(cx), 0, "the crumb goes back");
         assert!(at(&nodes, "Back to the session").is_none(), "no way back at the session");
-        assert!(holds(&home, cx), "the keyboard waits on the header");
+        assert!(holds(&home, cx), "the keyboard waits on the session's trace");
 
         // Enter on the run's row drills too.
         snapshots(&state, cx);

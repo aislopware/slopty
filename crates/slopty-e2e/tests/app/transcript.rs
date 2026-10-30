@@ -65,7 +65,7 @@ fn labelled<'a>(dump: &'a Dump, role: &str, words: &str) -> Option<&'a A11yNode>
 }
 
 /// Render the window in light and in dark against `golden/<name>-<appearance>.png`, the pointer
-/// off it and the done line's moment left out ([`crate::served::goldens`]).
+/// off it ([`crate::served::goldens`]).
 async fn goldens(drv: &mut Driver, renders: &Path, name: &str) {
     drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;

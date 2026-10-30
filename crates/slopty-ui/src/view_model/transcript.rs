@@ -339,6 +339,10 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
                     if let MessagePart::Tool { facts, .. } = &mut part {
                         *facts =
                             tool_facts(&id, item.at_ms, call, state, child.as_ref()).map(Box::new);
+                        // slopty: its start is said from its turn's, which its row's tooltip says.
+                        if let Some(time) = facts.as_mut().and_then(|facts| facts.time.as_mut()) {
+                            time.turn_started = turn_start(state, item.turn);
+                        }
                     }
                     parts.push(part);
                     // slopty: the files it changed, as the TUI lists them under a command.
@@ -405,14 +409,14 @@ pub fn entries(state: &ThreadState, look: &Look<'_>) -> Vec<SessionMessageEntry>
     }
     made.flush();
     let Made { mut out, turns, .. } = made;
-    // slopty: what the TUI folds of task notices, and each finished turn's done line. Subagents
+    // slopty: what the TUI folds of task notices, and each turn's figures on its prompt. Subagents
     // started together are the shell's to head with one line, live (`transcript/subagents.rs`).
     for entry in &mut out {
         if entry.role == MessageRole::Assistant {
             entry.parts = super::folds::fold_tasks(std::mem::take(&mut entry.parts));
         }
     }
-    super::folds::done_lines(state, &mut out, &turns, &chrono::Local);
+    super::folds::turn_roots(state, &mut out, &turns);
     failures(state, look, &turns, &mut out);
     plan_part(state, last_tasks.is_some(), device, &mut out);
     out
@@ -742,6 +746,17 @@ fn todo_items(
 /// The first wall time an item may truly carry (2000-01-01): anything before it is a time its
 /// agent never said, as a resumed session's history may come with none.
 const FIRST_TIME_MS: u64 = 946_684_800_000;
+
+/// When turn `turn` of `state` began, in ms since the epoch, when its agent said.
+fn turn_start(state: &ThreadState, turn: TurnId) -> Option<i64> {
+    // Turns come in their order, so a search finds one at once; any other order still finds it.
+    let ix = state
+        .turns
+        .binary_search_by_key(&turn, |t| t.id)
+        .ok()
+        .or_else(|| state.turns.iter().position(|t| t.id == turn))?;
+    Some(at(state.turns.get(ix)?.started_ms)).filter(|ms| *ms != 0)
+}
 
 /// An item's wall time as an entry's, in ms since the epoch; `0`, which the shell shows as no
 /// time, for a time its agent never said.

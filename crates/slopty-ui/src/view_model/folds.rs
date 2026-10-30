@@ -5,16 +5,15 @@
 //!   read as the first two, then "+N more tasks completed", whose rows open under it. Background
 //!   agents stopped together read as one row naming them ("2 background agents were stopped: …"),
 //!   or give way to the agent's own row that names them. A failure is never folded.
-//! - **The turn's done line.** A turn the agent finished ends on a quiet "Worked for 1m 5s · done
-//!   3:42 PM", the TUI's line with its plain verb. What the turn left running is not repeated
-//!   there: the agent's count is a snapshot at the turn's end, and the Background tray says what
-//!   runs now, by kind (`docs/decisions/ui.md`, "What runs is said once, by the tray").
+//! - **The turn's figures.** The prompt that opened a turn carries the turn's figures, which its
+//!   row says (`docs/decisions/inspector.md`, "The turn is the root row"): its time there is the
+//!   TUI's "Worked for 1m 5s", said once. What the turn left running is not said at its end: the
+//!   agent's count is a snapshot at the turn's end, and the Background tray says what runs now, by
+//!   kind (`docs/decisions/ui.md`, "What runs is said once, by the tray").
 
-use chrono::TimeZone;
 use slopty_proto::thread::{Notice, ThreadState, TurnId, TurnState};
 use slopty_view_doc::{
-    MessagePart, MessageRole, NoteLine, NoteRow, SessionMessageEntry, TaskRow, WorkRow,
-    duration_words,
+    MessagePart, MessageRole, NoteLine, NoteRow, SessionMessageEntry, TaskRow, TurnFacts, WorkRow,
 };
 
 /// How many task notices in a row show before the rest fold.
@@ -22,25 +21,6 @@ const TASKS_SHOWN: usize = 2;
 
 /// The kind of the row that folds task notices.
 pub const TASKS_FOLD: &str = "tasks";
-
-/// The kind of a turn's done line.
-pub const DONE: &str = "done";
-
-/// What a turn's done line says: how long it worked and the time it ended, in `tz`.
-#[must_use]
-pub fn done_words<Tz: TimeZone>(duration_ms: u64, ended_ms: i64, tz: &Tz) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let worked = duration_words(duration_ms.max(1_000));
-    let clock = chrono::DateTime::from_timestamp_millis(ended_ms).map(|utc| {
-        utc.with_timezone(tz).format(slopty_shell::transcript::clock_format()).to_string()
-    });
-    match clock {
-        Some(clock) => format!("Worked for {worked} · done {clock}"),
-        None => format!("Worked for {worked}"),
-    }
-}
 
 /// A part that is one of a run of task notices, or the agent's own row naming the agents it
 /// stopped together.
@@ -161,44 +141,57 @@ pub fn fold_tasks(parts: Vec<MessagePart>) -> Vec<MessagePart> {
     out
 }
 
-/// Each finished turn of `state` ends on its done line, in the last entry that answers it.
+/// Each turn a prompt opened carries its figures in that prompt's entry ([`TurnFacts`]), which
+/// the prompt's row says (`docs/decisions/inspector.md`, "The turn is the root row").
 ///
-/// `entries` come with `turns` saying which turn each answers. The turn's own footer notices
-/// (what it left running) give way to that line, which says the turn's time alone: what still
-/// runs is the Background tray's to say, live.
-pub fn done_lines<Tz: TimeZone>(
+/// `entries` come with `turns` saying which turn each answers. A finished turn's own footer
+/// notices (what it left running) are left out: what still runs is the Background tray's to say,
+/// live.
+pub fn turn_roots(
     state: &ThreadState,
     entries: &mut [SessionMessageEntry],
     turns: &[Option<TurnId>],
-    tz: &Tz,
-) where
-    Tz::Offset: std::fmt::Display,
-{
-    // A subagent's run is shown inside its parent's turn, which says when it finished.
+) {
+    // A subagent's run is one step of its parent's turn, whose drill header says its figures.
     if state.meta.parent.is_some() {
         return;
     }
     for turn in &state.turns {
-        let (TurnState::Complete, Some(ended)) = (&turn.state, turn.ended_ms) else { continue };
-        let Some(at) = turns.iter().rposition(|t| *t == Some(turn.id)) else { continue };
-        let Some(entry) = entries.get_mut(at) else { continue };
-        if entry.role != MessageRole::Assistant {
-            continue;
+        if turn.state == TurnState::Complete
+            && let Some(at) = turns.iter().rposition(|t| *t == Some(turn.id))
+            && let Some(entry) =
+                entries.get_mut(at).filter(|entry| entry.role == MessageRole::Assistant)
+        {
+            entry.parts.retain(
+                |part| !matches!(part, MessagePart::Note { note, .. } if note.kind == Notice::TURN),
+            );
         }
-        entry.parts.retain(
-            |part| !matches!(part, MessagePart::Note { note, .. } if note.kind == Notice::TURN),
-        );
-        let worked = ended.as_millis().saturating_sub(turn.started_ms.as_millis());
-        let ended_at = i64::try_from(ended.as_millis()).unwrap_or(i64::MAX);
-        // slopty: the turn's divider says the same time as its done line, which it folds in.
-        entry.duration_ms = Some(i64::try_from(worked.max(1_000)).unwrap_or(i64::MAX));
-        let text = done_words(worked, ended_at, tz);
+        let Some(input) = &turn.input else { continue };
+        let Some(entry) =
+            entries.iter_mut().find(|entry| entry.role == MessageRole::User && entry.id == input.0)
+        else {
+            continue;
+        };
+        let (word, error) = match &turn.state {
+            TurnState::Active => (TurnFacts::ACTIVE, None),
+            TurnState::Complete => (TurnFacts::COMPLETE, None),
+            TurnState::Interrupted => (TurnFacts::INTERRUPTED, None),
+            TurnState::Failed { error } => (TurnFacts::FAILED, Some(error.clone())),
+        };
+        let facts = TurnFacts {
+            state: word.to_owned(),
+            error,
+            started: super::transcript::at(turn.started_ms),
+            ended: turn.ended_ms.map(super::transcript::at),
+            models: turn.models.clone(),
+            tokens: turn.usage.0.clone(),
+            changed: [turn.changed.added, turn.changed.removed],
+        };
         entry.parts.push(MessagePart::Note {
-            id: format!("{}:done", entry.id),
+            id: format!("{}:turn", entry.id),
             note: Box::new(NoteRow {
-                kind: DONE.to_owned(),
-                text,
-                tone: NoteLine::INFO.to_owned(),
+                kind: TurnFacts::KIND.to_owned(),
+                turn: Some(Box::new(facts)),
                 ..NoteRow::default()
             }),
         });
@@ -281,22 +274,5 @@ mod tests {
         assert_eq!(said(&fold_tasks(with_note)).len(), 1);
         let one = vec![row("x1", WorkRow::SUBAGENT, "killed", "Survey")];
         assert_eq!(said(&fold_tasks(one)), ["task x1"]);
-    }
-
-    /// The done line says how long the turn worked and when it ended, in the person's time.
-    #[test]
-    fn the_done_line_says_its_time_and_clock() {
-        let tz = chrono::FixedOffset::east_opt(0).expect("utc");
-        // 2026-07-01 15:42 UTC.
-        let ended = 1_782_920_520_000;
-        // On the system's clock.
-        let clock = if slopty_shell::transcript::clock_format().contains('p') {
-            "3:42 PM"
-        } else {
-            "15:42"
-        };
-        assert_eq!(done_words(65_000, ended, &tz), format!("Worked for 1m 5s · done {clock}"));
-        assert_eq!(done_words(200, ended, &tz), format!("Worked for 1s · done {clock}"));
-        assert_eq!(done_words(60_000, ended, &tz), format!("Worked for 1m · done {clock}"));
     }
 }

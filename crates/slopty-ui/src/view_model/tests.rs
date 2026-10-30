@@ -1122,10 +1122,26 @@ fn a_failure_reads_in_one_grammar() {
     assert!(errors.iter().all(|message| *message == "The turn failed on studio. Try again."));
 }
 
-/// A goal's check is one row, what it checked opening under it; a finished turn ends on the
-/// TUI's done line with its plain verb.
+/// The figures each turn's prompt carries ([`slopty_view_doc::TurnFacts`]), by prompt id.
+fn turn_figures(
+    entries: &[slopty_view_doc::SessionMessageEntry],
+) -> Vec<(String, slopty_view_doc::TurnFacts)> {
+    entries
+        .iter()
+        .flat_map(|entry| entry.parts.iter().map(move |part| (entry, part)))
+        .filter_map(|(entry, part)| match part {
+            MessagePart::Note { note, .. } => {
+                note.turn.as_deref().map(|turn| (entry.id.clone(), turn.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A goal's check is one row, what it checked opening under it; a finished turn's time is said
+/// once, on the prompt that opened it, and no line at its end says it again.
 #[test]
-fn a_goal_row_opens_its_reason_and_a_turn_ends_on_its_done_line() {
+fn a_goal_row_opens_its_reason_and_a_turn_says_its_time_on_its_prompt() {
     use slopty_proto::thread::detail::Clipped;
     use slopty_proto::thread::{ItemBody, Notice};
     let mut state = fixtures::thread("tools");
@@ -1142,24 +1158,40 @@ fn a_goal_row_opens_its_reason_and_a_turn_ends_on_its_done_line() {
     assert_eq!(note.detail.as_deref(), Some("Reason: 2 tests fail"));
     assert_eq!(note.tone, slopty_view_doc::NoteLine::INFO);
 
-    let done: Vec<&str> = entries
+    // Each finished turn's figures ride its prompt, its start and end from its records.
+    let figures = turn_figures(&entries);
+    assert!(!figures.is_empty(), "the turns' prompts carry their figures");
+    for (prompt, facts) in &figures {
+        let entry = entries.iter().find(|e| &e.id == prompt).expect("the prompt's entry");
+        assert_eq!(entry.role, MessageRole::User, "{prompt} is a prompt");
+        let turn = state
+            .turns
+            .iter()
+            .find(|t| t.input.as_ref().is_some_and(|input| &input.0 == prompt))
+            .expect("the turn it opened");
+        assert_eq!(facts.started, transcript::at(turn.started_ms));
+        assert_eq!(facts.ended, turn.ended_ms.map(transcript::at));
+        assert_eq!(facts.models, turn.models);
+    }
+    // No line at a turn's end says its time again.
+    let worked: Vec<&str> = entries
         .iter()
         .flat_map(|e| &e.parts)
         .filter_map(|p| match p {
-            MessagePart::Note { note, .. } if note.kind == crate::view_model::folds::DONE => {
+            MessagePart::Note { note, .. } if note.text.starts_with("Worked for ") => {
                 Some(note.text.as_str())
             }
             _ => None,
         })
         .collect();
-    assert!(!done.is_empty() && done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
+    assert!(worked.is_empty(), "{worked:?}");
 }
 
-/// A turn that left work running ends on its time alone: the agent's count at the turn's end
-/// ("2 background tasks still running") is neither its own row nor part of the done line, since
-/// the Background tray says what runs now, by kind, and the two disagreed.
+/// A turn that left work running says so nowhere at its end: the agent's count at the turn's
+/// end ("2 background tasks still running") is no row of its own, since the Background tray
+/// says what runs now, by kind, and the two disagreed. Its time is said on its prompt alone.
 #[test]
-fn a_done_line_leaves_what_still_runs_to_the_tray() {
+fn a_finished_turn_leaves_what_still_runs_to_the_tray() {
     use slopty_proto::thread::detail::Clipped;
     use slopty_proto::thread::{ItemBody, Notice};
     let mut state = fixtures::thread("tools");
@@ -1177,24 +1209,17 @@ fn a_done_line_leaves_what_still_runs_to_the_tray() {
             _ => None,
         })
         .collect();
-    let done: Vec<&str> = notes
-        .iter()
-        .filter(|(kind, _)| *kind == crate::view_model::folds::DONE)
-        .map(|(_, text)| *text)
-        .collect();
-    assert!(!done.is_empty(), "the turn ends on its done line: {notes:?}");
-    assert!(done.iter().all(|d| d.starts_with("Worked for ")), "{done:?}");
-    // The turn's divider folds the line in and says the same time from the entry.
-    let ended = entries
-        .iter()
-        .find(|e| {
-            e.parts.iter().any(|p| {
-                matches!(p, MessagePart::Note { note, .. } if note.kind == crate::view_model::folds::DONE)
-            })
-        })
-        .expect("the entry the line ends");
-    assert!(ended.duration_ms.is_some_and(|ms| ms >= 1_000), "{:?}", ended.duration_ms);
     assert!(notes.iter().all(|(_, text)| !text.contains("still running")), "{notes:?}");
+    // Only the prompts' figures say a turn's time: one per turn a prompt opened.
+    let figures = turn_figures(&entries);
+    let opened = state.turns.iter().filter(|t| t.input.is_some()).count();
+    assert_eq!(figures.len(), opened, "{figures:?}");
+    assert!(
+        figures.iter().any(|(_, facts)| facts.state == slopty_view_doc::TurnFacts::COMPLETE
+            && facts.ended.is_some()),
+        "{figures:?}"
+    );
+    assert!(notes.iter().all(|(_, text)| !text.starts_with("Worked for ")), "{notes:?}");
 }
 
 /// An agent that is not signed in says so where it runs, its own words behind it; any other

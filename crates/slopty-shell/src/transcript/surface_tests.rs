@@ -872,7 +872,8 @@ fn bottom(node: &Node) -> f32 {
 }
 
 /// #1: a prompt heads its turn: the big step comes before it, its answer starts a turn gap under
-/// it, and under a pointer its strip waits beside the bubble's foot, taking no room.
+/// its line of figures, and under a pointer its strip waits beside the bubble's foot, taking no
+/// room.
 #[gpui::test]
 fn a_prompt_heads_its_turn(cx: &mut gpui::TestAppContext) {
     let (transcript, cx) = open(cx, answer("a1", "First answer."));
@@ -891,7 +892,8 @@ fn a_prompt_heads_its_turn(cx: &mut gpui::TestAppContext) {
     let second = find(&nodes, Role::Paragraph, "Second answer.").expect("the second answer").clone();
     let after = top(&second) - bottom(&asked);
     let before = top(&asked) - bottom(&first);
-    assert!((after - Theme::SPACE_LG).abs() <= 1.0, "16 pt under the prompt: {after}");
+    let under = super::turns::TURN_LINE + Theme::SPACE_LG;
+    assert!((after - under).abs() <= 1.0, "the turn's line and 16 pt under the prompt: {after}");
     assert!((before - 56.0).abs() <= 1.0, "the strip's lane and 24 pt over it: {before}");
 
     // Hovered, the strip's Copy stands left of the bubble, inside its height.
@@ -1027,93 +1029,6 @@ fn a_summary_says_what_runs_now(cx: &mut gpui::TestAppContext) {
     assert!(
         find(&nodes, Role::Status, "Needs your approval: touch refused.txt").is_some(),
         "{labels:?}"
-    );
-}
-
-/// #4: a turn ends on its done line, after what it changed, and its strip does not say the time
-/// again.
-#[test]
-fn a_turn_ends_on_its_done_line() {
-    let edit = MessagePart::Tool {
-        id: "edit".into(),
-        call: ToolCall::WriteFile { path: "/work/app/main.rs".into(), content: None },
-        is_error: false,
-        resolved: true,
-        output: None,
-        diff: None,
-        output_ref: None,
-        output_bytes: None,
-        diff_ref: None,
-        diff_stats: Some(vec![slopty_view_doc::ToolDiffStat {
-            path: "/work/app/main.rs".into(),
-            additions: 2,
-            deletions: 0,
-        }]),
-        subagent_ref: None,
-        subagent_status: None,
-        subagent_tail: None,
-        facts: None,
-    };
-    let done = MessagePart::Note {
-        id: "reply:done".into(),
-        note: Box::new(NoteRow {
-            kind: "done".into(),
-            text: "Worked for 4s · done 9:00 AM".into(),
-            tone: "info".into(),
-            ..NoteRow::default()
-        }),
-    };
-    let reply = SessionMessageEntry {
-        created_at: 1_760_000_000_000,
-        ..entry(MessageStatus::Complete, vec![edit, text("done"), done])
-    };
-    let rows = super::rows_for_entry(&reply, false, &mut |_, text| {
-        Arc::new(crate::markdown::parse_full(text))
-    });
-    let kinds: Vec<&str> = rows
-        .iter()
-        .map(|row| match &row.kind {
-            super::RowKind::TurnChanges { .. } => "changes",
-            super::RowKind::Notice { .. } => "done",
-            _ => "other",
-        })
-        .collect();
-    assert_eq!(kinds.last(), Some(&"done"), "the done line last: {kinds:?}");
-    assert_eq!(kinds.iter().rev().nth(1), Some(&"changes"), "the files above it: {kinds:?}");
-    assert_eq!(rows.last().and_then(|row| row.timestamp), Some(0), "the time said once");
-}
-
-/// #7: a turn that ends on its done line has its Copy at the end of the line's words, on the
-/// line, not alone in a lane under it.
-#[gpui::test]
-fn a_done_lines_copy_rides_on_its_line(cx: &mut gpui::TestAppContext) {
-    let done = MessagePart::Note {
-        id: "reply:done".into(),
-        note: Box::new(NoteRow {
-            kind: "done".into(),
-            text: "Worked for 4s · done 9:00 AM".into(),
-            tone: "info".into(),
-            ..NoteRow::default()
-        }),
-    };
-    let reply = SessionMessageEntry {
-        created_at: 1_760_000_000_000,
-        ..entry(MessageStatus::Complete, vec![text("All done."), done])
-    };
-    let (_, cx) = open(cx, reply);
-    let nodes = draw(cx);
-    let line = find(&nodes, Role::Status, "Worked for 4s · done 9:00 AM").expect("the done line");
-    let copy = find(&nodes, Role::Button, "Copy message").expect("its Copy");
-    assert!(
-        (copy.center.y - line.center.y).abs() < px(2.0),
-        "on the line: {:?} vs {:?}",
-        copy.center,
-        line.center
-    );
-    assert!(copy.center.x > line.center.x - px(line.width / 2.0), "after its words");
-    assert!(
-        descendants(&nodes, line, Role::Button).iter().any(|b| b.label == "Copy message"),
-        "the line's own control"
     );
 }
 
@@ -1454,8 +1369,8 @@ fn a_running_call_sweeps_its_words() {
     assert!(spawn.is_some_and(|tool| !super::sweeps(&tool)), "its own row, unswept");
 }
 
-/// #18: a fetch that failed says so in the transcript's voice, and offers one Retry that says
-/// what it fetches again.
+/// #18: a fetch that failed says so, and why, in the transcript's voice, and offers one Retry
+/// that says what it fetches again.
 #[gpui::test]
 fn a_failed_fetch_says_so_and_offers_retry(cx: &mut gpui::TestAppContext) {
     let mut call = exec("one", "cargo test", true, false);
@@ -1466,7 +1381,7 @@ fn a_failed_fetch_says_so_and_offers_retry(cx: &mut gpui::TestAppContext) {
     }
     let (transcript, cx) = open(cx, entry(MessageStatus::Complete, vec![call, text("Done.")]));
     transcript.update(cx, |this, cx| {
-        this.blob_details.insert("blob-1".into(), super::BlobFetch::Failed);
+        this.blob_details.insert("blob-1".into(), super::BlobFetch::Failed("the machine went away".into()));
         cx.notify();
     });
     let nodes = draw(cx);
@@ -1474,8 +1389,80 @@ fn a_failed_fetch_says_so_and_offers_retry(cx: &mut gpui::TestAppContext) {
     cx.simulate_click(row.center, gpui::Modifiers::default());
     let nodes = draw(cx);
     let labels: Vec<String> = nodes.values().map(|n| n.label.clone()).collect();
-    assert!(
-        find(&nodes, Role::Button, "Retry loading the full output").is_some(),
-        "{labels:?}"
+    assert!(find(&nodes, Role::Button, "Retry loading output").is_some(), "{labels:?}");
+}
+
+/// Find lands on a step the trace hides: at Prompts it shows the steps, opens the step's group
+/// and puts the trace's cursor on it, the failed-steps filter finding it with no words typed.
+#[gpui::test]
+fn find_opens_what_hides_the_step_it_lands_on(cx: &mut gpui::TestAppContext) {
+    use super::find::Filter;
+    use super::trace::{Cursor, Depth};
+    let (transcript, cx) = open(
+        cx,
+        entry(MessageStatus::Complete, vec![exec("t1", "cargo test", true, false), exec("t2", "cargo build", true, true), text("Done.")]),
     );
+    transcript.update(cx, |this, cx| this.set_depth(Depth::Prompts, cx));
+    draw(cx);
+    let group = transcript
+        .read_with(cx, |this, _| {
+            this.whole_rows().iter().find(|row| matches!(row.kind, super::RowKind::ToolGroup { .. })).map(|row| row.id.clone())
+        })
+        .expect("the run's group");
+    assert!(transcript.read_with(cx, |this, _| !this.rows.iter().any(|row| row.id == group)), "Prompts hides it");
+    cx.update(|window, cx| {
+        transcript.update(cx, |this, cx| {
+            this.open_find(window, cx);
+            this.set_find_filter(Filter { failed: true, kind: None }, window, cx);
+        });
+    });
+    draw(cx);
+    transcript.read_with(cx, |this, _| {
+        assert_eq!(this.depth(), Depth::Steps, "the steps show");
+        assert_eq!(this.folds.get(&group).and_then(|fold| fold.open), Some(true), "its group opens");
+        assert_eq!(this.cursor(), Some(&Cursor { row: group.clone(), step: Some("t2".into()) }), "the cursor on it");
+        assert_eq!(this.find_tally().as_deref(), Some("1 of 1"));
+    });
+}
+
+/// Where the trace holds the keyboard, E goes to the failure, opening its group to land on it;
+/// ↑ and ↓ move over the steps shown and the group's line, and ← on the line folds it.
+#[gpui::test]
+fn the_traces_keys_move_its_cursor_and_e_lands_on_the_failure(cx: &mut gpui::TestAppContext) {
+    use super::trace::Cursor;
+    let (transcript, cx) = open(
+        cx,
+        entry(
+            MessageStatus::Complete,
+            vec![text("Looking."), exec("t1", "cargo test", true, false), exec("t2", "cargo build", true, true), text("Done.")],
+        ),
+    );
+    draw(cx);
+    let group = transcript
+        .read_with(cx, |this, _| {
+            this.rows.iter().find(|row| matches!(row.kind, super::RowKind::ToolGroup { .. })).map(|row| row.id.clone())
+        })
+        .expect("the run's group");
+    cx.update(|window, cx| {
+        let keys = transcript.read(cx).keys_handle();
+        window.focus(&keys, cx);
+    });
+    let at = |cx: &mut VisualTestContext| transcript.read_with(cx, |this, _| this.cursor().cloned());
+    cx.simulate_keystrokes("e");
+    draw(cx);
+    assert_eq!(at(cx), Some(Cursor { row: group.clone(), step: Some("t2".into()) }), "on the failure");
+    assert_eq!(transcript.read_with(cx, |this, _| this.folds.get(&group).and_then(|fold| fold.open)), Some(true));
+    cx.simulate_keystrokes("up");
+    assert_eq!(at(cx), Some(Cursor { row: group.clone(), step: Some("t1".into()) }), "the step before");
+    cx.simulate_keystrokes("up");
+    assert_eq!(at(cx), Some(Cursor { row: group.clone(), step: None }), "its group's line");
+    cx.simulate_keystrokes("left");
+    draw(cx);
+    assert_eq!(transcript.read_with(cx, |this, _| this.folds.get(&group).and_then(|fold| fold.open)), Some(false), "folded");
+    cx.simulate_keystrokes("down");
+    let below = transcript.read_with(cx, |this, _| {
+        let ix = this.rows.iter().position(|row| row.id == group).unwrap();
+        this.rows.get(ix + 1).map(|row| row.id.clone())
+    });
+    assert_eq!(at(cx).map(|cursor| cursor.row), below, "over the folded group to the row under it");
 }

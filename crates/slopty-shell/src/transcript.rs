@@ -67,6 +67,8 @@ mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
 pub mod work;
 pub(crate) mod find;
 mod jump; // slopty: the pill that says what waits below and goes back to it.
+mod turns; // slopty: a turn's root row, its figures under its prompt.
+pub(crate) mod trace; // slopty: the trace's one fold depth.
 pub use extras::{claude_too_old, serve_terminal_runs};
 pub(crate) use subagents::Run;
 pub use find::{FindInThread, FindNext, FindPrevious};
@@ -651,7 +653,7 @@ fn thought_block_lines(block: &Block, indent: usize, out: &mut Vec<Vec<InlineRun
     }
 }
 
-/// A reasoning part as a tool-group chip: "Thought process" header over the
+/// A reasoning part as a tool-group chip: its "Thought for 4s" header over the
 /// thought's markdown flattened into styled detail lines (analytic height —
 /// the group's fold tween needs it; see [`thought_lines`]). Capped like tool
 /// outputs, with the counted tail. `live` = the part is still streaming
@@ -1076,6 +1078,9 @@ pub enum RowKind {
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// slopty: the figures of the turn this prompt opened, which its row says under it
+        /// (`inspector.md`, "The turn is the root row").
+        turn: Option<Arc<slopty_view_doc::TurnFacts>>,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1477,15 +1482,25 @@ pub fn rows_for_entry(
             });
         let attachments = parsed.attachments;
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
+        let turn = entry.parts.iter().find_map(|part| match part {
+            MessagePart::Note { note, .. } => note.turn.as_deref().cloned().map(Arc::new),
+            _ => None,
+        });
+        // slopty: the turn's figures change while it runs, and with them the row.
+        let mut figures = Vec::new();
+        if let Some(turn) = &turn {
+            work::hash_into(&mut figures, turn.as_ref());
+        }
         return vec![Row {
             id: entry.id.clone().into(),
-            version: (raw.len() as u64) << 1 | pending as u64,
+            version: ((raw.len() as u64) << 1 | pending as u64) ^ fnv1a(&figures).rotate_left(17),
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
                 markdown,
                 attachments: Arc::new(attachments),
                 pending,
+                turn,
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -1835,11 +1850,9 @@ pub fn rows_for_entry(
     flush_group(&mut rows, &mut pending_group, group_last_part_ix);
     flush_spawns(&mut rows, &mut pending_spawns);
 
-    // slopty: a settled turn says what it changed, above its done line, which ends it (#4).
-    let done = rows.last().is_some_and(is_done_line);
+    // slopty: a settled turn says what it changed (#4).
     if !streaming && let Some(row) = extras::turn_changes_row(entry) {
-        let at = if done { rows.len() - 1 } else { rows.len() };
-        rows.insert(at, row);
+        rows.push(row);
     }
     if let Some(first) = rows.first_mut() {
         first.turn_start = true;
@@ -1852,22 +1865,12 @@ pub fn rows_for_entry(
         && let Some(last) = rows.last_mut()
         && !matches!(last.kind, RowKind::ForkMarker { .. })
     {
-        // slopty: a done line says when the turn ended; the strip under it does not say it
-        // again (#4).
-        last.timestamp = Some(if done { 0 } else { entry.created_at });
+        last.timestamp = Some(entry.created_at);
         last.copy_text = assistant_copy_text(entry);
         last.version ^= 1 << 62;
     }
     rows
 }
-
-/// slopty: whether `row` is a turn's done line ("Worked for 4s · done 9:00 AM").
-fn is_done_line(row: &Row) -> bool {
-    matches!(&row.kind, RowKind::Notice { note } if note.kind == DONE_NOTE)
-}
-
-/// slopty: the kind of a turn's done line (`slopty_ui::view_model::folds::DONE`).
-const DONE_NOTE: &str = "done";
 
 /// slopty: what a request right after a group holds its open call up for (#3).
 fn waiting_on(next: Option<&MessagePart>) -> Option<&'static str> {
@@ -2369,7 +2372,7 @@ fn past_clauses(tools: &[&ToolItem]) -> Vec<Clause> {
             slopty_view_doc::work::duration_words(ms)
         ))),
         // slopty: a clause says what was done, as its siblings do ("Thought once and ran 1
-        // command"); "Thought process" is a thought's own row, never a clause of a sentence.
+        // command"); "Thought for 4s" is a thought's own row, never a clause of a sentence.
         (_, Some(_)) => clauses.push(Clause::new("thought briefly")),
         (1, None) => clauses.push(Clause::new("thought once")),
         (n, None) => clauses.push(Clause::new(format!("thought {n} times"))),
@@ -3329,6 +3332,18 @@ pub struct Transcript {
     /// slopty: the press under way began on the footer, which is no row: it leaves the follow
     /// rule alone (`inspector.md`, "Follow and anchor": a press in a row lets go).
     footer_press: bool,
+    /// slopty: ⌥ is held where the inspector holds the keyboard: every step's lane says the time
+    /// of day it began (`inspector.md`, "A step row reads at a glance").
+    alt: bool,
+    /// slopty: how much of the trace shows ([`trace::Depth`]).
+    depth: trace::Depth,
+    /// slopty: the trace's place for the keyboard, where its keys reach it, and their cursor.
+    keys: gpui::FocusHandle,
+    cursor: Option<trace::Cursor>,
+    /// slopty: the trace held the keyboard when it last drew, which its cursor's ink says.
+    keys_held: bool,
+    /// slopty: every row of the trace while the depth hides some ([`trace::Depth::Prompts`]).
+    whole: Option<Vec<Row>>,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -3574,8 +3589,8 @@ struct Reveal {
 /// One sidecar blob fetch's lifecycle.
 enum BlobFetch {
     Loading(#[allow(dead_code)] Task<()>),
-    /// Failed with the affordance re-armed as a retry.
-    Failed,
+    /// Failed, saying why, with the affordance re-armed as a retry.
+    Failed(SharedString),
     Ready(Arc<ToolDetail>),
 }
 
@@ -3794,6 +3809,12 @@ impl Transcript {
             retain_on_deselect: false,
             footer: None,
             footer_press: false,
+            alt: false,
+            depth: trace::Depth::default(),
+            keys: cx.focus_handle(),
+            cursor: None,
+            keys_held: false,
+            whole: None,
             doc_live: doc_override.is_some() && follow,
             doc_override,
             saved_viewports: SavedViewportCache::default(),
@@ -3923,6 +3944,15 @@ impl Transcript {
             self.list.remeasure_items(last..last + 1);
         }
         cx.notify();
+    }
+
+    /// slopty: hold ⌥ (`held`) or let it go: while it is held, every step's lane says the time of
+    /// day it began instead of its time, the lanes reserved so nothing moves.
+    pub(crate) fn hold_alt(&mut self, held: bool, cx: &mut Context<Self>) {
+        if self.alt != held {
+            self.alt = held;
+            cx.notify();
+        }
     }
 
     /// slopty: `footer` in a frame that marks a press begun on it, before the transcript's own
@@ -4647,6 +4677,14 @@ impl Transcript {
                 let own = std::mem::take(&mut new_rows);
                 self.nest(own, state, 0, &mut new_rows);
             }
+            // slopty: at Prompts, each turn's root row and its last reply alone; find and the key
+            // to the next failure still look through the whole trace.
+            if self.depth == trace::Depth::Prompts {
+                self.whole = Some(new_rows.clone());
+                new_rows = trace::prompts_only(new_rows, |row| usize::from(self.depth_of(&row.id)));
+            } else {
+                self.whole = None;
+            }
             entries.is_empty()
         };
 
@@ -4956,6 +4994,10 @@ impl Transcript {
             }
         }
         self.rows = new_rows;
+        // slopty: a cursor whose row went (a fold, a depth) goes with it.
+        if self.cursor.as_ref().is_some_and(|cursor| !self.rows.iter().any(|row| row.id == cursor.row)) {
+            self.cursor = None;
+        }
         if old_last != self.rows.len().checked_sub(1) {
             if let Some(ix) = old_last.filter(|&ix| ix < self.rows.len()) {
                 // Bottom chrome moves to the new tail too.
@@ -5037,7 +5079,7 @@ impl Transcript {
                 return;
             }
             Some(BlobFetch::Loading(_)) => return,
-            Some(BlobFetch::Failed) | None => {}
+            Some(BlobFetch::Failed(_)) | None => {}
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
@@ -5060,10 +5102,9 @@ impl Transcript {
                         .and_then(|t| t.as_str())
                         .unwrap_or_default();
                     blob_detail(text, is_diff)
-                        .map(|d| BlobFetch::Ready(Arc::new(d)))
-                        .unwrap_or(BlobFetch::Failed)
+                        .map_or_else(|| BlobFetch::Failed("it came back empty".into()), |d| BlobFetch::Ready(Arc::new(d)))
                 }
-                Err(_) => BlobFetch::Failed,
+                Err(err) => BlobFetch::Failed(SharedString::from(err)),
             };
             this.update(cx, |this, cx| {
                 this.blob_details.insert(ref_key, fetched);
@@ -5220,8 +5261,9 @@ impl Transcript {
     /// slopty: open or shut the group `row_id`, as the person asked: the tween runs from the
     /// height it was drawn at (`open_height` open, none shut).
     fn toggle_fold(&mut self, row_id: SharedString, open_height: f32, cx: &mut Context<Self>) {
+        let all = self.depth == trace::Depth::All;
         let entry = self.folds.entry(row_id.clone()).or_default();
-        let was_open = entry.open.unwrap_or(false);
+        let was_open = entry.open.unwrap_or(all);
         entry.from = if was_open { open_height } else { 0.0 };
         entry.open = Some(!was_open);
         entry.epoch += 1;
@@ -6692,6 +6734,7 @@ impl Transcript {
         // transcript is pinned to the bottom.
         // slopty: no composer stack under it to clear as well.
         let is_last = ix + 1 == self.rows.len();
+        let cursor_here = self.cursor.as_ref().is_some_and(|cursor| cursor.row == row.id && cursor.step.is_none());
         let bottom_pad = if is_last {
             Theme::TRANSCRIPT_FADE_BAND + 8.0
         } else {
@@ -6742,9 +6785,6 @@ impl Transcript {
         let beside_bubble = !TOUCH
             && !task
             && matches!(&row.kind, RowKind::User { text, .. } if !text.is_empty());
-        // slopty: a turn's done line says when it ended, so its Copy rides at the end of its
-        // words, not alone in a lane under them (#7).
-        let on_done_line = is_done_line(&row);
         // slopty: a run in its card shows its work, not its messages' times and actions; a run's
         // task, which the person never sent, has none either.
         let strip = row
@@ -6815,9 +6855,6 @@ impl Transcript {
             // slopty: TUI-first: the TUI goes back to a message (`/rewind`), not the record.
             // slopty: unseen until hovered or focused, but there for the keyboard (#9).
             let metadata = metadata.opacity(strip_t).into_any_element();
-            if on_done_line {
-                return div().flex_none().child(metadata).into_any_element();
-            }
             if beside_bubble {
                 // slopty: at the bubble's foot, to its left, drawn over the gutter (#1).
                 return div()
@@ -6849,7 +6886,6 @@ impl Transcript {
                 .into_any_element()
         });
         let (mut beside, strip) = if beside_bubble { (strip, None) } else { (None, strip) };
-        let (mut done_trailing, strip) = if on_done_line { (strip, None) } else { (None, strip) };
 
         let inner: AnyElement = match &row.kind {
             RowKind::User {
@@ -6857,6 +6893,7 @@ impl Transcript {
                 markdown,
                 attachments,
                 pending,
+                turn,
             } => {
                 let attachments = attachments.clone();
                 let text = text.clone();
@@ -6957,6 +6994,11 @@ impl Transcript {
                         .child(bubble)
                         .children(beside.take());
                     column = column.child(div().w_full().flex().justify_end().child(foot));
+                }
+                // slopty: a session's prompt is its turn's root row: the turn's figures under it,
+                // on a line always there (`inspector.md`, "The turn is the root row").
+                if depth == 0 && !task {
+                    column = column.child(self.render_turn_line(&row.id, turn.as_deref(), &theme, cx));
                 }
                 column.into_any_element()
             }
@@ -7137,7 +7179,7 @@ impl Transcript {
             | RowKind::TurnChanges { .. } => self.render_extra_row(&row, &theme, cx),
             RowKind::TaskNote { task } => self.render_task_note(&row, task, &theme, cx),
             RowKind::Notice { note } => {
-                self.render_notice(&row, note, done_trailing.take(), &theme, cx)
+                self.render_notice(&row, note, &theme, cx)
             }
             RowKind::Page { owner, card } => self.render_page(&row, owner, card, window, cx),
         };
@@ -7216,8 +7258,17 @@ impl Transcript {
         };
         let entry_id = row.entry_id.clone();
         let row_id = row.id.clone();
+        let pressed_row = row.id.clone();
         let outer = div()
             .id(row.id.clone())
+            // slopty: a press puts the keyboard's cursor on its row (`transcript/trace.rs`).
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
+                let here = trace::Cursor { row: pressed_row.clone(), step: None };
+                if this.cursor.as_ref() != Some(&here) {
+                    this.cursor = Some(here);
+                    cx.notify();
+                }
+            }))
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if *hovered {
                     let next = Some((row_id.clone(), entry_id.clone()));
@@ -7281,6 +7332,8 @@ impl Transcript {
                                     }))
                             })
                             .child(inner)
+                            // slopty: the keyboard's cursor on this row (`transcript/trace.rs`).
+                            .when(cursor_here, |column| column.child(cursor_bar(self.keys_held, &theme)))
                             .children(lane),
                     )
                     .children(self.footer.clone().filter(|_| is_last).map(|footer| Self::footer_frame(footer, cx))),
@@ -7516,7 +7569,7 @@ impl Transcript {
         let (collapses, solo) = group_shape(tools);
         // slopty: a group opens only as the person asks; nothing opens it by itself, not a
         // running call and not one arriving (`inspector.md`, "One fold depth").
-        let open = solo || !collapses || fold.open.unwrap_or(false);
+        let open = solo || !collapses || self.steps_shown(fold.open);
         if collapses {
             let reveal = self.tool_group_reveals.entry(row_id.clone()).or_default();
             if reveal
@@ -7533,6 +7586,7 @@ impl Transcript {
         // The title shimmer reads "working" while any call or thought of the group still runs.
         // Compute this before the collapsed-body skip, which may empty `tools`.
         let active = collapses && tools.iter().any(|t| !t.resolved);
+        let all_tools = tools.clone();
 
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
@@ -7608,7 +7662,7 @@ impl Transcript {
                 ];
                 for (blob_ref, what, bytes) in candidates {
                     let Some(blob_ref) = blob_ref else { continue };
-                    let retry = matches!(self.blob_details.get(blob_ref), Some(BlobFetch::Failed));
+                    let retry = matches!(self.blob_details.get(blob_ref), Some(BlobFetch::Failed(_)));
                     let label = match self.blob_details.get(blob_ref) {
                         Some(BlobFetch::Ready(_)) => {
                             if shown == Some(blob_ref) {
@@ -7618,7 +7672,7 @@ impl Transcript {
                         }
                         Some(BlobFetch::Loading(_)) => format!("Loading full {what}…"),
                         // slopty: what happened, then one action (#18).
-                        Some(BlobFetch::Failed) => format!("Couldn't load the full {what}."),
+                        Some(BlobFetch::Failed(why)) => format!("Couldn't load {what}: {why}"),
                         None => match bytes {
                             // slopty: one size formatter ("12.3 KB").
                             Some(b) => format!("Show full {what} ({})", slopty_view_doc::bytes_short(b)),
@@ -7703,6 +7757,8 @@ impl Transcript {
                             } else {
                                 0.0
                             }
+                            + detail_lines(tool, detail.is_some() || affordance.is_some()) as f32
+                                * BLOB_AFFORDANCE_HEIGHT
                     } else {
                         base_row_height
                     };
@@ -7861,8 +7917,37 @@ impl Transcript {
                     .child(rolled_summary.unwrap_or_else(|| {
                         tool_group_title(summary.text.clone(), &summary.marks, shimmer_phase, theme)
                     })),
-            );
+            )
+            // slopty: its span in the time lane every step row keeps, and its mark only when all
+            // its calls failed: the sentence names failures otherwise (`inspector.md`, "Runs of
+            // calls fold to one sentence").
+            .child(div().flex_1())
+            .when(group_failed(&all_tools), |header| {
+                header.child(div().flex_none().child(
+                    crate::loaders::status_mark::StatusMark::new(
+                        SharedString::from(format!("{row_id}-mark")),
+                        crate::loaders::status_mark::MarkState::Failed,
+                    )
+                    .size(crate::loaders::status_mark::MARK_SMALL),
+                ))
+            })
+            .child({
+                let running = all_tools.iter().any(|tool| !tool.resolved);
+                let span = work::span(
+                    all_tools.iter().filter_map(|tool| tool.facts.as_ref().and_then(|facts| facts.time.as_ref())),
+                    running,
+                );
+                chip_facts.lane(row_id, span.as_ref(), None, !running, theme)
+            });
 
+        // slopty: where the keyboard's cursor stands among the steps (`transcript/trace.rs`).
+        let cursor_step = self
+            .cursor
+            .as_ref()
+            .filter(|cursor| &cursor.row == row_id)
+            .and_then(|cursor| cursor.step.as_ref())
+            .and_then(|step| tools.iter().position(|tool| &tool.part_id == step));
+        let keys_held = self.keys_held;
         let chips = div()
             .pt(px(CHIPS_TOP_PAD))
             .flex()
@@ -8024,6 +8109,8 @@ impl Transcript {
                                 theme,
                             ));
                     }
+                    // slopty: an output that never came says so, and when the step ran closes it.
+                    let said_none = no_output(tool, detail.is_some() || affordance.is_some());
                     if let Some(ChipAffordance { blob_ref, label, retry }) = affordance {
                         let loading = matches!(
                             self.blob_details.get(&blob_ref),
@@ -8049,7 +8136,7 @@ impl Transcript {
                                 // slopty: its Retry says what it fetches again (#18).
                                 .aria_label(if retry {
                                     SharedString::from(
-                                        label.replace("Couldn't load", "Retry loading").trim_end_matches('.').to_owned(),
+                                        label.replace("Couldn't load", "Retry loading").split(':').next().unwrap_or_default().to_owned(),
                                     )
                                 } else {
                                     label
@@ -8063,6 +8150,13 @@ impl Transcript {
                                 }));
                         }
                         panel = panel.child(row);
+                    }
+                    if said_none {
+                        panel = panel.child(detail_line(&format!("{key}-none"), None, "No output".into(), theme));
+                    }
+                    if let Some(time) = step_time(tool) {
+                        let words = work::timing_words(time, &chrono::Local);
+                        panel = panel.child(detail_line(&format!("{key}-timing"), Some("Timing"), words.into(), theme));
                     }
                     card = card.child(panel);
                 }
@@ -8096,6 +8190,13 @@ impl Transcript {
                     }))
                     .into_any_element();
                 reveal_tool_row(row, row_height, reveal)
+            }).enumerate().map(|(ix, step)| {
+                // slopty: the keyboard's cursor on a step of the group.
+                if Some(ix) == cursor_step {
+                    div().relative().child(step).child(cursor_bar(keys_held, theme)).into_any_element()
+                } else {
+                    step
+                }
             }));
 
         let chips = chips.into_any_element();
@@ -8882,7 +8983,8 @@ fn detail_body(
     }
 }
 
-/// The counted-tail row under a truncated Output/Thought detail.
+/// The counted-tail row under a truncated Output/Thought detail: the lines past its size gate,
+/// which "Show full output" brings when there is more to fetch.
 fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
     div()
         .h(px(OUTPUT_LINE_HEIGHT))
@@ -8890,7 +8992,46 @@ fn more_lines_row(truncated_by: usize, theme: &Theme) -> gpui::Div {
         .items_center()
         .text_size(px(TOOL_TEXT_SIZE))
         .text_color(theme.text_faint)
-        .child(SharedString::from(format!("… {truncated_by} more lines")))
+        .child(SharedString::from(format!("+ {truncated_by} lines")))
+}
+
+/// slopty: when step `tool` ran, as its records say.
+fn step_time(tool: &ToolItem) -> Option<&slopty_view_doc::StepTime> {
+    tool.facts.as_ref().and_then(|facts| facts.time.as_ref())
+}
+
+/// slopty: an open step that ended with nothing to show (`has_output`: an output, or one to
+/// fetch) says "No output" rather than nothing (`inspector.md`, "Any step opens to its whole
+/// detail").
+fn no_output(tool: &ToolItem, has_output: bool) -> bool {
+    tool.resolved && tool.kind == ToolItemKind::Call && !has_output && !chip_has_images(tool)
+}
+
+/// slopty: the one-line rows an open step's detail ends on: "No output", and its Timing.
+fn detail_lines(tool: &ToolItem, has_output: bool) -> usize {
+    usize::from(no_output(tool, has_output)) + usize::from(step_time(tool).is_some())
+}
+
+/// slopty: one of those rows, [`BLOB_AFFORDANCE_HEIGHT`] tall: its section's name, then its words,
+/// cut short where the pane is narrow.
+fn detail_line(id: &str, section: Option<&'static str>, words: SharedString, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .h(px(BLOB_AFFORDANCE_HEIGHT))
+        .flex_none()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(TOOL_TEXT_SIZE))
+        .text_color(theme.text_faint)
+        .role(gpui::Role::Paragraph)
+        .aria_label(match section {
+            Some(section) => SharedString::from(format!("{section}: {words}")),
+            None => words.clone(),
+        })
+        .when_some(section, |line, section| line.child(div().flex_none().text_color(theme.text_muted).child(section)))
+        .child(div().min_w_0().truncate().child(words))
 }
 
 /// Shape one flattened thought line into gpui text runs — the detail-body
@@ -8984,13 +9125,18 @@ impl ToolFileOpener {
 /// "src/main.rs"), in the TUI's words where the call has them.
 fn chip_words(tool: &ToolItem) -> (String, String) {
     let (label, detail) = match tool.kind {
-        ToolItemKind::Thought => ("Thought process", String::new()),
-        ToolItemKind::Call => tool_chip_content(&tool.call),
+        // slopty: a thought is a step too, said as the TUI says it: "Thinking" while it runs,
+        // then how long it took (`inspector.md`, "Runs of calls fold to one sentence").
+        ToolItemKind::Thought => (thought_words(tool), String::new()),
+        ToolItemKind::Call => {
+            let (label, detail) = tool_chip_content(&tool.call);
+            (label.to_owned(), detail)
+        }
     };
     // slopty: a call zeron draws as `Tool · {name}` says itself in the TUI's words.
     let (label, detail) = match tool.facts.as_ref().and_then(|facts| facts.title.as_deref()) {
         Some(title) if tool.kind == ToolItemKind::Call => (title.to_owned(), String::new()),
-        _ => (label.to_owned(), detail),
+        _ => (label, detail),
     };
     // slopty: a file's path as the TUI shows it: relative to the chat's folder, its middle cut.
     let detail = match tool.facts.as_ref().and_then(|facts| facts.detail.as_deref()) {
@@ -9000,7 +9146,18 @@ fn chip_words(tool: &ToolItem) -> (String, String) {
     (label, detail)
 }
 
-/// slopty: a call's row as assistive tech names it: "{verb} {target}" (#10).
+/// slopty: a thought's row: "Thinking" while it runs, "Thought for 4s" once it said how long,
+/// "Thought briefly" under a second, else "Thought".
+fn thought_words(tool: &ToolItem) -> String {
+    if !tool.resolved {
+        return "Thinking".to_owned();
+    }
+    match tool.facts.as_ref().and_then(|facts| facts.thought_ms) {
+        Some(ms) if ms >= 1_000 => format!("Thought for {}", slopty_view_doc::duration_words(ms)),
+        Some(_) => "Thought briefly".to_owned(),
+        None => "Thought".to_owned(),
+    }
+}
 fn chip_name(tool: &ToolItem) -> SharedString {
     let (label, detail) = chip_words(tool);
     let detail = single_line(&detail);
@@ -9307,6 +9464,52 @@ fn chip_header_row(
                 ),
             })
         })
+        // slopty: a step that ended badly says so with its mark, and its time stands in its lane
+        // at the trailing edge (`inspector.md`, "A step row reads at a glance").
+        .when(activity && step_failed(tool), |row| {
+            row.child(div().flex_none().child(
+                crate::loaders::status_mark::StatusMark::new(
+                    SharedString::from(format!("{}-mark", tool.part_id)),
+                    crate::loaders::status_mark::MarkState::Failed,
+                )
+                .size(crate::loaders::status_mark::MARK_SMALL),
+            ))
+        })
+        .when_some(facts.filter(|_| activity), |row, chip| {
+            let said = tool.facts.as_deref();
+            row.child(chip.lane(
+                &tool.part_id,
+                said.and_then(|facts| facts.time.as_ref()),
+                said.and_then(|facts| facts.timer.as_ref()),
+                tool.resolved,
+                theme,
+            ))
+        })
+}
+
+/// slopty: the keyboard's cursor: a bar in the gutter at the left of the row or step it stands
+/// on, in the accent while the trace holds the keyboard, faint while it does not.
+fn cursor_bar(held: bool, theme: &Theme) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(2.0))
+        .bottom(px(2.0))
+        .left(px(-8.0))
+        .w(px(2.0))
+        .rounded(px(1.0))
+        .bg(if held { theme.accent } else { theme.text_faint })
+}
+
+/// slopty: whether a group ended badly: every call in it failed (`inspector.md`, "A group failed
+/// only if all of its calls failed").
+fn group_failed(tools: &[ToolItem]) -> bool {
+    let mut calls = tools.iter().filter(|tool| tool.kind == ToolItemKind::Call).peekable();
+    calls.peek().is_some() && calls.all(step_failed)
+}
+
+/// slopty: whether step `tool` ended badly: it failed, not by the person's own Deny.
+fn step_failed(tool: &ToolItem) -> bool {
+    tool.kind == ToolItemKind::Call && tool.is_error && !denied(tool)
 }
 
 /// The header row of an expandable chip card.
@@ -9753,6 +9956,8 @@ impl Render for Transcript {
         self.page_viewport = self.list.viewport_bounds();
         // slopty: a phone's window keeps the platform's margins (`row_inset`).
         self.subagents.window = window.viewport_size();
+        // slopty: the cursor's ink says whether the trace holds the keyboard.
+        self.keys_held = self.keys.is_focused(window);
         // slopty: the list stopped following on an input of its own (its scrollbar's drag), so
         // the rule lets go too.
         if self.pinned && !self.list.is_following_tail() {
@@ -9907,6 +10112,10 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
+            // slopty: the trace's own place for the keyboard, which a press in it takes, as a
+            // split's does, and its keys (`transcript/trace.rs`).
+            .track_focus(&self.keys)
+            .on_key_down(cx.listener(Self::trace_key))
             // slopty: every press starts off no footer's; the footer's own frame says otherwise
             // before the press handler below hears it.
             .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.footer_press = false))

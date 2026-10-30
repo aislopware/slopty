@@ -665,6 +665,7 @@ fn step_time(
         started,
         ended: call.ended_ms.map(at).filter(|ended| *ended != 0),
         ran_ms: note.and_then(|n| n.ran_ms),
+        turn_started: None,
     })
 }
 
@@ -1024,6 +1025,7 @@ pub fn note_row(
         detail: None,
         retry: None,
         recovered: false,
+        turn: None,
     };
     Some(match notice.kind.as_str() {
         Notice::API_ERROR => {

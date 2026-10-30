@@ -82,7 +82,7 @@ impl Transcript {
             return false;
         };
         let (collapses, solo) = super::group_shape(tools);
-        collapses && !solo && self.folds.get(&row.id).and_then(|fold| fold.open).unwrap_or(false)
+        collapses && !solo && self.steps_shown(self.folds.get(&row.id).and_then(|fold| fold.open))
     }
 
     /// Fold the group headed at row `ix` and glide back to it.
@@ -252,6 +252,7 @@ mod tests {
                     markdown: None,
                     attachments: Arc::default(),
                     pending: false,
+                    turn: None,
                 },
                 None => RowKind::ErrorChip {
                     message: SharedString::from(format!("Line {ix} of the long answer")),

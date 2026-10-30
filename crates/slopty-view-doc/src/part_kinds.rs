@@ -88,6 +88,10 @@ pub struct StepTime {
     /// person's permission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ran_ms: Option<u64>,
+    /// When the turn it ran in began, in ms since the epoch: its row's tooltip says its start
+    /// from there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started: Option<i64>,
 }
 
 impl StepTime {
@@ -281,9 +285,73 @@ pub struct NoteRow {
     /// counts down no more.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recovered: bool,
+    /// For a row of kind [`TurnFacts::KIND`], in the entry of the prompt that opened a turn: the
+    /// turn's figures, which that prompt's row carries. It draws no row of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<Box<TurnFacts>>,
 }
 
 impl NoteRow {
     /// Something that went well (a goal met, a request that recovered).
     pub const SUCCESS: &'static str = "success";
+}
+
+/// A turn's figures, on the row of the prompt that opened it (`docs/decisions/inspector.md`,
+/// "The turn is the root row"): how it stands, when it ran, the models that answered, the tokens
+/// it took by kind and the lines it changed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnFacts {
+    /// How it stands: [`TurnFacts::ACTIVE`], [`TurnFacts::COMPLETE`],
+    /// [`TurnFacts::INTERRUPTED`] or [`TurnFacts::FAILED`].
+    pub state: String,
+    /// What went wrong, as the agent said it, when it failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// When it began, in ms since the epoch.
+    pub started: i64,
+    /// When it ended, in ms since the epoch; `None` while it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<i64>,
+    /// The models that answered in it, in the order they first did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
+    /// The tokens it took, by kind as its agent counts them: `input`, `output`, `cache-read`,
+    /// `cache-write`, `reasoning` and any other the agent names.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub tokens: std::collections::BTreeMap<String, u64>,
+    /// The lines added and removed in the working tree over it.
+    #[serde(default)]
+    pub changed: [u32; 2],
+}
+
+impl TurnFacts {
+    /// The [`NoteRow::kind`] that carries a turn's figures.
+    pub const KIND: &'static str = "turn-root";
+    /// Under way.
+    pub const ACTIVE: &'static str = "active";
+    /// The agent answered.
+    pub const COMPLETE: &'static str = "complete";
+    /// The person stopped it.
+    pub const INTERRUPTED: &'static str = "interrupted";
+    /// It ended on an error.
+    pub const FAILED: &'static str = "failed";
+
+    /// How long it ran, until `now` while it runs.
+    #[must_use]
+    pub fn ran_ms(&self, now: i64) -> u64 {
+        u64::try_from(self.ended.unwrap_or(now).saturating_sub(self.started)).unwrap_or(0)
+    }
+
+    /// The tokens it read fresh, from the cache, and wrote: what its row says, the split by
+    /// every kind going in its tooltip.
+    #[must_use]
+    pub fn tokens_in_cached_out(&self) -> [u64; 3] {
+        let of = |kind: &str| self.tokens.get(kind).copied().unwrap_or(0);
+        [
+            of("input").saturating_add(of("cache-write")),
+            of("cache-read"),
+            of("output"),
+        ]
+    }
 }
