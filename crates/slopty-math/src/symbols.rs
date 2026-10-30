@@ -5,7 +5,7 @@ use crate::ast::Class;
 
 /// A symbol command's code point and atom class.
 pub(crate) fn symbol(name: &str) -> Option<(char, Class)> {
-    use Class::*;
+    use Class::{Bin, Close, Inner, Open, Ord, Punct, Rel};
     Some(match name {
         // Greek (letters are Ord; the alphabet picks italic/upright).
         "alpha" => ('α', Ord),
@@ -358,10 +358,10 @@ pub(crate) fn accent(name: &str) -> Option<(char, bool)> {
     })
 }
 
-/// Delimiter names usable after `\left`, `\right`, `\big`, …; `None` is the
-/// null delimiter `.`.
-pub(crate) fn delimiter_command(name: &str) -> Option<Option<char>> {
-    Some(Some(match name {
+/// Delimiter names usable after `\left`, `\right`, `\big`, … (the null
+/// delimiter `.` is a character).
+pub(crate) fn delimiter_command(name: &str) -> Option<char> {
+    Some(match name {
         "{" | "lbrace" => '{',
         "}" | "rbrace" => '}',
         "|" | "Vert" | "lVert" | "rVert" => '‖',
@@ -384,23 +384,25 @@ pub(crate) fn delimiter_command(name: &str) -> Option<Option<char>> {
         "Downarrow" => '⇓',
         "Updownarrow" => '⇕',
         _ => return None,
-    }))
+    })
 }
 
-pub(crate) fn delimiter_char(ch: char) -> Option<Option<char>> {
+/// A delimiter typed as itself, `<` and `>` standing for angle brackets (the
+/// parser reads `.`, the null delimiter, apart).
+pub(crate) const fn delimiter_char(ch: char) -> Option<char> {
     Some(match ch {
-        '.' => None,
-        '(' | ')' | '[' | ']' | '|' | '/' => Some(ch),
-        '<' => Some('⟨'),
-        '>' => Some('⟩'),
-        '⟨' | '⟩' | '⌊' | '⌋' | '⌈' | '⌉' | '‖' | '{' | '}' => Some(ch),
+        '(' | ')' | '[' | ']' | '|' | '/' | '⟨' | '⟩' | '⌊' | '⌋' | '⌈' | '⌉' | '‖' | '{' | '}' => {
+            ch
+        }
+        '<' => '⟨',
+        '>' => '⟩',
         _ => return None,
     })
 }
 
 /// Class of a literal character typed in math mode.
 pub(crate) fn char_class(ch: char) -> (char, Class) {
-    use Class::*;
+    use Class::{Bin, Close, Open, Ord, Punct, Rel};
     match ch {
         '+' => ('+', Bin),
         '-' | '−' => ('−', Bin),
@@ -414,8 +416,8 @@ pub(crate) fn char_class(ch: char) -> (char, Class) {
 }
 
 /// Unicode math typed directly (`≤`, `→`, `×`): classify like its command.
-fn reverse_class(ch: char) -> Option<Class> {
-    use Class::*;
+const fn reverse_class(ch: char) -> Option<Class> {
+    use Class::{Bin, Close, Open, Rel};
     Some(match ch {
         '±' | '∓' | '×' | '÷' | '⋅' | '∘' | '∙' | '∩' | '∪' | '∨' | '∧' | '⊕' | '⊗' | '⊖' | '⊙' => {
             Bin

@@ -84,7 +84,7 @@ pub(crate) enum Node {
         class: Option<Class>,
     },
     Scripts {
-        base: Box<Node>,
+        base: Box<Self>,
         sup: Option<List>,
         sub: Option<List>,
     },
@@ -156,7 +156,7 @@ pub(crate) enum Node {
     Style(Style),
     Text {
         text: String,
-        variant: crate::unicode::Variant,
+        variant: Variant,
         at: u32,
     },
     Phantom {
@@ -166,12 +166,12 @@ pub(crate) enum Node {
     },
     Boxed(List),
     /// `\not` over the next atom.
-    Not(Box<Node>),
+    Not(Box<Self>),
     Array(Array),
 }
 
 impl Node {
-    pub(crate) fn group(body: List) -> Node {
-        Node::Group { body, class: None }
+    pub(crate) const fn group(body: List) -> Self {
+        Self::Group { body, class: None }
     }
 }

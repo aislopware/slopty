@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::ast::{Align, Array, ArrayKind, Class, Dim, List, Node, Style};
 use crate::unicode::Variant;
-use crate::{Error, ErrorKind, symbols};
+use crate::{ErrorKind, LayoutError, symbols};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tok<'a> {
@@ -44,7 +44,7 @@ enum Infix {
     Choose,
 }
 
-pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
+pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, LayoutError> {
     let mut p = Parser { src, pos: 0, depth: 0, max_depth, variant: Variant::Normal };
     let mut rows: Vec<Vec<List>> = Vec::new();
     let mut row: Vec<List> = Vec::new();
@@ -64,12 +64,7 @@ pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
                 gaps.push(gap);
                 lines = true;
             }
-            Ended::Brace => return Err(Error::new(ErrorKind::Unexpected("}".into()), r)),
-            Ended::Right => return Err(Error::new(ErrorKind::Unexpected("\\right".into()), r)),
-            Ended::End(name) => {
-                return Err(Error::new(ErrorKind::Unexpected(format!("\\end{{{name}}}")), r));
-            }
-            Ended::Bracket => unreachable!("brackets only end optional arguments"),
+            other => return Err(LayoutError::new(ErrorKind::Unexpected(describe(&other)), r)),
         }
     }
     if !lines && !columns {
@@ -90,7 +85,7 @@ pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
 
 /// A trailing `\\` leaves an empty last row; drop it.
 fn trim_last_row(rows: &mut Vec<Vec<List>>) {
-    if rows.len() > 1 && rows.last().is_some_and(|r| r.iter().all(|c| c.is_empty())) {
+    if rows.len() > 1 && rows.last().is_some_and(|r| r.iter().all(Vec::is_empty)) {
         rows.pop();
     }
 }
@@ -106,16 +101,21 @@ struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn rest(&self) -> &'a str {
-        &self.src[self.pos..]
+        self.src.get(self.pos..).unwrap_or_default()
+    }
+
+    /// Moves past `by` bytes of the source.
+    const fn advance(&mut self, by: usize) {
+        self.pos = self.pos.saturating_add(by);
     }
 
     fn skip_ws(&mut self) {
         loop {
             let rest = self.rest();
             let trimmed = rest.trim_start();
-            self.pos += rest.len() - trimmed.len();
+            self.advance(rest.len().saturating_sub(trimmed.len()));
             if trimmed.starts_with('%') {
-                self.pos += trimmed.find('\n').unwrap_or(trimmed.len());
+                self.advance(trimmed.find('\n').unwrap_or(trimmed.len()));
             } else {
                 break;
             }
@@ -128,7 +128,7 @@ impl<'a> Parser<'a> {
         let Some(ch) = self.rest().chars().next() else {
             return (Tok::Eof, start..start);
         };
-        self.pos += ch.len_utf8();
+        self.advance(ch.len_utf8());
         let tok = match ch {
             '\\' => {
                 let rest = self.rest();
@@ -137,12 +137,12 @@ impl<'a> Parser<'a> {
                     Some(c) if c.is_ascii_alphabetic() => {
                         let len =
                             rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
-                        self.pos += len;
-                        Tok::Cmd(&rest[..len])
+                        self.advance(len);
+                        Tok::Cmd(rest.get(..len).unwrap_or_default())
                     }
                     Some(c) => {
-                        self.pos += c.len_utf8();
-                        Tok::Cmd(&rest[..c.len_utf8()])
+                        self.advance(c.len_utf8());
+                        Tok::Cmd(rest.get(..c.len_utf8()).unwrap_or_default())
                     }
                 }
             }
@@ -167,23 +167,28 @@ impl<'a> Parser<'a> {
     /// Consumes `*` right after a command (`\operatorname*`).
     fn star(&mut self) -> bool {
         if self.rest().starts_with('*') {
-            self.pos += 1;
+            self.advance(1);
             true
         } else {
             false
         }
     }
 
-    fn deeper(&mut self, range: &Range<usize>) -> Result<(), Error> {
-        self.depth += 1;
+    fn deeper(&mut self, range: &Range<usize>) -> Result<(), LayoutError> {
+        self.depth = self.depth.saturating_add(1);
         if self.depth > self.max_depth {
-            return Err(Error::new(ErrorKind::TooDeep, range.clone()));
+            return Err(LayoutError::new(ErrorKind::TooDeep, range.clone()));
         }
         Ok(())
     }
 
+    /// Leaves the level [`Self::deeper`] entered.
+    const fn shallower(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
     /// Parses a math list up to whatever ends it.
-    fn list(&mut self, bracket: bool) -> Result<(List, Ended<'a>, Range<usize>), Error> {
+    fn list(&mut self, bracket: bool) -> Result<(List, Ended<'a>, Range<usize>), LayoutError> {
         let saved = self.variant;
         let mut list: List = Vec::new();
         let mut infix: Option<(Infix, List, Range<usize>)> = None;
@@ -196,9 +201,7 @@ impl<'a> Parser<'a> {
                 Tok::Char(']') if bracket => Some(Ended::Bracket),
                 Tok::Cmd("right") => Some(Ended::Right),
                 Tok::Cmd("end") => Some(Ended::End(self.env_name(&range)?)),
-                Tok::Cmd("\\") | Tok::Cmd("cr") | Tok::Cmd("newline") => {
-                    Some(Ended::Newline(self.row_gap(&range)?))
-                }
+                Tok::Cmd("\\" | "cr" | "newline") => Some(Ended::Newline(self.row_gap(&range)?)),
                 _ => None,
             };
             if let Some(ended) = ended {
@@ -210,10 +213,10 @@ impl<'a> Parser<'a> {
                     attach(&mut list, tok == Tok::Sup, arg, &range)?;
                 }
                 Tok::Prime => {
-                    let mut n = 1;
+                    let mut n = 1_usize;
                     while self.peek() == Tok::Prime {
                         self.next();
-                        n += 1;
+                        n = n.saturating_add(1);
                     }
                     let primes = match n {
                         1 => vec!['′'],
@@ -221,20 +224,24 @@ impl<'a> Parser<'a> {
                         3 => vec!['‴'],
                         _ => vec!['′'; n],
                     };
+                    let at = offset(range.start);
                     let arg = primes
                         .into_iter()
                         .map(|ch| Node::Char {
                             ch,
                             class: Class::Ord,
                             variant: Variant::Upright,
-                            at: range.start as u32,
+                            at,
                         })
                         .collect();
                     attach(&mut list, true, arg, &range)?;
                 }
                 Tok::Cmd(name @ ("over" | "atop" | "choose")) => {
                     if infix.is_some() {
-                        return Err(Error::new(ErrorKind::Unexpected(format!("\\{name}")), range));
+                        return Err(LayoutError::new(
+                            ErrorKind::Unexpected(format!("\\{name}")),
+                            range,
+                        ));
                     }
                     let kind = match name {
                         "over" => Infix::Over,
@@ -250,7 +257,7 @@ impl<'a> Parser<'a> {
                             *limits = value;
                         }
                         _ => {
-                            return Err(Error::new(
+                            return Err(LayoutError::new(
                                 ErrorKind::Unexpected(format!("\\{name}")),
                                 range,
                             ));
@@ -279,168 +286,175 @@ impl<'a> Parser<'a> {
     }
 
     /// `{…}` after its opening brace.
-    fn group_body(&mut self, open: &Range<usize>) -> Result<List, Error> {
+    fn group_body(&mut self, open: &Range<usize>) -> Result<List, LayoutError> {
         self.deeper(open)?;
         let (list, ended, range) = self.list(false)?;
-        self.depth -= 1;
+        self.shallower();
         match ended {
             Ended::Brace => Ok(list),
-            Ended::Eof => Err(Error::new(ErrorKind::MissingBrace, open.clone())),
-            other => Err(Error::new(ErrorKind::Unexpected(describe(&other)), range)),
+            Ended::Eof => Err(LayoutError::new(ErrorKind::MissingBrace, open.clone())),
+            other => Err(LayoutError::new(ErrorKind::Unexpected(describe(&other)), range)),
         }
     }
 
     /// One argument: a `{group}` or a single token.
-    fn arg(&mut self, cmd: &Range<usize>) -> Result<List, Error> {
+    fn arg(&mut self, cmd: &Range<usize>) -> Result<List, LayoutError> {
         let (tok, range) = self.next();
         match tok {
             Tok::Open => self.group_body(&range),
             Tok::Char(_) | Tok::Cmd(_) if !matches!(tok, Tok::Cmd("\\" | "right" | "end")) => {
                 Ok(self.atom(tok, range)?.into_iter().collect())
             }
-            _ => Err(Error::new(ErrorKind::MissingArgument, cmd.clone())),
+            _ => Err(LayoutError::new(ErrorKind::MissingArgument, cmd.clone())),
         }
     }
 
     /// `[…]` if present.
-    fn optional(&mut self) -> Result<Option<List>, Error> {
+    fn optional(&mut self) -> Result<Option<List>, LayoutError> {
         if self.peek() != Tok::Char('[') {
             return Ok(None);
         }
         let (_, open) = self.next();
         self.deeper(&open)?;
         let (list, ended, range) = self.list(true)?;
-        self.depth -= 1;
+        self.shallower();
         match ended {
             Ended::Bracket => Ok(Some(list)),
-            Ended::Eof => Err(Error::new(ErrorKind::MissingBracket, open)),
-            other => Err(Error::new(ErrorKind::Unexpected(describe(&other)), range)),
+            Ended::Eof => Err(LayoutError::new(ErrorKind::MissingBracket, open)),
+            other => Err(LayoutError::new(ErrorKind::Unexpected(describe(&other)), range)),
         }
     }
 
     /// Raw text of a `{…}` argument (balanced braces), with its range.
-    fn raw_group(&mut self, cmd: &Range<usize>) -> Result<(&'a str, Range<usize>), Error> {
+    fn raw_group(&mut self, cmd: &Range<usize>) -> Result<(&'a str, Range<usize>), LayoutError> {
         self.skip_ws();
         if !self.rest().starts_with('{') {
-            return Err(Error::new(ErrorKind::MissingArgument, cmd.clone()));
+            return Err(LayoutError::new(ErrorKind::MissingArgument, cmd.clone()));
         }
         let start = self.pos;
-        let body = start + 1;
-        let mut depth = 0usize;
+        let rest = self.rest();
+        let mut depth = 0_usize;
         let mut escaped = false;
-        for (i, ch) in self.rest().char_indices() {
+        for (i, ch) in rest.char_indices() {
             if escaped {
                 escaped = false;
                 continue;
             }
             match ch {
                 '\\' => escaped = true,
-                '{' => depth += 1,
+                '{' => depth = depth.saturating_add(1),
                 '}' => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        self.pos = start + i + 1;
-                        return Ok((&self.src[body..start + i], start..self.pos));
+                        // Past the closing brace, one byte.
+                        self.advance(i.saturating_add(1));
+                        return Ok((rest.get(1..i).unwrap_or_default(), start..self.pos));
                     }
                 }
                 _ => {}
             }
         }
-        Err(Error::new(ErrorKind::MissingBrace, start..start + 1))
+        Err(LayoutError::new(ErrorKind::MissingBrace, start..start.saturating_add(1)))
     }
 
-    fn env_name(&mut self, cmd: &Range<usize>) -> Result<&'a str, Error> {
+    fn env_name(&mut self, cmd: &Range<usize>) -> Result<&'a str, LayoutError> {
         let (raw, _) = self.raw_group(cmd)?;
         Ok(raw.trim())
     }
 
     /// `\\[4pt]`: extra space after a row, in ems.
-    fn row_gap(&mut self, cmd: &Range<usize>) -> Result<f32, Error> {
+    fn row_gap(&mut self, cmd: &Range<usize>) -> Result<f32, LayoutError> {
         let pos = self.pos;
         self.skip_ws();
         if !self.rest().starts_with('[') {
             self.pos = pos;
             return Ok(0.0);
         }
-        let Some(end) = self.rest().find(']') else {
-            return Err(Error::new(ErrorKind::MissingBracket, cmd.clone()));
+        let rest = self.rest();
+        let Some(end) = rest.find(']') else {
+            return Err(LayoutError::new(ErrorKind::MissingBracket, cmd.clone()));
         };
-        let raw = &self.rest()[1..end];
-        let range = self.pos..self.pos + end + 1;
-        self.pos += end + 1;
-        match parse_dim(raw) {
+        let start = self.pos;
+        // Past the closing bracket, one byte.
+        self.advance(end.saturating_add(1));
+        let range = start..self.pos;
+        match parse_dim(rest.get(1..end).unwrap_or_default()) {
             Some(Dim::Em(v)) => Ok(v),
             Some(Dim::Mu(v)) => Ok(v / 18.0),
-            None => Err(Error::new(ErrorKind::BadDimension, range)),
+            None => Err(LayoutError::new(ErrorKind::BadDimension, range)),
         }
     }
 
     /// A dimension argument: `{1em}` or a bare `1em`.
-    fn dim_arg(&mut self, cmd: &Range<usize>) -> Result<Dim, Error> {
+    fn dim_arg(&mut self, cmd: &Range<usize>) -> Result<Dim, LayoutError> {
         self.skip_ws();
         if self.rest().starts_with('{') {
             let (raw, range) = self.raw_group(cmd)?;
-            return parse_dim(raw).ok_or(Error::new(ErrorKind::BadDimension, range));
+            return parse_dim(raw).ok_or_else(|| LayoutError::new(ErrorKind::BadDimension, range));
         }
         let rest = self.rest();
         let number = rest
             .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+' || c == ' '))
             .unwrap_or(rest.len());
-        let unit = rest[number..]
-            .find(|c: char| !c.is_ascii_alphabetic())
-            .map_or(rest.len(), |u| number + u);
-        let unit = (unit - number).min(2) + number;
-        let raw = &rest[..unit];
-        let range = self.pos..self.pos + unit;
-        self.pos += unit;
-        parse_dim(raw).ok_or(Error::new(ErrorKind::BadDimension, range))
+        let after = rest.get(number..).unwrap_or_default();
+        // A unit is at most two letters.
+        let unit = after.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(after.len()).min(2);
+        let len = number.saturating_add(unit);
+        let start = self.pos;
+        self.advance(len);
+        let range = start..self.pos;
+        parse_dim(rest.get(..len).unwrap_or_default())
+            .ok_or_else(|| LayoutError::new(ErrorKind::BadDimension, range))
     }
 
-    fn delim(&mut self, cmd: &Range<usize>) -> Result<Option<char>, Error> {
+    fn delim(&mut self, cmd: &Range<usize>) -> Result<Option<char>, LayoutError> {
         let (tok, range) = self.next();
         let found = match tok {
-            Tok::Char(c) => symbols::delimiter_char(c),
-            Tok::Cmd(name) => symbols::delimiter_command(name),
-            Tok::Eof => return Err(Error::new(ErrorKind::MissingDelimiter, cmd.clone())),
+            // The null delimiter.
+            Tok::Char('.') => Some(None),
+            Tok::Char(c) => symbols::delimiter_char(c).map(Some),
+            Tok::Cmd(name) => symbols::delimiter_command(name).map(Some),
+            Tok::Eof => return Err(LayoutError::new(ErrorKind::MissingDelimiter, cmd.clone())),
             _ => None,
         };
-        found.ok_or(Error::new(ErrorKind::BadDelimiter, range))
+        found.ok_or_else(|| LayoutError::new(ErrorKind::BadDelimiter, range))
     }
 
     /// `\text{…}`-style content: literal characters, whitespace collapsed.
-    fn text(&mut self, cmd: &Range<usize>) -> Result<String, Error> {
+    fn text(&mut self, cmd: &Range<usize>) -> Result<String, LayoutError> {
         self.skip_ws();
         if !self.rest().starts_with('{') {
             // `\text x`: one character.
             let (tok, range) = self.next();
             return match tok {
                 Tok::Char(c) => Ok(c.to_string()),
-                _ => Err(Error::new(ErrorKind::MissingArgument, range)),
+                _ => Err(LayoutError::new(ErrorKind::MissingArgument, range)),
             };
         }
         let (raw, range) = self.raw_group(cmd)?;
-        let base = range.start + 1;
+        let base = range.start.saturating_add(1);
         let mut out = String::with_capacity(raw.len());
-        let mut chars = raw.char_indices().peekable();
+        let mut chars = raw.char_indices();
         while let Some((i, ch)) = chars.next() {
+            let here = base.saturating_add(i);
             match ch {
                 '{' | '}' => {}
                 '~' => out.push('\u{a0}'),
                 '$' => {
-                    return Err(Error::new(
+                    return Err(LayoutError::new(
                         ErrorKind::Unsupported("math inside \\text".into()),
-                        base + i..base + i + 1,
+                        here..here.saturating_add(1),
                     ));
                 }
                 '\\' => {
-                    let rest = &raw[i + 1..];
+                    let rest = raw.get(i.saturating_add(1)..).unwrap_or_default();
                     let Some(next) = rest.chars().next() else {
                         continue;
                     };
                     if next.is_ascii_alphabetic() {
                         let len =
                             rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
-                        let name = &rest[..len];
+                        let name = rest.get(..len).unwrap_or_default();
                         for _ in 0..len {
                             chars.next();
                         }
@@ -452,17 +466,16 @@ impl<'a> Parser<'a> {
                             "textbf" | "textit" | "textrm" | "text" | "emph" | "textsf"
                             | "texttt" | "textup" | "textnormal" => {}
                             _ => {
-                                return Err(Error::new(
+                                return Err(LayoutError::new(
                                     ErrorKind::UnknownCommand(name.into()),
-                                    base + i..base + i + 1 + len,
+                                    here..here.saturating_add(1).saturating_add(len),
                                 ));
                             }
                         }
                     } else {
                         chars.next();
                         match next {
-                            ' ' | ',' | ';' | ':' | '!' => out.push(' '),
-                            '\\' => out.push(' '),
+                            ' ' | ',' | ';' | ':' | '!' | '\\' => out.push(' '),
                             c => out.push(c),
                         }
                     }
@@ -478,15 +491,19 @@ impl<'a> Parser<'a> {
         Ok(out)
     }
 
-    fn atom(&mut self, tok: Tok<'a>, range: Range<usize>) -> Result<Option<Node>, Error> {
+    fn atom(&mut self, tok: Tok<'a>, range: Range<usize>) -> Result<Option<Node>, LayoutError> {
         self.deeper(&range)?;
         let node = self.atom_inner(tok, range);
-        self.depth -= 1;
+        self.shallower();
         node
     }
 
-    fn atom_inner(&mut self, tok: Tok<'a>, range: Range<usize>) -> Result<Option<Node>, Error> {
-        let at = range.start as u32;
+    fn atom_inner(
+        &mut self,
+        tok: Tok<'a>,
+        range: Range<usize>,
+    ) -> Result<Option<Node>, LayoutError> {
+        let at = offset(range.start);
         Ok(Some(match tok {
             Tok::Char('~') => Node::Space(Dim::Em(0.25)),
             Tok::Char(c) => {
@@ -495,29 +512,29 @@ impl<'a> Parser<'a> {
             }
             Tok::Open => Node::group(self.group_body(&range)?),
             Tok::Cmd(name) => return self.command(name, range),
-            Tok::Close => return Err(Error::new(ErrorKind::Unexpected("}".into()), range)),
+            Tok::Close => return Err(LayoutError::new(ErrorKind::Unexpected("}".into()), range)),
             Tok::Sup | Tok::Sub | Tok::Amp | Tok::Prime => {
-                let text = self.src[range.clone()].to_string();
-                return Err(Error::new(ErrorKind::Unexpected(text), range));
+                let text = self.src.get(range.clone()).unwrap_or_default().to_owned();
+                return Err(LayoutError::new(ErrorKind::Unexpected(text), range));
             }
-            Tok::Eof => return Err(Error::new(ErrorKind::MissingArgument, range)),
+            Tok::Eof => return Err(LayoutError::new(ErrorKind::MissingArgument, range)),
         }))
     }
 
-    fn command(&mut self, name: &'a str, range: Range<usize>) -> Result<Option<Node>, Error> {
-        use Class::*;
-        let at = range.start as u32;
+    fn command(&mut self, name: &'a str, range: Range<usize>) -> Result<Option<Node>, LayoutError> {
+        use Class::{Bin, Close, Inner, Op, Open, Ord, Punct, Rel};
+        let at = offset(range.start);
         let node = match name {
             "left" => {
                 let left = self.delim(&range)?;
                 self.deeper(&range)?;
                 let (body, ended, end) = self.list(false)?;
-                self.depth -= 1;
+                self.shallower();
                 match ended {
                     Ended::Right => {}
-                    Ended::Eof => return Err(Error::new(ErrorKind::MissingRight, range)),
+                    Ended::Eof => return Err(LayoutError::new(ErrorKind::MissingRight, range)),
                     other => {
-                        return Err(Error::new(ErrorKind::Unexpected(describe(&other)), end));
+                        return Err(LayoutError::new(ErrorKind::Unexpected(describe(&other)), end));
                     }
                 }
                 let right = self.delim(&end)?;
@@ -535,10 +552,10 @@ impl<'a> Parser<'a> {
                 } else {
                     1
                 };
-                let class = match name.as_bytes()[name.len() - 1] {
-                    b'l' => Open,
-                    b'r' => Close,
-                    b'm' => Rel,
+                let class = match name.as_bytes().last() {
+                    Some(b'l') => Open,
+                    Some(b'r') => Close,
+                    Some(b'm') => Rel,
                     _ => Ord,
                 };
                 Node::Big { delim: self.delim(&range)?, size, class }
@@ -569,7 +586,7 @@ impl<'a> Parser<'a> {
             "operatorname" | "operatornamewithlimits" => {
                 let star = self.star() || name == "operatornamewithlimits";
                 let text = self.text(&range)?;
-                Node::NamedOp { name: text.trim().to_string(), default_limits: star, limits: None }
+                Node::NamedOp { name: text.trim().to_owned(), default_limits: star, limits: None }
             }
             "text" | "textrm" | "textup" | "textnormal" | "mbox" | "hbox" | "textmd" | "textbf"
             | "textit" | "emph" | "textsf" | "texttt" | "fbox" => {
@@ -680,15 +697,15 @@ impl<'a> Parser<'a> {
             "not" => {
                 let (tok, next) = self.next();
                 let Some(node) = self.atom(tok, next)? else {
-                    return Err(Error::new(ErrorKind::MissingArgument, range));
+                    return Err(LayoutError::new(ErrorKind::MissingArgument, range));
                 };
                 negate(node)
             }
-            "color" => {
+            "color" | "label" => {
                 self.raw_group(&range)?;
                 return Ok(None);
             }
-            "textcolor" | "colorbox" => {
+            "textcolor" | "colorbox" | "href" => {
                 self.raw_group(&range)?;
                 Node::group(self.arg(&range)?)
             }
@@ -733,7 +750,7 @@ impl<'a> Parser<'a> {
                 };
                 match name {
                     "pmod" => {
-                        body.extend([paren('(', Open), word("mod"), Node::Space(Dim::Mu(6.0))])
+                        body.extend([paren('(', Open), word("mod"), Node::Space(Dim::Mu(6.0))]);
                     }
                     "pod" => body.push(paren('(', Open)),
                     _ => body.extend([word("mod"), Node::Space(Dim::Mu(6.0))]),
@@ -751,7 +768,7 @@ impl<'a> Parser<'a> {
             "substack" => {
                 let (tok, open) = self.next();
                 if tok != Tok::Open {
-                    return Err(Error::new(ErrorKind::MissingArgument, range));
+                    return Err(LayoutError::new(ErrorKind::MissingArgument, range));
                 }
                 self.deeper(&open)?;
                 let (mut rows, mut gaps) = (Vec::new(), Vec::new());
@@ -766,16 +783,19 @@ impl<'a> Parser<'a> {
                             rows.push(vec![cell]);
                             break;
                         }
-                        Ended::Eof => return Err(Error::new(ErrorKind::MissingBrace, open)),
+                        Ended::Eof => return Err(LayoutError::new(ErrorKind::MissingBrace, open)),
                         other => {
-                            return Err(Error::new(ErrorKind::Unexpected(describe(&other)), end));
+                            return Err(LayoutError::new(
+                                ErrorKind::Unexpected(describe(&other)),
+                                end,
+                            ));
                         }
                     }
                     if rows.len() > 4096 {
-                        return Err(Error::new(ErrorKind::TooLarge, range));
+                        return Err(LayoutError::new(ErrorKind::TooLarge, range));
                     }
                 }
-                self.depth -= 1;
+                self.shallower();
                 trim_last_row(&mut rows);
                 gaps.truncate(rows.len());
                 Node::Array(Array {
@@ -787,42 +807,35 @@ impl<'a> Parser<'a> {
                     right: None,
                 })
             }
-            "hline" | "hdashline" => return Ok(None),
             "varGamma" | "varDelta" | "varTheta" | "varLambda" | "varXi" | "varPi" | "varSigma"
             | "varUpsilon" | "varPhi" | "varPsi" | "varOmega" => {
-                let (ch, _) = symbols::symbol(&name[3..]).ok_or_else(|| {
-                    Error::new(ErrorKind::UnknownCommand(name.into()), range.clone())
-                })?;
+                let (ch, _) = symbols::symbol(name.strip_prefix("var").unwrap_or(name))
+                    .ok_or_else(|| {
+                        LayoutError::new(ErrorKind::UnknownCommand(name.into()), range.clone())
+                    })?;
                 Node::Char { ch, class: Ord, variant: Variant::Italic, at }
             }
-            "href" => {
-                self.raw_group(&range)?;
-                Node::group(self.arg(&range)?)
-            }
-            "label" => {
-                self.raw_group(&range)?;
-                return Ok(None);
-            }
-            "nonumber" | "notag" | "displaybreak" | "allowbreak" | "nobreak" => return Ok(None),
+            "hline" | "hdashline" | "nonumber" | "notag" | "displaybreak" | "allowbreak"
+            | "nobreak" => return Ok(None),
             _ => {
                 if let Some((ch, class)) = symbols::symbol(name) {
                     Node::Char { ch, class, variant: self.variant, at }
                 } else if let Some((ch, default_limits)) = symbols::large_op(name) {
                     Node::LargeOp { ch, default_limits, limits: None, at }
                 } else if let Some((text, default_limits)) = symbols::named_op(name) {
-                    Node::NamedOp { name: text.to_string(), default_limits, limits: None }
+                    Node::NamedOp { name: text.to_owned(), default_limits, limits: None }
                 } else if let Some((ch, wide)) = symbols::accent(name) {
                     Node::Accent { ch, wide, body: self.arg(&range)? }
                 } else {
                     let name = if name.is_empty() { "\\" } else { name };
-                    return Err(Error::new(ErrorKind::UnknownCommand(name.into()), range));
+                    return Err(LayoutError::new(ErrorKind::UnknownCommand(name.into()), range));
                 }
             }
         };
         Ok(Some(node))
     }
 
-    fn environment(&mut self, cmd: &Range<usize>) -> Result<Array, Error> {
+    fn environment(&mut self, cmd: &Range<usize>) -> Result<Array, LayoutError> {
         let name = self.env_name(cmd)?;
         let (mut left, mut right) = (None, None);
         let mut cols = Vec::new();
@@ -871,7 +884,10 @@ impl<'a> Parser<'a> {
                 ArrayKind::Array
             }
             _ => {
-                return Err(Error::new(ErrorKind::UnknownEnvironment(name.into()), cmd.clone()));
+                return Err(LayoutError::new(
+                    ErrorKind::UnknownEnvironment(name.into()),
+                    cmd.clone(),
+                ));
             }
         };
         let mut rows: Vec<Vec<List>> = Vec::new();
@@ -892,7 +908,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 Ended::End(end) => {
-                    return Err(Error::new(
+                    return Err(LayoutError::new(
                         ErrorKind::MismatchedEnvironment {
                             expected: name.into(),
                             found: end.into(),
@@ -901,15 +917,17 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 Ended::Eof => {
-                    return Err(Error::new(ErrorKind::MissingEnd(name.into()), cmd.clone()));
+                    return Err(LayoutError::new(ErrorKind::MissingEnd(name.into()), cmd.clone()));
                 }
-                other => return Err(Error::new(ErrorKind::Unexpected(describe(&other)), range)),
+                other => {
+                    return Err(LayoutError::new(ErrorKind::Unexpected(describe(&other)), range));
+                }
             }
             if rows.len() > 4096 {
-                return Err(Error::new(ErrorKind::TooLarge, cmd.clone()));
+                return Err(LayoutError::new(ErrorKind::TooLarge, cmd.clone()));
             }
         }
-        self.depth -= 1;
+        self.shallower();
         trim_last_row(&mut rows);
         gaps.truncate(rows.len());
         Ok(Array { kind, cols, rows, gaps, left, right })
@@ -918,16 +936,15 @@ impl<'a> Parser<'a> {
 
 impl Node {
     /// `equation` is just its body.
-    fn flatten_equation(self) -> Node {
+    fn flatten_equation(self) -> Self {
         match self {
-            Node::Array(a)
+            Self::Array(a)
                 if a.kind == ArrayKind::Gathered
-                    && a.rows.len() == 1
-                    && a.rows[0].len() == 1
+                    && matches!(a.rows.as_slice(), [row] if row.len() == 1)
                     && a.left.is_none() =>
             {
                 let mut rows = a.rows;
-                Node::group(rows.pop().and_then(|mut r| r.pop()).unwrap_or_default())
+                Self::group(rows.pop().and_then(|mut r| r.pop()).unwrap_or_default())
             }
             other => other,
         }
@@ -935,7 +952,7 @@ impl Node {
 }
 
 /// Attaches a script to the last atom of `list`.
-fn attach(list: &mut List, sup: bool, arg: List, range: &Range<usize>) -> Result<(), Error> {
+fn attach(list: &mut List, sup: bool, arg: List, range: &Range<usize>) -> Result<(), LayoutError> {
     let mut node = match list.pop() {
         Some(n @ Node::Scripts { .. }) => n,
         Some(base) => Node::Scripts { base: Box::new(base), sup: None, sub: None },
@@ -947,14 +964,14 @@ fn attach(list: &mut List, sup: bool, arg: List, range: &Range<usize>) -> Result
             None => *slot = Some(arg),
             // `f'^2`: primes and an explicit superscript share the slot.
             Some(existing) if sup && existing.iter().all(is_prime) => existing.extend(arg),
-            Some(_) => return Err(Error::new(ErrorKind::DoubleScript, range.clone())),
+            Some(_) => return Err(LayoutError::new(ErrorKind::DoubleScript, range.clone())),
         }
     }
     list.push(node);
     Ok(())
 }
 
-fn is_prime(node: &Node) -> bool {
+const fn is_prime(node: &Node) -> bool {
     matches!(node, Node::Char { ch: '′' | '″' | '‴', .. })
 }
 
@@ -992,16 +1009,16 @@ fn negate(node: Node) -> Node {
 
 fn column_spec(spec: &str) -> Vec<Align> {
     let mut cols = Vec::new();
-    let mut depth = 0;
+    // Signed: a stray `}` goes below zero, and the letters after it still count.
+    let mut depth = 0_i32;
     for ch in spec.chars() {
         match ch {
-            '{' => depth += 1,
-            '}' => depth -= 1,
+            '{' => depth = depth.saturating_add(1),
+            '}' => depth = depth.saturating_sub(1),
             _ if depth > 0 => {}
-            'l' => cols.push(Align::Left),
+            'l' | 'p' | 'm' | 'b' => cols.push(Align::Left),
             'c' => cols.push(Align::Center),
             'r' => cols.push(Align::Right),
-            'p' | 'm' | 'b' => cols.push(Align::Left),
             _ => {}
         }
     }
@@ -1012,12 +1029,13 @@ fn column_spec(spec: &str) -> Vec<Align> {
 pub(crate) fn parse_dim(raw: &str) -> Option<Dim> {
     let raw = raw.trim();
     let split = raw.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(raw.len());
-    let number: String = raw[..split].chars().filter(|c| !c.is_whitespace()).collect();
+    let (number, unit) = raw.split_at_checked(split).unwrap_or((raw, ""));
+    let number: String = number.chars().filter(|c| !c.is_whitespace()).collect();
     let value: f32 = number.parse().ok()?;
     if !value.is_finite() || value.abs() > 1000.0 {
         return None;
     }
-    let em = match raw[split..].trim() {
+    let em = match unit.trim() {
         "em" => value,
         "ex" => value * 0.431,
         "mu" => return (value.abs() <= MAX_DIM_EM * 18.0).then_some(Dim::Mu(value)),
@@ -1031,6 +1049,11 @@ pub(crate) fn parse_dim(raw: &str) -> Option<Dim> {
     // Checked after unit conversion: `1000in` is 7227em. No real kern or row
     // gap comes near 100em; beyond it a dimension can only blow up the box.
     (em.abs() <= MAX_DIM_EM).then_some(Dim::Em(em))
+}
+
+/// A source offset as nodes keep it; a formula is far shorter than `u32` reaches.
+fn offset(pos: usize) -> u32 {
+    u32::try_from(pos).unwrap_or(u32::MAX)
 }
 
 /// Largest accepted dimension (`\kern`, `\hspace`, `\\[…]`), in ems.

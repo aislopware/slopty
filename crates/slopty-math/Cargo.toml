@@ -2,17 +2,22 @@
 name = "slopty-math"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 description = "Fast, low-memory LaTeX math layout over any OpenType math font"
 
-# Parser + TeX layout driven entirely by the font's MATH table, emitting a flat
-# display list (glyph ids and rules). UI-free: hosts paint the glyph outlines.
+[lints]
+workspace = true
+
+# Parser and TeX layout driven entirely by the font's MATH table, emitting a flat display list
+# (glyph ids and rules). UI-free: hosts paint the glyph outlines.
 [dependencies]
+# `MathFont`'s glyph-metrics cache, shared across threads.
+parking_lot.workspace = true
 ttf-parser.workspace = true
 
 [features]
 # Two math faces compiled in (`slopty_math::bundled`: Fira, backed by STIX Two), ~1 MB of read-only
-# data;
-# a face is only parsed (and its pages touched) once something uses it.
+# data; a face is only parsed (and its pages touched) once something uses it.
 bundled = [  ]

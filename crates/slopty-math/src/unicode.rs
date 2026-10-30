@@ -22,7 +22,7 @@ pub(crate) enum Variant {
 }
 
 /// Starts of the Latin capital / small runs, per alphabet.
-fn latin(v: Variant) -> Option<(u32, u32)> {
+const fn latin(v: Variant) -> Option<(u32, u32)> {
     Some(match v {
         Variant::Bold => (0x1d400, 0x1d41a),
         Variant::Italic | Variant::Normal => (0x1d434, 0x1d44e),
@@ -38,7 +38,7 @@ fn latin(v: Variant) -> Option<(u32, u32)> {
 }
 
 /// Letters that predate the math block and live in Letterlike Symbols.
-fn hole(ch: char, v: Variant) -> Option<char> {
+const fn hole(ch: char, v: Variant) -> Option<char> {
     Some(match (v, ch) {
         (Variant::Italic | Variant::Normal, 'h') => 'ℎ',
         (Variant::Script, 'B') => 'ℬ',
@@ -68,7 +68,7 @@ fn hole(ch: char, v: Variant) -> Option<char> {
     })
 }
 
-fn digits(v: Variant) -> Option<u32> {
+const fn digits(v: Variant) -> Option<u32> {
     Some(match v {
         Variant::Bold | Variant::BoldItalic => 0x1d7ce,
         Variant::DoubleStruck => 0x1d7d8,
@@ -81,7 +81,7 @@ fn digits(v: Variant) -> Option<u32> {
 
 /// Start of a 58-slot Greek run: 25 capitals (with ϴ in the U+03A2 hole),
 /// ∇, then 25 smalls (with ς), ∂ ϵ ϑ ϰ ϕ ϱ ϖ.
-fn greek(v: Variant) -> Option<u32> {
+const fn greek(v: Variant) -> Option<u32> {
     Some(match v {
         Variant::Bold => 0x1d6a8,
         Variant::Italic => 0x1d6e2,
@@ -91,13 +91,13 @@ fn greek(v: Variant) -> Option<u32> {
     })
 }
 
-fn greek_slot(ch: char) -> Option<(bool, u32)> {
+const fn greek_slot(ch: char) -> Option<(bool, u32)> {
     let c = ch as u32;
     Some(match ch {
-        'Α'..='Ω' => (true, c - 0x391),
+        'Α'..='Ω' => (true, c.saturating_sub(0x391)),
         'ϴ' => (true, 17),
         '∇' => (true, 25),
-        'α'..='ω' => (false, c - 0x3b1),
+        'α'..='ω' => (false, c.saturating_sub(0x3b1)),
         '∂' => (false, 25),
         'ϵ' => (false, 26),
         'ϑ' => (false, 27),
@@ -114,14 +114,10 @@ pub(crate) fn styled(ch: char, v: Variant) -> char {
     let mapped = match ch {
         'A'..='Z' | 'a'..='z' => hole(ch, v).or_else(|| {
             let (cap, small) = latin(v)?;
-            let c = if ch.is_ascii_uppercase() {
-                cap + (ch as u32 - 'A' as u32)
-            } else {
-                small + (ch as u32 - 'a' as u32)
-            };
-            char::from_u32(c)
+            let (run, first) = if ch.is_ascii_uppercase() { (cap, 'A') } else { (small, 'a') };
+            char::from_u32(run.checked_add((ch as u32).checked_sub(first as u32)?)?)
         }),
-        '0'..='9' => digits(v).and_then(|d| char::from_u32(d + (ch as u32 - '0' as u32))),
+        '0'..='9' => digits(v).and_then(|d| char::from_u32(d.checked_add(ch.to_digit(10)?)?)),
         'ı' if matches!(v, Variant::Normal | Variant::Italic) => Some('𝚤'),
         'ȷ' if matches!(v, Variant::Normal | Variant::Italic) => Some('𝚥'),
         _ => greek_slot(ch).and_then(|(upper, slot)| {
@@ -131,7 +127,9 @@ pub(crate) fn styled(ch: char, v: Variant) -> char {
                 v => v,
             };
             let base = greek(v)?;
-            char::from_u32(base + if upper { slot } else { 26 + slot })
+            // Capitals first, then 26 slots on, the smalls.
+            let slot = if upper { slot } else { slot.checked_add(26)? };
+            char::from_u32(base.checked_add(slot)?)
         }),
     };
     mapped.unwrap_or(ch)

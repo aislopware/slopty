@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! Math fonts compiled into the binary (feature `bundled`): two faces, each
-//! falling back to STIX Two Math for what it lacks. A face loads on first use
+//! Math fonts compiled into the binary (feature `bundled`).
+//!
+//! Two faces, each falling back to STIX Two Math for what it lacks. A face loads on first use
 //! and is shared, so every host and thread uses the same parsed font and
 //! caches; faces nobody picks are never parsed (their bytes stay untouched
 //! pages of the binary).
@@ -11,7 +12,7 @@
 
 use std::sync::{Arc, OnceLock};
 
-use crate::{Error, Formula, Item, MathFont, Options};
+use crate::{Formula, Item, LayoutError, MathFont, Options};
 
 /// The bundled faces apps can pick between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -27,30 +28,39 @@ pub enum Face {
 
 impl Face {
     /// Every face, in table order.
-    pub const ALL: [Face; 2] = [Face::Fira, Face::StixTwo];
+    pub const ALL: [Self; 2] = [Self::Fira, Self::StixTwo];
 
     /// The face's own font in the [`font_at`] table. Append-only, so an
     /// index a host stored or sent across FFI never changes meaning.
-    pub fn index(self) -> u8 {
+    pub const fn index(self) -> u8 {
         self as u8
     }
 
-    fn data(self) -> &'static [u8] {
+    const fn data(self) -> &'static [u8] {
         match self {
-            Face::Fira => include_bytes!("../fonts/FiraMath-Regular.otf"),
-            Face::StixTwo => include_bytes!("../fonts/STIXTwoMath-Regular.otf"),
+            Self::Fira => include_bytes!("../fonts/FiraMath-Regular.otf"),
+            Self::StixTwo => include_bytes!("../fonts/STIXTwoMath-Regular.otf"),
         }
+    }
+
+    /// The face's font, without fallback.
+    #[expect(
+        clippy::expect_used,
+        reason = "the bundled fonts are bytes fixed at build time that every test run parses, \
+                  so one that fails is a broken build rather than a case to handle"
+    )]
+    fn parse(self) -> MathFont {
+        MathFont::new(self.data()).expect("a bundled math font parses")
     }
 }
 
 /// How many fonts [`layout`] can name: one per [`Face`], by [`Face::index`].
+#[expect(clippy::cast_possible_truncation, reason = "a handful of faces")]
 pub const FONTS: u8 = Face::ALL.len() as u8;
 
 fn stix_arc() -> &'static Arc<MathFont> {
     static FONT: OnceLock<Arc<MathFont>> = OnceLock::new();
-    FONT.get_or_init(|| {
-        Arc::new(MathFont::new(Face::StixTwo.data()).expect("bundled STIX Two Math"))
-    })
+    FONT.get_or_init(|| Arc::new(Face::StixTwo.parse()))
 }
 
 /// The font for `face` (with its fallback chain), loaded on first use.
@@ -60,9 +70,10 @@ pub fn font(face: Face) -> &'static MathFont {
     if face == Face::StixTwo {
         return stix_arc();
     }
-    FONTS[face as usize].get_or_init(|| {
-        MathFont::new(face.data()).expect("bundled math font").with_fallback(stix_arc().clone())
-    })
+    let Some(slot) = FONTS.get(usize::from(face.index())) else {
+        return stix_arc();
+    };
+    slot.get_or_init(|| face.parse().with_fallback(Arc::clone(stix_arc())))
 }
 
 /// The font a [`layout`]ed glyph's `font` index names (see [`FONTS`]): that
@@ -77,7 +88,7 @@ pub fn font_at(index: u8) -> &'static MathFont {
 
 /// [`crate::layout()`] in a bundled face, with glyph font indices into the
 /// fixed table [`font_at`] resolves — the same for every face.
-pub fn layout(source: &str, face: Face, options: &Options) -> Result<Formula, Error> {
+pub fn layout(source: &str, face: Face, options: &Options) -> Result<Formula, LayoutError> {
     let mut formula = crate::layout(source, font(face), options)?;
     // A chain is the face then STIX Two (STIX Two's is just itself).
     let table = |chain: u8| match (chain, face) {
@@ -103,7 +114,7 @@ mod tests {
         for (name, part) in names.iter().zip(["Fira", "STIX"]) {
             assert!(name.contains(part), "{names:?}");
         }
-        let src = r"\mathcal{L} = \frac{x}{y} + \mathfrak{g}";
+        let src = r"\mathcal{L} = \frac{a+b}{c-d} + \mathfrak{g}";
         let opts = Options::inline(16.0);
         for face in Face::ALL {
             let f = layout(src, face, &opts).unwrap();

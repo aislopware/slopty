@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! slopty_math — fast, low-memory LaTeX math layout for Slopty.
+//! `slopty_math` — fast, low-memory LaTeX math layout for Slopty.
 //!
 //! [`layout()`] turns a TeX math string into a [`Formula`]: a width, ascent and
 //! descent plus a flat list of [`Item`]s (glyph ids and rules) in points.
@@ -27,8 +27,8 @@
 //! `\boxed`, `\not`, `\phantom`, and the `matrix`/`pmatrix`/…/`cases`/
 //! `aligned`/`gathered`/`array` environments. No macros.
 //!
-//! Parsing is strict — an unknown command is an [`Error`] with a byte range —
-//! so hosts can show the source for anything slopty_math can't render faithfully
+//! Parsing is strict — an unknown command is an [`LayoutError`] with a byte range —
+//! so hosts can show the source for anything `slopty_math` can't render faithfully
 //! (including half-streamed formulas).
 //!
 //! # Cost
@@ -37,6 +37,13 @@
 //! 20-byte [`Item`]. Glyph metrics are cached inside [`MathFont`]. Inputs are
 //! bounded by [`Options`] (bytes, nesting depth, emitted items), so hostile
 //! source can't run away with time or memory.
+
+#![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
+#![allow(
+    clippy::redundant_pub_crate,
+    reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
+)]
 
 mod ast;
 #[cfg(feature = "bundled")]
@@ -98,10 +105,12 @@ impl Default for Options {
 }
 
 impl Options {
+    /// The defaults for inline (text-style) math at `size` points.
     pub fn inline(size: f32) -> Self {
         Self { size, ..Self::default() }
     }
 
+    /// The defaults for display math at `size` points.
     pub fn display(size: f32) -> Self {
         Self { size, display: true, ..Self::default() }
     }
@@ -114,20 +123,40 @@ pub enum Item {
     /// Glyph `glyph` of font `font` in the [`MathFont::chain`] (0 is the
     /// font passed to [`layout()`]), its origin at (`x`, `y`), drawn at `size`
     /// points.
-    Glyph { font: u8, glyph: u16, x: f32, y: f32, size: f32 },
+    Glyph {
+        /// The face's index in the chain.
+        font: u8,
+        /// The glyph id in that face.
+        glyph: u16,
+        /// The glyph origin's x.
+        x: f32,
+        /// The glyph origin's y (its baseline).
+        y: f32,
+        /// The size it is drawn at, in points.
+        size: f32,
+    },
     /// A filled rectangle (fraction bars, radical overbars, …); (`x`, `y`)
     /// is its top-left corner.
-    Rule { x: f32, y: f32, width: f32, height: f32 },
+    Rule {
+        /// The left edge.
+        x: f32,
+        /// The top edge.
+        y: f32,
+        /// Its width.
+        width: f32,
+        /// Its height.
+        height: f32,
+    },
 }
 
 impl Item {
     fn shifted(self, dx: f32, dy: f32) -> Self {
         match self {
-            Item::Glyph { font, glyph, x, y, size } => {
-                Item::Glyph { font, glyph, x: x + dx, y: y + dy, size }
+            Self::Glyph { font, glyph, x, y, size } => {
+                Self::Glyph { font, glyph, x: x + dx, y: y + dy, size }
             }
-            Item::Rule { x, y, width, height } => {
-                Item::Rule { x: x + dx, y: y + dy, width, height }
+            Self::Rule { x, y, width, height } => {
+                Self::Rule { x: x + dx, y: y + dy, width, height }
             }
         }
     }
@@ -149,11 +178,14 @@ pub struct Formula {
     /// edge, so neither negative space nor overhanging ink paints over the
     /// text beside a formula.
     pub left: f32,
+    /// The rightmost extent (see [`Formula::left`]).
     pub right: f32,
+    /// Everything the formula paints, in paint order.
     pub items: Vec<Item>,
 }
 
 impl Formula {
+    /// Ascent plus descent, points.
     pub fn height(&self) -> f32 {
         self.ascent + self.descent
     }
@@ -170,7 +202,7 @@ impl Formula {
         for item in &self.items {
             match *item {
                 Item::Glyph { font: index, glyph, x: gx, y: gy, size } => {
-                    font.at(index).outline(glyph, size, x + gx, y + gy, sink)
+                    font.at(index).outline(glyph, size, x + gx, y + gy, sink);
                 }
                 Item::Rule { x: rx, y: ry, width, height } => {
                     let (l, t) = (x + rx, y + ry);
@@ -187,21 +219,28 @@ impl Formula {
     /// A standalone SVG of the formula (for debugging and snapshots).
     pub fn to_svg(&self, font: &MathFont) -> String {
         struct Svg(String);
+        impl Svg {
+            fn push(&mut self, args: std::fmt::Arguments<'_>) {
+                use std::fmt::Write as _;
+                // Writing into a `String` never fails.
+                let _infallible = self.0.write_fmt(args);
+            }
+        }
         impl PathSink for Svg {
             fn move_to(&mut self, x: f32, y: f32) {
-                self.0.push_str(&format!("M{x:.2} {y:.2}"));
+                self.push(format_args!("M{x:.2} {y:.2}"));
             }
 
             fn line_to(&mut self, x: f32, y: f32) {
-                self.0.push_str(&format!("L{x:.2} {y:.2}"));
+                self.push(format_args!("L{x:.2} {y:.2}"));
             }
 
             fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-                self.0.push_str(&format!("Q{x1:.2} {y1:.2} {x:.2} {y:.2}"));
+                self.push(format_args!("Q{x1:.2} {y1:.2} {x:.2} {y:.2}"));
             }
 
             fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-                self.0.push_str(&format!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2}"));
+                self.push(format_args!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2}"));
             }
 
             fn close(&mut self) {
@@ -220,36 +259,57 @@ impl Formula {
 }
 
 /// Why a formula couldn't be laid out.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Error {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutError {
+    /// What went wrong.
     pub kind: ErrorKind,
     /// Byte range in the source the error points at.
     pub range: Range<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// What went wrong laying a formula out.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ErrorKind {
+    /// A command this crate doesn't know, by name without its backslash.
     UnknownCommand(String),
+    /// An environment this crate doesn't know (`\begin{…}`), by name.
     UnknownEnvironment(String),
+    /// A token where none of its kind may stand (a stray `}`, `&`, `\right`).
     Unexpected(String),
+    /// A known construct used in a way this crate doesn't lay out.
     Unsupported(String),
+    /// A command's required argument is missing.
     MissingArgument,
+    /// A group's `}` is missing.
     MissingBrace,
+    /// An optional argument's `]` is missing.
     MissingBracket,
+    /// A `\left` has no `\right`.
     MissingRight,
+    /// An environment has no `\end`, by name.
     MissingEnd(String),
+    /// An environment is closed by another's `\end`.
     MismatchedEnvironment {
+        /// The environment `\begin` opened.
         expected: String,
+        /// The one `\end` named.
         found: String,
     },
+    /// A sizing command (`\left`, `\big`) has no delimiter after it.
     MissingDelimiter,
+    /// What follows a sizing command is not a delimiter.
     BadDelimiter,
+    /// A length (`\hspace{…}`, `\\[…]`) doesn't parse.
     BadDimension,
+    /// Two superscripts or two subscripts on one base.
     DoubleScript,
     /// The font has no glyph for this character.
     MissingGlyph(char),
+    /// The source is longer than [`Options::max_bytes`].
     TooLong,
+    /// The source nests deeper than [`Options::max_depth`].
     TooDeep,
+    /// The formula is wider or taller than its bounds, or emits too many items.
     TooLarge,
     /// [`Options::size`] isn't a positive, finite number.
     BadSize,
@@ -257,44 +317,44 @@ pub enum ErrorKind {
     Internal,
 }
 
-impl Error {
-    pub(crate) fn new(kind: ErrorKind, range: Range<usize>) -> Self {
+impl LayoutError {
+    pub(crate) const fn new(kind: ErrorKind, range: Range<usize>) -> Self {
         Self { kind, range }
     }
 }
 
-impl std::fmt::Display for Error {
+impl std::fmt::Display for LayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        use ErrorKind::*;
+        use ErrorKind as K;
         match &self.kind {
-            UnknownCommand(name) => write!(f, "unknown command \\{name}"),
-            UnknownEnvironment(name) => write!(f, "unknown environment {name}"),
-            Unexpected(what) => write!(f, "unexpected {what}"),
-            Unsupported(what) => write!(f, "unsupported: {what}"),
-            MissingArgument => f.write_str("missing argument"),
-            MissingBrace => f.write_str("missing }"),
-            MissingBracket => f.write_str("missing ]"),
-            MissingRight => f.write_str("\\left without \\right"),
-            MissingEnd(name) => write!(f, "missing \\end{{{name}}}"),
-            MismatchedEnvironment { expected, found } => {
+            K::UnknownCommand(name) => write!(f, "unknown command \\{name}"),
+            K::UnknownEnvironment(name) => write!(f, "unknown environment {name}"),
+            K::Unexpected(what) => write!(f, "unexpected {what}"),
+            K::Unsupported(what) => write!(f, "unsupported: {what}"),
+            K::MissingArgument => f.write_str("missing argument"),
+            K::MissingBrace => f.write_str("missing }"),
+            K::MissingBracket => f.write_str("missing ]"),
+            K::MissingRight => f.write_str("\\left without \\right"),
+            K::MissingEnd(name) => write!(f, "missing \\end{{{name}}}"),
+            K::MismatchedEnvironment { expected, found } => {
                 write!(f, "\\begin{{{expected}}} ended by \\end{{{found}}}")
             }
-            MissingDelimiter => f.write_str("missing delimiter"),
-            BadDelimiter => f.write_str("not a delimiter"),
-            BadDimension => f.write_str("bad dimension"),
-            DoubleScript => f.write_str("double superscript or subscript"),
-            MissingGlyph(ch) => write!(f, "font has no glyph for {ch:?}"),
-            TooLong => f.write_str("formula too long"),
-            TooDeep => f.write_str("formula nested too deeply"),
-            TooLarge => f.write_str("formula too large"),
-            BadSize => f.write_str("font size must be positive and finite"),
-            Internal => f.write_str("formula could not be laid out"),
+            K::MissingDelimiter => f.write_str("missing delimiter"),
+            K::BadDelimiter => f.write_str("not a delimiter"),
+            K::BadDimension => f.write_str("bad dimension"),
+            K::DoubleScript => f.write_str("double superscript or subscript"),
+            K::MissingGlyph(ch) => write!(f, "font has no glyph for {ch:?}"),
+            K::TooLong => f.write_str("formula too long"),
+            K::TooDeep => f.write_str("formula nested too deeply"),
+            K::TooLarge => f.write_str("formula too large"),
+            K::BadSize => f.write_str("font size must be positive and finite"),
+            K::Internal => f.write_str("formula could not be laid out"),
         }?;
         write!(f, " at {}..{}", self.range.start, self.range.end)
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for LayoutError {}
 
 /// Where a missing glyph came from: the token at `start` when it spells the
 /// character, else the character's first literal use (text inside
@@ -306,7 +366,7 @@ fn glyph_range(source: &str, start: usize, ch: char) -> Range<usize> {
         return token;
     }
     match source.find(ch) {
-        Some(i) => i..i + ch.len_utf8(),
+        Some(i) => i..i.saturating_add(ch.len_utf8()),
         None if start > 0 => token,
         None => 0..source.len(),
     }
@@ -320,33 +380,34 @@ fn token_at(source: &str, start: usize) -> Range<usize> {
     let mut chars = rest.chars();
     let len = match chars.next() {
         Some('\\') => {
-            let name = &rest[1..];
-            1 + match name.find(|c: char| !c.is_ascii_alphabetic()) {
+            let name = chars.as_str();
+            let name_len = match name.find(|c: char| !c.is_ascii_alphabetic()) {
                 Some(0) => name.chars().next().map_or(0, char::len_utf8),
                 Some(n) => n,
                 None => name.len(),
-            }
+            };
+            name_len.saturating_add(1)
         }
         Some(c) => c.len_utf8(),
         None => 0,
     };
-    start..start + len
+    start..start.saturating_add(len)
 }
 
 /// Lays out TeX math `source` (without `$` delimiters) in `font`. Hosts run
 /// this on agent output in their render paths, so a panic (a layout bug) is
 /// an [`ErrorKind::Internal`] error rather than a crash.
-pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
+pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formula, LayoutError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lay_out(source, font, options)))
-        .unwrap_or_else(|_| Err(Error::new(ErrorKind::Internal, 0..source.len())))
+        .unwrap_or_else(|_| Err(LayoutError::new(ErrorKind::Internal, 0..source.len())))
 }
 
-fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
+fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, LayoutError> {
     if source.len() > options.max_bytes {
-        return Err(Error::new(ErrorKind::TooLong, 0..source.len()));
+        return Err(LayoutError::new(ErrorKind::TooLong, 0..source.len()));
     }
     if !(options.size.is_finite() && options.size > 0.0) {
-        return Err(Error::new(ErrorKind::BadSize, 0..0));
+        return Err(LayoutError::new(ErrorKind::BadSize, 0..0));
     }
     let nodes = parse::parse(source, options.max_depth)?;
     let style = if options.display { ast::Style::Display } else { ast::Style::Text };
@@ -354,7 +415,7 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
     // character plus a few per stretchy delimiter, while nested `\left(`
     // around a tall body multiplied 434 bytes into 18,000 items — paint and
     // memory every host pays per formula.
-    let max_items = options.max_items.min(64 + 8 * source.len());
+    let max_items = options.max_items.min(source.len().saturating_mul(8).saturating_add(64));
     let mut ctx = layout::Ctx::new(font, options.size, max_items);
     let b = ctx.list(&nodes, layout::St::new(style)).map_err(|mut e| {
         match e.kind {
@@ -368,7 +429,7 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
     // A huge `size` (or bound) overflows the bounds to infinity, which every
     // extent would pass.
     if !(w.is_finite() && h.is_finite()) {
-        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+        return Err(LayoutError::new(ErrorKind::TooLarge, 0..source.len()));
     }
     // Hosts size a formula's slot, line or row from its box, so the box must
     // hold all of its ink: anything painted outside would land on the
@@ -385,10 +446,12 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
     // two per byte (`\quad` is one em in five), while spacing alone
     // (`\hspace{100em}`, `\\[100em]`) would make a few bytes reserve a
     // page of blank slot, line or row in every host.
-    let budget = (4.0 + 2.0 * source.len() as f32) * options.size;
+    #[expect(clippy::cast_precision_loss, reason = "a bound, which needs no exact byte count")]
+    let bytes = source.len() as f32;
+    let budget = 2.0_f32.mul_add(bytes, 4.0) * options.size;
     let fits = b.w.abs() <= w && right - left <= w.min(budget) && ascent + descent <= h.min(budget);
     if !fits {
-        return Err(Error::new(ErrorKind::TooLarge, 0..source.len()));
+        return Err(LayoutError::new(ErrorKind::TooLarge, 0..source.len()));
     }
     let mut items = b.items;
     // Hosts keep formulas around (caches, prepared rows): drop growth slack.
@@ -421,14 +484,14 @@ fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
                 let m = face.metrics(glyph);
                 let scale = size / face.upem();
                 add(
-                    x + m.x_min * scale,
-                    x + m.x_max * scale,
-                    m.height * scale - y,
-                    m.depth * scale + y,
+                    m.x_min.mul_add(scale, x),
+                    m.x_max.mul_add(scale, x),
+                    m.height.mul_add(scale, -y),
+                    m.depth.mul_add(scale, y),
                 );
             }
             Item::Rule { x, y, width, height } => {
-                add(x.min(x + width), x.max(x + width), -y, y + height)
+                add(x.min(x + width), x.max(x + width), -y, y + height);
             }
         }
     }

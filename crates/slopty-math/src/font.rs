@@ -6,8 +6,9 @@
 //! kerns, size variants and extensible assemblies. Nothing is tuned per font.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use ttf_parser::gsub::SubstitutionSubtable;
 use ttf_parser::math::{GlyphConstruction, Table};
 use ttf_parser::opentype_layout::Lookup;
@@ -16,18 +17,18 @@ use ttf_parser::{Face, GlyphId, OutlineBuilder, Tag};
 /// Why a font can't be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontError {
-    /// Not a parseable OpenType/TrueType font.
-    Parse,
+    /// Not a parseable OpenType/TrueType font, for this reason.
+    Parse(ttf_parser::FaceParsingError),
     /// The font has no MATH table (or no MATH constants), so it can't lay out math.
     NoMathTable,
 }
 
 impl std::fmt::Display for FontError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            FontError::Parse => "not a valid font file",
-            FontError::NoMathTable => "font has no OpenType MATH table",
-        })
+        match self {
+            Self::Parse(error) => write!(f, "not a valid font file ({error})"),
+            Self::NoMathTable => f.write_str("font has no OpenType MATH table"),
+        }
     }
 }
 
@@ -124,7 +125,16 @@ pub(crate) enum Stretched {
 }
 
 fn percent(value: i16, default: f32) -> f32 {
-    if (1..=100).contains(&value) { value as f32 / 100.0 } else { default }
+    if (1..=100).contains(&value) { f32::from(value) / 100.0 } else { default }
+}
+
+/// A count of glyph parts as an `f32`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "assemblies hold a few hundred parts, far below 2^24 where an f32 stops being exact"
+)]
+const fn count(n: usize) -> f32 {
+    n as f32
 }
 
 /// Hard ceiling on parts in one assembly (a hostile `\left(` 10 km tall).
@@ -140,13 +150,13 @@ pub struct MathFont {
     data: &'static [u8],
     face: Face<'static>,
     math: Table<'static>,
-    pub(crate) c: Constants,
+    c: Constants,
     upem: f32,
     space: f32,
     metrics: Mutex<HashMap<u16, Metrics>>,
     /// GSUB lookups of the `ssty` feature: glyphs redrawn for script sizes.
     ssty: Vec<Lookup<'static>>,
-    fallback: Option<Arc<MathFont>>,
+    fallback: Option<Arc<Self>>,
 }
 
 impl std::fmt::Debug for MathFont {
@@ -154,7 +164,7 @@ impl std::fmt::Debug for MathFont {
         f.debug_struct("MathFont")
             .field("name", &self.name())
             .field("units_per_em", &self.upem)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -162,15 +172,15 @@ impl MathFont {
     /// Loads a math font from bytes that live for the whole process (an
     /// `include_bytes!` or a mapped file). Fails if the font has no MATH table.
     pub fn new(data: &'static [u8]) -> Result<Self, FontError> {
-        let face = Face::parse(data, 0).map_err(|_| FontError::Parse)?;
+        let face = Face::parse(data, 0).map_err(FontError::Parse)?;
         let math = face.tables().math.ok_or(FontError::NoMathTable)?;
         let k = math.constants.ok_or(FontError::NoMathTable)?;
-        let v = |m: ttf_parser::math::MathValue| m.value as f32;
+        let v = |m: ttf_parser::math::MathValue| f32::from(m.value);
         let c = Constants {
             // A zero or nonsensical scale would divide by zero; TeX's own defaults stand in.
             script_scale: percent(k.script_percent_scale_down(), 0.7),
             script_script_scale: percent(k.script_script_percent_scale_down(), 0.5),
-            display_operator_min_height: k.display_operator_min_height() as f32,
+            display_operator_min_height: f32::from(k.display_operator_min_height()),
             axis_height: v(k.axis_height()),
             accent_base_height: v(k.accent_base_height()),
             subscript_shift_down: v(k.subscript_shift_down()),
@@ -220,18 +230,16 @@ impl MathFont {
             radical_extra_ascender: v(k.radical_extra_ascender()),
             radical_kern_before_degree: v(k.radical_kern_before_degree()),
             radical_kern_after_degree: v(k.radical_kern_after_degree()),
-            radical_degree_bottom_raise: k.radical_degree_bottom_raise_percent() as f32 / 100.0,
+            radical_degree_bottom_raise: f32::from(k.radical_degree_bottom_raise_percent()) / 100.0,
             min_connector_overlap: math
                 .variants
-                .map(|v| v.min_connector_overlap as f32)
-                .unwrap_or(0.0),
+                .map_or(0.0, |v| f32::from(v.min_connector_overlap)),
         };
-        let upem = face.units_per_em() as f32;
+        let upem = f32::from(face.units_per_em());
         let space = face
             .glyph_index(' ')
             .and_then(|g| face.glyph_hor_advance(g))
-            .map(|a| a as f32)
-            .unwrap_or(upem / 4.0);
+            .map_or(upem / 4.0, f32::from);
         let ssty = face
             .tables()
             .gsub
@@ -263,26 +271,27 @@ impl MathFont {
     /// Uses `fallback` (and its own fallbacks) for characters this font lacks
     /// — e.g. a sans font that has no script or Fraktur alphabet. Layout
     /// constants still come from this font, so it keeps deciding the look.
-    pub fn with_fallback(mut self, fallback: Arc<MathFont>) -> Self {
+    #[must_use]
+    pub fn with_fallback(mut self, fallback: Arc<Self>) -> Self {
         self.fallback = Some(fallback);
         self
     }
 
     /// This font then its fallbacks, in lookup order.
-    pub fn chain(&self) -> impl Iterator<Item = &MathFont> {
+    pub fn chain(&self) -> impl Iterator<Item = &Self> {
         std::iter::successors(Some(self), |f| f.fallback.as_deref()).take(MAX_CHAIN)
     }
 
     /// The font at `index` in [`MathFont::chain`] (an [`crate::Item::Glyph`]'s `font`).
-    pub fn at(&self, index: u8) -> &MathFont {
-        self.chain().nth(index as usize).unwrap_or(self)
+    pub fn at(&self, index: u8) -> &Self {
+        self.chain().nth(usize::from(index)).unwrap_or(self)
     }
 
     /// Loads a math font from owned bytes. The bytes are leaked so the font can
     /// borrow them for the rest of the process — load each font once and share it.
     pub fn from_vec(data: Vec<u8>) -> Result<Self, FontError> {
         // Validate first so a bad file isn't leaked.
-        let face = Face::parse(&data, 0).map_err(|_| FontError::Parse)?;
+        let face = Face::parse(&data, 0).map_err(FontError::Parse)?;
         if face.tables().math.and_then(|m| m.constants).is_none() {
             return Err(FontError::NoMathTable);
         }
@@ -291,7 +300,7 @@ impl MathFont {
 
     /// The font file's bytes, for painters that rasterize glyph ids natively
     /// (CoreText, a GPU glyph atlas) rather than filling [`MathFont::outline`]s.
-    pub fn data(&self) -> &'static [u8] {
+    pub const fn data(&self) -> &'static [u8] {
         self.data
     }
 
@@ -306,19 +315,26 @@ impl MathFont {
         })
     }
 
+    /// The font's units per em, which every font-unit metric is a fraction of.
     pub fn units_per_em(&self) -> u16 {
-        self.upem as u16
+        self.face.units_per_em()
     }
 
-    pub(crate) fn upem(&self) -> f32 {
+    pub(crate) const fn upem(&self) -> f32 {
         self.upem
     }
 
+    /// The MATH constants layout reads.
+    pub(crate) const fn constants(&self) -> &Constants {
+        &self.c
+    }
+
     /// Advance of the font's space, in font units.
-    pub(crate) fn space(&self) -> f32 {
+    pub(crate) const fn space(&self) -> f32 {
         self.space
     }
 
+    /// Whether this font itself (not its fallbacks) has a glyph for `ch`.
     pub fn has_char(&self, ch: char) -> bool {
         self.glyph(ch).is_some()
     }
@@ -328,17 +344,17 @@ impl MathFont {
     }
 
     pub(crate) fn metrics(&self, glyph: u16) -> Metrics {
-        let mut cache = self.metrics.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self.metrics.lock();
         *cache.entry(glyph).or_insert_with(|| {
             let id = GlyphId(glyph);
-            let advance = self.face.glyph_hor_advance(id).unwrap_or(0) as f32;
+            let advance = f32::from(self.face.glyph_hor_advance(id).unwrap_or(0));
             match self.face.glyph_bounding_box(id) {
                 Some(r) => Metrics {
                     advance,
-                    x_min: r.x_min as f32,
-                    x_max: r.x_max as f32,
-                    height: r.y_max as f32,
-                    depth: -(r.y_min as f32),
+                    x_min: f32::from(r.x_min),
+                    x_max: f32::from(r.x_max),
+                    height: f32::from(r.y_max),
+                    depth: -f32::from(r.y_min),
                 },
                 None => Metrics { advance, ..Metrics::default() },
             }
@@ -354,12 +370,13 @@ impl MathFont {
             for i in 0..lookup.subtables.len() {
                 let found = match lookup.subtables.get::<SubstitutionSubtable>(i) {
                     Some(SubstitutionSubtable::Single(single)) => {
-                        use ttf_parser::gsub::SingleSubstitution::*;
+                        use ttf_parser::gsub::SingleSubstitution as S;
                         match single {
-                            Format1 { coverage, delta } => {
-                                coverage.get(id).map(|_| (glyph as i32 + delta as i32) as u16)
+                            // The delta wraps modulo 65536 (OpenType's `deltaGlyphID`).
+                            S::Format1 { coverage, delta } => {
+                                coverage.get(id).map(|_| glyph.wrapping_add_signed(delta))
                             }
-                            Format2 { coverage, substitutes } => {
+                            S::Format2 { coverage, substitutes } => {
                                 coverage.get(id).and_then(|c| substitutes.get(c)).map(|g| g.0)
                             }
                         }
@@ -370,7 +387,8 @@ impl MathFont {
                         .and_then(|c| alt.alternate_sets.get(c))
                         .and_then(|set| {
                             let n = set.alternates.len();
-                            (n > 0).then(|| set.alternates.get((level as u16 - 1).min(n - 1)))?
+                            let pick = u16::from(level).saturating_sub(1).min(n.saturating_sub(1));
+                            (n > 0).then(|| set.alternates.get(pick))?
                         })
                         .map(|g| g.0),
                     _ => None,
@@ -388,8 +406,7 @@ impl MathFont {
             .glyph_info
             .and_then(|i| i.italic_corrections)
             .and_then(|v| v.get(GlyphId(glyph)))
-            .map(|v| v.value as f32)
-            .unwrap_or(0.0)
+            .map_or(0.0, |v| f32::from(v.value))
     }
 
     /// Horizontal position accents attach to, if the font says.
@@ -398,7 +415,7 @@ impl MathFont {
             .glyph_info
             .and_then(|i| i.top_accent_attachments)
             .and_then(|v| v.get(GlyphId(glyph)))
-            .map(|v| v.value as f32)
+            .map(|v| f32::from(v.value))
     }
 
     /// The cut-in kern at `corner` for a correction height (font units).
@@ -414,16 +431,12 @@ impl MathFont {
         }) else {
             return 0.0;
         };
+        // The kern of the first band whose top is above `height`, else of the last band.
         let n = kern.count();
-        let mut i = 0;
-        while i < n {
-            match kern.height(i) {
-                Some(h) if height < h.value as f32 => break,
-                Some(_) => i += 1,
-                None => break,
-            }
-        }
-        kern.kern(i).map(|v| v.value as f32).unwrap_or(0.0)
+        let band = (0..n)
+            .find(|&i| kern.height(i).is_none_or(|h| height < f32::from(h.value)))
+            .unwrap_or(n);
+        kern.kern(band).map_or(0.0, |v| f32::from(v.value))
     }
 
     fn construction(&self, glyph: u16, vertical: bool) -> Option<GlyphConstruction<'static>> {
@@ -447,7 +460,7 @@ impl MathFont {
         let c = self.construction(glyph, vertical)?;
         c.variants
             .into_iter()
-            .find(|v| v.advance_measurement as f32 >= min)
+            .find(|v| f32::from(v.advance_measurement) >= min)
             .map(|v| v.variant_glyph.0)
     }
 
@@ -455,8 +468,7 @@ impl MathFont {
     pub(crate) fn largest_variant(&self, glyph: u16, vertical: bool) -> u16 {
         self.construction(glyph, vertical)
             .and_then(|c| c.variants.into_iter().last())
-            .map(|v| v.variant_glyph.0)
-            .unwrap_or(glyph)
+            .map_or(glyph, |v| v.variant_glyph.0)
     }
 
     /// Grows `glyph` along an axis to cover `target` font units: the smallest
@@ -473,33 +485,36 @@ impl MathFont {
             return Stretched::Glyph(self.largest_variant(glyph, vertical));
         }
         let o_min = self.c.min_connector_overlap;
-        let (mut fixed, mut ext, mut n_fixed, mut n_ext) = (0.0f32, 0.0f32, 0usize, 0usize);
+        let (mut fixed, mut ext, mut n_fixed, mut n_ext) = (0.0_f32, 0.0_f32, 0_usize, 0_usize);
         for p in &parts {
             if p.part_flags.extender() {
-                ext += p.full_advance as f32;
-                n_ext += 1;
+                ext += f32::from(p.full_advance);
+                n_ext = n_ext.saturating_add(1);
             } else {
-                fixed += p.full_advance as f32;
-                n_fixed += 1;
+                fixed += f32::from(p.full_advance);
+                n_fixed = n_fixed.saturating_add(1);
             }
         }
         // Fewest extender repetitions whose longest assembly (minimal overlap)
-        // reaches the target.
-        let longest = |r: usize| {
-            let n = n_fixed + r * n_ext;
-            fixed + r as f32 * ext - n.saturating_sub(1) as f32 * o_min
-        };
-        let mut reps = 0usize;
-        if n_ext > 0 {
-            let step = ext - n_ext as f32 * o_min;
-            if step > 0.0 && longest(0) < target {
-                reps = ((target - longest(0)) / step).ceil().max(0.0) as usize;
+        // reaches the target: the fixed parts alone reach `bare`, and each
+        // repetition adds `step`.
+        let bare = count(n_fixed.saturating_sub(1)).mul_add(-o_min, fixed);
+        let mut reps = 0_usize;
+        if let Some(cap) = MAX_ASSEMBLY_PARTS.saturating_sub(n_fixed).checked_div(n_ext) {
+            let step = count(n_ext).mul_add(-o_min, ext);
+            if step > 0.0 && bare < target {
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "ceiled and ≥ 0; a huge quotient saturates, and the cap brings it down"
+                )]
+                let needed = ((target - bare) / step).ceil().max(0.0) as usize;
+                reps = needed;
             }
             reps = reps.max(usize::from(n_fixed == 0));
-            let cap = MAX_ASSEMBLY_PARTS.saturating_sub(n_fixed) / n_ext.max(1);
             reps = reps.min(cap.max(1));
         }
-        let mut seq = Vec::with_capacity(n_fixed + reps * n_ext);
+        let mut seq = Vec::with_capacity(reps.saturating_mul(n_ext).saturating_add(n_fixed));
         for p in &parts {
             let count = if p.part_flags.extender() { reps } else { 1 };
             for _ in 0..count {
@@ -512,11 +527,12 @@ impl MathFont {
         // Shared overlap: as large as the connectors allow while still
         // reaching the target, but never under the font's minimum.
         let o_max = seq
-            .windows(2)
-            .map(|w| w[0].end_connector_length.min(w[1].start_connector_length) as f32)
+            .iter()
+            .zip(seq.iter().skip(1))
+            .map(|(a, b)| f32::from(a.end_connector_length.min(b.start_connector_length)))
             .fold(f32::INFINITY, f32::min);
-        let gaps = seq.len().saturating_sub(1) as f32;
-        let total: f32 = seq.iter().map(|p| p.full_advance as f32).sum();
+        let gaps = count(seq.len().saturating_sub(1));
+        let total: f32 = seq.iter().map(|p| f32::from(p.full_advance)).sum();
         let overlap = if gaps > 0.0 {
             let o_max = if o_max.is_finite() { o_max.max(o_min) } else { o_min };
             ((total - target) / gaps).clamp(o_min, o_max)
@@ -527,9 +543,9 @@ impl MathFont {
         let mut out = Vec::with_capacity(seq.len());
         for p in &seq {
             out.push(Part { glyph: p.glyph_id.0, offset });
-            offset += p.full_advance as f32 - overlap;
+            offset += f32::from(p.full_advance) - overlap;
         }
-        let length = total - gaps * overlap;
+        let length = gaps.mul_add(-overlap, total);
         Stretched::Assembly { parts: out, length }
     }
 
@@ -544,10 +560,19 @@ impl MathFont {
 
 /// Receives glyph outlines and rules as paths (y down).
 pub trait PathSink {
+    /// Starts a contour at (`x`, `y`).
     fn move_to(&mut self, x: f32, y: f32);
+    /// A straight line to (`x`, `y`).
     fn line_to(&mut self, x: f32, y: f32);
+    /// A quadratic Bézier through control point (`x1`, `y1`) to (`x`, `y`).
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32);
+    /// A cubic Bézier through control points (`x1`, `y1`) and (`x2`, `y2`) to (`x`, `y`).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "a cubic's three points, as every path API (and `ttf_parser`'s builder) takes them"
+    )]
     fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32);
+    /// Closes the contour.
     fn close(&mut self);
 }
 
@@ -560,7 +585,7 @@ struct Transform<'a> {
 
 impl Transform<'_> {
     fn p(&self, x: f32, y: f32) -> (f32, f32) {
-        (self.x + x * self.s, self.y - y * self.s)
+        (x.mul_add(self.s, self.x), (-y).mul_add(self.s, self.y))
     }
 }
 

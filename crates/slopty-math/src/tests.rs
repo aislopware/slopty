@@ -37,8 +37,8 @@ fn rules(f: &Formula) -> usize {
 
 /// What models actually write. Every font must lay all of it out.
 pub(crate) const CORPUS: &[&str] = &[
-    r"x^2 + y^2 = z^2",
-    r"E = mc^2",
+    "x^2 + y^2 = z^2",
+    "E = mc^2",
     r"e^{i\pi} + 1 = 0",
     r"\frac{a}{b}",
     r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
@@ -128,7 +128,7 @@ fn fonts_load_with_names() {
 fn non_math_font_is_rejected() {
     // Any font without a MATH table; the bytes of one of ours minus the table
     // would be fiddly, so use something that isn't a font at all, too.
-    assert!(MathFont::new(b"not a font").is_err());
+    MathFont::new(b"not a font").unwrap_err();
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn fraction_has_bar_and_stacks() {
         .iter()
         .filter_map(|i| match i {
             Item::Glyph { y, .. } => Some(*y),
-            _ => None,
+            Item::Rule { .. } => None,
         })
         .collect();
     assert!(ys[0] < 0.0 && ys[1] > 0.0, "{ys:?}");
@@ -196,7 +196,7 @@ fn left_right_grows_with_content() {
     let tall = inline(r"\left( \frac{\frac{a}{b}}{\frac{c}{d}} \right)");
     let first = |f: &Formula| match f.items[0] {
         Item::Glyph { glyph, .. } => glyph,
-        _ => panic!(),
+        Item::Rule { .. } => panic!("a rule first"),
     };
     assert_ne!(first(&small), first(&tall), "a taller paren variant or assembly");
     assert!(tall.height() > small.height() * 2.0);
@@ -238,7 +238,7 @@ fn errors_are_located() {
     assert_eq!(e.range, 4..8);
     assert_eq!(err(r"\frac{a}{b").kind, ErrorKind::MissingBrace);
     assert_eq!(err(r"\left( x").kind, ErrorKind::MissingRight);
-    assert_eq!(err(r"x^2^3").kind, ErrorKind::DoubleScript);
+    assert_eq!(err("x^2^3").kind, ErrorKind::DoubleScript);
     assert_eq!(err(r"\frac{a}").kind, ErrorKind::MissingArgument);
     assert!(matches!(err(r"\begin{matrix} a").kind, ErrorKind::MissingEnd(_)));
     assert!(matches!(
@@ -252,18 +252,19 @@ fn errors_are_located() {
 fn half_streamed_formulas_fail_cleanly() {
     let full = r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a} + \left( \sum_{i=1}^{n} x_i \right)";
     for end in 0..=full.len() {
-        if !full.is_char_boundary(end) {
+        // `None` inside a character.
+        let Some(prefix) = full.get(..end) else {
             continue;
-        }
-        let _ = layout(&full[..end], stix(), &Options::default());
+        };
+        let _outcome = layout(prefix, stix(), &Options::default());
     }
 }
 
 #[test]
 fn limits_are_enforced() {
-    let deep = "{".repeat(500) + &"}".repeat(500);
+    let deep = format!("{}{}", "{".repeat(500), "}".repeat(500));
     assert_eq!(layout(&deep, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooDeep);
-    let nested = r"\frac".repeat(300) + &"1".repeat(301);
+    let nested = format!("{}{}", r"\frac".repeat(300), "1".repeat(301));
     assert_eq!(layout(&nested, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooDeep);
     let long = "x".repeat(20_000);
     assert_eq!(layout(&long, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooLong);
@@ -287,10 +288,10 @@ fn random_input_never_panics() {
             s ^= s << 13;
             s ^= s >> 7;
             s ^= s << 17;
-            src.push(alphabet[(s % alphabet.len() as u64) as usize]);
+            src.push(alphabet[usize::try_from(s % alphabet.len() as u64).unwrap()]);
         }
-        let _ = layout(&src, stix(), &Options::default());
-        let _ = layout(&src, stix(), &Options::display(12.0));
+        let _inline = layout(&src, stix(), &Options::default());
+        let _display = layout(&src, stix(), &Options::display(12.0));
     }
 }
 
@@ -306,7 +307,7 @@ fn missing_glyph_falls_back_or_errors() {
     assert_eq!(e.kind, ErrorKind::MissingGlyph('⋃'));
     assert_eq!(e.range, 2..9);
     // A look-alike stands in when the whole chain lacks a symbol.
-    assert!(layout(r"A \setminus B", &fira, &Options::default()).is_ok());
+    layout(r"A \setminus B", &fira, &Options::default()).unwrap();
 }
 
 #[test]
@@ -323,7 +324,7 @@ fn bare_rows_become_an_alignment() {
 
 #[test]
 fn item_is_small() {
-    assert!(std::mem::size_of::<Item>() <= 20);
+    assert!(size_of::<Item>() <= 20);
 }
 
 /// Every command in the symbol tables, scraped from the source.
@@ -337,7 +338,7 @@ fn symbol_commands() -> Vec<String> {
         for part in line.split("=>").next().unwrap().split('|') {
             let name = part.trim().trim_matches('"');
             if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic()) {
-                names.push(name.to_string());
+                names.push(name.to_owned());
             }
         }
     }
@@ -388,11 +389,11 @@ fn nested_middle_is_bounded() {
     // Each `\middle` body is laid out once, so nesting to the depth limit is
     // linear work, not 2^31.
     let n = 31;
-    let src = "\\left.".repeat(n) + &"\\middle.\\right.".repeat(n);
-    assert!(layout(&src, stix(), &Options::default()).is_ok());
+    let src = format!("{}{}", r"\left.".repeat(n), r"\middle.\right.".repeat(n));
+    layout(&src, stix(), &Options::default()).unwrap();
     assert_linear(&src, "nesting to the depth limit"); // see `fastest`.
-    let honest = "\\left(".repeat(8) + "x" + &"\\middle| y \\right)".repeat(8);
-    assert!(layout(&honest, stix(), &Options::default()).is_ok());
+    let honest = format!("{}x{}", r"\left(".repeat(8), r"\middle| y \right)".repeat(8));
+    layout(&honest, stix(), &Options::default()).unwrap();
 }
 
 #[test]
@@ -407,7 +408,7 @@ fn bad_sizes_are_rejected() {
 fn missing_glyphs_point_at_their_source() {
     let src = "abc + \\operatorname{x\u{378}}";
     let e = layout(src, stix(), &Options::default()).unwrap_err();
-    assert_eq!(&src[e.range.clone()], "\u{378}");
+    assert_eq!(src.get(e.range), Some("\u{378}"));
 }
 
 // A layout's time is judged against plain text of the same length laid out at the same moment,
@@ -415,14 +416,14 @@ fn missing_glyphs_point_at_their_source() {
 // for linear work. Superlinear work still shows as a ratio far past the bound; a uniformly slow
 // machine does not.
 fn fastest(src: &str) -> std::time::Duration {
-    (0..5)
-        .map(|_| {
-            let started = std::time::Instant::now();
-            let _ = layout(src, stix(), &Options::default());
-            started.elapsed()
-        })
-        .min()
-        .unwrap()
+    std::iter::repeat_with(|| {
+        let started = std::time::Instant::now();
+        let _outcome = layout(src, stix(), &Options::default());
+        started.elapsed()
+    })
+    .take(5)
+    .min()
+    .unwrap()
 }
 
 // See `fastest`.
@@ -431,7 +432,7 @@ fn assert_linear(src: &str, what: &str) {
     let plain = format!("\\text{{{}}}", "x".repeat(src.len().saturating_sub(7)));
     let (took, base) = (fastest(src), fastest(&plain));
     assert!(
-        took <= base * 8 + std::time::Duration::from_millis(5),
+        took <= base.saturating_mul(8).saturating_add(std::time::Duration::from_millis(5)),
         "{what}: {took:?}, plain text of its length {base:?}"
     );
 }
@@ -441,13 +442,13 @@ fn assert_linear(src: &str, what: &str) {
 fn nested_middle_with_text_stays_fast() {
     for d in [8, 10, 12, 14, 20, 30] {
         let open = "\\left.\\middle|".repeat(d);
-        let fill = 16_000usize.saturating_sub(open.len() + 7 * d + 8);
+        let fill = 16_000_usize.saturating_sub(open.len() + 7 * d + 8);
         let src = format!("{open}\\text{{{}}}{}", "x".repeat(fill), "\\right.".repeat(d));
         assert_linear(&src, &format!("d={d}")); // see `fastest`.
     }
     // `\middle` bodies are laid out once: deep honest nesting costs linear work.
-    let honest = "\\left(".repeat(30) + "x" + &"\\middle| y \\right)".repeat(30);
-    assert!(layout(&honest, stix(), &Options::default()).is_ok());
+    let honest = format!("{}x{}", r"\left(".repeat(30), r"\middle| y \right)".repeat(30));
+    layout(&honest, stix(), &Options::default()).unwrap();
     assert_linear(&honest, "honest nesting"); // see `fastest`.
 }
 
@@ -480,9 +481,9 @@ fn runaway_sizes_are_too_large() {
     assert_eq!(err(&r"\hspace{100em}".repeat(19)), ErrorKind::TooLarge);
     assert_eq!(err(r"a\\[100em]b"), ErrorKind::TooLarge);
     // Ordinary large formulas are fine.
-    assert!(layout(r"\kern10em x", stix(), &Options::default()).is_ok());
+    layout(r"\kern10em x", stix(), &Options::default()).unwrap();
     let matrix = format!("\\begin{{pmatrix}}{}\\end{{pmatrix}}", "1 \\\\ ".repeat(100));
-    assert!(layout(&matrix, stix(), &Options::display(16.0)).is_ok());
+    layout(&matrix, stix(), &Options::display(16.0)).unwrap();
 }
 
 /// Hosts size a formula's slot from its box, so nothing may paint outside

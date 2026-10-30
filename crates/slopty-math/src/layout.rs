@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! Math list → positioned boxes, following TeX's Appendix G as MathML Core
+//! Math list → positioned boxes, following TeX's Appendix G as `MathML` Core
 //! restates it for OpenType MATH fonts. Every size, gap and shift is a font
 //! constant scaled to the current style, so the same code serves any font.
 //!
@@ -9,7 +9,7 @@
 use crate::ast::{Align, Array, ArrayKind, Class, Dim, Node, Style};
 use crate::font::{Corner, MathFont, Stretched};
 use crate::unicode::{Variant, styled};
-use crate::{Error, ErrorKind, Item};
+use crate::{ErrorKind, Item, LayoutError};
 
 /// TeX's `\nulldelimiterspace` (1.2pt at 10pt), in ems.
 const NULL_DELIMITER: f32 = 0.12;
@@ -26,26 +26,26 @@ pub(crate) struct St {
 }
 
 impl St {
-    pub fn new(style: Style) -> Self {
+    pub(crate) const fn new(style: Style) -> Self {
         Self { style, cramped: false }
     }
 
-    fn script(self) -> Style {
+    const fn script(self) -> Style {
         match self.style {
             Style::Display | Style::Text => Style::Script,
             _ => Style::ScriptScript,
         }
     }
 
-    fn sup(self) -> St {
-        St { style: self.script(), cramped: self.cramped }
+    const fn sup(self) -> Self {
+        Self { style: self.script(), cramped: self.cramped }
     }
 
-    fn sub(self) -> St {
-        St { style: self.script(), cramped: true }
+    const fn sub(self) -> Self {
+        Self { style: self.script(), cramped: true }
     }
 
-    fn frac_part(self) -> Style {
+    const fn frac_part(self) -> Style {
         match self.style {
             Style::Display => Style::Text,
             Style::Text => Style::Script,
@@ -53,16 +53,16 @@ impl St {
         }
     }
 
-    fn num(self) -> St {
-        St { style: self.frac_part(), cramped: self.cramped }
+    const fn num(self) -> Self {
+        Self { style: self.frac_part(), cramped: self.cramped }
     }
 
-    fn den(self) -> St {
-        St { style: self.frac_part(), cramped: true }
+    const fn den(self) -> Self {
+        Self { style: self.frac_part(), cramped: true }
     }
 
-    fn cramp(self) -> St {
-        St { style: self.style, cramped: true }
+    const fn cramp(self) -> Self {
+        Self { style: self.style, cramped: true }
     }
 
     fn display(self) -> bool {
@@ -96,7 +96,7 @@ pub(crate) struct LBox {
 
 impl LBox {
     /// Moves `other`'s items into `self` at an offset (dimensions untouched).
-    fn put(&mut self, other: LBox, dx: f32, dy: f32) {
+    fn put(&mut self, other: Self, dx: f32, dy: f32) {
         self.items.reserve(other.items.len());
         self.items.extend(other.items.into_iter().map(|i| i.shifted(dx, dy)));
     }
@@ -122,7 +122,7 @@ struct Atom {
 }
 
 impl Atom {
-    fn new(class: Class, b: LBox) -> Self {
+    const fn new(class: Class, b: LBox) -> Self {
         Self { class, b, char: false, limits: false, op: false }
     }
 }
@@ -133,20 +133,24 @@ enum Piece {
 }
 
 pub(crate) struct Ctx<'f> {
-    pub font: &'f MathFont,
-    pub size: f32,
-    pub max_items: usize,
-    pub items: usize,
+    font: &'f MathFont,
+    size: f32,
+    max_items: usize,
+    items: usize,
     /// Everything laid out so far — atoms, items, cells, assembly parts,
     /// including attempts that get discarded. Never reset, so it bounds time
     /// where the item count alone can't.
     work: usize,
 }
 
-type R<T> = Result<T, Error>;
+type R<T> = Result<T, LayoutError>;
+
+/// A deferred `\middle`: its placeholder's index among the pieces, its
+/// delimiter and its style.
+type Middle = (usize, Option<char>, St);
 
 impl<'f> Ctx<'f> {
-    pub fn new(font: &'f MathFont, size: f32, max_items: usize) -> Self {
+    pub(crate) const fn new(font: &'f MathFont, size: f32, max_items: usize) -> Self {
         Self { font, size, max_items, items: 0, work: 0 }
     }
 
@@ -154,8 +158,8 @@ impl<'f> Ctx<'f> {
         self.size
             * match st.style {
                 Style::Display | Style::Text => 1.0,
-                Style::Script => self.font.c.script_scale,
-                Style::ScriptScript => self.font.c.script_script_scale,
+                Style::Script => self.font.constants().script_scale,
+                Style::ScriptScript => self.font.constants().script_script_scale,
             }
     }
 
@@ -173,19 +177,19 @@ impl<'f> Ctx<'f> {
         self.font_size(st) / self.face(g).upem()
     }
 
-    fn count(&mut self, n: usize) -> R<()> {
-        self.items += n;
+    const fn count(&mut self, n: usize) -> R<()> {
+        self.items = self.items.saturating_add(n);
         if self.items > self.max_items {
-            return Err(Error::new(ErrorKind::TooLarge, 0..0));
+            return Err(LayoutError::new(ErrorKind::TooLarge, 0..0));
         }
         self.work(n)
     }
 
     /// Charges `n` units against the work budget (a few times `max_items`).
-    fn work(&mut self, n: usize) -> R<()> {
+    const fn work(&mut self, n: usize) -> R<()> {
         self.work = self.work.saturating_add(n);
         if self.work > self.max_items.saturating_mul(4) {
-            return Err(Error::new(ErrorKind::TooLarge, 0..0));
+            return Err(LayoutError::new(ErrorKind::TooLarge, 0..0));
         }
         Ok(())
     }
@@ -229,7 +233,7 @@ impl<'f> Ctx<'f> {
         self.font
             .chain()
             .enumerate()
-            .find_map(|(i, f)| f.glyph(ch).map(|id| G { font: i as u8, id }))
+            .find_map(|(i, f)| Some(G { font: u8::try_from(i).ok()?, id: f.glyph(ch)? }))
     }
 
     /// `ch` from the chain, else a look-alike, else an error.
@@ -237,7 +241,7 @@ impl<'f> Ctx<'f> {
         self.find(ch).or_else(|| equivalents(ch).iter().find_map(|&alt| self.find(alt))).ok_or_else(
             || {
                 let at = at as usize;
-                Error::new(ErrorKind::MissingGlyph(ch), at..at + ch.len_utf8())
+                LayoutError::new(ErrorKind::MissingGlyph(ch), at..at.saturating_add(ch.len_utf8()))
             },
         )
     }
@@ -262,18 +266,18 @@ impl<'f> Ctx<'f> {
                 self.count(parts.len())?;
                 let size = self.font_size(st);
                 let mut b = LBox::default();
-                for p in &parts {
-                    let m = face.metrics(p.glyph);
+                for part in &parts {
+                    let metrics = face.metrics(part.glyph);
                     let (x, y) = if vertical {
                         // Stack from the baseline up, each part's ink bottom at its offset.
-                        b.w = b.w.max(m.advance * k);
-                        (0.0, -(p.offset + m.depth) * k)
+                        b.w = b.w.max(metrics.advance * k);
+                        (0.0, -(part.offset + metrics.depth) * k)
                     } else {
-                        b.h = b.h.max(m.height * k);
-                        b.d = b.d.max(m.depth * k);
-                        (p.offset * k, 0.0)
+                        b.h = b.h.max(metrics.height * k);
+                        b.d = b.d.max(metrics.depth * k);
+                        (part.offset * k, 0.0)
                     };
-                    b.items.push(Item::Glyph { font: glyph.font, glyph: p.glyph, x, y, size });
+                    b.items.push(Item::Glyph { font: glyph.font, glyph: part.glyph, x, y, size });
                 }
                 if vertical {
                     b.h = length * k;
@@ -295,8 +299,7 @@ impl<'f> Ctx<'f> {
             .font
             .chain()
             .enumerate()
-            .filter(|(_, f)| f.glyph(ch).is_some())
-            .map(|(i, _)| i as u8)
+            .filter_map(|(i, f)| f.glyph(ch).and_then(|_| u8::try_from(i).ok()))
             .collect();
         for font in fonts {
             let id = self.font.at(font).glyph(ch).unwrap_or_default();
@@ -309,12 +312,11 @@ impl<'f> Ctx<'f> {
                 best = Some(b);
             }
         }
-        match best {
-            Some(b) => Ok(b),
-            None => {
-                let glyph = self.lookup(ch, 0)?;
-                self.stretched(glyph, target, vertical, st)
-            }
+        if let Some(b) = best {
+            Ok(b)
+        } else {
+            let glyph = self.lookup(ch, 0)?;
+            self.stretched(glyph, target, vertical, st)
         }
     }
 
@@ -324,7 +326,7 @@ impl<'f> Ctx<'f> {
             return Ok(LBox { w: NULL_DELIMITER * self.font_size(st), ..LBox::default() });
         };
         let mut b = self.stretch_char(ch, target, true, st)?;
-        let axis = self.font.c.axis_height * self.k(st);
+        let axis = self.font.constants().axis_height * self.k(st);
         b.shift_y((b.h - b.d) / 2.0 - axis);
         b.glyph = None;
         Ok(b)
@@ -332,12 +334,13 @@ impl<'f> Ctx<'f> {
 
     /// TeX's size for delimiters around content with height `h`, depth `d`.
     fn delimiter_target(&self, h: f32, d: f32, st: St) -> f32 {
-        let axis = self.font.c.axis_height * self.k(st);
+        let axis = self.font.constants().axis_height * self.k(st);
         let delta = (h - axis).max(d + axis);
-        (2.0 * delta * DELIMITER_FACTOR).max(2.0 * delta - DELIMITER_SHORTFALL * self.font_size(st))
+        (2.0 * delta * DELIMITER_FACTOR)
+            .max(DELIMITER_SHORTFALL.mul_add(-self.font_size(st), 2.0 * delta))
     }
 
-    pub fn list(&mut self, nodes: &[Node], st: St) -> R<LBox> {
+    pub(crate) fn list(&mut self, nodes: &[Node], st: St) -> R<LBox> {
         self.list_lead(nodes, st, false)
     }
 
@@ -351,13 +354,12 @@ impl<'f> Ctx<'f> {
     /// A list's atoms and kerns, not yet spaced. With `defer_middles`, each
     /// `\middle` is an empty placeholder whose index (and delimiter and
     /// style) is returned, to be sized once the rest of the body is known.
-    #[allow(clippy::type_complexity)]
     fn pieces(
         &mut self,
         nodes: &[Node],
         st: St,
         defer_middles: bool,
-    ) -> R<(Vec<Piece>, Vec<(usize, Option<char>, St)>)> {
+    ) -> R<(Vec<Piece>, Vec<Middle>)> {
         let mut st = st;
         let mut pieces = Vec::with_capacity(nodes.len());
         let mut middles = Vec::new();
@@ -382,45 +384,45 @@ impl<'f> Ctx<'f> {
     }
 
     /// Spaces and concatenates a list's pieces (TeX rules 5, 6 and 20).
-    fn assemble(&mut self, mut pieces: Vec<Piece>, lead_ord: bool) -> LBox {
+    fn assemble(&self, mut pieces: Vec<Piece>, lead_ord: bool) -> LBox {
         // Bin atoms with nothing to bind become Ord (TeX rules 5 and 6).
         let mut prev: Option<usize> = None;
         for i in 0..pieces.len() {
-            let Piece::Atom(atom, _) = &pieces[i] else {
+            let Some(Piece::Atom(atom, _)) = pieces.get(i) else {
                 continue;
             };
             let class = atom.class;
-            let prev_class = prev.and_then(|p| match &pieces[p] {
-                Piece::Atom(a, _) => Some(a.class),
-                Piece::Kern(_) => None,
+            let prev_class = prev.and_then(|p| match pieces.get(p) {
+                Some(Piece::Atom(a, _)) => Some(a.class),
+                Some(Piece::Kern(_)) | None => None,
             });
-            let prev_class = prev_class.or(lead_ord.then_some(Class::Ord));
+            let prev_class = prev_class.or_else(|| lead_ord.then_some(Class::Ord));
             let unary = matches!(
                 prev_class,
                 None | Some(Class::Bin | Class::Op | Class::Rel | Class::Open | Class::Punct)
             );
             if class == Class::Bin
                 && unary
-                && let Piece::Atom(a, _) = &mut pieces[i]
+                && let Some(Piece::Atom(a, _)) = pieces.get_mut(i)
             {
                 a.class = Class::Ord;
             }
             if matches!(class, Class::Rel | Class::Close | Class::Punct)
                 && prev_class == Some(Class::Bin)
-                && let Some(Piece::Atom(a, _)) = prev.map(|p| &mut pieces[p])
+                && let Some(Piece::Atom(a, _)) = prev.and_then(|p| pieces.get_mut(p))
             {
                 a.class = Class::Ord;
             }
             prev = Some(i);
         }
-        if let Some(Piece::Atom(a, _)) = prev.map(|p| &mut pieces[p])
+        if let Some(Piece::Atom(a, _)) = prev.and_then(|p| pieces.get_mut(p))
             && a.class == Class::Bin
         {
             a.class = Class::Ord;
         }
         let single = pieces.len() == 1;
         let mut out = LBox::default();
-        let mut x = 0.0f32;
+        let mut x = 0.0_f32;
         let mut prev_class = lead_ord.then_some(Class::Ord);
         for piece in pieces {
             match piece {
@@ -475,17 +477,17 @@ impl<'f> Ctx<'f> {
                 let mut glyph = self.lookup(*ch, *at)?;
                 if st.display() {
                     let face = self.face(glyph);
-                    let min =
-                        self.font.c.display_operator_min_height * self.k(st) / self.kg(st, glyph);
+                    let min = self.font.constants().display_operator_min_height * self.k(st)
+                        / self.kg(st, glyph);
                     glyph.id = face
                         .variant_at_least(glyph.id, min, true)
                         .unwrap_or_else(|| face.largest_variant(glyph.id, true));
                 }
                 let mut b = self.glyph_box(glyph, st)?;
-                let axis = self.font.c.axis_height * self.k(st);
+                let axis = self.font.constants().axis_height * self.k(st);
                 b.shift_y((b.h - b.d) / 2.0 - axis);
                 Atom {
-                    limits: limits.unwrap_or(*default_limits && st.display()),
+                    limits: limits.unwrap_or_else(|| *default_limits && st.display()),
                     op: true,
                     ..Atom::new(Class::Op, b)
                 }
@@ -493,12 +495,14 @@ impl<'f> Ctx<'f> {
             Node::NamedOp { name, default_limits, limits } => {
                 let b = self.text(name, Variant::Upright, 0, st)?;
                 Atom {
-                    limits: limits.unwrap_or(*default_limits && st.display()),
+                    limits: limits.unwrap_or_else(|| *default_limits && st.display()),
                     ..Atom::new(Class::Op, b)
                 }
             }
             Node::Frac { num, den, bar, style, delims } => {
-                Atom::new(Class::Inner, self.fraction(num, den, *bar, *style, *delims, st)?)
+                // `\dfrac`, `\tfrac`: a style of their own, cramped as around them.
+                let st = style.map_or(st, |style| St { style, cramped: st.cramped });
+                Atom::new(Class::Inner, self.fraction(num, den, *bar, *delims, st)?)
             }
             Node::Sqrt { index, body } => {
                 Atom::new(Class::Ord, self.radical(index.as_deref(), body, st)?)
@@ -509,7 +513,9 @@ impl<'f> Ctx<'f> {
             // A `\middle` outside `\left…\right` keeps its natural size.
             Node::Middle(delim) => Atom::new(Class::Ord, self.delimiter(*delim, 0.0, st)?),
             Node::Big { delim, size, class } => {
-                let target = BIG_SIZES[(*size as usize).clamp(1, 4) - 1] * self.size;
+                // Sizes 1 to 4 pick from the table; anything else clamps into it.
+                let big = usize::from(*size).clamp(1, BIG_SIZES.len()).saturating_sub(1);
+                let target = BIG_SIZES.get(big).copied().unwrap_or_default() * self.size;
                 Atom::new(*class, self.delimiter(*delim, target, st)?)
             }
             Node::Accent { ch, wide, body } => {
@@ -573,7 +579,7 @@ impl<'f> Ctx<'f> {
         sub: Option<&[Node]>,
         st: St,
     ) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let b = base.b;
         let sup = sup.map(|l| self.list(l, st.sup())).transpose()?;
@@ -583,28 +589,36 @@ impl<'f> Ctx<'f> {
         let (sup_drop, sub_drop) = if base_is_char {
             (0.0, 0.0)
         } else {
-            (b.h - c.superscript_baseline_drop_max * k, b.d + c.subscript_baseline_drop_min * k)
+            (
+                consts.superscript_baseline_drop_max.mul_add(-k, b.h),
+                consts.subscript_baseline_drop_min.mul_add(k, b.d),
+            )
         };
-        let mut up = 0.0f32;
-        let mut down = 0.0f32;
+        let mut up = 0.0_f32;
+        let mut down = 0.0_f32;
         if let Some(sp) = &sup {
-            let standard =
-                if st.cramped { c.superscript_shift_up_cramped } else { c.superscript_shift_up };
-            up = (standard * k).max(sup_drop).max(sp.d + c.superscript_bottom_min * k);
+            let standard = if st.cramped {
+                consts.superscript_shift_up_cramped
+            } else {
+                consts.superscript_shift_up
+            };
+            up = (standard * k).max(sup_drop).max(consts.superscript_bottom_min.mul_add(k, sp.d));
         }
         if let Some(sb) = &sub {
-            down = (c.subscript_shift_down * k).max(sub_drop);
+            down = (consts.subscript_shift_down * k).max(sub_drop);
             if sup.is_none() {
-                down = down.max(sb.h - c.subscript_top_max * k);
+                down = down.max(consts.subscript_top_max.mul_add(-k, sb.h));
             }
         }
         if let (Some(sp), Some(sb)) = (&sup, &sub) {
             let gap = (up - sp.d) - (sb.h - down);
-            let min = c.sub_superscript_gap_min * k;
+            let min = consts.sub_superscript_gap_min * k;
             if gap < min {
                 let need = min - gap;
-                let raise =
-                    (c.superscript_bottom_max_with_subscript * k - (up - sp.d)).clamp(0.0, need);
+                let raise = consts
+                    .superscript_bottom_max_with_subscript
+                    .mul_add(k, -(up - sp.d))
+                    .clamp(0.0, need);
                 up += raise;
                 down += need - raise;
             }
@@ -614,10 +628,11 @@ impl<'f> Ctx<'f> {
         if let (Some(glyph), false) = (b.glyph, base.op) {
             let (face, kg) = (self.face(glyph), self.kg(st, glyph));
             if let Some(sp) = &sup {
-                sup_x += face.kern(glyph.id, Corner::TopRight, (up - sp.d) / kg) * kg;
+                sup_x = face.kern(glyph.id, Corner::TopRight, (up - sp.d) / kg).mul_add(kg, sup_x);
             }
             if let Some(sb) = &sub {
-                sub_x += face.kern(glyph.id, Corner::BottomRight, (sb.h - down) / kg) * kg;
+                sub_x =
+                    face.kern(glyph.id, Corner::BottomRight, (sb.h - down) / kg).mul_add(kg, sub_x);
             }
         }
         let mut out = LBox { w: b.w, h: b.h, d: b.d, ..LBox::default() };
@@ -634,7 +649,7 @@ impl<'f> Ctx<'f> {
             out.h = out.h.max(sb.h - down);
             out.put(sb, sub_x, down);
         }
-        out.w += c.space_after_script * k;
+        out.w = consts.space_after_script.mul_add(k, out.w);
         Ok(out)
     }
 
@@ -646,29 +661,36 @@ impl<'f> Ctx<'f> {
         under: Option<&[Node]>,
         st: St,
     ) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let over = over.map(|l| self.list(l, st.sup())).transpose()?;
         let under = under.map(|l| self.list(l, st.sub())).transpose()?;
         let delta = b.italic;
-        let w =
-            b.w.max(over.as_ref().map_or(0.0, |o| o.w)).max(under.as_ref().map_or(0.0, |u| u.w));
-        let mut out = LBox { w, h: b.h, d: b.d, ..LBox::default() };
+        let width =
+            b.w.max(over.as_ref().map_or(0.0, |over| over.w))
+                .max(under.as_ref().map_or(0.0, |under| under.w));
+        let mut out = LBox { w: width, h: b.h, d: b.d, ..LBox::default() };
         let (bw, bh, bd) = (b.w, b.h, b.d);
-        out.put(b, (w - bw) / 2.0, 0.0);
-        if let Some(o) = over {
-            let rise = (c.upper_limit_gap_min * k + o.d).max(c.upper_limit_baseline_rise_min * k);
+        out.put(b, (width - bw) / 2.0, 0.0);
+        if let Some(over) = over {
+            let rise = consts
+                .upper_limit_gap_min
+                .mul_add(k, over.d)
+                .max(consts.upper_limit_baseline_rise_min * k);
             let y = -(bh + rise);
-            out.h = out.h.max(-y + o.h);
-            let x = (w - o.w) / 2.0 + delta / 2.0;
-            out.put(o, x, y);
+            out.h = out.h.max(-y + over.h);
+            let x = (width - over.w) / 2.0 + delta / 2.0;
+            out.put(over, x, y);
         }
-        if let Some(u) = under {
-            let drop = (c.lower_limit_gap_min * k + u.h).max(c.lower_limit_baseline_drop_min * k);
+        if let Some(under) = under {
+            let drop = consts
+                .lower_limit_gap_min
+                .mul_add(k, under.h)
+                .max(consts.lower_limit_baseline_drop_min * k);
             let y = bd + drop;
-            out.d = out.d.max(y + u.d);
-            let x = (w - u.w) / 2.0 - delta / 2.0;
-            out.put(u, x, y);
+            out.d = out.d.max(y + under.d);
+            let x = (width - under.w) / 2.0 - delta / 2.0;
+            out.put(under, x, y);
         }
         Ok(out)
     }
@@ -678,63 +700,58 @@ impl<'f> Ctx<'f> {
         num: &[Node],
         den: &[Node],
         bar: bool,
-        style: Option<Style>,
         delims: Option<(Option<char>, Option<char>)>,
         st: St,
     ) -> R<LBox> {
-        let st = match style {
-            Some(s) => St { style: s, cramped: st.cramped },
-            None => st,
-        };
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let num = self.list(num, st.num())?;
         let den = self.list(den, st.den())?;
         let display = st.display();
-        let axis = c.axis_height * k;
+        let axis = consts.axis_height * k;
         let (u, v, t) = if bar {
-            let t = c.fraction_rule_thickness * k;
+            let t = consts.fraction_rule_thickness * k;
             let (shift_up, shift_down, gap_num, gap_den) = if display {
                 (
-                    c.fraction_numerator_display_style_shift_up,
-                    c.fraction_denominator_display_style_shift_down,
-                    c.fraction_num_display_style_gap_min,
-                    c.fraction_denom_display_style_gap_min,
+                    consts.fraction_numerator_display_style_shift_up,
+                    consts.fraction_denominator_display_style_shift_down,
+                    consts.fraction_num_display_style_gap_min,
+                    consts.fraction_denom_display_style_gap_min,
                 )
             } else {
                 (
-                    c.fraction_numerator_shift_up,
-                    c.fraction_denominator_shift_down,
-                    c.fraction_numerator_gap_min,
-                    c.fraction_denominator_gap_min,
+                    consts.fraction_numerator_shift_up,
+                    consts.fraction_denominator_shift_down,
+                    consts.fraction_numerator_gap_min,
+                    consts.fraction_denominator_gap_min,
                 )
             };
-            let u = (shift_up * k).max(axis + t / 2.0 + gap_num * k + num.d);
-            let v = (shift_down * k).max(den.h + gap_den * k - axis + t / 2.0);
+            let u = (shift_up * k).max(gap_num.mul_add(k, axis + t / 2.0) + num.d);
+            let v = (shift_down * k).max(gap_den.mul_add(k, den.h) - axis + t / 2.0);
             (u, v, t)
         } else {
             let (shift_up, shift_down, gap) = if display {
                 (
-                    c.stack_top_display_style_shift_up,
-                    c.stack_bottom_display_style_shift_down,
-                    c.stack_display_style_gap_min,
+                    consts.stack_top_display_style_shift_up,
+                    consts.stack_bottom_display_style_shift_down,
+                    consts.stack_display_style_gap_min,
                 )
             } else {
-                (c.stack_top_shift_up, c.stack_bottom_shift_down, c.stack_gap_min)
+                (consts.stack_top_shift_up, consts.stack_bottom_shift_down, consts.stack_gap_min)
             };
             let (mut u, mut v) = (shift_up * k, shift_down * k);
             let actual = (u - num.d) - (den.h - v);
             if actual < gap * k {
-                let e = (gap * k - actual) / 2.0;
-                u += e;
-                v += e;
+                let share = gap.mul_add(k, -actual) / 2.0;
+                u += share;
+                v += share;
             }
             (u, v, 0.0)
         };
         let pad = if delims.is_some() { 0.0 } else { NULL_DELIMITER * self.font_size(st) };
         let inner = num.w.max(den.w);
         let mut out = LBox {
-            w: inner + 2.0 * pad,
+            w: pad.mul_add(2.0, inner),
             h: (u + num.h).max(axis + t / 2.0),
             d: (v + den.d).max(t / 2.0 - axis),
             ..LBox::default()
@@ -756,16 +773,16 @@ impl<'f> Ctx<'f> {
     }
 
     fn radical(&mut self, index: Option<&[Node]>, body: &[Node], st: St) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let body = self.list(body, st.cramp())?;
         let gap = if st.display() {
-            c.radical_display_style_vertical_gap
+            consts.radical_display_style_vertical_gap
         } else {
-            c.radical_vertical_gap
+            consts.radical_vertical_gap
         } * k;
-        let t = c.radical_rule_thickness * k;
-        let extra = c.radical_extra_ascender * k;
+        let t = consts.radical_rule_thickness * k;
+        let extra = consts.radical_extra_ascender * k;
         let target = body.h + body.d + gap + t;
         let rad = self.stretch_char('√', target, true, st)?;
         let total = rad.h + rad.d;
@@ -778,10 +795,10 @@ impl<'f> Ctx<'f> {
             LBox { h: body.h + gap + t + extra, d: body.d.max(rad.d + rad_dy), ..LBox::default() };
         if let Some(index) = index {
             let degree = self.list(index, St::new(Style::ScriptScript))?;
-            let before = c.radical_kern_before_degree * k;
-            let after = c.radical_kern_after_degree * k;
+            let before = consts.radical_kern_before_degree * k;
+            let after = consts.radical_kern_after_degree * k;
             let bottom = rad_dy + rad.d;
-            let y = bottom - c.radical_degree_bottom_raise * total;
+            let y = consts.radical_degree_bottom_raise.mul_add(-total, bottom);
             out.h = out.h.max(-y + degree.h);
             let dw = degree.w;
             out.put(degree, before, y);
@@ -806,13 +823,16 @@ impl<'f> Ctx<'f> {
         // The body is laid out once: `\middle`s wait as placeholders until the
         // rest of it sets their size, then everything is spaced together.
         let (mut pieces, middles) = self.pieces(body, st, true)?;
-        let (h, d) = pieces.iter().fold((0.0f32, 0.0f32), |(h, d), piece| match piece {
+        let (height, depth) = pieces.iter().fold((0.0_f32, 0.0_f32), |(h, d), piece| match piece {
             Piece::Atom(atom, _) => (h.max(atom.b.h), d.max(atom.b.d)),
             Piece::Kern(_) => (h, d),
         });
-        let target = self.delimiter_target(h, d, st);
+        let target = self.delimiter_target(height, depth, st);
         for (ix, delim, st) in middles {
-            pieces[ix] = Piece::Atom(Atom::new(Class::Ord, self.delimiter(delim, target, st)?), st);
+            let middle = Piece::Atom(Atom::new(Class::Ord, self.delimiter(delim, target, st)?), st);
+            if let Some(slot) = pieces.get_mut(ix) {
+                *slot = middle;
+            }
         }
         let inner = self.assemble(pieces, false);
         self.fence(left, inner, right, target, st)
@@ -843,7 +863,7 @@ impl<'f> Ctx<'f> {
     }
 
     fn accent(&mut self, ch: char, wide: bool, body: &[Node], st: St) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         // Accented i and j drop their dots.
         let dotless;
@@ -876,22 +896,22 @@ impl<'f> Ctx<'f> {
         let combining = matches!(ch, '\u{300}'..='\u{36F}' | '\u{20D0}'..='\u{20FF}');
         let shift = if combining {
             // Combining marks are drawn to sit on x-height; taller bases lift them.
-            (base.h - c.accent_base_height * k).max(0.0)
+            consts.accent_base_height.mul_add(-k, base.h).max(0.0)
         } else {
             // Arrows: ink bottom a small gap above the base.
-            base.h + c.stretch_stack_gap_below_min * k + acc.d
+            consts.stretch_stack_gap_below_min.mul_add(k, base.h) + acc.d
         };
         let base_attach = base
             .glyph
             .and_then(|g| Some(self.face(g).top_accent(g.id)? * self.kg(st, g)))
-            .unwrap_or((base.w + base.italic) / 2.0);
+            .unwrap_or_else(|| base.w.midpoint(base.italic));
         let acc_attach = match acc.glyph {
             Some(g) => {
                 let (face, kg) = (self.face(g), self.kg(st, g));
                 face.top_accent(g.id).map_or_else(
                     || {
-                        let m = face.metrics(g.id);
-                        (m.x_min + m.x_max) / 2.0 * kg
+                        let metrics = face.metrics(g.id);
+                        metrics.x_min.midpoint(metrics.x_max) * kg
                     },
                     |a| a * kg,
                 )
@@ -911,17 +931,17 @@ impl<'f> Ctx<'f> {
     }
 
     fn line(&mut self, over: bool, body: &[Node], st: St) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let body = self.list(body, if over { st.cramp() } else { st })?;
         let mut out = LBox { w: body.w, h: body.h, d: body.d, ..LBox::default() };
         let rule = if over {
-            let (gap, t) = (c.overbar_vertical_gap * k, c.overbar_rule_thickness * k);
-            out.h = body.h + gap + t + c.overbar_extra_ascender * k;
+            let (gap, t) = (consts.overbar_vertical_gap * k, consts.overbar_rule_thickness * k);
+            out.h = consts.overbar_extra_ascender.mul_add(k, body.h + gap + t);
             self.rule(0.0, -(body.h + gap + t), body.w, t)?
         } else {
-            let (gap, t) = (c.underbar_vertical_gap * k, c.underbar_rule_thickness * k);
-            out.d = body.d + gap + t + c.underbar_extra_descender * k;
+            let (gap, t) = (consts.underbar_vertical_gap * k, consts.underbar_rule_thickness * k);
+            out.d = consts.underbar_extra_descender.mul_add(k, body.d + gap + t);
             self.rule(0.0, body.d + gap, body.w, t)?
         };
         out.put(body, 0.0, 0.0);
@@ -930,7 +950,7 @@ impl<'f> Ctx<'f> {
     }
 
     fn brace(&mut self, over: bool, body: &[Node], st: St) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let base = self.list(body, st)?;
         let brace = self.stretch_char(if over { '⏞' } else { '⏟' }, base.w, false, st)?;
@@ -938,11 +958,11 @@ impl<'f> Ctx<'f> {
         let x = (out.w - brace.w) / 2.0;
         let bx = (out.w - base.w) / 2.0;
         let y = if over {
-            let y = -(base.h + c.stretch_stack_gap_below_min * k) - brace.d;
+            let y = -consts.stretch_stack_gap_below_min.mul_add(k, base.h) - brace.d;
             out.h = -y + brace.h;
             y
         } else {
-            let y = base.d + c.stretch_stack_gap_above_min * k + brace.h;
+            let y = consts.stretch_stack_gap_above_min.mul_add(k, base.d) + brace.h;
             out.d = y + brace.d;
             y
         };
@@ -952,21 +972,21 @@ impl<'f> Ctx<'f> {
     }
 
     fn xarrow(&mut self, ch: char, over: &[Node], under: Option<&[Node]>, st: St) -> R<LBox> {
-        let c = self.font.c;
+        let consts = *self.font.constants();
         let k = self.k(st);
         let em = self.font_size(st);
         let over = self.list(over, st.sup())?;
         let under = under.map(|u| self.list(u, st.sub())).transpose()?;
         let label = over.w.max(under.as_ref().map_or(0.0, |u| u.w));
-        let arrow = self.stretch_char(ch, (label + 0.6 * em).max(1.5 * em), false, st)?;
+        let arrow = self.stretch_char(ch, 0.6_f32.mul_add(em, label).max(1.5 * em), false, st)?;
         let w = arrow.w.max(label);
         let mut out = LBox { w, h: arrow.h, d: arrow.d, ..LBox::default() };
-        let y = -(arrow.h + c.stretch_stack_gap_above_min * k + over.d);
+        let y = -(consts.stretch_stack_gap_above_min.mul_add(k, arrow.h) + over.d);
         out.h = out.h.max(-y + over.h);
         let ow = over.w;
         out.put(over, (w - ow) / 2.0, y);
         if let Some(u) = under {
-            let y = arrow.d + c.stretch_stack_gap_below_min * k + u.h;
+            let y = consts.stretch_stack_gap_below_min.mul_add(k, arrow.d) + u.h;
             out.d = out.d.max(y + u.d);
             let uw = u.w;
             out.put(u, (w - uw) / 2.0, y);
@@ -983,7 +1003,7 @@ impl<'f> Ctx<'f> {
         let mut x = 0.0;
         for ch in text.chars() {
             match ch {
-                ' ' | '\u{a0}' => x += self.font.space() * k,
+                ' ' | '\u{a0}' => x = self.font.space().mul_add(k, x),
                 '\u{2003}' => x += size,
                 _ => {
                     let glyph = self.char_glyph(ch, variant, at)?;
@@ -1001,10 +1021,10 @@ impl<'f> Ctx<'f> {
     }
 
     fn boxed(&mut self, body: &[Node], st: St) -> R<LBox> {
-        let t = self.font.c.fraction_rule_thickness * self.k(st);
+        let t = self.font.constants().fraction_rule_thickness * self.k(st);
         let pad = 0.3 * self.font_size(st);
         let inner = self.list(body, st)?;
-        let (w, h, d) = (inner.w + 2.0 * (pad + t), inner.h + pad + t, inner.d + pad + t);
+        let (w, h, d) = ((pad + t).mul_add(2.0, inner.w), inner.h + pad + t, inner.d + pad + t);
         let mut out = LBox { w, h, d, ..LBox::default() };
         out.put(inner, pad + t, 0.0);
         for rule in
@@ -1020,8 +1040,8 @@ impl<'f> Ctx<'f> {
     fn negated(&mut self, mut b: LBox, st: St) -> R<LBox> {
         let glyph = self.find('\u{338}').map_or_else(|| self.lookup('/', 0), Ok)?;
         let slash = self.glyph_box(glyph, st)?;
-        let m = self.face(glyph).metrics(glyph.id);
-        let ink_center = (m.x_min + m.x_max) / 2.0 * self.kg(st, glyph);
+        let metrics = self.face(glyph).metrics(glyph.id);
+        let ink_center = metrics.x_min.midpoint(metrics.x_max) * self.kg(st, glyph);
         b.h = b.h.max(slash.h);
         b.d = b.d.max(slash.d);
         let x = b.w / 2.0 - ink_center;
@@ -1030,9 +1050,9 @@ impl<'f> Ctx<'f> {
         Ok(b)
     }
 
-    fn array(&mut self, a: &Array, st: St) -> R<LBox> {
+    fn array(&mut self, array: &Array, st: St) -> R<LBox> {
         let em = self.font_size(st);
-        let (cell_st, stretch, jot) = match a.kind {
+        let (cell_st, stretch, jot) = match array.kind {
             ArrayKind::Matrix | ArrayKind::Array => (St::new(Style::Text), 1.0, 0.0),
             ArrayKind::Small => (St::new(Style::Script), 0.6, 0.0),
             ArrayKind::Cases { display } => {
@@ -1040,8 +1060,8 @@ impl<'f> Ctx<'f> {
             }
             ArrayKind::Aligned | ArrayKind::Gathered => (St::new(Style::Display), 1.0, 0.3),
         };
-        let ncols = a.rows.iter().map(Vec::len).max().unwrap_or(0);
-        let align = |j: usize| match a.kind {
+        let ncols = array.rows.iter().map(Vec::len).max().unwrap_or(0);
+        let align = |j: usize| match array.kind {
             ArrayKind::Matrix | ArrayKind::Small | ArrayKind::Gathered => Align::Center,
             ArrayKind::Cases { .. } => Align::Left,
             ArrayKind::Aligned => {
@@ -1051,16 +1071,16 @@ impl<'f> Ctx<'f> {
                     Align::Left
                 }
             }
-            ArrayKind::Array => a.cols.get(j).copied().unwrap_or(Align::Center),
+            ArrayKind::Array => array.cols.get(j).copied().unwrap_or(Align::Center),
         };
-        let gap_after = |j: usize| match a.kind {
+        let gap_after = |j: usize| match array.kind {
             ArrayKind::Small => 0.333 * em,
             ArrayKind::Aligned if j.is_multiple_of(2) => 0.0,
             ArrayKind::Aligned => 2.0 * em,
             _ => em,
         };
-        let fenced = a.left.is_some() || a.right.is_some();
-        let outer = match a.kind {
+        let fenced = array.left.is_some() || array.right.is_some();
+        let outer = match array.kind {
             ArrayKind::Array => 0.5 * em,
             // TeX sets matrix entries flush against the brackets, leaning on
             // Computer Modern's roomy side bearings; slimmer fonts' brackets
@@ -1071,18 +1091,20 @@ impl<'f> Ctx<'f> {
         // Every row is at least a strut tall (`\arraystretch` × 1.2em baselines).
         let skip = 1.2 * stretch * self.font_size(cell_st);
         let (strut_h, strut_d) = (0.7 * skip, 0.3 * skip);
-        let mut cells: Vec<Vec<LBox>> = Vec::with_capacity(a.rows.len());
-        let mut widths = vec![0.0f32; ncols];
-        let mut heights = Vec::with_capacity(a.rows.len());
-        for row in &a.rows {
+        let mut cells: Vec<Vec<LBox>> = Vec::with_capacity(array.rows.len());
+        let mut widths = vec![0.0_f32; ncols];
+        let mut heights = Vec::with_capacity(array.rows.len());
+        for row in &array.rows {
             let mut boxes = Vec::with_capacity(row.len());
             let (mut h, mut d) = (strut_h, strut_d);
             for (j, cell) in row.iter().enumerate() {
                 // Empty cells (`&&&…`) emit nothing but still cost a layout.
                 self.work(1)?;
-                let lead = a.kind == ArrayKind::Aligned && j % 2 == 1;
+                let lead = array.kind == ArrayKind::Aligned && j % 2 == 1;
                 let b = self.list_lead(cell, cell_st, lead)?;
-                widths[j] = widths[j].max(b.w);
+                if let Some(width) = widths.get_mut(j) {
+                    *width = width.max(b.w);
+                }
                 h = h.max(b.h);
                 d = d.max(b.d);
                 boxes.push(b);
@@ -1091,30 +1113,29 @@ impl<'f> Ctx<'f> {
             cells.push(boxes);
         }
         let mut xs = Vec::with_capacity(ncols);
-        let mut x = outer;
+        let mut cursor = outer;
         for (j, w) in widths.iter().enumerate() {
-            xs.push(x);
-            x += w;
-            if j + 1 < ncols {
-                x += gap_after(j);
+            xs.push(cursor);
+            cursor += w;
+            if j.saturating_add(1) < ncols {
+                cursor += gap_after(j);
             }
         }
-        let total_w = x + outer;
+        let total_w = cursor + outer;
         // TeX's `\lineskip`: rows whose content overflows the struts that
         // space them (scripts above and below) keep 1pt apart instead of touching.
         let overflows = |i: usize| {
-            let (_, d) = heights[i];
-            let (h, _) = heights.get(i + 1).copied().unwrap_or((strut_h, strut_d));
+            let (_, d) = heights.get(i).copied().unwrap_or((strut_h, strut_d));
+            let (h, _) = heights.get(i.saturating_add(1)).copied().unwrap_or((strut_h, strut_d));
             d > strut_d || h > strut_h
         };
         let row_gap = |i: usize| {
-            a.gaps.get(i).copied().unwrap_or(0.0) * em
-                + jot * em
+            array.gaps.get(i).copied().unwrap_or(0.0).mul_add(em, jot * em)
                 + if overflows(i) { 0.1 * em } else { 0.0 }
         };
         let total_h: f32 = heights.iter().map(|(h, d)| h + d).sum::<f32>()
             + (0..heights.len().saturating_sub(1)).map(row_gap).sum::<f32>();
-        let axis = self.font.c.axis_height * self.k(st);
+        let axis = self.font.constants().axis_height * self.k(st);
         let top = -axis - total_h / 2.0;
         let mut out = LBox {
             w: total_w,
@@ -1123,19 +1144,18 @@ impl<'f> Ctx<'f> {
             ..LBox::default()
         };
         let mut y = top;
-        for (i, row) in cells.into_iter().enumerate() {
-            let (h, d) = heights[i];
-            let baseline = y + h;
-            for (j, b) in row.into_iter().enumerate() {
-                let slack = widths[j] - b.w;
+        for (i, (row, &(height, depth))) in cells.into_iter().zip(&heights).enumerate() {
+            let baseline = y + height;
+            for (j, ((cell, width), x)) in row.into_iter().zip(&widths).zip(&xs).enumerate() {
+                let slack = width - cell.w;
                 let dx = match align(j) {
                     Align::Left => 0.0,
                     Align::Center => slack / 2.0,
                     Align::Right => slack,
                 };
-                out.put(b, xs[j] + dx, baseline);
+                out.put(cell, x + dx, baseline);
             }
-            y = baseline + d + row_gap(i);
+            y = baseline + depth + row_gap(i);
         }
         Ok(out)
     }
@@ -1143,28 +1163,32 @@ impl<'f> Ctx<'f> {
 
 /// TeX's inter-atom spacing in mu (Appendix G table); entries marked as
 /// non-script-only vanish in script styles.
-fn spacing(l: Class, r: Class, small: bool) -> f32 {
-    use Class::*;
+const fn spacing(l: Class, r: Class, small: bool) -> f32 {
+    use Class::{Bin, Close, Inner, Op, Open, Ord, Punct, Rel};
     // 1 thin, 2 medium, 3 thick; negative: only in display/text style.
     let code: i8 = match (l, r) {
-        (Ord, Op) | (Op, Ord) | (Op, Op) | (Close, Op) | (Inner, Op) => 1,
-        (Ord, Bin) | (Op, Bin) | (Close, Bin) | (Inner, Bin) => -2,
-        (Bin, Ord | Op | Open | Inner) => -2,
-        (Ord | Op | Close | Inner, Rel) => -3,
-        (Rel, Ord | Op | Open | Inner) => -3,
-        (Ord | Op | Close, Inner) => -1,
-        (Punct, Ord | Op | Rel | Open | Close | Punct | Inner) => -1,
-        (Inner, Ord | Open | Punct | Inner) => -1,
+        (Ord | Op | Close | Inner, Op) | (Op, Ord) => 1,
+        (Ord | Op | Close | Inner, Bin) | (Bin, Ord | Op | Open | Inner) => -2,
+        (Ord | Op | Close | Inner, Rel) | (Rel, Ord | Op | Open | Inner) => -3,
+        (Ord | Op | Close, Inner)
+        | (Punct, Ord | Op | Rel | Open | Close | Punct | Inner)
+        | (Inner, Ord | Open | Punct | Inner) => -1,
         _ => 0,
     };
     if code < 0 && small {
         return 0.0;
     }
-    [0.0, 3.0, 4.0, 5.0][code.unsigned_abs() as usize]
+    // In mu.
+    match code.unsigned_abs() {
+        1 => 3.0,
+        2 => 4.0,
+        3 => 5.0,
+        _ => 0.0,
+    }
 }
 
 /// Look-alikes for symbols some math fonts lack, tried after the whole chain.
-fn equivalents(ch: char) -> &'static [char] {
+const fn equivalents(ch: char) -> &'static [char] {
     match ch {
         '∖' => &['⧵', '\\'],
         '⟂' => &['⊥'],
