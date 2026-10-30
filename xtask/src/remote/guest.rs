@@ -840,7 +840,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
             } else {
                 this_log.with_extension(format!("{group}.log"))
             };
-            let ran_group = teed(command, &group_log);
+            let ran_group = teed(command, &group_log, &home, &ip);
             if group > 0 {
                 append(&this_log, &group_log)?;
             }
@@ -1276,17 +1276,47 @@ fn append(to: &Path, from: &Path) -> Result<()> {
     file.write_all(&lines).with_context(|| format!("append to {to}"))
 }
 
-/// Run `command`, its output into `log` and, less the lines of what passed, onto this terminal;
-/// how it ended.
-fn teed(mut command: Command, log: &Path) -> Result<std::process::ExitStatus> {
+/// How often a run reads the guest's boot ([`watch_boot`]).
+const BOOT_WATCH: Duration = Duration::from_secs(20);
+
+/// How long the guest may go unanswered mid-run before the run is given up: a panicking guest
+/// writes its core and boots again in about a minute.
+const UNANSWERED: Duration = Duration::from_mins(4);
+
+/// Run `command`, a `tart exec` into the guest at `ip`, its output into `log` and, less the lines
+/// of what passed, onto this terminal; how it ended. A guest that boots again under it, as one
+/// whose kernel panicked does, leaves `tart exec` waiting for an answer that never comes (a run
+/// sat 69 minutes so on 2026-10-30, holding the guest from every other lane), so
+/// [`watch_boot`] ends it and the run fails, saying why.
+fn teed(
+    mut command: Command,
+    log: &Path,
+    home: &Path,
+    ip: &str,
+) -> Result<std::process::ExitStatus> {
     use std::io::{BufRead as _, Write as _};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, OnceLock};
     let mut file = File::create(log).with_context(|| format!("create {log}"))?;
+    let booted = boot_session(home, ip).context("read the guest's boot before its run")?;
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .context("tart exec")?;
+    let (done, ended) = (Arc::new(AtomicBool::new(false)), Arc::new(OnceLock::<String>::new()));
+    let watch = {
+        let (home, ip, pid) = (home.to_owned(), ip.to_owned(), child.id());
+        let (done, ended) = (Arc::clone(&done), Arc::clone(&ended));
+        std::thread::spawn(move || {
+            if let Some(why) = watch_boot(&home, &ip, &booted, &done) {
+                let _set = ended.set(why);
+                // Its pipes close with it, and the lines below end.
+                let _killed = Command::new("/bin/kill").arg(pid.to_string()).status();
+            }
+        })
+    };
     let stderr = child.stderr.take().context("stderr")?;
     let (tx, lines) = std::sync::mpsc::channel::<String>();
     let err_tx = tx.clone();
@@ -1317,7 +1347,76 @@ fn teed(mut command: Command, log: &Path) -> Result<std::process::ExitStatus> {
     }
     let joined = (out.join(), err.join());
     ensure!(joined.0.is_ok() && joined.1.is_ok(), "a reader thread panicked");
-    Ok(child.wait()?)
+    let status = child.wait()?;
+    done.store(true, Ordering::Relaxed);
+    ensure!(watch.join().is_ok(), "the guest's watch panicked");
+    if let Some(why) = ended.get() {
+        bail!("{why}");
+    }
+    Ok(status)
+}
+
+/// The guest's boot, which every boot names anew: its kernel's boot session.
+fn boot_session(home: &Path, ip: &str) -> Result<String> {
+    let session = ssh_out(home, ip, "sysctl -n kern.bootsessionuuid")?.trim().to_owned();
+    ensure!(!session.is_empty(), "the guest names no boot session");
+    Ok(session)
+}
+
+/// Read the guest's boot every [`BOOT_WATCH`] until `done`: why the run is over when the guest
+/// booted again since `booted`, or has not answered for [`UNANSWERED`].
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
+fn watch_boot(
+    home: &Path,
+    ip: &str,
+    booted: &str,
+    done: &std::sync::atomic::AtomicBool,
+) -> Option<String> {
+    use std::sync::atomic::Ordering;
+    let mut answered = Instant::now();
+    loop {
+        let waited = Instant::now();
+        while waited.elapsed() < BOOT_WATCH {
+            if done.load(Ordering::Relaxed) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        match boot_session(home, ip) {
+            Ok(now) if now == booted => answered = Instant::now(),
+            Ok(_) => {
+                return Some(format!("{GUEST} booted again mid-run; {}", panic_report(home, ip)));
+            }
+            Err(_) if answered.elapsed() >= UNANSWERED => {
+                return Some(format!(
+                    "{GUEST} has not answered for {:.0?}; {}",
+                    answered.elapsed(),
+                    panic_report(home, ip)
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// What the guest's newest kernel panic of the last half hour says, and where its report is.
+fn panic_report(home: &Path, ip: &str) -> String {
+    const REPORTS: &str = "/Library/Logs/DiagnosticReports";
+    let script = format!(
+        "f=$(find {REPORTS} -maxdepth 1 -name '*.panic' -mmin -30 2>/dev/null | sort | tail -1); \
+         [ -n \"$f\" ] || exit 0; echo \"$f\"; \
+         grep -o 'panic(cpu [^@]*@[A-Za-z0-9_.]*:[0-9]*' \"$f\" | head -1 | tr -d '\\\\'; \
+         grep -o 'Panicked task [^\\\\]*' \"$f\" | head -1 | sed 's/.*: //'"
+    );
+    let said = ssh_out(home, ip, &script).unwrap_or_default();
+    let mut lines = said.lines().map(str::trim).filter(|l| !l.is_empty());
+    match (lines.next(), lines.next(), lines.next()) {
+        (Some(report), Some(panic), task) => {
+            let task = task.map_or_else(String::new, |task| format!(", in {task}"));
+            format!("its kernel panicked: {panic}{task} ({report})")
+        }
+        _ => format!("a kernel panic leaves its report in the guest's {REPORTS}"),
+    }
 }
 
 #[cfg(test)]

@@ -1509,6 +1509,21 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - Test: `remote::guest::tests::the_guest_s_idleness_is_top_s_samples_after_the_first` (`top`'s
     first sample skipped, output without two samples or an idle share refused).
 
+- ✅ **A guest run ends when its guest boots again** (2026-10-30). The e2e guest's kernel
+  panicked twice that night: in WindowServer, at `IOGPUEventMachine.cpp:1378` ("Merge from
+  non-scrubbed src event"), in macOS 27.0 26A428's virtual GPU. The first was under gpui-fast
+  `988229b0`, so it predates the `CAMetalDisplayLink` import. The guest booted again in about a
+  minute. The host's `tart exec` of the tests never ended, and its run held the guest's lock,
+  and so the guest, for 69 minutes. No test hung: nextest's per-test timeouts died with the
+  guest.
+  - `remote::guest::teed` reads the guest's boot session (`kern.bootsessionuuid`) before the
+    tests and every 20 s while they run. On a new session, or none for 4 minutes, it stops the
+    `tart exec` and fails the run. It names the panic from the guest's newest report, and the
+    report's path.
+  - Rejected: a deadline on the whole run. It would have to clear the full suite on a loaded
+    Mac by a wide margin, so it would end a dead run late. A new boot session says so in
+    20 seconds.
+
 - ✅ **Fuzz corpora are regression tests, and two engines grow them** (2026-10-30). This is
   item 5 of "Simulation, models and mutants carry the tests" (above). Until now, what the
   fuzzers had covered lived only in CI's cache, where an eviction lost it. The gate linted the
