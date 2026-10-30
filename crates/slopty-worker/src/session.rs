@@ -71,6 +71,11 @@ pub const DRIVER_SILENCE: Duration = Duration::from_secs(3);
 pub const QUEUED_MAX_BYTES: usize = 16 << 20;
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
+/// The most [`Actor::last_words`] reads once a program ended. What the program wrote before it
+/// ended is far less (the tty holds a few kilobytes and its writer waits on the rest), but a
+/// program it left behind holding the terminal open may go on writing without end, and the end
+/// is told all the same.
+const LAST_WORDS_MAX: usize = 256 << 10;
 /// Search hits sent back at most; the count still covers every hit.
 const MAX_SEARCH_MATCHES: u32 = 5_000;
 
@@ -736,6 +741,9 @@ struct Viewer {
     lost: bool,
     /// Where its frames stand against the markers it answers ([`Reach`]).
     reach: Reach,
+    /// Events that tell of the screen it is owed (a program's end), held until it has that
+    /// screen so they never come before it, and whatever was told after them, in order.
+    after_screen: VecDeque<Outbound>,
 }
 
 /// How far a viewer's frames have got, by the markers it answers: a written frame may still
@@ -799,6 +807,7 @@ impl Viewer {
             waiting: false,
             lost: false,
             reach: Reach::default(),
+            after_screen: VecDeque::new(),
         }
     }
 
@@ -1278,6 +1287,33 @@ impl Actor {
             }
         }
         tracing::debug!(session = %self.id, "actor stopped");
+    }
+
+    /// Read what the program that ended wrote and the loop has not read yet, so its viewers
+    /// see its last output before they hear it ended. The loop takes a command before output,
+    /// and ptyd's word of the exit can come before the runtime sees the master readable (on
+    /// Linux the tty hands output over from a work queue), so this reads the master itself: a
+    /// read that finds nothing yet runs that hand-over first. It stops when the tty is empty or
+    /// closed, or after [`LAST_WORDS_MAX`].
+    fn last_words(&mut self) {
+        let mut buf = vec![0_u8; READ_BUF];
+        let mut read = 0_usize;
+        while read < LAST_WORDS_MAX && !self.pty_closed {
+            match rustix::io::read(self.master.as_fd(), &mut buf) {
+                // macOS reports the slave hangup as EIO.
+                Ok(0) | Err(rustix::io::Errno::IO) => self.pty_closed = true,
+                Ok(n) => {
+                    read = read.saturating_add(n);
+                    self.on_output(buf.get(..n).unwrap_or_default());
+                }
+                Err(rustix::io::Errno::INTR) => {}
+                Err(rustix::io::Errno::AGAIN) => return,
+                Err(e) => {
+                    tracing::warn!(session = %self.id, error = %e, "pty read failed");
+                    self.pty_closed = true;
+                }
+            }
+        }
     }
 
     /// The session did something (output, a viewer's request, a resize): any compressing
@@ -1817,6 +1853,7 @@ impl Actor {
             self.owed = true;
         }
         self.send_whole_frames();
+        self.release_after_screen();
     }
 
     /// A frame left: the pace counts from here, and the echo trace ends.
@@ -1968,7 +2005,23 @@ impl Actor {
         let Some(out) = self.encode(ev) else { return };
         let mut gone = Vec::new();
         for i in 0..self.viewers.len() {
-            if !self.deliver(i, out.clone()) {
+            if !self.deliver_in_order(i, out.clone(), false) {
+                gone.push(i);
+            }
+        }
+        self.remove(gone);
+    }
+
+    /// [`Self::broadcast`] an event that tells of what the screen now shows: a viewer still
+    /// owed that screen hears it once it has it.
+    fn broadcast_after_screen(&mut self, ev: &TermEvent) {
+        if self.viewers.is_empty() {
+            return;
+        }
+        let Some(out) = self.encode(ev) else { return };
+        let mut gone = Vec::new();
+        for i in 0..self.viewers.len() {
+            if !self.deliver_in_order(i, out.clone(), true) {
                 gone.push(i);
             }
         }
@@ -1981,8 +2034,42 @@ impl Actor {
         };
         if let Some(out) = self.encode(ev) {
             // A closed sink is its connection's to detach.
-            let _open = self.deliver(i, out);
+            let _open = self.deliver_in_order(i, out, false);
         }
+    }
+
+    /// Viewer `i` waits for the screen: it missed the last diff, or nobody could take it.
+    fn owed_screen(&self, i: usize) -> bool {
+        self.viewers.get(i).is_some_and(|v| !v.lost && (v.stale || self.owed))
+    }
+
+    /// Hand `out` to viewer `i` after the events it holds until it has its screen, and held
+    /// with them when it waits for that screen and `after_screen` says it tells of it.
+    /// `false` when the viewer is gone.
+    fn deliver_in_order(&mut self, i: usize, out: Outbound, after_screen: bool) -> bool {
+        let hold = after_screen && self.owed_screen(i);
+        let Some(v) = self.viewers.get_mut(i) else { return true };
+        if hold || !v.after_screen.is_empty() {
+            v.after_screen.push_back(out);
+            return true;
+        }
+        self.deliver(i, out)
+    }
+
+    /// Every viewer that has its screen now hears what was held until it did.
+    fn release_after_screen(&mut self) {
+        let mut gone = Vec::new();
+        for i in 0..self.viewers.len() {
+            if self.owed_screen(i) {
+                continue;
+            }
+            let Some(v) = self.viewers.get_mut(i) else { continue };
+            let held = std::mem::take(&mut v.after_screen);
+            if !held.into_iter().all(|out| self.deliver(i, out)) {
+                gone.push(i);
+            }
+        }
+        self.remove(gone);
     }
 
     fn encode(&self, ev: &TermEvent) -> Option<Outbound> {
@@ -2013,6 +2100,8 @@ impl Actor {
             tracing::warn!(session = %self.id, client = %v.client, bytes = v.queued_bytes, "viewer not reading; told everything again once it drains");
             v.queued.clear();
             v.queued_bytes = 0;
+            // It is told everything again, as it stands then.
+            v.after_screen.clear();
             v.lost = true;
             v.stale = true;
             // The frames and markers dropped with the queue will never be confirmed.
@@ -2076,7 +2165,8 @@ impl Actor {
 
     /// What a viewer joining is told: the title, the directory, the program's colours, its
     /// progress and pointer shape, whether the session was restored, every row with the images
-    /// on them (now if it has room, else when it has), and the exit if the child is gone.
+    /// on them (now if it has room, else when it has), and after them the exit if the child is
+    /// gone.
     fn introduce(&mut self, client: ClientId) {
         if let Some(t) = self.title.clone() {
             self.send_to(client, &TermEvent::Title(t));
@@ -2111,8 +2201,13 @@ impl Actor {
                 self.remove(vec![i]);
             }
         }
-        if let Some(exit) = self.exited {
-            self.send_to(client, &TermEvent::Exited { status: exit.status });
+        // The end follows the rows it tells of, however long they wait for room.
+        if let Some(exit) = self.exited
+            && let Some(i) = self.viewers.iter().position(|v| v.client == client)
+            && let Some(out) = self.encode(&TermEvent::Exited { status: exit.status })
+        {
+            // A closed sink is its connection's to detach.
+            let _open = self.deliver_in_order(i, out, true);
         }
     }
 
@@ -2340,6 +2435,7 @@ impl Actor {
                 let _ignored = reply.send(Probe { foreground, cwd: self.cwd.clone() });
             }
             Cmd::Exited { exit } => {
+                self.last_words();
                 self.exited = Some(exit);
                 self.activity.send_if_modified(|a| !std::mem::replace(&mut a.exited, true));
                 self.flush_frame();
@@ -2353,7 +2449,7 @@ impl Actor {
                     self.moved();
                     self.broadcast(&TermEvent::ProgramStatus(self.program.clone()));
                 }
-                self.broadcast(&TermEvent::Exited { status: exit.status });
+                self.broadcast_after_screen(&TermEvent::Exited { status: exit.status });
             }
             Cmd::Restart { again, reply } => {
                 let _ignored = reply.send(self.restart(again));

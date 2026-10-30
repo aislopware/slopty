@@ -1282,6 +1282,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `the_viewers_are_told_the_real_exit_status_of_the_child`,
   `a_resize_reaches_ptyd_and_the_next_checkpoint_is_at_it`; ptyd
   `an_exit_arrives_without_a_request_to_carry_it`.
+- ✅ **A program's end comes after its last output** (2026-10-30). Its exit (from ptyd) and
+  its last output (from the master) reach the session by two roads, and the actor takes a
+  command before output, so a viewer could hear `Exited` before the last line the program
+  wrote. Linux, whose tty hands output to the master from a work queue, showed it on the gate.
+  On `Exited` the actor now reads the master itself until it is empty or closed (a read that
+  finds nothing runs the tty's hand-over first), at most 256 KiB, since a program the ended one
+  left behind holding the terminal open may write without end. And a viewer still owed its
+  screen (its frames in flight full, or a diff it missed) hears the end once it has that
+  screen: the event waits in the viewer's own queue with whatever is told after it, and goes
+  at the end of the next flush. Tests: ptyd `a_program_s_last_output_comes_before_its_end`,
+  `an_ended_session_starts_again_below_its_screen`.
 
 - ✅ **A key draws no frame until the tile has something new to show** (2026-09-25). Every
   key made the view notify, so each keystroke drew a frame of its own, and on loopback the

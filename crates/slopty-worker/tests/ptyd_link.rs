@@ -259,7 +259,8 @@ mod ptyd_link {
 
     /// A worker dials only a ptyd that says, under the pid the connection reached, the custody
     /// it speaks: one that keeps another is refused, and so is one whose file another process
-    /// wrote, each with its sessions left alone.
+    /// wrote, each with its sessions left alone. A ptyd writes its file just after it binds, so
+    /// a file that says so a moment after the dial is waited for.
     #[tokio::test]
     async fn a_worker_dials_only_a_ptyd_that_keeps_its_custody() {
         let dir = tempfile::tempdir().unwrap();
@@ -278,6 +279,50 @@ mod ptyd_link {
         std::fs::write(&file, format!("1 {rest}")).unwrap();
         let refused = connect(&custody()).await.expect_err("another process's file");
         assert!(refused.to_string().contains("does not say its custody"), "{refused}");
+
+        let late = file.clone();
+        let written = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            std::fs::write(&late, said).unwrap();
+        });
+        let (worker, _reports) = connect(&custody()).await.expect("its file, written late");
+        written.await.unwrap();
+        drop(worker);
+    }
+
+    /// The processes ptyd started for the sessions whose programs still run, the roots of
+    /// the trees a port is looked for in: a session that ended is left out.
+    #[tokio::test]
+    async fn the_pids_are_those_of_the_programs_that_still_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
+                .await
+                .unwrap();
+        let open = |script: &str| OpenSession {
+            size: SIZE,
+            cwd: None,
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        let running = worker.open(&open("exec sleep 60")).await.unwrap().id();
+        let ending = worker.open(&open("exit 0")).await.unwrap().id();
+        let (id, exit) = tokio::time::timeout(WAIT, reports.exits.recv()).await.unwrap().unwrap();
+        assert_eq!(id, ending);
+        worker.on_exit(id, exit);
+
+        let pids = worker.pids().await.unwrap();
+        let [(id, pid)] = pids.as_slice() else { panic!("one running: {pids:?}") };
+        assert_eq!(*id, running);
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let command = String::from_utf8_lossy(&ps.stdout);
+        assert!(command.contains("sleep 60"), "pid {pid} runs {command:?}");
     }
 
     /// ptyd runs a new build in place under a worker that holds a session: the worker, which
@@ -437,8 +482,8 @@ mod ptyd_link {
     /// A session whose program ended starts again at the person's word, and only then: under the
     /// same id, with its viewer attached throughout, the same command with the same variables in
     /// the same directory, below its old screen and a divider. Its summary runs again and the
-    /// viewer's ended state goes; the new run's end is told as the first's was. A second word
-    /// while the first holds the session is refused.
+    /// viewer's ended state goes; the new run's end is told as the first's was, each after the
+    /// last output of its run. A second word while the first holds the session is refused.
     #[tokio::test]
     async fn an_ended_session_starts_again_below_its_screen() {
         let dir = tempfile::tempdir().unwrap();
@@ -471,6 +516,8 @@ mod ptyd_link {
         session.request(viewer.client, typed("one")).unwrap();
         assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(3));
         viewer.until(|seen| exits(seen) == 1).await;
+        // What it said reached the viewer before its end did.
+        viewer.row("said one kept work");
         assert_eq!(viewer.state.exited(), Some(Ended(Some(3))));
         assert_eq!(state(&worker, id).await, SessionState::Exited { status: Some(3) });
 
@@ -495,6 +542,36 @@ mod ptyd_link {
         assert_eq!(state(&worker, id).await, SessionState::Exited { status: Some(3) });
         assert_eq!(worker.session_count(), 1, "the same session, not another");
         worker.close(id).await.unwrap();
+    }
+
+    /// What a program writes just before it ends, more than one read of the terminal takes,
+    /// reaches its viewer before its end does, however its frames were paced.
+    #[tokio::test]
+    async fn a_program_s_last_output_comes_before_its_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ptyd, socket) = ptyd(dir.path()).await;
+        let (worker, mut reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.path().join("kept"), None)
+                .await
+                .unwrap();
+        // 300 kB, then its last line: the viewer is attached before any of it.
+        let script = "read x; yes said | head -n 60000; echo its last line; exit 3";
+        let open = OpenSession {
+            size: SIZE,
+            cwd: None,
+            command: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            env: Vec::new(),
+            title: None,
+            attach: false,
+        };
+        let session = worker.open(&open).await.unwrap();
+        let mut viewer = Viewer::attach(&session);
+        session.request(viewer.client, TermRequest::Raw(b"go\r".to_vec())).unwrap();
+        assert_eq!(ended(&worker, &mut reports.exits).await, Exit::with(3));
+        viewer.until(|seen| exits(seen) == 1).await;
+        let (said, last) = (viewer.row("said"), viewer.row("its last line"));
+        assert!(said < last, "{}", viewer.screen());
+        worker.close(session.id()).await.unwrap();
     }
 
     /// The new program's end that comes while the restart still holds the session is its own,
