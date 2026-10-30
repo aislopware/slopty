@@ -1066,9 +1066,9 @@ fn the_tools_used_manifest_is_the_models() {
 }
 
 /// What the TUI's queue holds is what its `queue-operation` records made of it, by every
-/// sequence of them: a prompt queued at the end, all taken back, the first given the agent,
-/// one taken out by its words (the first of the same words). A change of the queue is said as
-/// the whole queue, and an operation that changes nothing says nothing.
+/// sequence of up to four of them: a prompt queued at the end, all taken back, the first given the
+/// agent, one taken out by its words (the first of the same words). A change of the queue is said
+/// as the whole queue, and an operation that changes nothing says nothing.
 #[test]
 fn the_queue_is_what_its_operations_made_it() {
     const OPERATIONS: [(&str, &str); 6] = [
@@ -1079,84 +1079,84 @@ fn the_queue_is_what_its_operations_made_it() {
         ("remove", "a"),
         ("remove", "b"),
     ];
-    // Every sequence of up to four operations: each number below 6⁴ read in base 6, digit
-    // by digit, for each length.
-    for length in 1..=4_u32 {
-        for number in 0..6_usize.pow(length) {
-            let mut c = Conversation::default();
-            let mut model: Vec<&str> = Vec::new();
-            let mut done = Vec::new();
-            let mut rest = number;
-            for _ in 0..length {
-                let (operation, text) = OPERATIONS[rest % 6];
-                rest /= 6;
-                done.push((operation, text));
-                let record = json!({
-                    "type": "queue-operation", "operation": operation, "content": text,
-                    "timestamp": "2026-09-27T03:16:25.000Z",
-                });
-                let changed = match operation {
-                    "enqueue" => {
-                        model.push(text);
-                        true
+    // Every sequence of four operations, each number below 6⁴ read in base 6, checked after
+    // each one: every shorter sequence is the start of one of them.
+    for number in 0..6_usize.pow(4) {
+        let mut c = Conversation::default();
+        let mut model: Vec<&str> = Vec::new();
+        let mut done = Vec::new();
+        let mut rest = number;
+        for _ in 0..4 {
+            let (operation, text) = OPERATIONS[rest % 6];
+            rest /= 6;
+            done.push((operation, text));
+            let record = json!({
+                "type": "queue-operation", "operation": operation, "content": text,
+                "timestamp": "2026-09-27T03:16:25.000Z",
+            });
+            let changed = match operation {
+                "enqueue" => {
+                    model.push(text);
+                    true
+                }
+                "popAll" => !std::mem::take(&mut model).is_empty(),
+                "dequeue" => {
+                    let given = !model.is_empty();
+                    if given {
+                        model.remove(0);
                     }
-                    "popAll" => !std::mem::take(&mut model).is_empty(),
-                    "dequeue" => {
-                        let given = !model.is_empty();
-                        if given {
-                            model.remove(0);
-                        }
-                        given
-                    }
-                    _ => model
-                        .iter()
-                        .position(|&queued| queued == text)
-                        .map(|at| model.remove(at))
-                        .is_some(),
-                };
-                let said: Vec<Vec<String>> = c
-                    .ingest(&MAIN, &record)
-                    .into_iter()
-                    .filter_map(|change| match change {
-                        Change::Queued(queued) => {
-                            Some(queued.into_iter().map(|q| q.text).collect())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                let expected: Vec<Vec<String>> = if changed {
-                    vec![model.iter().map(|&text| text.to_owned()).collect()]
-                } else {
-                    Vec::new()
-                };
-                assert_eq!(said, expected, "after {done:?}");
-            }
+                    given
+                }
+                _ => model
+                    .iter()
+                    .position(|&queued| queued == text)
+                    .map(|at| model.remove(at))
+                    .is_some(),
+            };
+            let said: Vec<Vec<String>> = c
+                .ingest(&MAIN, &record)
+                .into_iter()
+                .filter_map(|change| match change {
+                    Change::Queued(queued) => Some(queued.into_iter().map(|q| q.text).collect()),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<Vec<String>> = if changed {
+                vec![model.iter().map(|&text| text.to_owned()).collect()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(said, expected, "after {done:?}");
         }
     }
 }
 
 /// A clipped text points at its whole, and the whole read back is the text the decoder
 /// clipped, as many lines and characters as the clip says: a compaction summary in the words
-/// the decoder gave it, one text block of several on its own.
+/// the decoder gave it, one text block of several on its own, a call's input field, the result
+/// the model read and a subagent's report.
 #[test]
 fn a_clipped_text_reads_back_as_the_text_it_was_cut_from() {
-    let long = |word: &str| {
-        (0..500).fold(String::new(), |mut text, n| {
-            let _written = writeln!(text, "{word} {n}");
-            text
-        })
-    };
+    let long = |word: &str| (0..500).map(|n| format!("{word} {n}")).collect::<Vec<_>>().join("\n");
     let summary = format!(
         "Continued.\n<system-reminder>\n<{TOOLS_USED}>Read, Bash</{TOOLS_USED}>\n\
          </system-reminder>\n{}",
         long("summary")
     );
     let two = |word: &str| json!([{"type": "text", "text": long(word)}, {"type": "text", "text": "and one more"}]);
+    let report = json!({"agentId": "x1", "status": "completed",
+        "content": [{"type": "text", "text": long("report")}]});
     let jsonl = [
         line(&user("p1", None, &two("prompt"))),
         line(&assistant("a1", Some("p1"), &two("answer"))),
+        line(&call("a2", Some("a1"), "t1", "Bash", &json!({"command": long("echo")}))),
+        line(&result("u1", Some("a2"), "t1", "ok", &json!({"stdout": "ok", "stderr": ""}))),
+        line(&call("a3", Some("u1"), "t2", "mcp__docs__fetch", &json!({"url": "x"}))),
+        line(&result("u2", Some("a3"), "t2", &long("page"), &json!({}))),
+        line(&call("a4", Some("u2"), "t3", "Agent", &json!({"description": "Survey"}))),
+        line(&result("u3", Some("a4"), "t3", "done", &report)),
         line(&json!({"type": "system", "subtype": "compact_boundary", "uuid": "c1",
-            "parentUuid": null, "logicalParentUuid": "a1",
+            "parentUuid": null, "logicalParentUuid": "u3",
             "compactMetadata": {"trigger": "manual", "preTokens": 1_000}})),
         line(&json!({"type": "user", "uuid": "c2", "parentUuid": "c1", "isCompactSummary": true,
             "message": {"role": "user", "content": summary}})),
@@ -1164,19 +1164,36 @@ fn a_clipped_text_reads_back_as_the_text_it_was_cut_from() {
     .concat();
     let mut c = Conversation::default();
     c.ingest_jsonl(&MAIN, &jsonl);
-    let clipped: Vec<&Clipped> = c
-        .entries(&MAIN)
-        .iter()
-        .filter_map(|entry| match &entry.body {
-            Body::Prompt(prompt) => Some(&prompt.text),
-            Body::Text(text) | Body::Thinking(text) => Some(text),
-            Body::Compact(compact) => compact.summary.as_ref(),
-            _ => None,
-        })
-        .filter(|text| text.is_clipped())
-        .collect();
-    assert_eq!(clipped.len(), 3, "the prompt, the answer and the summary: {clipped:#?}");
-    for text in clipped {
+    let mut texts: Vec<&Clipped> = Vec::new();
+    for entry in c.entries(&MAIN) {
+        match &entry.body {
+            Body::Prompt(prompt) => texts.push(&prompt.text),
+            Body::Text(text) | Body::Thinking(text) => texts.push(text),
+            Body::Compact(compact) => texts.extend(&compact.summary),
+            Body::Tool(call) => {
+                texts.extend(call.result.as_ref().and_then(|result| result.text.as_ref()));
+                match &call.detail {
+                    ToolDetail::Bash(bash) => {
+                        texts.push(&bash.command);
+                        texts.extend(bash.stdout.iter().chain(&bash.stderr));
+                    }
+                    ToolDetail::Agent(agent) => {
+                        texts.push(&agent.prompt);
+                        texts.extend(&agent.report);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    let clipped: Vec<&TextRef> = texts.iter().filter_map(|text| text.full.as_ref()).collect();
+    assert_eq!(
+        clipped.len(),
+        6,
+        "the prompt, the answer, the command, the page, the report and the summary: {clipped:?}"
+    );
+    for text in texts.into_iter().filter(|text| text.is_clipped()) {
         let full = text.full.as_ref().expect("clipped");
         let whole = full_text(&jsonl, full).expect("the whole");
         assert_eq!(
