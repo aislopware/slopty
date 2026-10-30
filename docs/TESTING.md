@@ -189,7 +189,12 @@ pass. So main holds only commits the full gate passed. A red run's summary names
 and each failed test, read from nextest's JUnit report. The fix lands as a new commit on top,
 and its run supersedes the red one. The tests a runner's virtual Mac cannot run (missing
 hardware) are listed in nextest's `ci` profile and run in every local `cargo gate --full`.
-`docs/DEV.md` ("Gate") has the flags and the workflow.
+A test that fails and then passes on a retry fails its run (`flaky-result = "fail"`): a pass on
+a retry is a flake, which a green must not hide. The one exception is the few tests named in
+the `gate` and `warm` profiles, which time themselves against the machine's load and are
+retried twice by their exact names, never by a pattern, until virtual time replaces their
+clocks (a test in `xtask/src/deep.rs` holds the config to that). `docs/DEV.md` ("Gate") has
+the flags and the workflow.
 
 ### VideoToolbox
 A runner's virtual Mac shares its host's media engine, and at times its encoder stops ("No real
@@ -250,11 +255,16 @@ runner lacks, and the soak and bench measure this Mac. Here a check runs one at 
 Four deep checks see what the rest cannot:
 - **Sanitizers and signals.** A sanitizer's runtime installs its own fatal-signal handlers, and
   `slopty-crash` chains to the handler it finds, so its tests that die of a signal run apart with
-  the runtime's handlers off (`deep.rs`, `OWN_SIGNALS`). ThreadSanitizer holds a signal's handler
-  until the thread next calls a function it intercepts, and it does not intercept `kevent`. A
-  tokio runtime parked in its I/O driver never hears `SIGCHLD` then, so a test that waits on a
-  child through `tokio::process` waits forever with the child `<defunct>`. Such a test fails
-  under `sanitize thread` for that reason alone, and passes under `sanitize address`.
+  the runtime's handlers off (`deep.rs`, `OWN_SIGNALS`). `ThreadSanitizer` runs a signal's
+  handler at once only on a thread inside a call it treats as blocking, and otherwise holds it
+  until that thread next calls a function it intercepts. The kernel hands a child's `SIGCHLD` to
+  the test harness's main thread, which waits for the tests in a call the runtime does not
+  intercept and wakes only for its 60-second notice. So every test that waited on a child
+  through `SIGCHLD` (`tokio::process`, a PTY's child) waited a minute, and the session actor's and
+  the review's tests failed or timed out for that alone. Every binary `sanitize thread` builds
+  links a pump (`xtask/src/deep/fixtures/sigchld.rs`): before `main` it blocks `SIGCHLD` on the
+  main thread, which every later thread inherits, and starts one thread that waits for it in
+  `sigsuspend`, whose interceptor runs the handler at once. A child waits 5 ms for it, not 60 s.
 - **Loom models** (`deep loom`). A lock-free structure whose correctness rests on its orderings
   gets a model beside it, behind `cfg(slopty_loom)`, which swaps its atomics for loom's. Loom
   then explores every interleaving, with loads free to read stale stores. A model is proven by

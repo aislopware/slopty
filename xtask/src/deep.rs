@@ -8,9 +8,12 @@
 //! does not build alone, a test suite that would not notice a mutated line. Each one prints
 //! what it ran so the number lands in `docs/MEASUREMENTS.md` or the decision it decides.
 
+use std::fmt::Write as _;
+
 use anyhow::{Context as _, Result};
+use camino::Utf8PathBuf;
 use clap::{Subcommand, ValueEnum};
-use xshell::{Shell, cmd};
+use xshell::{PushEnv, Shell, cmd};
 
 use crate::tools::{TRIPLES, quiet_step, step};
 
@@ -54,36 +57,22 @@ const SANITIZED: &[&str] = &[
 /// run apart, with the runtime's handlers off ([`OWN_SIGNALS_OPTIONS`]).
 const OWN_SIGNALS: &[&str] = &["slopty-crash"];
 
-/// Tests `ThreadSanitizer` cannot run, by package and name. Each waits on a child through
-/// `tokio::process`, which learns of the exit from `SIGCHLD`. `ThreadSanitizer` holds a signal's
-/// handler until the thread next calls a function it intercepts, and it does not intercept
-/// `kevent`, where the runtime is parked, so the child stays `<defunct>` and the test waits
-/// forever. Each was seen doing so alone on 2026-09-30 (`docs/TESTING.md`, "Sanitizers and
-/// signals"). `AddressSanitizer` runs them. Only this reason puts a test here, never a timing.
-const TSAN_CANNOT_RUN: &[(&str, &str)] = &[
-    ("slopty-pty", "pty::tests::the_tty_is_the_controlling_terminal_of_the_child"),
-    (
-        "slopty-pty",
-        "ssh::tests::a_host_that_cannot_take_the_entry_gets_xterm_256color_and_is_asked_again_next_time",
-    ),
-    ("slopty-pty", "process_state::spawns_hold_up_in_a_process_in_a_bad_state"),
-    ("slopty-pty", "spawn::shells_start_while_other_threads_allocate_and_hold_locks"),
-    ("slopty-worker", "actor::the_summary_carries_the_progress_and_the_restore"),
-    ("slopty-worker", "actor::closing_the_session_hangs_up_the_child"),
-];
-
 /// Tests that count the instructions an operation takes against a budget, which
 /// `ThreadSanitizer` cannot run: it adds its own instructions at every memory access and atomic,
 /// so the count is the instrumentation's. `AddressSanitizer` leaves a loop of additions as it
 /// is and runs them. Only this reason puts a test here.
+///
+/// The tests that wait on a child once stood beside these: `ThreadSanitizer` held the child's
+/// `SIGCHLD` for a minute (`fixtures/sigchld.rs`), and each such test waited that long or timed
+/// out. The `SIGCHLD` pump linked into every sanitized binary ([`sigchld_pump`]) hands it over at
+/// once, so they run.
 const TSAN_COUNTS_INSTRUCTIONS: &[(&str, &str)] =
     &[("slopty-testkit", "bench::tests::a_series_reports_per_operation_and_as_json")];
 
-/// The nextest filterset that leaves out [`TSAN_CANNOT_RUN`] and [`TSAN_COUNTS_INSTRUCTIONS`].
+/// The nextest filterset that leaves out [`TSAN_COUNTS_INSTRUCTIONS`].
 fn tsan_filter() -> String {
-    let skipped: Vec<String> = TSAN_CANNOT_RUN
+    let skipped: Vec<String> = TSAN_COUNTS_INSTRUCTIONS
         .iter()
-        .chain(TSAN_COUNTS_INSTRUCTIONS)
         .map(|(package, test)| format!("(package({package}) & test(={test}))"))
         .collect();
     format!("not ({})", skipped.join(" | "))
@@ -200,6 +189,9 @@ pub enum DeepCmd {
         #[arg(long, default_value_t = 1)]
         jobs: u32,
     },
+    /// Fetch every package `Cargo.lock` names, for every platform, and drop from the registry's
+    /// cache each `.crate` it no longer names: what the features job saves as main's cargo cache.
+    CargoCache,
 }
 
 pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
@@ -211,6 +203,7 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
         DeepCmd::Mutants { package, timeout, shard, jobs } => {
             mutants(sh, package, *timeout, shard.as_deref(), *jobs)
         }
+        DeepCmd::CargoCache => cargo_cache(sh),
         DeepCmd::Metal { filter, no_build } => metal(sh, filter.as_deref(), *no_build),
         DeepCmd::Loom => loom(sh),
         DeepCmd::Noq => noq(sh),
@@ -233,7 +226,7 @@ pub fn run(sh: &Shell, cmd: &DeepCmd) -> Result<()> {
 /// `target/deep/<name>` under the workspace root, absolute: a test that runs cargo itself (as
 /// `slopty-worker`'s `ptyd_link` builds `slopty-ptyd`) runs in its crate's directory and inherits
 /// `CARGO_TARGET_DIR`, which a relative path would put inside the crate.
-fn deep_dir(name: &str) -> Result<camino::Utf8PathBuf> {
+fn deep_dir(name: &str) -> Result<Utf8PathBuf> {
     Ok(crate::tools::repo_root()?.join("target/deep").join(name))
 }
 
@@ -250,29 +243,8 @@ fn packages(chosen: &[String], default: &[&str]) -> Vec<String> {
 /// for insta's snapshots; proptest is cut to a few cases because the interpreter is ~100×
 /// slower than native.
 fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
-    let ready = cmd!(sh, "rustup run nightly cargo miri --version").quiet().ignore_stderr().read();
-    if ready.is_err() {
-        quiet_step(
-            "rustup component add miri",
-            cmd!(sh, "rustup component add --toolchain nightly miri"),
-        )?;
-    }
-    let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("miri")?);
-    // Floats exact, as the hardware computes them: Miri otherwise adds a random error to every
-    // operation the language leaves inexact, and the theme's colour tests, which compare
-    // conversions to `f32::EPSILON`, failed on it (Deep trial run 38148072272).
-    let _flags = sh.push_env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-deterministic-floats");
-    let _cases = sh.push_env("PROPTEST_CASES", "8");
-    let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
-    // insta shells out to `cargo metadata` for the workspace root unless told it; Miri cannot
-    // `fork`, so it is told.
-    let _root = sh.push_env("INSTA_WORKSPACE_ROOT", sh.current_dir());
-    let _update = sh.push_env("INSTA_UPDATE", "no");
-    // No pure crate's test spawns a daemon, and none could under Miri, but they take the test
-    // kit, so nextest's setup script would build every one the workspace has: on a Linux
-    // runner, the client's too, which no Linux build takes (run 38001943825, and every night
-    // from 2026-10-04 on).
-    let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
+    miri_ready(sh)?;
+    let _env = miri_env(sh)?;
     let packages = packages(chosen, PURE);
     // Under nextest each test is its own interpreter, side by side on the cores, and the `miri`
     // profile ends one that runs past its bound instead of the night.
@@ -284,6 +256,40 @@ fn miri(sh: &Shell, chosen: &[String]) -> Result<()> {
             "nice -n 10 cargo +nightly miri nextest run --profile miri --no-fail-fast {packages...} -E {filter}"
         ),
     )
+}
+
+/// Miri on the nightly toolchain, added when it is missing.
+fn miri_ready(sh: &Shell) -> Result<()> {
+    let ready = cmd!(sh, "rustup run nightly cargo miri --version").quiet().ignore_stderr().read();
+    if ready.is_err() {
+        quiet_step(
+            "rustup component add miri",
+            cmd!(sh, "rustup component add --toolchain nightly miri"),
+        )?;
+    }
+    Ok(())
+}
+
+/// What every Miri run shares.
+fn miri_env(sh: &Shell) -> Result<Vec<PushEnv<'_>>> {
+    Ok(vec![
+        sh.push_env("CARGO_TARGET_DIR", deep_dir("miri")?),
+        // Floats exact, as the hardware computes them: Miri otherwise adds a random error to
+        // every operation the language leaves inexact, and the theme's colour tests, which
+        // compare conversions to `f32::EPSILON`, failed on it (Deep trial run 38148072272).
+        sh.push_env("MIRIFLAGS", "-Zmiri-disable-isolation -Zmiri-deterministic-floats"),
+        sh.push_env("PROPTEST_CASES", "8"),
+        sh.push_env("RUSTC_WRAPPER", ""),
+        // insta shells out to `cargo metadata` for the workspace root unless told it; Miri
+        // cannot `fork`, so it is told.
+        sh.push_env("INSTA_WORKSPACE_ROOT", sh.current_dir()),
+        sh.push_env("INSTA_UPDATE", "no"),
+        // No pure crate's test spawns a daemon, and none could under Miri, but they take the
+        // test kit, so nextest's setup script would build every one the workspace has: on a
+        // Linux runner, the client's too, which no Linux build takes (run 38001943825, and
+        // every night from 2026-10-04 on).
+        sh.push_env(crate::gate::BINS_FRESH, "1"),
+    ])
 }
 
 /// What Miri leaves out: the allocation-budget targets, which count a real allocator over
@@ -332,25 +338,19 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
     // the setup failed and no sanitized test ran (Deep run 38228066972). This binary is built.
     let xtask = std::env::current_exe().context("the xtask binary")?;
     let _xtask = sh.push_env("SLOPTY_XTASK", xtask);
+    let _env = sanitized_env(sh, which)?;
+    let host = TRIPLES[0];
+    let profile = runner_profile();
     if matches!(which, Sanitizer::Realtime) {
-        let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("realtime")?);
-        let flags = "-Zsanitizer=realtime --cfg slopty_rtsan -C target-cpu=apple-m1";
-        let _flags = sh.push_env("RUSTFLAGS", flags);
-        let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
         // No codec test spawns a daemon; nextest's setup script would build them without the
         // target, so with the sanitizer on the proc macros, which rustc refuses.
         let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
         let packages = packages(chosen, &["slopty-codec"]);
-        let host = TRIPLES[0];
         return step(
             "realtime sanitizer",
-            &cmd!(sh, "cargo +nightly nextest run --target {host} {packages...}"),
+            &cmd!(sh, "cargo +nightly nextest run --target {host} {profile...} {packages...}"),
         );
     }
-    let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir(flag)?);
-    let _flags = sh.push_env("RUSTFLAGS", format!("-Zsanitizer={flag} -C target-cpu=apple-m1"));
-    let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
-    let host = TRIPLES[0];
     let options_var = match which {
         Sanitizer::Thread => "TSAN_OPTIONS",
         Sanitizer::Address | Sanitizer::Realtime => "ASAN_OPTIONS",
@@ -364,7 +364,7 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
         let title = format!("{flag} sanitizer: {}", group.join(" "));
         let packages = packages(&group, &[]);
         let _options = options.map(|o| sh.push_env(options_var, o));
-        let filter = &filter;
+        let (filter, profile) = (&filter, &profile);
         // The daemons the tests spawn, built here with the sanitizer and the target as the tests
         // are. Left to nextest's setup script, they were built without the target, so with the
         // sanitizer on the proc macros, which rustc refuses: no sanitized test ran from
@@ -385,7 +385,7 @@ fn sanitize(sh: &Shell, which: Sanitizer, chosen: &[String]) -> Result<()> {
                 &title,
                 &cmd!(
                     sh,
-                    "nice -n 10 cargo +nightly nextest run -Zbuild-std --target {host} --no-fail-fast {packages...} {filter...}"
+                    "nice -n 10 cargo +nightly nextest run -Zbuild-std --target {host} {profile...} --no-fail-fast {packages...} {filter...}"
                 ),
             )
         });
@@ -413,6 +413,63 @@ fn sanitized_groups(chosen: &[String]) -> Vec<(Vec<String>, Option<&'static str>
         .collect()
 }
 
+/// What every sanitized build shares, the canaries' too: the sanitizer in `RUSTFLAGS` (with the
+/// [`sigchld_pump`] linked in under `ThreadSanitizer`), no compile cache, and a target dir of its
+/// own, which `RUSTFLAGS` must name with no space in it.
+fn sanitized_env(sh: &Shell, which: Sanitizer) -> Result<Vec<PushEnv<'_>>> {
+    let dir = deep_dir(which.flag())?;
+    let mut flags = match which {
+        Sanitizer::Realtime => "-Zsanitizer=realtime --cfg slopty_rtsan".to_owned(),
+        Sanitizer::Address | Sanitizer::Thread => format!("-Zsanitizer={}", which.flag()),
+    };
+    flags.push_str(" -C target-cpu=apple-m1");
+    if matches!(which, Sanitizer::Thread) {
+        let pump = sigchld_pump(sh)?;
+        anyhow::ensure!(
+            !pump.as_str().contains(char::is_whitespace),
+            "RUSTFLAGS cannot hold {pump}"
+        );
+        let _pump = write!(flags, " -C link-arg={pump}");
+    }
+    Ok(vec![
+        sh.push_env("CARGO_TARGET_DIR", dir),
+        sh.push_env("RUSTFLAGS", flags),
+        sh.push_env("RUSTC_WRAPPER", ""),
+    ])
+}
+
+/// Build `fixtures/sigchld.rs` into the object every `ThreadSanitizer` binary links: before
+/// `main` it blocks `SIGCHLD` on every thread but one, which waits for it in `sigsuspend`, so the
+/// runtime runs the handler at once rather than on the main thread's next intercepted call, a
+/// minute later (`docs/decisions/testing.md`, "Red means something", its `SIGCHLD` pump).
+/// `no_std` and on its own, so it needs no build of the standard library.
+fn sigchld_pump(sh: &Shell) -> Result<Utf8PathBuf> {
+    let source = crate::tools::repo_root()?.join("xtask/src/deep/fixtures/sigchld.rs");
+    let out = deep_dir("thread")?.join("sigchld.o");
+    std::fs::create_dir_all(deep_dir("thread")?)?;
+    let host = TRIPLES[0];
+    quiet_step(
+        "the SIGCHLD pump",
+        cmd!(
+            sh,
+            "rustc +nightly --edition 2024 --crate-type lib --crate-name slopty_sigchld --emit obj -C panic=abort -C opt-level=2 --target {host} -o {out} {source}"
+        ),
+    )?;
+    Ok(out)
+}
+
+/// nextest's profile on a runner, `ci`: the hardware a hosted Mac lacks left out as the gate
+/// leaves it out, its timeouts and its `JUnit` report. Without it, the sanitizers and coverage ran
+/// the counter and `IOReport` tests, which read nothing on a virtual Mac, and failed on them
+/// every night (Deep run 40862351365). Here, the default: this Mac has the hardware.
+fn runner_profile() -> Vec<&'static str> {
+    if std::env::var_os("GITHUB_ACTIONS").is_some() {
+        vec!["--profile", crate::gate::NEXTEST_CI_PROFILE]
+    } else {
+        Vec::new()
+    }
+}
+
 /// `--each-feature` builds every crate with each feature alone, none and all; the iOS lane
 /// of the gate covers one axis of this (the `e2e`/`headless` features off), this covers all.
 /// Off a Mac, as CI runs it, cargo-hack's cargo is the one that checks an Apple target there
@@ -432,26 +489,66 @@ fn features(sh: &Shell) -> Result<()> {
 }
 
 /// The unit and headless tests, instrumented; the live e2e crate is left out (it drives a
-/// built app, whose coverage is not attributable to it).
+/// built app, whose coverage is not attributable to it). Every build under one environment,
+/// `cargo llvm-cov show-env`'s: the binaries tests spawn first, as the sanitizers build them,
+/// then the tests with [`crate::gate::BINS_FRESH`], then the report. Under `cargo llvm-cov
+/// nextest` the spawned binaries were built where no test looked, and a test that spawns one
+/// built them again inside its own bound: 2 min 44 s of the repository watch's 180 s (Deep run
+/// 40862351365). A failed test fails the run, after the report.
 fn coverage(sh: &Shell, html: bool) -> Result<()> {
     let _dir = sh.push_env("CARGO_TARGET_DIR", deep_dir("cov")?);
-    let _wrapper = sh.push_env("RUSTC_WRAPPER", "");
     let _env = sh.push_env("AWS_LC_SYS_CMAKE_BUILDER", "1");
-    let report: &[&str] = if html { &["--html", "--open"] } else { &["--summary-only"] };
-    // On a runner, the runners' profile: the tests that read hardware a hosted Mac lacks are
-    // left out there, as in the gate, and the timeouts are a three-core runner's. The default
-    // ran the counter tests, which read 0 instructions on its virtual Mac (Deep run 38228066972).
-    let profile: &[&str] = if std::env::var_os("GITHUB_ACTIONS").is_some() {
-        &["--profile", crate::gate::NEXTEST_CI_PROFILE]
-    } else {
-        &[]
+    let _cov = llvm_cov_env(sh)?;
+    let profile = runner_profile();
+    let scope = ["--workspace", "--exclude", "slopty-e2e", "--exclude", "xtask"];
+    let bins = crate::gate::spawned_bin_args();
+    step(
+        "coverage: the binaries tests spawn",
+        &cmd!(sh, "nice -n 10 cargo build --profile test {scope...} --tests {bins...}"),
+    )?;
+    let tests = {
+        let _bins = sh.push_env(crate::gate::BINS_FRESH, "1");
+        step(
+            "coverage: the tests",
+            &cmd!(sh, "nice -n 10 cargo nextest run {scope...} {profile...} --no-fail-fast"),
+        )
     };
-    cmd!(
-        sh,
-        "cargo llvm-cov nextest --workspace --exclude slopty-e2e --exclude xtask {profile...} {report...}"
-    )
-    .run()
-    .context("cargo llvm-cov")
+    let lcov = deep_dir("cov")?.join("lcov.info");
+    step("coverage: lcov", &cmd!(sh, "cargo llvm-cov report --lcov --output-path {lcov}"))?;
+    let report: &[&str] = if html { &["--html", "--open"] } else { &["--summary-only"] };
+    step("coverage: the report", &cmd!(sh, "cargo llvm-cov report {report...}"))?;
+    tests
+}
+
+/// `cargo llvm-cov show-env`'s environment, set on `sh` for every cargo after it, and the
+/// profiles of the last run cleaned away. Without the compile cache: its wrapper would sit under
+/// cargo-llvm-cov's, which instruments the workspace's crates alone.
+fn llvm_cov_env(sh: &Shell) -> Result<Vec<PushEnv<'_>>> {
+    let mut env = vec![sh.push_env("RUSTC_WRAPPER", "")];
+    let shown =
+        cmd!(sh, "cargo llvm-cov show-env --sh").read().context("cargo llvm-cov show-env")?;
+    for (key, value) in shell_exports(&shown) {
+        env.push(sh.push_env(key, value));
+    }
+    quiet_step("cargo llvm-cov clean", cmd!(sh, "cargo llvm-cov clean --workspace"))?;
+    Ok(env)
+}
+
+/// The `export KEY='VALUE'` lines (or `KEY=VALUE`) `show-env --sh` prints, unquoted.
+fn shell_exports(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let line = line.strip_prefix("export ").unwrap_or(line);
+            let (key, value) = line.split_once('=')?;
+            let ok = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            let value = value
+                .strip_prefix('\'')
+                .and_then(|v| v.strip_suffix('\''))
+                .map_or_else(|| value.to_owned(), |v| v.replace("'\\''", "'"));
+            ok.then(|| (key.to_owned(), value))
+        })
+        .collect()
 }
 
 /// The loom models, by crate and nextest filterset. A model lives beside the structure it checks,
@@ -547,7 +644,7 @@ fn leaks(sh: &Shell, chosen: &[String], stacks: bool) -> Result<()> {
         let name = binary.rsplit('/').next().unwrap_or(binary);
         let started = std::time::Instant::now();
         let report = reports.join(format!("{name}.txt"));
-        let status = under_leaks(binary, report.as_std_path(), stacks)
+        let status = under_leaks(binary, report.as_std_path(), stacks, &[])
             .with_context(|| format!("leaks on {name}"))?;
         let text = std::fs::read_to_string(&report).unwrap_or_default();
         let verdict = match status {
@@ -580,16 +677,23 @@ enum Ran {
     Killed,
 }
 
-/// Run `binary`'s tests one at a time under `leaks --atExit`, its output to `report`. One that
+/// Run `binary`'s tests one at a time under `leaks --atExit`, its output to `report`, with `env`
+/// added to its environment. One that
 /// outlives [`LEAKS_BOUND`] is killed, with its process group and any process still running the
 /// binary (a PTY child calls `setsid`).
 #[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a child")]
-fn under_leaks(binary: &str, report: &std::path::Path, stacks: bool) -> Result<Ran> {
+fn under_leaks(
+    binary: &str,
+    report: &std::path::Path,
+    stacks: bool,
+    env: &[(&str, &str)],
+) -> Result<Ran> {
     use std::os::unix::process::CommandExt as _;
     let out = std::fs::File::create(report)?;
     let mut child = std::process::Command::new("nice")
         .args(["-n", "10", "leaks", "--atExit", "--", binary, "--test-threads=1", "-q"])
         .envs(stacks.then_some(("MallocStackLogging", "1")))
+        .envs(env.iter().copied())
         // Built by `leaks` before any binary runs.
         .env(crate::gate::BINS_FRESH, "1")
         .stdout(out.try_clone()?)
@@ -638,7 +742,9 @@ fn test_binaries(built: &str) -> Vec<String> {
 fn leaks_verdict(text: &str, status: Option<i32>) -> Result<String, String> {
     let verdict = text
         .lines()
-        .find(|l| l.starts_with("Process ") && l.contains(" leaks for "))
+        .find(|l| {
+            l.starts_with("Process ") && (l.contains(" leaks for ") || l.contains(" leak for "))
+        })
         .map(str::trim);
     let passed = text.lines().any(|l| l.starts_with("test result: ok."));
     match (status, verdict, passed) {
@@ -672,6 +778,57 @@ fn metal(sh: &Shell, filter: Option<&str>, no_build: bool) -> Result<()> {
         "the app self-test under Metal validation",
         &cmd!(sh, "{exe} e2e app {filter...} {no_build...}"),
     )
+}
+
+/// Fetch every package `Cargo.lock` names, for every platform, then drop from each registry's
+/// cache the `.crate` files it no longer names, so the cache main saves is the lock's alone.
+/// In Rust, not shell: the step it replaces piped `ls` into `grep -v`, which exits 1 when it
+/// selects nothing, so under pipefail a cache with nothing stale failed the features job every
+/// night after its check had passed (Deep run 40862351365).
+fn cargo_cache(sh: &Shell) -> Result<()> {
+    quiet_step("cargo fetch --locked", cmd!(sh, "cargo fetch --locked"))?;
+    let lock = std::fs::read_to_string(crate::tools::repo_root()?.join("Cargo.lock"))?;
+    let locked = locked_crates(&lock)?;
+    let home = std::env::var_os("CARGO_HOME").map_or_else(
+        || std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cargo")),
+        |h| Some(h.into()),
+    );
+    let cache = home.context("neither CARGO_HOME nor HOME is set")?.join("registry/cache");
+    let (mut kept, mut dropped, mut bytes) = (0_usize, 0_usize, 0_u64);
+    for registry in std::fs::read_dir(&cache).into_iter().flatten().filter_map(Result::ok) {
+        for entry in std::fs::read_dir(registry.path())?.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let crate_file = std::path::Path::new(&name).extension().is_some_and(|e| e == "crate");
+            let Some(name) = name.to_str().filter(|_| crate_file) else { continue };
+            if locked.contains(name) {
+                kept = kept.saturating_add(1);
+            } else {
+                bytes = bytes.saturating_add(entry.metadata().map_or(0, |m| m.len()));
+                std::fs::remove_file(entry.path())
+                    .with_context(|| format!("removing {}", entry.path().display()))?;
+                dropped = dropped.saturating_add(1);
+            }
+        }
+    }
+    println!(
+        "cargo cache: {} packages locked, {kept} kept, {dropped} dropped ({} MB)",
+        locked.len(),
+        bytes / 1_000_000
+    );
+    Ok(())
+}
+
+/// Each package of a `Cargo.lock` as its registry cache names its file, `<name>-<version>.crate`.
+fn locked_crates(lock: &str) -> Result<std::collections::BTreeSet<String>> {
+    let lock: toml::Table = lock.parse().context("Cargo.lock")?;
+    let packages = lock.get("package").and_then(toml::Value::as_array).context("no [[package]]")?;
+    Ok(packages
+        .iter()
+        .filter_map(|p| {
+            let (name, version) = (p.get("name")?.as_str()?, p.get("version")?.as_str()?);
+            Some(format!("{name}-{version}.crate"))
+        })
+        .collect())
 }
 
 /// One crate at a time: mutants rebuilds per mutation, so the whole workspace would be hours.
@@ -708,6 +865,53 @@ fn mutants_dir(package: &str, shard: Option<&str>) -> String {
 mod tests {
     use super::*;
 
+    /// A test that passes only on a retry fails every run but for the tests named as timing
+    /// themselves against the machine's load, each retried by its exact name, never a pattern,
+    /// and no profile retries all its tests.
+    #[test]
+    fn a_flaky_pass_fails_but_for_the_named_retries() {
+        let root = crate::tools::repo_root().unwrap();
+        let text = std::fs::read_to_string(root.join(".config/nextest.toml")).unwrap();
+        let config: toml::Table = text.parse().unwrap();
+        let profiles = config["profile"].as_table().unwrap();
+        let default = profiles["default"].as_table().unwrap();
+        assert_eq!(default["flaky-result"].as_str(), Some("fail"));
+        let mut named = 0_usize;
+        for (name, profile) in profiles {
+            let profile = profile.as_table().unwrap();
+            assert!(
+                profile.get("flaky-result").is_none_or(|r| r.as_str() == Some("fail")),
+                "profile {name} lets a flaky pass stand"
+            );
+            assert!(
+                profile.get("retries").is_none_or(|r| r.as_integer() == Some(0)),
+                "profile {name} retries every test"
+            );
+            let overrides = profile.get("overrides").and_then(toml::Value::as_array);
+            for over in overrides.into_iter().flatten() {
+                let over = over.as_table().unwrap();
+                if over.get("flaky-result").and_then(toml::Value::as_str) != Some("pass") {
+                    assert!(
+                        over.get("retries").is_none(),
+                        "{name}: a retry whose pass does not stand passes nothing"
+                    );
+                    continue;
+                }
+                let filter = over["filter"].as_str().unwrap();
+                assert!(over.contains_key("retries"), "{name}: {filter} passes with no retry");
+                let tests = filter.matches("test(").count();
+                assert!(tests > 0, "{name}: {filter} names no test");
+                assert_eq!(
+                    filter.matches("test(=").count(),
+                    tests,
+                    "{name}: {filter} retries tests by a pattern"
+                );
+                named = named.saturating_add(tests);
+            }
+        }
+        assert!(named > 0, "no named retries: drop this test's allowance with them");
+    }
+
     #[test]
     fn a_shard_of_mutants_writes_its_own_report() {
         assert_eq!(mutants_dir("slopty-proto", None), "target/deep/mutants/slopty-proto");
@@ -715,6 +919,43 @@ mod tests {
             mutants_dir("slopty-proto", Some("2/4")),
             "target/deep/mutants/slopty-proto-2of4"
         );
+    }
+
+    #[test]
+    fn the_cargo_cache_keeps_each_locked_package_by_its_file_name() {
+        let lock = r#"
+version = 4
+
+[[package]]
+name = "anyhow"
+version = "1.0.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "slopty-core"
+version = "0.1.0"
+"#;
+        let locked = locked_crates(lock).unwrap();
+        assert!(locked.contains("anyhow-1.0.100.crate"), "{locked:?}");
+        assert!(!locked.contains("anyhow-1.0.99.crate"));
+        assert!(locked_crates("version = 4\n").is_err(), "a lock with no package is refused");
+    }
+
+    #[test]
+    fn llvm_cov_s_environment_is_read_from_its_shell_exports() {
+        let shown = "export RUSTFLAGS='-C instrument-coverage --cfg=coverage'\n\
+                     export LLVM_PROFILE_FILE='/t/x-%p-%10m.profraw'\n\
+                     CARGO_LLVM_COV=1\n\
+                     info: not an export\n";
+        assert_eq!(
+            shell_exports(shown),
+            [
+                ("RUSTFLAGS".to_owned(), "-C instrument-coverage --cfg=coverage".to_owned()),
+                ("LLVM_PROFILE_FILE".to_owned(), "/t/x-%p-%10m.profraw".to_owned()),
+                ("CARGO_LLVM_COV".to_owned(), "1".to_owned()),
+            ]
+        );
+        assert_eq!(shell_exports("export A='it'\\''s'"), [("A".to_owned(), "it's".to_owned())]);
     }
 
     #[test]
@@ -754,6 +995,12 @@ mod tests {
         let failed = "test result: FAILED. 1 passed; 1 failed\nProcess 1: 0 leaks for 0 total leaked bytes.\n";
         assert!(leaks_verdict(failed, Some(0)).is_err(), "a failed test is not clean");
         assert!(leaks_verdict("test result: ok. 1 passed\n", Some(2)).is_err(), "no verdict");
+        let one = "test result: ok. 1 passed\nProcess 1: 1 leak for 65536 total leaked bytes.\n";
+        assert_eq!(
+            leaks_verdict(one, Some(1)),
+            Err("Process 1: 1 leak for 65536 total leaked bytes.".into()),
+            "one leak is named by its own verdict, not as a missing one"
+        );
     }
 
     #[test]
@@ -779,11 +1026,12 @@ mod tests {
     }
 
     #[test]
-    fn the_thread_sanitizer_leaves_out_each_test_it_cannot_run_by_its_whole_name() {
+    fn the_thread_sanitizer_leaves_out_only_the_instruction_counts_by_their_whole_names() {
         let filter = tsan_filter();
         assert!(filter.starts_with("not ("), "{filter}");
-        for (package, test) in TSAN_CANNOT_RUN {
+        for (package, test) in TSAN_COUNTS_INSTRUCTIONS {
             assert!(filter.contains(&format!("(package({package}) & test(={test}))")), "{filter}");
         }
+        assert_eq!(filter.matches("package(").count(), TSAN_COUNTS_INSTRUCTIONS.len());
     }
 }

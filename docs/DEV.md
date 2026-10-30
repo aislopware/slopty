@@ -502,8 +502,9 @@ under `target/deep/`:
   reached from it aborts. One test proves it trips, on an allocation armed in a child process.
 - `features` — `cargo hack check --each-feature` over the workspace: every feature alone,
   none, and all.
-- `coverage [--html]` — `cargo llvm-cov nextest` line coverage per crate (the live e2e crate
-  left out).
+- `coverage [--html]` — line coverage per crate (the live e2e crate left out), every build in
+  `cargo llvm-cov show-env`'s environment, the binaries tests spawn built first; the report is
+  `target/deep/cov/lcov.info`.
 - `mutants -p <crate> [--timeout s] [--shard k/n] [--jobs n]` — `cargo mutants` on one crate,
   or its `k`th of `n` shares counting from 0, into `target/deep/mutants/<crate>[-<k>of<n>]`; the
   missed mutants (`mutants.out/missed.txt`) are the lines no test would notice changing.
@@ -515,6 +516,8 @@ under `target/deep/`:
   scenarios checked.
 - `leaks` — the daemon and wire test binaries under `leaks --atExit`: a leaked allocation fails.
 - `metal [--filter …]` — the app self-test with Metal API and shader validation on.
+- `cargo-cache` — the cargo cache made the lock's alone: every locked package fetched and every
+  other one deleted, before Deep saves main's entry.
 
 `cargo xtask fuzz [<target>] [--time s] [--jobs n]` builds `fuzz/` with cargo-fuzz (nightly,
 AddressSanitizer, debug assertions, the crate's `libfuzzer` feature; `cargo binstall

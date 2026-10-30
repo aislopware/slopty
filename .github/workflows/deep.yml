@@ -258,18 +258,15 @@ jobs:
           mkdir -p target/deep
           cargo xtask ${{ matrix.run }} 2>&1 | tee target/deep/report.log
       # main's cargo cache entry for this lock, when none has it: every package of every
-      # platform, the lock's alone (as `ci.yml`'s tools lane saves the gate's).
+      # platform, the lock's alone (`cargo xtask deep cargo-cache`), as `ci.yml`'s tools lane
+      # saves the gate's. It once ran in shell, whose prune's `grep -v` exits 1 when nothing is
+      # stale, which failed the night's features check after the check had passed.
       - id: fetch
         if: >-
           always() && github.ref == 'refs/heads/main' && matrix.slug == 'features'
           && steps.cargo-home.outputs.cache-hit != 'true'
         run: |
-          cargo fetch --locked
-          sed -n 's/^name = "\(.*\)"$/\1/p; s/^version = "\(.*\)"$/\1/p' Cargo.lock \
-            | paste -d- - - | sed 's/$/.crate/' > "$RUNNER_TEMP/locked-crates"
-          for dir in ~/.cargo/registry/cache/*/; do
-            ls "$dir" | grep -vxFf "$RUNNER_TEMP/locked-crates" | sed "s|^|$dir|" | xargs rm -f
-          done
+          cargo xtask deep cargo-cache
       - if: always() && steps.fetch.outcome == 'success'
         uses: actions/cache/save@v6
         with:

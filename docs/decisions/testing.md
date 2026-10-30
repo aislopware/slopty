@@ -1617,3 +1617,30 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     - No two controls side by side lie over each other, except on a touch screen, where a
       control takes presses a finger's 44 pt around it.
     - Every shortcut is in `aria-keyshortcuts` spelling.
+
+- ✅ **Red means something** (2026-10-30). Deep had been red every night since 10-25, and a check
+  that is always red tells nothing (research §7, rank 1). Each red had its root cause found and
+  fixed at the root:
+  - **A flake fails** (`flaky-result = "fail"`). A pass on a retry stands only for the seven
+    tests the `gate` and `warm` profiles name, which time themselves against the machine's
+    load (the session actor's frame pace and checkpoint wait, the relay's short wait, the
+    markdown parser's linear-time bounds). Virtual time (rank 2) replaces them; a test holds
+    the config to exact names and no blanket retry.
+  - **`ThreadSanitizer` hears `SIGCHLD` through a pump.** The runtime runs a handler at once
+    only on a thread inside a call it intercepts as blocking, and the kernel handed `SIGCHLD` to
+    libtest's main thread, which waits in one it does not intercept and wakes for its 60-second
+    notice. So a child's exit was heard a minute late, and the tests that wait on one timed out
+    or failed. Leaving them out (the old `TSAN_CANNOT_RUN`) hid the cause. Every binary the
+    check builds now links a `no_std` object (`xtask/src/deep/fixtures/sigchld.rs`): its
+    constructor blocks `SIGCHLD` on the main thread, which every later thread inherits, and
+    starts one thread looping on `sigsuspend`, which the runtime intercepts. The handler runs in
+    5 ms instead of 60 s (MEASUREMENTS 2026-10-30, "Deep's reds").
+  - **The other reds, each at its root.** The sanitizers ran nextest's default profile, so on a
+    runner's virtual Mac they ran the counter and `IOReport` tests the `ci` profile leaves out;
+    they now take `ci` there. Coverage built the binaries tests spawn outside its instrumented
+    environment, so the worker's end-to-end test built them inside its 180 s bound; every build
+    now runs in `cargo llvm-cov show-env`'s environment, the spawned binaries first. The
+    features check passed and then failed: the cache prune's `grep -v` exits 1 when nothing is
+    stale, so it moved to Rust (`deep cargo-cache`). The GPUI seeds failed on four shell tests
+    that keep a process's state from one seed to the next (a selection drag, two hover fades,
+    the attachment cache), which reset now.
