@@ -6041,6 +6041,41 @@ mod tests {
         });
     }
 
+    /// A picture drawn in block elements keeps the colours its program gave it under a minimum
+    /// contrast. Claude Code's mascot is peach, over a dark background of its own in some cells
+    /// and over the terminal's light one in others: held to the contrast, only the cells over
+    /// the light background were darkened, and one shape came out in two colours. Ghostty holds
+    /// no graphic to a minimum contrast (`noMinContrast`); text is still held.
+    #[gpui::test]
+    fn a_block_picture_keeps_its_colours_under_a_minimum_contrast(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let peach = Style { fg: slopty_grid::Color::Rgb(255, 202, 128), ..Style::DEFAULT };
+        let on_dark = Style { bg: slopty_grid::Color::Rgb(34, 33, 44), ..peach };
+        let mut f = history_frame(100, &[""]);
+        if let TermEvent::Frame(frame) = &mut f {
+            let row = &mut Arc::make_mut(&mut frame.updates[0].line).cells;
+            row[0] = Cell::narrow('▝', peach);
+            row[1] = Cell::narrow('▜', peach);
+            row[2] = Cell::narrow('█', on_dark);
+            row[3] = Cell::narrow('▛', on_dark);
+            row[4] = Cell::narrow('▀', peach);
+            row[5] = Cell::narrow('─', peach);
+        }
+        view.update_in(cx, |view, _window, cx| {
+            let mut theme = Theme::new(slopty_theme::Variant::Light);
+            theme.terminal.minimum_contrast = 450;
+            view.set_theme(theme, cx);
+            view.apply(f, cx);
+        });
+        cx.run_until_parked();
+        let sprites = cx.update(|window, _| window.painted_sprites());
+        let drawn: Vec<&String> = sprites.iter().filter(|s| s.starts_with("monochrome")).collect();
+        assert_eq!(drawn.len(), 6, "every cell is a sprite: {sprites:#?}");
+        let peach =
+            format!("{:?}", slopty_kit::colors::hsla(slopty_theme::Rgb { r: 255, g: 202, b: 128 }));
+        assert!(drawn.iter().all(|s| s.ends_with(&peach)), "all {peach}: {drawn:#?}");
+    }
+
     /// Either half of a wide character reads as the character, as in Ghostty: a word of wide
     /// characters is one word from any cell, over the spacer a wrapped one leaves at the edge,
     /// and a wide blank (the ideographic space) parts two words from either half.

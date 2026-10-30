@@ -1147,8 +1147,16 @@ fn shape_cells(
     let mut colors: Vec<(usize, Hsla)> = Vec::new();
     // `(first byte, column)` of every cell that draws text, in text order.
     let mut starts: Vec<(usize, u16)> = Vec::with_capacity(cells.len());
-    let mut current: Option<(CellStyle, usize)> = None;
+    // A run is one style, and graphics ([`graphic`]) or text: a font's graphic keeps its colour.
+    let mut current: Option<(CellStyle, bool, usize)> = None;
     let mut col: u16 = 0;
+    let run_of = |len: usize, style: &CellStyle, drawing: bool, contrast: &mut Contrast| {
+        let mut run = text_run(len, style, look, contrast);
+        if drawing {
+            run.color = graphic_color(style, look.palette, look.blink_off);
+        }
+        run
+    };
     for cell in cells {
         if !cell.width.draws_text() {
             // A wide cell's tail is already counted in its columns; a spacer head is its own.
@@ -1158,26 +1166,27 @@ fn shape_cells(
             continue;
         }
         let piece: &str = if cell.text.is_empty() { " " } else { cell.text.as_str() };
+        let drawing = piece.chars().next().is_some_and(graphic);
         starts.push((text.len(), col));
         col = col.saturating_add(cell.width.columns());
         text.push_str(piece);
         let len = piece.len();
         match &mut current {
-            Some((style, acc)) if *style == cell.style => {
+            Some((style, of, acc)) if *style == cell.style && *of == drawing => {
                 *acc = acc.saturating_add(len);
             }
             _ => {
-                if let Some((style, acc)) = current.take() {
-                    let run = text_run(acc, &style, look, contrast);
+                if let Some((style, of, acc)) = current.take() {
+                    let run = run_of(acc, &style, of, contrast);
                     colors.push((text.len().saturating_sub(len), run.color));
                     runs.push(run);
                 }
-                current = Some((cell.style, len));
+                current = Some((cell.style, drawing, len));
             }
         }
     }
-    if let Some((style, acc)) = current.take() {
-        let run = text_run(acc, &style, look, contrast);
+    if let Some((style, of, acc)) = current.take() {
+        let run = run_of(acc, &style, of, contrast);
         colors.push((text.len(), run.color));
         runs.push(run);
     }
@@ -1230,11 +1239,40 @@ fn cell_color(
     blink_off: bool,
     contrast: &mut Contrast,
 ) -> Hsla {
+    paint(style, palette, blink_off, |fg, bg| contrast.text_over(palette, fg, bg))
+}
+
+/// [`cell_color`] for a terminal graphic ([`graphic`]), which keeps the colour the program
+/// gave it: a picture drawn in block elements on its own background (a mascot, a chart, a
+/// prompt's Powerline segments) holds its colours across cells, and lifting only the cells
+/// over the terminal's background split one shape into two colours. Ghostty holds the same
+/// characters to no minimum contrast (`noMinContrast`, `renderer/cell.zig`).
+fn graphic_color(style: &CellStyle, palette: &Colors, blink_off: bool) -> Hsla {
+    paint(style, palette, blink_off, |fg, _bg| fg)
+}
+
+/// Whether `c` is a terminal graphic: box drawing, a block element, a Symbols for Legacy
+/// Computing shape (with the Unicode 16 supplement) or a Powerline glyph, as Ghostty's
+/// `isGraphicsElement` has them. Braille is dots of text, held as text is.
+fn graphic(c: char) -> bool {
+    matches!(
+        u32::from(c),
+        0x2500..=0x259f | 0x1fb00..=0x1fbff | 0x1cc00..=0x1cebf | 0xe0b0..=0xe0d7
+    )
+}
+
+/// [`cell_color`] with `held` taking the text colour and its background to the colour drawn.
+fn paint(
+    style: &CellStyle,
+    palette: &Colors,
+    blink_off: bool,
+    held: impl FnOnce(Rgb, Rgb) -> Rgb,
+) -> Hsla {
     let inverse = style.flags.contains(StyleFlags::INVERSE);
     let (fg_slot, bg_slot) = if inverse { (style.bg, style.fg) } else { (style.fg, style.bg) };
     let fg = palette.resolve(fg_slot, inverse);
     let bg = palette.resolve(bg_slot, !inverse);
-    let mut color = hsla(contrast.text_over(palette, fg, bg));
+    let mut color = hsla(held(fg, bg));
     if style.flags.contains(StyleFlags::FAINT) {
         color.a = 0.6;
     }
@@ -1704,7 +1742,12 @@ impl Element for TerminalElement {
                                 device_span(y, line_height, scale),
                             );
                             let tile = cache.sprite(ch, w, h, sprite_thickness);
-                            sprites.push(SpriteCell { col, ch, fg: text, tile });
+                            let fg = if graphic(ch) {
+                                graphic_color(&cell.style, palette, blink_off)
+                            } else {
+                                text
+                            };
+                            sprites.push(SpriteCell { col, ch, fg, tile });
                         }
                         // Underline and strikethrough go where the font says, not where GPUI
                         // would put them; a curly underline is GPUI's wave at that position.
