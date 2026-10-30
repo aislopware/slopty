@@ -104,7 +104,7 @@ pub(crate) use compact::force_touch; // slopty: tests lay a view out for a finge
 mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
 // slopty: the window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
-    NavigateBack, NavigateForward, NewRightTab, NextNeedsYou, OpenIn, ReopenClosedTab,
+    Inbox, NavigateBack, NavigateForward, NewRightTab, NextNeedsYou, OpenIn, ReopenClosedTab,
     ToggleExpandPane, ToggleInspector,
 };
 mod closed_tabs; // slopty: the right pane's closed tabs, opened again
@@ -443,12 +443,9 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             None,
             cx,
         ),
-        crate::keys::binding(
-            &valid_or_default(&keymap.toggle_terminal, "mod-j"),
-            ToggleTerminal,
-            None,
-            cx,
-        ),
+        // ⌘J is the jump to what needs the person (`docs/decisions/layout.md`); the shell beside
+        // the session is ⌘D, the split's key.
+        crate::keys::binding(&platform_combo("mod-d"), ToggleTerminal, None, cx),
         crate::keys::binding(
             &valid_or_default(&keymap.new_session, "mod-n"),
             NewSession,
@@ -1289,6 +1286,9 @@ pub struct Shell {
     transcript: Entity<Transcript>,
     // slopty: the main column's session terminal and the right pane's inspector of it.
     session_terminal: Entity<TerminalPanel>,
+    /// slopty: the session a note's tap last landed on, and when: its terminal wears one accent
+    /// border fade ([`landing_opacity`]).
+    landed: Option<(String, std::time::Instant)>,
     inspector: Entity<crate::inspector::Inspector>,
     // slopty: the selected session and the terminal it was last seen in, which the selection
     // follows to the session that terminal is next (`follow_session_terminal`).
@@ -1906,6 +1906,7 @@ impl Shell {
             _inspector_events: inspector_events,
             _session_terminal_events: session_terminal_events,
             session_terminal,
+            landed: None, // slopty
             inspector,
             followed_terminal: None,
             new_session: None,
@@ -4291,34 +4292,14 @@ impl Shell {
             SettingsSection::Notifications => {
                 if self.notifications_page.is_none() {
                     let page = cx.new(|cx| {
-                        NotificationsPage::new(
-                            self.settings.sound_enabled,
-                            self.settings.sound_completion_enabled,
-                            self.settings.sound_input_enabled,
-                            self.settings.sound_attention_enabled,
-                            self.settings.notifications_enabled,
-                            self.settings.notifications_background_only,
-                            cx,
-                        )
+                        NotificationsPage::new(self.settings.notifications_enabled, cx)
                     });
-                    // Persist the flags whenever the page flips one.
+                    // slopty: keep the one switch whenever the page flips it.
                     self.notifications_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &NotificationsEvent, cx| {
-                            let NotificationsEvent::Changed {
-                                sound,
-                                completion_sound,
-                                input_sound,
-                                attention_sound,
-                                desktop,
-                                background_only,
-                            } = *event;
-                            this.settings.sound_enabled = sound;
-                            this.settings.sound_completion_enabled = completion_sound;
-                            this.settings.sound_input_enabled = input_sound;
-                            this.settings.sound_attention_enabled = attention_sound;
+                            let NotificationsEvent::Changed { desktop } = *event;
                             this.settings.notifications_enabled = desktop;
-                            this.settings.notifications_background_only = background_only;
                             this.schedule_save(cx);
                             cx.notify();
                         },
@@ -5857,6 +5838,7 @@ impl Shell {
         }
         overlays.extend(self.render_resume_picker(viewport, window, cx)); // slopty: past_sessions
         overlays.extend(self.render_new_session_picker(viewport, window, cx)); // slopty
+        overlays.extend(self.render_inbox(window, cx)); // slopty: the inbox under the eye
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -6027,12 +6009,24 @@ impl Shell {
             let (width, height) = self.glide_hold(terminal_geometry.get(), cx);
             let by = gpui::size(px(width), px(height));
             self.session_terminal.update(cx, |panel, cx| panel.hold_fit(by, cx));
+            let landing = self.landing_fade(selected.as_deref(), window, cx);
             div()
                 .id("session-terminal")
                 .debug_selector(|| "session-terminal".into())
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .child(self.session_terminal.clone())
+                .when_some(landing, |terminal, opacity| {
+                    terminal.child(
+                        div()
+                            .debug_selector(|| "session-landing".into())
+                            .absolute()
+                            .inset_0()
+                            .border_2()
+                            .border_color(theme.accent.opacity(opacity)),
+                    )
+                })
                 .into_any_element()
         } else if let Some(chat) = selected {
             self.render_session_ended(&chat, theme, cx)
@@ -6122,6 +6116,29 @@ impl Shell {
             .child(div().flex_1().min_h_0().flex().flex_col().child(outlet))
             .child(self.render_terminal_container(terminal_geometry, window, cx))
             .into_any_element()
+    }
+
+    /// slopty: a note's tap landed on `chat`: its terminal wears one accent border fade.
+    ///
+    /// Ghostty presents the surface a notification lands on so, without its repeating glow
+    /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
+    pub(crate) fn present_landing(&mut self, chat: String, cx: &mut Context<Self>) {
+        self.landed = Some((chat, crate::clock::now(cx)));
+        cx.notify();
+    }
+
+    /// The landing fade's border opacity for the terminal of `shown` this frame, asking for the
+    /// next while it fades; `None` once it has, or while another session is shown.
+    fn landing_fade(&mut self, shown: Option<&str>, window: &mut Window, cx: &App) -> Option<f32> {
+        let (chat, at) = self.landed.as_ref()?;
+        let opacity = landing_opacity(crate::clock::now(cx).saturating_duration_since(*at))
+            .filter(|_| shown == Some(chat.as_str()));
+        if opacity.is_some() {
+            window.request_animation_frame();
+        } else {
+            self.landed = None;
+        }
+        opacity
     }
 
     /// slopty: the main column for a session with no terminal: one starting shows that it
@@ -7811,6 +7828,10 @@ impl Render for Shell {
                     self.state.update(cx, |s, _| s.window_active = window_active);
                 }
                 self.was_window_active = window_active;
+                // slopty: what the person looks at, which the app's notes keep quiet for
+                // (`presence::OnScreen`).
+                let on_screen = self.state.read(cx).selected_chat.clone();
+                crate::presence::show(on_screen.filter(|_| window_active), cx);
                 // A run finishing while you're LOOKING at the session must not
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
@@ -10289,6 +10310,34 @@ const JUMP_RISE: f32 = 8.0;
 // slopty: in on the quint ease-out over 200 ms, out over 300 ms on (0.7, 0, 0.84, 0), gathering
 // speed as it sinks back the way it came (HextaUI's `MessageScrollerButton`;
 // design-inspiration item 11). Its 0.95 scale is left out: a div has no scale here.
+/// slopty: a note's landing: one 0.4 s accent border fade on its session's terminal.
+const LANDING: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE_OUT);
+
+/// The landing border's opacity `elapsed` after the tap: full at once, faded out by
+/// [`LANDING`]'s end, then `None`.
+fn landing_opacity(elapsed: Duration) -> Option<f32> {
+    let total = LANDING.total();
+    (elapsed < total).then(|| 1.0 - LANDING.progress(elapsed.as_secs_f32() / total.as_secs_f32()))
+}
+
+#[cfg(test)]
+mod landing_tests {
+    use std::time::Duration;
+
+    /// slopty: the landing border is full at the tap, fades, and is gone by 0.4 s.
+    #[test]
+    fn the_landing_border_fades_once_in_four_tenths_of_a_second() {
+        assert_eq!(super::landing_opacity(Duration::ZERO), Some(1.0));
+        let half = super::landing_opacity(Duration::from_millis(200)).expect("still fading");
+        assert!(half > 0.0 && half < 1.0, "{half}");
+        assert!(
+            super::landing_opacity(Duration::from_millis(390)).is_some_and(|o| o < half),
+            "fainter as it goes"
+        );
+        assert_eq!(super::landing_opacity(Duration::from_millis(400)), None, "then gone");
+    }
+}
+
 const JUMP_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
 const JUMP_OUT: motion::MotionSpec =
     motion::MotionSpec::new(300, motion::CubicBezier::new(0.7, 0.0, 0.84, 0.0));

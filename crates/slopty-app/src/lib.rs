@@ -193,9 +193,8 @@ impl Workspace {
         let events = cx.subscribe(&view, move |ws: &mut Self, _view, event, cx| match event {
             // The badge is the inbox's count, which `Self::look` follows.
             WorkspaceEvent::NeedsYou(_) => {}
-            // The Dock bounces while the human is elsewhere; the shell's "Input required" chime
-            // is its sound. Led by a server, its notice bounces it instead, so a moment never
-            // says it twice.
+            // The Dock bounces once while the human is elsewhere, with no sound. Led by a server,
+            // its notice bounces it instead, so a moment never says it twice.
             WorkspaceEvent::Attention(_session) => {
                 let active = cx.active_window().is_some();
                 if !ws.attention.server_led() && settings::alerts(&ws.settings, active) {
@@ -333,11 +332,25 @@ impl Workspace {
         this.repoint_this_mac(cx);
         this.ask_this_mac_worker(cx);
         Self::watch_presence(cx);
+        Self::watch_on_screen(cx);
         #[cfg(target_os = "macos")]
         this.watch_leaving(cx);
         #[cfg(target_os = "ios")]
         Self::watch_push_tokens(cx);
         this
+    }
+
+    /// Follow the session on screen, which never notifies and whose note goes once the person
+    /// looks (`slopty_shell::presence::OnScreen`, said as the shell draws). A chat is its
+    /// agent's thread.
+    fn watch_on_screen(cx: &mut Context<Self>) {
+        cx.observe_global::<slopty_shell::presence::OnScreen>(|ws: &mut Self, cx| {
+            let about = slopty_shell::presence::on_screen(cx)
+                .and_then(|chat| chat.parse().ok())
+                .map(slopty_ui::workspace::attention::About::Thread);
+            ws.attention.set_on_screen(about);
+        })
+        .detach();
     }
 
     /// Post notes through `notifier` from now on (the system's in the app).
@@ -1250,7 +1263,7 @@ fn frame_nominal() -> std::time::Duration {
         })
 }
 
-/// The person's alert: the sound chosen in System Settings and a bounce of the Dock icon.
+/// The person's alert, with no sound: a haptic on iPhone and one bounce of the Dock icon.
 #[cfg(not(feature = "e2e"))]
 fn alert() {
     slopty_platform::attention();
@@ -1263,8 +1276,7 @@ fn alert() {
     tracing::info!("alert");
 }
 
-/// The person's alert with no sound of its own, for a moment the shell already chimes: a bounce
-/// of the Dock icon.
+/// The person's alert for an agent that needs them: one bounce of the Dock icon.
 #[cfg(not(feature = "e2e"))]
 fn bounce() {
     slopty_platform::bounce();

@@ -46,7 +46,6 @@ pub mod loaders;
 pub mod markdown;
 pub mod motion;
 mod notice;
-pub mod notify;
 pub mod invariants; // slopty: what the shell's state must hold, checked as it runs
 pub mod overscroll;
 pub mod page; // slopty: a page an agent shows inline, as its card
@@ -60,7 +59,6 @@ pub mod running_pill;
 pub mod settings;
 pub mod shell;
 pub mod smooth_scroll;
-pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;
 pub mod syntax_cache;
@@ -331,7 +329,8 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
         Some(shell) => {
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
-                shell.open_chat(target, cx);
+                shell.open_chat(target.clone(), cx);
+                shell.present_landing(target, cx); // slopty: one accent fade where it lands
             });
         }
         None => state.update(cx, |state, cx| state.select_chat(Some(target), cx)),

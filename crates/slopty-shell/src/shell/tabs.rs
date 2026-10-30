@@ -560,14 +560,16 @@ impl Shell {
             })
         });
         let open_in = (!takeover && !on_canvas).then(|| self.render_open_in_button(cx)).flatten();
-        // At the trailing end: the palette, then a new session, which over the new-session
-        // canvas would open the canvas it is on.
+        // At the trailing end: the inbox's eye, the palette, then a new session, which over the
+        // new-session canvas would open the canvas it is on.
+        let eye = self.render_inbox_button(&ink, cx);
         let actions = div()
             .flex_none()
             .flex()
             .flex_row()
             .items_center()
             .gap(px(TITLEBAR_CONTROL_GAP))
+            .child(eye)
             .child(
                 window_control_button(
                     "titlebar-palette",

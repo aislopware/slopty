@@ -208,7 +208,7 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     open_chat(drv, phone, title).await;
     shown(drv, "the session's terminal", |d| d.a11y.iter().any(|n| n.role == "Terminal")).await;
 
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     shown(drv, "a shell at its prompt", |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
     })
@@ -221,7 +221,7 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     .await;
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &dir, device, "terminal").await;
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
 
     if phone {
         tap(drv, "Button", "Show files").await;

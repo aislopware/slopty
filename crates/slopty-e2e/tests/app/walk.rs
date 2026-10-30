@@ -62,7 +62,7 @@ async fn the_terminal_dock_keeps_up_with_a_person() {
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
 
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     let first = run(drv, "echo one-$((1+1))", "one-2").await;
     let first_session = focused_terminal(&first).unwrap_or_default().to_owned();
     println!("WALK dock\n{}", slopty_e2e::frame_text(&first.a11y));
@@ -118,9 +118,9 @@ async fn the_terminal_dock_keeps_up_with_a_person() {
     .unwrap();
 
     // Hidden and shown again: the same shell, with the keyboard.
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("the dock hidden", STEP, |d| tabs(d).is_empty()).await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     let shown = run(drv, "echo again-$((4+4))", "again-8").await;
     assert_eq!(focused_terminal(&shown), Some(first_session.as_str()), "the same shell");
 
@@ -360,7 +360,7 @@ async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
     let (mut stack, cut) = Stack::launch_behind_cut("e2e-walk-link").await.unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     let before = run(drv, "echo before-$((7+7))", "before-14").await;
     let session = focused_terminal(&before).unwrap_or_default().to_owned();
     let links = |d: &Dump| d.workers.first().map_or(0, |w| w.links);
@@ -394,7 +394,7 @@ async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
     // The dock comes back as it was left; the keyboard starts where a launch puts it, and the
     // person picks the shell by its tab.
     if tabs(&reopened).is_empty() {
-        drv.keys("cmd-j").await.unwrap();
+        drv.keys("cmd-d").await.unwrap();
     } else if focused_terminal(&reopened).is_none() {
         let (x, y) = tabs(&reopened).first().map(|t| middle(t)).unwrap_or_default();
         drv.click(x, y).await.unwrap();

@@ -22,7 +22,7 @@ fn shell(d: &Dump) -> Option<String> {
 /// ⌘J's shell on `drv`, at its prompt; its session.
 async fn dock_shell(drv: &mut Driver, who: &str) -> String {
     drv.wait_for(&format!("{who}: the worker"), STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     let d = drv
         .wait_for(&format!("{who}: the dock's shell at its prompt"), STEP, |d| {
             shell(d).is_some() && d.focused.starts_with("terminal:")

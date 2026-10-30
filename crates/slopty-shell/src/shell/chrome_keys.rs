@@ -39,6 +39,8 @@ actions!(
         UndoArchive,
         ResumeSession,
         NextNeedsYou,
+        // slopty: what needs the person, across sessions and machines (`inbox`).
+        Inbox,
         OpenIn,
         ToggleExpandPane,
         // slopty: ⌘I shows or hides the session's inspector (`docs/decisions/ui.md`, "The
@@ -89,6 +91,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
         (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
         (ShortcutId::ResumeSession, Box::new(ResumeSession)),
         (ShortcutId::NextNeedsYou, Box::new(NextNeedsYou)),
+        (ShortcutId::Inbox, Box::new(Inbox)),
     ] {
         let combo = platform_combo(keymap.get(id));
         if combo.is_empty() {
@@ -173,6 +176,13 @@ impl Shell {
             if !this.overlay_owns_keyboard() {
                 this.open_next_needing_you(cx);
             }
+        }))
+        .on_action(cx.listener(|this, _: &Inbox, window, cx| {
+            // Over another overlay the key waits; the inbox's own key puts it away.
+            if this.overlay_owns_keyboard() && !this.inbox.is_open() {
+                return;
+            }
+            this.toggle_inbox(window, cx);
         }))
         .on_action(cx.listener(|this, _: &UndoArchive, window, cx| {
             if in_own_keys(window) || !this.undo_last_archive(cx) {

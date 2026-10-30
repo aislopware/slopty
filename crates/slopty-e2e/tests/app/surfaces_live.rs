@@ -75,7 +75,7 @@ async fn the_terminal_dock_holds_a_shell_of_the_worker() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
 
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("a shell at its prompt", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
     })
@@ -108,7 +108,7 @@ async fn the_terminal_s_floats_wear_the_shell() {
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("a shell at its prompt", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
     })
@@ -248,7 +248,7 @@ async fn a_local_page_a_shell_asks_for_is_offered() {
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("a shell at its prompt", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
     })

@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use futures::FutureExt as _;
 use futures::channel::oneshot;
 use gpui::{
-    App, AsyncApp, Context, Entity, FocusHandle, IntoElement, KeyBinding, MouseButton, Pixels,
+    App, AsyncApp, Context, Entity, FocusHandle, IntoElement, MouseButton, Pixels,
     Render, SharedString, Size, Subscription, Task, WeakEntity, Window, actions, div, prelude::*,
     px,
 };
@@ -53,14 +53,8 @@ pub struct ShownChanged;
 
 impl gpui::EventEmitter<ShownChanged> for TerminalPanel {}
 
-/// Bind the terminal keymap (global): Cmd+J on Apple keyboards, Ctrl+J elsewhere.
+/// Bind the panel's own keys. Its toggle is the shell's keymap's (⌘D); ⌘J is the jump.
 pub fn init(cx: &mut App) {
-    let toggle = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌘ too
-        "cmd-j"
-    } else {
-        "ctrl-j"
-    };
-    cx.bind_keys([KeyBinding::new(toggle, ToggleTerminal, None)]);
     bind_keys(cx);
 }
 

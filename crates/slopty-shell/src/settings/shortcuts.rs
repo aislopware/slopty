@@ -416,7 +416,6 @@ fn group(id: ShortcutId) -> &'static str {
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ToggleTerminal
         | ShortcutId::ReopenClosedTab => "Panels", // slopty: the right pane's last closed tab
         // slopty: dictation removed; a new project is how a session starts somewhere new.
         ShortcutId::NewProject
@@ -425,7 +424,8 @@ fn group(id: ShortcutId) -> &'static str {
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
         | ShortcutId::ResumeSession // slopty: a past Claude Code session
-        | ShortcutId::NextNeedsYou => "Sessions", // slopty: the next one waiting on the person
+        | ShortcutId::NextNeedsYou // slopty: the next one waiting on the person
+        | ShortcutId::Inbox => "Sessions", // slopty: everything waiting, behind the eye
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }

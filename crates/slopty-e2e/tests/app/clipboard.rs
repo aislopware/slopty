@@ -29,7 +29,7 @@ fn watched(d: &Dump) -> bool {
 /// keys' echo comes back behind the watch on the one control stream.
 async fn shell_watched(drv: &mut Driver) {
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("the dock's shell with the keyboard, its worker watched", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.focused.starts_with("terminal:") && watched(d)
     })
@@ -97,7 +97,7 @@ async fn the_dock_s_shell_shares_the_clipboard_with_its_worker() {
     assert_eq!(there.as_deref(), Some(&*text), "the worker's pasteboard holds it");
 
     let drv = &mut stack.driver;
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("the keyboard away from the shell, nothing watched", STEP, |d| {
         !d.focused.starts_with("terminal:") && !watched(d)
     })

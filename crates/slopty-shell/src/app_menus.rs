@@ -230,12 +230,13 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
 ];
 
 /// slopty: the Go menu's moves.
-pub(crate) const GO_COMMANDS: [WindowCommand; 5] = [
+pub(crate) const GO_COMMANDS: [WindowCommand; 6] = [
     command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
     command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
     command!("Next session", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
     command!("Previous session", crate::icons::ALT_ARROW_UP, shell::PrevSession),
     command!("Next session that needs you", crate::icons::BELL, shell::NextNeedsYou),
+    command!("Inbox", crate::icons::EYE, shell::Inbox),
 ];
 
 /// slopty: every command the palette offers from the menu bar's table.
@@ -344,7 +345,8 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Dark", AppearanceDark),
         ])),
     ])));
-    let [back, forward, next, previous, needs_you] = GO_COMMANDS.map(|command| command.menu_item());
+    let [back, forward, next, previous, needs_you, inbox] =
+        GO_COMMANDS.map(|command| command.menu_item());
     let mut go = vec![
         back,
         forward,
@@ -352,6 +354,7 @@ pub fn app_menus() -> Vec<Menu> {
         next,
         previous,
         needs_you,
+        inbox,
         MenuItem::separator(),
     ];
     go.extend(JUMP_TITLES.iter().enumerate().map(|(slot, title)| {

@@ -20,7 +20,7 @@ async fn the_terminal_s_clear_is_option_command_k() {
     let mut stack = Stack::launch_at_home("e2e-keys").await.unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
-    drv.keys("cmd-j").await.unwrap();
+    drv.keys("cmd-d").await.unwrap();
     drv.wait_for("the dock's shell with the keyboard", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.focused.starts_with("terminal:")
     })
