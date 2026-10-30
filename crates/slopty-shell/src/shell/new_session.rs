@@ -1,4 +1,4 @@
-//! slopty: a new session, started at once (`docs/decisions/ui.md`, "A session is its
+//! A new session, started at once (`docs/decisions/ui.md`, "A session is its
 //! terminal"): an agent's own TUI, or a plain terminal, in one of the projects.
 //!
 //! The picker lists the projects, the one in context first, and the agent it starts above
@@ -432,7 +432,7 @@ impl Shell {
                     .child(agent.name),
             );
         }
-        // slopty: the keys, where there are keys: a phone or a pad has none to hint.
+        // The keys, where there are keys: a phone or a pad has none to hint.
         let keys = (!crate::shell::touch_screen()).then(|| {
             palette_footer()
                 .child(command_key_hint(&theme, "\u{2191} \u{2193}", "Navigate", window, cx))

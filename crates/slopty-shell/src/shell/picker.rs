@@ -1,4 +1,4 @@
-//! slopty: the session picker and Go to Directory, one card under the titlebar's identity
+//! The session picker and Go to Directory, one card under the titlebar's identity
 //! (`docs/decisions/layout.md`, "The picker and the palette are one keyboard door to everything").
 //!
 //! - **⌘K, or a press on the identity**: a "Filter or create…" field over every session on every
@@ -45,9 +45,9 @@ use crate::theme::{Theme, hairline};
 actions!(
     shell,
     [
-        // slopty: the session picker, ⌘K.
+        // The session picker, ⌘K.
         OpenPicker,
-        // slopty: Go to Directory, ⇧⌘G while no find field is open (`docs/decisions/layout.md`).
+        // Go to Directory, ⇧⌘G while no find field is open (`docs/decisions/layout.md`).
         GoToDirectory
     ]
 );
@@ -986,7 +986,7 @@ impl Shell {
         let card = popover::popover_card_flush(&theme)
             .id("picker-card")
             .debug_selector(|| "picker-card".into())
-            // slopty: no focus of its own: a press on a row the machine refuses, or on a machine's
+            // No focus of its own: a press on a row the machine refuses, or on a machine's
             // tab, leaves the keyboard in the search, so typing goes on filtering.
             .role(gpui::Role::Dialog)
             .aria_label(label)

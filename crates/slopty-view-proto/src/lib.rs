@@ -12,7 +12,6 @@ pub mod motion;
 pub mod preview;
 pub mod projectless;
 pub mod view;
-// slopty: voice removed.
 pub mod workspace;
 
 pub use agent::*;

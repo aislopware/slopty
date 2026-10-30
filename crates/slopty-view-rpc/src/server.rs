@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::StreamExt; // slopty: `SinkExt` served only the cut WebSocket acceptor.
+use futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
@@ -129,5 +129,3 @@ async fn handle_request(
         }
     }
 }
-
-// slopty: the WebSocket acceptor (`serve_ws_listener`) is cut with the transport.

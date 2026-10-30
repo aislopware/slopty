@@ -1,4 +1,4 @@
-//! slopty: pages an agent shows inline (an MCP App's view, a `show_page`, an `.html` file), hosted
+//! Pages an agent shows inline (an MCP App's view, a `show_page`, an `.html` file), hosted
 //! in each window's [`PageHost`] for the shell's page card (`slopty_shell::live::serve_pages`),
 //! and what they ask answered through the person.
 //!
@@ -1484,7 +1484,7 @@ impl WorkspaceView {
         };
         let app = page.app.clone();
         match &request.ask {
-            // slopty: words for the chat, and context for its next turn, are declined: the window
+            // Words for the chat, and context for its next turn, are declined: the window
             // is read-only toward the agent, which hears only what the person types into its TUI.
             Ask::Message { .. } | Ask::UpdateContext { .. } => {
                 let _answered = host.answer(

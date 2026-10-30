@@ -586,7 +586,7 @@ impl Pipelines {
                         module,
                         entry_point: Some("vs"),
                         compilation_options: Default::default(),
-                        buffers: &[Some(Vertex::layout())], // slopty: wgpu 30.
+                        buffers: &[Some(Vertex::layout())],
                     },
                     primitive: wgpu::PrimitiveState::default(),
                     depth_stencil,
@@ -702,7 +702,7 @@ impl Pipelines {
                 module: &surface,
                 entry_point: Some("vs_shadow"),
                 compilation_options: Default::default(),
-                buffers: &[Some(Vertex::layout())], // slopty: wgpu 30.
+                buffers: &[Some(Vertex::layout())],
             },
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: Some(wgpu::DepthStencilState {

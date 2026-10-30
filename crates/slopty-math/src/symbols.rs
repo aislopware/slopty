@@ -260,7 +260,7 @@ pub(crate) fn symbol(name: &str) -> Option<(char, Class)> {
         "rVert" => ('‖', Close),
         "lgroup" => ('⟮', Open),
         "rgroup" => ('⟯', Close),
-        // slopty: semantic brackets.
+        // Semantic brackets.
         "llbracket" => ('⟦', Open),
         "rrbracket" => ('⟧', Close),
         _ => return None,

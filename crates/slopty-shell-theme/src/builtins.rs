@@ -9,7 +9,7 @@ use crate::{
     ThemeRegistry, ThemeSource, ThemeVariant,
 };
 
-// slopty: a curated few (Amp's lesson): the house pair, a true black, a high-contrast pair, and
+// A curated few (Amp's lesson): the house pair, a true black, a high-contrast pair, and
 // four strong colourful ports, each with one line of voice (`docs/decisions/ui.md`).
 pub fn builtin_registry() -> &'static ThemeRegistry {
     static REGISTRY: OnceLock<ThemeRegistry> = OnceLock::new();
@@ -312,7 +312,7 @@ fn slopty_black() -> ThemeVariant {
     })
 }
 
-/// slopty: a high-contrast variant draws its edges in the text's own ink, strong enough to read
+/// A high-contrast variant draws its edges in the text's own ink, strong enough to read
 /// without colour, as VS Code's high-contrast themes do.
 fn high_contrast(mut variant: ThemeVariant) -> ThemeVariant {
     let ink = variant.colors.text;
@@ -323,7 +323,7 @@ fn high_contrast(mut variant: ThemeVariant) -> ThemeVariant {
     variant
 }
 
-// slopty: after VS Code's Dark High Contrast (MIT): white on black, cyan edges, orange focus.
+// After VS Code's Dark High Contrast (MIT): white on black, cyan edges, orange focus.
 fn high_contrast_dark() -> ThemeVariant {
     high_contrast(variant(Seeds {
         id: "high-contrast-dark",
@@ -362,7 +362,7 @@ fn high_contrast_dark() -> ThemeVariant {
     }))
 }
 
-// slopty: after VS Code's Light High Contrast (MIT): black on white, deep blue edges and focus.
+// After VS Code's Light High Contrast (MIT): black on white, deep blue edges and focus.
 fn high_contrast_light() -> ThemeVariant {
     high_contrast(variant(Seeds {
         id: "high-contrast-light",

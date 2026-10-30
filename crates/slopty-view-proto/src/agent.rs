@@ -3,9 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
-// slopty: an agent is named, not enumerated: any agent a worker offers (Claude Code, Codex, pi,
-// any ACP agent by its registry's name) is a harness, so the type is an open, interned name. The
-// names zeron knew stay as constants, and its matches on them keep a fallback arm.
+// An agent is named, not enumerated: any agent a worker offers (Claude Code, Codex, pi, any ACP
+// agent by its registry's name) is a harness, so the type is an open, interned name. The known
+// names are constants, and matches on them keep a fallback arm.
 /// An agent harness, by its wire name (`claude-code`, `codex`, an ACP agent's registry name).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HarnessId(&'static str);
@@ -92,8 +92,6 @@ impl<'de> Deserialize<'de> for HarnessId {
         Ok(Self::named(&name))
     }
 }
-
-// slopty: no agent CLI updates; Slopty never installs or updates an agent.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -379,8 +377,6 @@ pub const VISUAL_MAX_ASSETS: usize = 16;
 pub const VISUAL_MAX_ASSET_BYTES: usize = 8 * 1024 * 1024;
 pub const VISUAL_MAX_TOTAL_ASSET_BYTES: usize = 10 * 1024 * 1024;
 
-// slopty: no engine WebSocket frame to fit; the script rides the agent's own tool call.
-
 /// Whether `name` can name a visual's asset: a plain file name.
 pub fn valid_visual_asset_name(name: &str) -> bool {
     !name.is_empty()
@@ -489,7 +485,7 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)] // slopty: Default.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
     pub id: String,
@@ -502,11 +498,11 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
-    // slopty: an approval or a prompt like Claude Code's trust dialog offers choices, not a field.
+    // An approval or a prompt like Claude Code's trust dialog offers choices, not a field.
     /// It takes one of its options, on a click, and no words of one's own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub choices_only: bool,
-    // slopty: an approval that is long, unknown or destructive is never shown as allowable at
+    // An approval that is long, unknown or destructive is never shown as allowable at
     // a key's press (Claude desktop's rules).
     /// Focus starts on the deny ([`Self::deny_option`]), not the first option.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -523,7 +519,7 @@ pub struct UserInputQuestion {
     /// The change an edit's approval would make.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposed: Option<ToolDiff>,
-    // slopty: what the dock draws a request's card by (`docs/decisions/ui.md`).
+    // What the dock draws a request's card by (`docs/decisions/ui.md`).
     /// What each of `options` says under it, by the same index; empty for one that says
     /// nothing, and no entries at all when none says anything.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -578,7 +574,6 @@ pub struct UserInputQuestion {
     /// agent (Claude Code's `requires_user_interaction`): the card says "Answer in Slopty".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_presence: bool,
-    // slopty: a shell command's approval leads with the command, set as code.
     /// The command an approval would run, whole, which the card draws in the code face ahead of
     /// `question` (then only the agent's words about it); none for any other request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -588,7 +583,7 @@ pub struct UserInputQuestion {
     /// the careful default, it never marks a call for being long or unknown.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub risky: bool,
-    // slopty: an approval's answers have a hierarchy (opencode's permission dock).
+    // An approval's answers have a hierarchy (opencode's permission dock).
     /// Which of `options` the card recommends and draws as its primary: an approval's
     /// once-allow, none where the card starts on its deny (a risky, long or unknown call).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -598,7 +593,7 @@ pub struct UserInputQuestion {
     pub stop_options: Vec<usize>,
 }
 
-// slopty: one wording for a request only the person at its card answers.
+// One wording for a request only the person at its card answers.
 impl UserInputQuestion {
     /// What the card of a question that `needs_presence` says (`slopty_proto`'s
     /// `Request::NEEDS_PRESENCE`, the words an answer from elsewhere is refused with).
@@ -608,7 +603,7 @@ impl UserInputQuestion {
     pub const NEEDS_PRESENCE_WHY: &'static str = "The agent takes this answer only from its card";
 }
 
-// slopty: "Allow with rule" (`slopty.AllowWithRule`).
+// "Allow with rule" (`slopty.AllowWithRule`).
 /// A rule an approval offers to allow its like from now on.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -628,7 +623,7 @@ pub struct RuleOffer {
 pub struct UserInputAnswer {
     pub question_id: String,
     pub labels: Vec<String>,
-    // slopty: the person's notes on a question whose options have previews (the TUI's "Add
+    // The person's notes on a question whose options have previews (the TUI's "Add
     // notes on this design…"), beside the answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -674,7 +669,7 @@ pub enum AgentEvent {
     /// that builds native UI (`slopty-visual`). The engine emits it when the
     /// agent calls Slopty's `show_visual` MCP tool; `path` is the stored
     /// script on the host device.
-    // slopty: the view model emits it from the thread's `show_visual` call; `path` names the
+    // The view model emits it from the thread's `show_visual` call; `path` names the
     // script in that thread (`slopty_ui::view_model::transcript::visual_path`).
     Visual {
         id: String,
@@ -989,7 +984,6 @@ mod todo_item_tests {
 mod harness_id_tests {
     use super::HarnessId;
 
-    // slopty: the open harness name.
     /// A harness reads and writes as its wire name: a known one is its constant, any other is
     /// kept by its name, the same value each time it is read; an empty name is no harness.
     #[test]

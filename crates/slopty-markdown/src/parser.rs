@@ -2011,7 +2011,6 @@ fn heading_level(level: HeadingLevel) -> u8 {
 /// What ends a line in CommonMark: `\n`, `\r\n`, or a `\r` alone.
 const LINE_ENDS: [char; 2] = ['\n', '\r'];
 
-// slopty: one place finds where a line begins, for the definition scan and the reparse boundary.
 /// Where the last line of `text` begins: just past its last line ending, or
 /// at 0 when it has none.
 fn last_line_start(text: &str) -> usize {

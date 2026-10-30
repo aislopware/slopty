@@ -1,5 +1,4 @@
-// slopty: Slopty's own tests (not in zeron).
-//! slopty: the whole shell drawn under gpui-fast's view retention against the same state drawn
+//! The whole shell drawn under gpui-fast's view retention against the same state drawn
 //! from scratch, through what the self-test's `dump` judges (`slopty_kit::retained::stale`): ⌘1
 //! opening a chat whose turn runs, and that turn's spinner going on. GPUI's retained check runs
 //! on every frame of them too (`Window::set_check_retained`). It also holds the shell window, the
@@ -196,7 +195,7 @@ fn shell(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
 /// A shell window on `screen`, with two chats, the first of them at work, and no chat open yet.
 /// GPUI checks every frame it draws against one from scratch, and panics on a stale one.
 pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>, &mut VisualTestContext) {
-    crate::motion::forget_for_test(); // slopty: no hover from the last seed
+    crate::motion::forget_for_test(); // no hover from the last seed
     let dir = tempfile::tempdir().unwrap();
     compact::force_touch(screen.touch);
     cx.update(|cx| {
@@ -232,7 +231,7 @@ pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>,
         shell
     });
     std::mem::forget(dir);
-    // slopty: GPUI checks every frame that draws a view again against one drawn from scratch at
+    // GPUI checks every frame that draws a view again against one drawn from scratch at
     // its moment, and panics naming the view a frame drew stale.
     cx.update(|window, _| window.set_check_retained(Some(gpui::RetainedCheck::Panic)));
     cx.simulate_scale_factor_change(screen.scale);

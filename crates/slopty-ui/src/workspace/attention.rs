@@ -642,7 +642,7 @@ mod tests {
         Look { asking, turns: Vec::new(), unread: waiting.len() }
     }
 
-    /// slopty: in front, the session on screen never notifies and one in the background does;
+    /// In front, the session on screen never notifies and one in the background does;
     /// its note goes once the person looks at it. Away, every session notifies.
     #[test]
     fn the_session_on_screen_stays_quiet_and_one_behind_it_notifies() {
@@ -668,7 +668,7 @@ mod tests {
         assert_eq!(memory.withdrawn().len(), 2, "back in front, the one on screen goes again");
     }
 
-    /// slopty: a wait already under way when its worker was first heard here is no moment: the
+    /// A wait already under way when its worker was first heard here is no moment: the
     /// list shows it, and no note says it; one that starts after notifies.
     #[test]
     fn a_wait_found_under_way_posts_no_note() {
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(posted[0].id, About::Session(started).note_id());
     }
 
-    /// slopty: back in front, a note pointing at a session in the background stays until that
+    /// Back in front, a note pointing at a session in the background stays until that
     /// session is looked at or answered; a pushed one whose moment passed goes.
     #[test]
     fn coming_back_keeps_the_notes_that_still_point_somewhere() {

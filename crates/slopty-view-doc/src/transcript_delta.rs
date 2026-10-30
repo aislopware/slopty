@@ -16,7 +16,6 @@ use std::collections::HashMap;
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
 
-// slopty: no context usage or plan windows: the agent's own TUI shows them.
 /// Transcript changes, with the history they carry when they bring some.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,7 +176,7 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         if p == n {
             continue;
         }
-        // slopty: a thought whose duration came is replaced, not appended to.
+        // A thought whose duration came is replaced, not appended to.
         if let (
             MessagePart::Reasoning { thought_ms: was, .. },
             MessagePart::Reasoning { thought_ms: is, .. },

@@ -254,7 +254,7 @@ impl WorkspaceView {
         if let Some(answer) = self.composer_call(method, params, cx) {
             return Some(answer);
         }
-        // slopty: Claude Code's past sessions (`past`).
+        // Claude Code's past sessions (`past`).
         if let Some(answer) = self.past_call(method, params, cx) {
             return Some(answer);
         }
@@ -329,7 +329,7 @@ impl WorkspaceView {
             }
             WorkerMsg::File { path, read } => {
                 let asked = surfaces.reads.remove(&(key, path.clone())).unwrap_or_default();
-                // slopty: a file nobody asked for changed; a page showing it reloads (M).
+                // A file nobody asked for changed; a page showing it reloads (M).
                 #[cfg(target_vendor = "apple")]
                 if asked.is_empty() {
                     self.view_model.pages.file_changed(key, path, read);
@@ -477,7 +477,7 @@ impl WorkspaceView {
         rx
     }
 
-    /// Read the file `path` on `key` (slopty: a page reads its changed file again (M)).
+    /// Read the file `path` on `key` (a page reads its changed file again (M)).
     pub(super) fn surface_read(
         &mut self,
         key: WorkerKey,

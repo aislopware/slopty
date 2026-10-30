@@ -44,7 +44,6 @@ pub(crate) fn open(
     let (_links, links) = futures::channel::mpsc::unbounded();
     let config = slopty_shell::UiConfig {
         data_dir: slopty_platform::dirs::data_dir().join("interface"),
-        // slopty: Slopty's server is the only backend.
         default_harness: slopty_view_proto::HarnessId::CLAUDE_CODE,
         initial_url: None,
         service: view_model,

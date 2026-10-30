@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space}; // slopty: no accounts, sync or sign-in.
+use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -47,7 +47,7 @@ pub fn effective_indicator(session: Option<&Session>, now: DateTime<Utc>) -> Ind
         return Indicator::None;
     };
     match session.status {
-        // slopty: an agent at rest, waiting on its own work, or done or stopped shows no live
+        // An agent at rest, waiting on its own work, or done or stopped shows no live
         // state; the sidebar reads which from the session itself.
         SessionStatus::Idle
         | SessionStatus::Waiting
@@ -185,7 +185,6 @@ pub enum GatePhase {
     Loading,
     /// Engine unreachable and embedding failed.
     Failed(String),
-    // slopty: no accounts, sync or sign-in.
     /// Render the shell.
     Ready,
 }
@@ -193,7 +192,7 @@ pub enum GatePhase {
 /// Missing scope is treated as synced. Current engines always publish
 /// [`WorkspaceScope`] before becoming ready, while old daemons are deliberately
 /// kept behind the account gate instead of being mistaken for local runtimes.
-pub fn gate_phase(connection: &ConnectionStatus) -> GatePhase { // slopty: no accounts, sync or sign-in.
+pub fn gate_phase(connection: &ConnectionStatus) -> GatePhase {
     match connection {
         ConnectionStatus::Connecting => GatePhase::Loading,
         ConnectionStatus::Failed(err) => GatePhase::Failed(err.clone()),
@@ -238,7 +237,6 @@ mod project_tests {
 #[cfg(test)]
 mod gate_tests {
     use super::*;
-    // slopty: no accounts, sync or sign-in.
 
     fn running_session(running: u32, updated_at: DateTime<Utc>) -> Session {
         Session {
@@ -249,8 +247,8 @@ mod gate_tests {
             started_at: None,
             updated_at,
             running_subagents: running,
-            status_since: None, // slopty: new field.
-            waiting_on: None,   // slopty: new field.
+            status_since: None,
+            waiting_on: None,
         }
     }
 
@@ -267,8 +265,6 @@ mod gate_tests {
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
     }
-
-    // slopty: no accounts, sync or sign-in.
 }
 
 /// Parse an `AuthStatus` frame tolerantly. The engine currently serializes its

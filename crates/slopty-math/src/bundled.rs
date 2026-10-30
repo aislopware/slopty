@@ -21,7 +21,7 @@ pub enum Face {
     Fira,
     /// STIX Two Math: Times-like; covers everything, so it backs every face.
     StixTwo,
-    // slopty: New Computer Modern, Libertinus, Pagella and Euler are not bundled: nothing
+    // New Computer Modern, Libertinus, Pagella and Euler are not bundled: nothing
     // picks a face but Fira, and STIX Two backs it.
 }
 

@@ -27,7 +27,6 @@ pub mod capabilities {
         MESSAGE_QUEUE_CLEAN_ATTACHMENT_TEXT_V1,
         MESSAGE_QUEUE_EDIT_LEASE_V1,
         PROJECTLESS_SCRATCH_V1,
-        // slopty: voice removed.
     ];
 
     pub fn current() -> Vec<String> {
@@ -108,7 +107,6 @@ mod tests {
                     "message-queue-clean-attachment-text-v1",
                     "message-queue-edit-lease-v1",
                     "projectless-scratch-v1"
-                    // slopty: voice removed.
                 ],
             })
         );

@@ -31,15 +31,15 @@ pub struct Device {
     /// this device row. Missing on older builds.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
-    // slopty: what the person can do to the machine from here (update, remove, wake…), as the
+    // What the person can do to the machine from here (update, remove, wake…), as the
     // app offers it; the Devices page shows each and calls `DeviceAction` with its id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<DeviceAction>,
-    // slopty: where this client reaches the machine (its tailnet name or address), for the
+    // Where this client reaches the machine (its tailnet name or address), for the
     // person's own tools: an editor's SSH remote. None for this machine's own worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host: Option<String>,
-    // slopty: why the machine turns this device away, in words for its badge's tooltip (its
+    // Why the machine turns this device away, in words for its badge's tooltip (its
     // tailnet policy grants this device no role there, or its allow ranges do not hold this
     // device's address); None while it lets this device in. The badge retries with the row's
     // `DeviceAction::REDIAL` action and never asks for a credential.
@@ -47,7 +47,7 @@ pub struct Device {
     pub turned_away: Option<String>,
 }
 
-// slopty: one thing the person can do to a machine or the server, named by the app.
+// One thing the person can do to a machine or the server, named by the app.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceAction {
@@ -207,25 +207,24 @@ pub struct Chat {
     /// a dangling id (parent deleted) is tolerated rather than cascaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<String>,
-    // slopty: a subagent lives in its parent's chat (its inline card, the Background tray, a
+    // A subagent lives in its parent's chat (its inline card, the Background tray, a
     // drill-in; `docs/decisions/ui.md`, "Subagents live in their parent's chat"); a side chat in
     // the explorer.
     /// A subagent its parent's agent started, not a side chat the person opened.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub subagent: bool,
-    // slopty: a call's subagent runs inside its agent's session, and shows that agent's panes.
+    // A call's subagent runs inside its agent's session, and shows that agent's panes.
     /// A subagent of one of its parent's calls, running inside the parent's agent (its
     /// terminal, its checkout), not an agent started on its own.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_parent: bool,
-    // slopty: what the person was writing to it and has not sent, as a device last kept it on
+    // What the person was writing to it and has not sent, as a device last kept it on
     // its machine; the composer restores it on open.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub draft: Option<String>,
 }
 
 impl Chat {
-    // slopty: voice removed.
     /// A session the user sees in chat lists: not another chat's worker
     /// (`parent_chat_id`).
     pub fn is_top_level(&self) -> bool {
@@ -281,7 +280,7 @@ pub enum SessionStatus {
     Working,
     AwaitingInput,
     Errored,
-    // slopty: an agent's phases stay apart instead of folding into Idle.
+    // An agent's phases stay apart rather than fold into Idle.
     /// At its prompt, waiting on its own background work or a wakeup, not on the person:
     /// nothing to stop, and it works again when what it waits on wakes it.
     Waiting,
@@ -291,7 +290,7 @@ pub enum SessionStatus {
     Stopped,
 }
 
-// slopty: what a session waits on, for the sidebar's reason line.
+// What a session waits on, for the sidebar's reason line.
 /// What a session waits on: while it awaits the person, the request it holds open; while it
 /// works, a wait of its own such as `compacting`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -338,7 +337,7 @@ pub struct Session {
     /// has not opened; read it through `view::running_subagents`.
     #[serde(default)]
     pub running_subagents: u32,
-    // slopty: since when its status stands, on its machine's clock, and what it waits on.
+    // Since when its status stands, on its machine's clock, and what it waits on.
     /// When the status last changed, as the worker says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_since: Option<DateTime<Utc>>,
@@ -373,8 +372,6 @@ pub struct RepoRef {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
 }
-
-// slopty: no History surface (ruled out).
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1287,12 +1284,12 @@ pub struct Connectivity {
     /// fall back to the global state).
     #[serde(default)]
     pub chats: Vec<ChatConnectivity>,
-    // slopty: the server this client follows, shown at the sidebar's foot.
+    // The server this client follows, shown at the sidebar's foot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerPresence>,
 }
 
-// slopty: the server this client follows: its name, and whether the link to it is up.
+// The server this client follows: its name, and whether the link to it is up.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerPresence {
@@ -1301,12 +1298,12 @@ pub struct ServerPresence {
     /// What the person can do to the server from here (update it), as for a device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<DeviceAction>,
-    // slopty: what a phone or iPad scans to connect to the server, where this device can show it.
+    // What a phone or iPad scans to connect to the server, where this device can show it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invite: Option<ServerInvite>,
 }
 
-// slopty: the code a phone or iPad scans for the server's address, or why there is none.
+// The code a phone or iPad scans for the server's address, or why there is none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerInvite {

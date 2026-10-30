@@ -9,11 +9,11 @@
 //! LoroList of part maps whose text bodies live in **LoroText** — streaming appends RLE-merge at
 //! ~1.03x oplog overhead, whereas rewriting whole part values costs ~125x.
 //!
-//! slopty: only the transcript, part and command types the interface reads are kept; the
-//! Loro documents, the registry, rebuild, workspace and voice docs are cut (`vendor/slopty/README.md`).
+//! Only the transcript, part and command types the interface reads live here
+//! (`vendor/slopty/README.md`).
 
-// slopty: Slopty's own shapes: the calls beyond zeron's, the dock, the tray, a page's card and
-// a part's facts.
+// Slopty's own shapes: the calls beyond `slopty_view_rpc::methods`, the dock, the tray, a page's
+// card and a part's facts.
 pub mod calls;
 pub mod commands;
 pub mod constants;

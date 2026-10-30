@@ -112,7 +112,7 @@ impl Gpu {
                 power_preference: wgpu::PowerPreference::LowPower,
                 force_fallback_adapter: false,
                 compatible_surface: None,
-                apply_limit_buckets: false, // slopty: wgpu 30.
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -184,7 +184,6 @@ impl Gpu {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         let mut bgra = vec![0u8; (width * height * 4) as usize];
         if let Ok(Ok(())) = rx.recv() {
-            // slopty: wgpu 30's mapped range is a `Result`.
             if let Ok(mapped) = buffer.slice(..).get_mapped_range() {
                 for y in 0..height as usize {
                     let src = &mapped[y * row as usize..][..width as usize * 4];

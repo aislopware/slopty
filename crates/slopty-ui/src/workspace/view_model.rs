@@ -29,7 +29,7 @@ mod blobs;
 mod link_tests;
 #[cfg(target_vendor = "apple")]
 mod pages;
-// slopty: Claude Code's past sessions, listed, searched and taken up again.
+// Claude Code's past sessions, listed, searched and taken up again.
 mod past;
 mod surfaces;
 mod work;
@@ -108,10 +108,10 @@ pub(super) struct Bridge {
     serving_since: Option<Instant>,
     /// What the right-pane surfaces wait on from the workers ([`surfaces`]).
     surfaces: surfaces::Surfaces,
-    /// slopty: the pages agents show inline, hosted per window ([`pages`]).
+    /// The pages agents show inline, hosted per window ([`pages`]).
     #[cfg(target_vendor = "apple")]
     pages: pages::Pages,
-    /// slopty: what Claude Code's past sessions wait on from the machines ([`past`]).
+    /// What Claude Code's past sessions wait on from the machines ([`past`]).
     past: past::Past,
 }
 
@@ -250,7 +250,7 @@ impl WorkspaceView {
     /// Publish everything the interface watches.
     fn view_publish(&mut self, cx: &mut Context<Self>) {
         self.view_hear_hubs(cx);
-        self.live_adopt_terminals(cx); // slopty: an agent's terminal is a session of its own
+        self.live_adopt_terminals(cx); // an agent's terminal is a session of its own
         self.probe_projects(cx);
         self.view_fetch_followed(cx);
         let Some(feed) = self.view_model.feed.clone() else { return };
@@ -387,7 +387,7 @@ impl WorkspaceView {
         // its whole history, and the real one, once it comes, as live arrivals. A chat with no
         // thread had its empty transcript when followed.
         for chat in feed.followed() {
-            // slopty: its tray, dock and rules beside it.
+            // Its tray, dock and rules beside it.
             if let Some(views) = self.view_chat_views(&chat, cx) {
                 feed.chat_views(&chat, views);
             }
@@ -540,7 +540,7 @@ impl WorkspaceView {
         }
     }
 
-    /// slopty: a call on an inline page ([`pages`]).
+    /// A call on an inline page ([`pages`]).
     #[cfg(target_vendor = "apple")]
     fn view_page_call(
         &mut self,
@@ -551,7 +551,7 @@ impl WorkspaceView {
         self.page_call(method, params, cx)
     }
 
-    /// slopty: no inline pages here: no call on one is answered.
+    /// No inline pages here: no call on one is answered.
     #[cfg(not(target_vendor = "apple"))]
     #[expect(clippy::unused_self, reason = "pages are hosted on Apple platforms only")]
     fn view_page_call(
@@ -753,7 +753,7 @@ impl WorkspaceView {
     /// `key`'s answer to any intent: a session being started hears how it went, and what was
     /// kept to be sent again is let go.
     pub(super) fn view_intent_done(&mut self, done: &IntentDone) {
-        self.past_done(done); // slopty: a session started or taken up again.
+        self.past_done(done); // a session started or taken up again
         self.view_model.unanswered.remove(&done.id);
     }
 }

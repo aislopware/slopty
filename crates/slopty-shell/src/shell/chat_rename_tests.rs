@@ -25,7 +25,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        // slopty: no History surface (ruled out).
         apply_keymap(
             cx,
             &KeymapConfig::default(),
@@ -38,7 +37,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -209,7 +207,7 @@ fn add_chats(shell: &Entity<Shell>, cx: &mut VisualTestContext, ids: &[&str], ar
 #[gpui::test]
 fn rename_opens_collapsed_sessions_groups_and_the_sidebar(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    // slopty: the chat's shut group opens (it has no project: "No project").
+    // The chat's shut group opens (it has no project: "No project").
     shell.update(cx, |shell, cx| {
         shell.sidebar_collapsed_groups.insert("project:".into());
         shell.settings.sidebar_collapsed = true;

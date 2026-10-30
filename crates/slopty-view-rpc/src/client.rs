@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
-// slopty: `SinkExt` and `StreamExt` served only the cut WebSocket dialer.
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{ClientFrame, RpcError, ServerFrame};
@@ -357,6 +356,3 @@ fn wire_error(error: String) -> RpcError {
         RpcError::Failed(error)
     }
 }
-
-// slopty: the WebSocket dial (`connect_ws`) is cut: Slopty's interface talks only to its
-// in-process `RpcService`.

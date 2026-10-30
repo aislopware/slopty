@@ -180,7 +180,7 @@ impl WorkspaceView {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
         self.view_resend(key);
-        // slopty: the pages waiting for this machine ask again.
+        // The pages waiting for this machine ask again.
         #[cfg(target_vendor = "apple")]
         self.pages_linked(key, cx);
     }
@@ -200,7 +200,7 @@ impl WorkspaceView {
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, ThreadHub::disconnected);
         }
-        // slopty: the pages waiting for this machine say so.
+        // The pages waiting for this machine say so.
         #[cfg(target_vendor = "apple")]
         self.pages_unlinked(key, cx);
     }
@@ -219,7 +219,7 @@ impl WorkspaceView {
         frame: ThreadFrame,
         cx: &mut Context<Self>,
     ) {
-        // slopty: an agent's answer to what an inline page asked of its app goes to the page.
+        // An agent's answer to what an inline page asked of its app goes to the page.
         #[cfg(target_vendor = "apple")]
         if let ThreadFrame::App { id, answer } = frame {
             self.page_app_answer(id, answer, cx);

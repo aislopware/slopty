@@ -459,7 +459,7 @@ fn nested_middle_is_bounded() {
     let n = 31;
     let src = "\\left.".repeat(n) + &"\\middle.\\right.".repeat(n);
     assert!(layout(&src, stix(), &Options::default()).is_ok());
-    assert_linear(&src, "nesting to the depth limit"); // slopty: see `fastest`.
+    assert_linear(&src, "nesting to the depth limit"); // see `fastest`.
     let honest = "\\left(".repeat(8) + "x" + &"\\middle| y \\right)".repeat(8);
     assert!(layout(&honest, stix(), &Options::default()).is_ok());
 }
@@ -479,10 +479,10 @@ fn missing_glyphs_point_at_their_source() {
     assert_eq!(&src[e.range.clone()], "\u{378}");
 }
 
-// slopty: a layout's time is judged against plain text of the same length laid out at the same
-// moment, fastest of five each, not against a wall-clock bound: on a loaded gate runner a linear
-// layout took 272 ms against a fixed 250 ms. Superlinear work still shows as a ratio far past
-// the bound; a uniformly slow machine no longer does.
+// A layout's time is judged against plain text of the same length laid out at the same moment,
+// fastest of five each, not against a wall-clock bound, which a loaded gate runner overruns even
+// for linear work. Superlinear work still shows as a ratio far past the bound; a uniformly slow
+// machine does not.
 fn fastest(src: &str) -> std::time::Duration {
     (0..5)
         .map(|_| {
@@ -494,7 +494,7 @@ fn fastest(src: &str) -> std::time::Duration {
         .unwrap()
 }
 
-// slopty: see `fastest`.
+// See `fastest`.
 #[track_caller]
 fn assert_linear(src: &str, what: &str) {
     let plain = format!("\\text{{{}}}", "x".repeat(src.len().saturating_sub(7)));
@@ -516,19 +516,19 @@ fn nested_middle_with_text_stays_fast() {
             "x".repeat(fill),
             "\\right.".repeat(d)
         );
-        assert_linear(&src, &format!("d={d}")); // slopty: see `fastest`.
+        assert_linear(&src, &format!("d={d}")); // see `fastest`.
     }
     // `\middle` bodies are laid out once: deep honest nesting costs linear work.
     let honest = "\\left(".repeat(30) + "x" + &"\\middle| y \\right)".repeat(30);
     assert!(layout(&honest, stix(), &Options::default()).is_ok());
-    assert_linear(&honest, "honest nesting"); // slopty: see `fastest`.
+    assert_linear(&honest, "honest nesting"); // see `fastest`.
 }
 
 #[test]
 fn empty_cells_and_parts_count_as_work() {
     // 16 KB of empty cells: bounded by the work budget, never a hang.
     let src = format!("\\begin{{matrix}}{}\\end{{matrix}}", "&".repeat(16_000));
-    assert_linear(&src, "16 KB of empty cells"); // slopty: see `fastest`.
+    assert_linear(&src, "16 KB of empty cells"); // see `fastest`.
 }
 
 #[test]
@@ -639,7 +639,7 @@ fn rules_over_negative_content_are_empty() {
     }
 }
 
-// slopty: the commands Slopty adds to zatex's set, each typeset rather than refused.
+// The commands Slopty adds to zatex's set, each typeset rather than refused.
 #[test]
 fn slopty_commands_typeset() {
     for tex in [

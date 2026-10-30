@@ -4,7 +4,7 @@
 //! device and project, the branch, and the pull request.
 //! Compact rows drop all of that, so the card is where it lives on.
 //!
-//! slopty: it also says which machine (project @ machine), the agent and model, how long the
+//! It also says which machine (project @ machine), the agent and model, how long the
 //! chat has stood as it is, what it needs of the person in its agent's words, the last line the
 //! agent wrote, and how many subagents it has running (`sidebar_status::chat_card`); a chat with
 //! no project shows its folder. A screen reader reads it as a tooltip.
@@ -33,7 +33,7 @@ pub(super) struct SessionHoverCard {
     shown: Option<String>,
     pending: Option<(String, Task<()>)>,
     hidden_at: Option<Instant>,
-    /// slopty: the ports the shown card's session listens on, as its machine's shells report
+    /// The ports the shown card's session listens on, as its machine's shells report
     /// them (`WATCH_PREVIEWS`, the browser's previews): the chat watched, its ports so far, and
     /// the watch, which goes with the card.
     ports: Option<(String, Vec<u16>, Task<()>)>,
@@ -106,7 +106,7 @@ impl SessionHoverCard {
     }
 }
 
-/// slopty: "Listening on 3000 · 5173", or none while it listens on nothing.
+/// "Listening on 3000 · 5173", or none while it listens on nothing.
 fn ports_line(ports: &[u16]) -> Option<SharedString> {
     (!ports.is_empty()).then(|| {
         let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
@@ -176,7 +176,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// slopty: keep the ports' watch on the card shown: started when a card shows, dropped when
+    /// Keep the ports' watch on the card shown: started when a card shows, dropped when
     /// it goes or another shows.
     fn watch_card_ports(&mut self, cx: &mut Context<Self>) {
         let shown = self.session_hover_card.shown.clone();
@@ -238,7 +238,7 @@ impl Shell {
     ) -> Option<AnyElement> {
         let theme = Theme::of(cx).for_popup();
         let now = crate::clock::utc(cx);
-        // slopty: Slopty's facts of the row (`sidebar_status::chat_card`).
+        // Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
         let (title, project, local, online, turned_away, branch, change_request) = {
             let state = self.state.read(cx);
@@ -342,7 +342,7 @@ impl Shell {
                         div()
                             .text_size(crate::typography::ui_rems(11.0))
                             .text_color(muted)
-                            // slopty: how long it has stood as it is, said in full.
+                            // How long it has stood as it is, said in full.
                             .child(facts.status.clone()),
                     ),
             )
@@ -361,22 +361,22 @@ impl Shell {
                 Some(_) => self.render_project_icon(chat_id, 14.0, false, cx),
                 None => glyph(icons::FOLDER),
             },
-            // slopty: its machine beside its project ("project @ machine").
+            // Its machine beside its project ("project @ machine").
             facts.place.clone().or_else(|| project.clone()).unwrap_or_else(|| "No project".into()),
         )
         .text_color(theme.text);
-        // slopty: a chat with no project says which folder it works in.
+        // A chat with no project says which folder it works in.
         let folder = project
             .is_none()
             .then(|| facts.folder.clone())
             .flatten()
             .map(|folder| meta_row(glyph(icons::FOLDER), folder));
-        // slopty: the agent and model, and the subagents at work, summed up: they live in the
+        // The agent and model, and the subagents at work, summed up: they live in the
         // chat, not in the sidebar.
         let agent = facts.agent.clone().map(|agent| meta_row(glyph(icons::BOT), agent));
         let subagents =
             facts.subagents.clone().map(|subagents| meta_row(glyph(icons::LIST), subagents));
-        // slopty: the ports it listens on, while the card's watch has heard any.
+        // The ports it listens on, while the card's watch has heard any.
         let ports = self
             .session_hover_card
             .ports
@@ -422,7 +422,7 @@ impl Shell {
             .children(agent)
             .children(subagents)
             .children(ports_row);
-        // slopty: what the agent wants of the person, in its records' words, beside the glyph its
+        // What the agent wants of the person, in its records' words, beside the glyph its
         // row wears for it (`marks`): the row has room for the glyph alone.
         let need = facts.need.clone().map(|need| {
             let words = need.words.clone();
@@ -463,7 +463,7 @@ impl Shell {
                         .child(words),
                 )
         });
-        // slopty: the last line the agent wrote, quiet, as its records hold it (never its screen).
+        // The last line the agent wrote, quiet, as its records hold it (never its screen).
         let last = facts.last.clone().map(|last| {
             div()
                 .debug_selector({
@@ -476,7 +476,7 @@ impl Shell {
                 .line_clamp(3)
                 .child(last)
         });
-        // slopty: what a screen reader says of the card, a line per fact.
+        // What a screen reader says of the card, a line per fact.
         let spoken = [
             Some(&facts.status),
             facts.need.as_ref().map(|need| &need.words),
@@ -496,7 +496,7 @@ impl Shell {
 
         let card = div()
             .id(SharedString::from(format!("session-hover-card-body-{chat_id}")))
-            .role(gpui::Role::Tooltip) // slopty: read as the row's tooltip
+            .role(gpui::Role::Tooltip) // read as the row's tooltip
             .aria_label(title.clone())
             .aria_value(spoken)
             .w(px(CARD_WIDTH))
@@ -579,7 +579,6 @@ mod tests {
             state,
             EngineBootConfig {
                 data_dir: data_dir.into(),
-                // slopty: Slopty's server is the only backend.
                 default_harness: slopty_view_proto::HarnessId::MOCK,
             },
             cx,
@@ -592,7 +591,7 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
-            crate::app_menus::init(cx); // slopty: no History surface
+            crate::app_menus::init(cx);
             settings::init(settings::UiSettings::default(), dir, cx);
             motion::set_reduced_motion(cx, true);
         });

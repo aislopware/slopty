@@ -46,7 +46,7 @@ pub mod calls {
     pub const OPEN_PAST_SESSION: &str = "slopty.OpenPastSession";
 }
 
-// slopty: `slopty_view_doc::calls::START_SESSION` starts a new session here too: its start is
+// `slopty_view_doc::calls::START_SESSION` starts a new session here too: its start is
 // answered as a past session's is (`past_done`).
 
 /// The fact a session's branch is said by, when its machine says it.

@@ -11,7 +11,7 @@ const PROJECT: u32 = 40;
 const BRANCH: u32 = 30;
 const DEVICE: u32 = 20;
 const PULL_REQUEST: u32 = 20;
-/// slopty: a session's state in a word ("needs you", "working", "failed", "done"), the picker's
+/// A session's state in a word ("needs you", "working", "failed", "done"), the picker's
 /// filter by state.
 const STATE: u32 = 30;
 
@@ -37,7 +37,7 @@ pub(super) fn score_thread(fields: &ThreadFields, terms: &[String]) -> Option<u3
     score_session(fields, "", terms)
 }
 
-/// slopty: [`score_thread`], the session's state in a word (its mark's) one more field.
+/// [`score_thread`] with the session's state in a word (its mark's) as one more field.
 pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]) -> Option<u32> {
     if terms.is_empty() {
         return None;
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(ranked, vec!["best", "new"]);
     }
 
-    /// slopty: a session's state is a field of its own: "needs" finds the one that needs the
+    /// A session's state is a field of its own: "needs" finds the one that needs the
     /// person, below any title that says it.
     #[test]
     fn a_state_word_finds_the_sessions_in_that_state() {

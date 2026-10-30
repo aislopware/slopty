@@ -510,7 +510,7 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
     })
 }
 
-/// slopty: when `at` was, in the person's time on the system's clock: "2:05 PM" today, "Oct 16,
+/// When `at` was, in the person's time on the system's clock: "2:05 PM" today, "Oct 16,
 /// 2:05 PM" before, the year too past this one.
 pub(crate) fn absolute_time(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     let (at, now) = (at.with_timezone(&Local), now.with_timezone(&Local));
@@ -532,7 +532,7 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
     let since = session.and_then(|s| s.status_since.or(s.started_at));
     let ago = |at: DateTime<Utc>| format_time_ago(at, now);
     let last = touched(chat);
-    // slopty: a relative time also says when, which "2d ago" alone never does.
+    // A relative time also says when, which "2d ago" alone never does.
     let when = |words: String| format!("{words} \u{b7} {}", absolute_time(last, now));
     match status {
         ChatIndicator::Working
@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT, "still one line");
     }
 
-    // slopty: a screen reader hears a waiting row say "Needs you", then what it needs in its
+    // A screen reader hears a waiting row say "Needs you", then what it needs in its
     // agent's words, as the status's description; no node of the row is named by those words,
     // which stay off the row as its glyph says them (`docs/decisions/layout.md`, "A state is a
     // glyph").
@@ -1318,7 +1318,7 @@ mod tests {
         redraw(cx);
         assert!(cx.update(|window, _| window.is_window_active()), "the window is the active one");
         assert!(cx.debug_bounds("jump-hint-c00").is_none(), "no numbers before the key is held");
-        let held = if crate::keys::MOD_IS_COMMAND { // slopty
+        let held = if crate::keys::MOD_IS_COMMAND {
             gpui::Modifiers { platform: true, ..gpui::Modifiers::default() }
         } else {
             gpui::Modifiers { control: true, ..gpui::Modifiers::default() }

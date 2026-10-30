@@ -1,4 +1,4 @@
-//! slopty: Claude Code's past sessions, found and taken up again (`docs/decisions/agents.md`,
+//! Claude Code's past sessions, found and taken up again (`docs/decisions/agents.md`,
 //! "Past Claude Code sessions are seen and continued in the GUI").
 //!
 //! - **Finding** one is typing in the session picker (`picker`, ⌘K): every project's machine is
@@ -187,7 +187,7 @@ impl Shell {
             }
             let _gone = this.update(cx, |this, cx| {
                 this.past_sessions.opening = None;
-                // slopty: its terminal shows once its machine names it.
+                // Its terminal shows once its machine names it.
                 this.mark_starting(chat.clone(), cx);
                 this.open_chat(chat, cx);
             });
@@ -196,7 +196,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// slopty: resume ended session `chat` in a new terminal, by Claude Code's own `--resume`.
+    /// Resume ended session `chat` in a new terminal, by Claude Code's own `--resume`.
     pub(super) fn resume_ended_session(&mut self, chat: &slopty_view_proto::Chat, cx: &mut Context<Self>) {
         let Some(native) = chat.harness_session_id.clone().filter(|id| !id.is_empty()) else {
             return;
@@ -212,7 +212,7 @@ impl Shell {
         self.open_past_session(row, cx);
     }
 
-    /// slopty: whether ended session `chat` is being resumed now.
+    /// Whether ended session `chat` is being resumed now.
     pub(super) fn resuming(&self, chat: &slopty_view_proto::Chat) -> bool {
         chat.harness_session_id
             .as_deref()

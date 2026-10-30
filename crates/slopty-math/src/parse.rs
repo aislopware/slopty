@@ -775,9 +775,9 @@ impl<'a> Parser<'a> {
                     class: Some(Ord),
                 }
             }
-            // slopty: commands models write that KaTeX sets and zatex did not: `\pmod`, `\bmod`,
-            // `\pod`, `\mod`, `\substack`, `\hline` (its rule left out), the italic capital
-            // Greek and `\href`'s text (docs/decisions/ui.md, "Math typeset by zatex").
+            // Commands models write that KaTeX sets and zatex does not: `\pmod`, `\bmod`, `\pod`,
+            // `\mod`, `\substack`, `\hline` (its rule left out), the italic capital Greek and
+            // `\href`'s text (docs/decisions/ui.md, "Math typeset by zatex").
             "pmod" | "pod" | "mod" => {
                 let arg = self.arg(&range)?;
                 let mut body = vec![Node::Space(Dim::Em(if name == "mod" { 1.0 } else { 0.667 }))];

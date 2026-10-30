@@ -16,10 +16,8 @@
 //! Text bodies are **LoroText** so streaming appends RLE-merge (1.03x oplog overhead vs
 //! 125x for whole-value rewrites).
 
-// slopty: the Loro document layer is cut; the entry types stay.
 use serde::{Deserialize, Serialize};
 
-// slopty: the command and tail constants served only the cut document writer.
 use crate::parts::{MessagePart, MessageStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +48,3 @@ pub struct SessionMessageEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
 }
-
-// slopty: the doc's part maps and their decode and salvage, the continuation join, the
-// streaming segment writer, the tail materializer and the Loro-backed tests are cut with the
-// document layer: Slopty reads an agent's own records, never a session doc.

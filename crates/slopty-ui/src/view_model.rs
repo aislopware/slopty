@@ -86,7 +86,7 @@ pub struct Feed {
     spaces: watch::Sender<Option<Arc<[Space]>>>,
     chats: watch::Sender<Option<Arc<[Chat]>>>,
     sessions: watch::Sender<Arc<[Session]>>,
-    /// slopty: the terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`).
+    /// The terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`).
     terminals: watch::Sender<Arc<std::collections::BTreeMap<String, String>>>,
     /// The link to the server, for the sidebar's foot, and each chat's link to its worker.
     connectivity: watch::Sender<Connectivity>,
@@ -108,7 +108,7 @@ enum Local {
     Known(Option<String>),
 }
 
-/// One followed chat's transcript, the rest of what its thread says (slopty: its tray and
+/// One followed chat's transcript, the rest of what its thread says (its tray and
 /// dock), and how many watches are open on any of it: the thread stays open while one is.
 #[derive(Debug)]
 struct Followed {
@@ -129,7 +129,7 @@ impl Followed {
     }
 }
 
-/// slopty: what a followed chat's thread says beside its transcript, as the workspace publishes
+/// What a followed chat's thread says beside its transcript, as the workspace publishes
 /// it ([`Feed::chat_views`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatViews {
@@ -241,7 +241,7 @@ impl Feed {
         publish(&self.sessions, sessions);
     }
 
-    /// slopty: the terminal each session is, by chat. An unchanged map wakes no watch.
+    /// The terminal each session is, by chat. An unchanged map wakes no watch.
     pub fn terminals(&self, terminals: std::collections::BTreeMap<String, String>) {
         self.terminals.send_if_modified(|now| {
             if **now == terminals {
@@ -307,7 +307,7 @@ impl Feed {
         });
     }
 
-    /// slopty: what `chat`'s thread says beside its transcript; nothing while no watch is open
+    /// What `chat`'s thread says beside its transcript; nothing while no watch is open
     /// on the chat.
     pub fn chat_views(&self, chat: &str, views: ChatViews) {
         let senders = self.transcripts.lock().get(chat).map(|f| (f.work.clone(), f.dock.clone()));
@@ -430,7 +430,7 @@ impl ViewModel {
         Ok(RpcReply::Stream(transcript_frames(entries, closing)))
     }
 
-    /// slopty: a watch of what `chat`'s thread says beside its transcript, read by `pick`: the
+    /// A watch of what `chat`'s thread says beside its transcript, read by `pick`: the
     /// thread is followed while it is open, as a transcript's watch follows it.
     fn chat_watch<T>(
         &self,
@@ -629,7 +629,7 @@ impl RpcService for ViewModel {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }
             methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
-            // slopty: a chat's tray and dock, followed as its transcript is.
+            // A chat's tray and dock, followed as its transcript is.
             calls::WATCH_WORK | calls::WATCH_DOCK => {
                 let chat = chat_param(&params)
                     .ok_or_else(|| RpcError::BadParams("chatId is required".to_owned()))?;

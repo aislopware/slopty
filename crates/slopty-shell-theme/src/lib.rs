@@ -2,7 +2,7 @@
 //! Slopty's source-neutral theme domain model.
 //!
 //! Runtime code consumes complete [`ThemeVariant`] values.
-// slopty: the built-in themes are the whole set; theme import and the theme library are gone
+// The built-in themes are the whole set: there is no theme import or theme library
 // (`docs/decisions/ui.md`, "A curated few themes").
 
 mod builtins;
@@ -458,7 +458,7 @@ pub struct ThemeVariant {
     pub id: String,
     pub family_id: String,
     pub name: String,
-    /// slopty: one short line of the theme's voice, under its name in Appearance (Amp's).
+    /// One short line of the theme's voice, under its name in Appearance (Amp's).
     #[serde(default)]
     pub description: String,
     pub appearance: Appearance,
@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(variants * VisualFixture::ALL.len(), 90);
     }
 
-    // slopty: each curated theme carries one short line in sentence case, and both appearances
+    // Each curated theme carries one short line in sentence case, and both appearances
     // keep a high-contrast choice and a choice past the house pair.
     #[test]
     fn every_builtin_says_one_short_line() {
@@ -822,8 +822,8 @@ mod tests {
         assert_eq!(black.colors.background, Color::rgb(0, 0, 0), "true black");
     }
 
-    // slopty: a theme that is no longer built in resolves to the house's own, so an old
-    // settings file still opens.
+    // A theme that is not built in resolves to the house's own, so a settings file naming one still
+    // opens.
     #[test]
     fn a_theme_no_longer_built_in_resolves_to_the_houses() {
         let registry = ThemeRegistry::builtin();

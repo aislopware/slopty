@@ -58,7 +58,6 @@ mod sidebar_row_tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
         });
         let (host, cx) = cx.add_window_view(|_, cx| {
             SidebarHost(cx.new(|cx| {
@@ -67,7 +66,6 @@ mod sidebar_row_tests {
                     state,
                     EngineBootConfig {
                         data_dir: dir.path().into(),
-                        // slopty: Slopty's server is the only backend.
                         default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
@@ -91,14 +89,14 @@ mod sidebar_row_tests {
                 shell
             }))
         });
-        // slopty: the hover fades run on the test's clock, which the test advances.
+        // The hover fades run on the test's clock, which the test advances.
         crate::motion::run_on(cx.executor());
         let shell = host.read_with(cx, |host, _| host.0.clone());
         let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
         assert_eq!(order, ids(&["a", "b", "c"]));
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
 
-        // slopty: the archive pill stands at the row's end while the row is under the pointer.
+        // The archive pill stands at the row's end while the row is under the pointer.
         let row = cx.debug_bounds("chat-a").unwrap();
         cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
         cx.run_until_parked();
@@ -135,11 +133,11 @@ mod sidebar_row_tests {
                 cx.notify();
             });
             cx.run_until_parked();
-            // slopty: the row's fade out, run to its end on the test's clock.
+            // The row's fade out, run to its end on the test's clock.
             cx.executor().advance_clock(crate::motion::HOVER_FADE.total().mul_f32(crate::motion::speed_scale()));
             cx.run_until_parked();
-            // Its Archived-section copy shares the row key and must not stay lit. slopty: the
-            // row's fade is in its last frame here, not lit.
+            // Its Archived-section copy shares the row key and must not stay lit. The row's fade is
+            // in its last frame here, not lit.
             let lit = crate::motion::hover_t(&format!("chat-{archived}-hover"));
             assert!(lit < 0.01, "chat-{archived} still lit at {lit}");
             let expected = next.map(|(next, _)| format!("chat-{next}"));
@@ -176,7 +174,7 @@ mod sidebar_row_tests {
     }
 }
 
-// slopty: the sidebar's list is one keyboard stop, as Claude desktop's session list: Tab reaches
+// The sidebar's list is one keyboard stop, as Claude desktop's session list: Tab reaches
 // the open chat's row (or the first, with none open), Up and Down walk the rows in the order
 // they draw, Enter opens one and Delete archives it.
 /// The sidebar's rows as keyboard stops: each row's focus, and the row Tab reaches.
@@ -203,7 +201,7 @@ impl SidebarKeys {
     }
 }
 
-// slopty: the Archived shelf lists its rows newest first; the live list keeps the order its
+// The Archived shelf lists its rows newest first; the live list keeps the order its
 // sessions started in (`sidebar_status::list`).
 pub(super) fn compare_sidebar_chats(
     left: &slopty_view_proto::Chat,
@@ -233,11 +231,11 @@ pub(super) struct SpacesMenu {
 // handoff from its header without leaving dead space while collapsed.
 const SIDEBAR_SECTION_GAP: f32 = 12.0;
 pub(super) const SIDEBAR_DISCLOSURE_HEADER_HEIGHT: f32 = 28.0;
-/// slopty: a group heading's words and count: 12 medium (Claude desktop's compact heading),
+/// A group heading's words and count: 12 medium (Claude desktop's compact heading),
 /// a step under the rows' 13 regular titles, so a heading reads as the list's label and not as
 /// one more row.
 pub(super) const SIDEBAR_HEADER_TEXT: f32 = 12.0;
-/// slopty: a heading's chevron turns over Amp's 200 ms ease-out.
+/// A heading's chevron turns over Amp's 200 ms ease-out.
 const SIDEBAR_CHEVRON_TURN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT);
 pub(super) const SIDEBAR_DISCLOSURE_BODY_INSET: f32 = 4.0;
 const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
@@ -257,7 +255,7 @@ pub(super) fn sidebar_separator(theme: &Theme) -> gpui::Div {
 /// custom sections): a muted label, `count` as a muted badge
 /// beside it while the section is collapsed, then any action and the
 /// disclosure chevron.
-// slopty: the label reads at the full muted tone, 12 medium as Claude desktop's compact group
+// The label reads at the full muted tone, 12 medium as Claude desktop's compact group
 // headings, and brightens to the text's under the pointer over the house's hover fade, as
 // Claude desktop's do; the group's count fades in beside it then (Amp), and the chevron follows
 // the words: an open group's shows only under the pointer (Claude desktop's caret), a shut
@@ -344,7 +342,7 @@ pub(super) fn sidebar_disclosure_header(
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
 }
 
-/// slopty: what a shut group's header wears at its end: how many rows it holds, and its loudest
+/// What a shut group's header wears at its end: how many rows it holds, and its loudest
 /// row's mark (`marks::loudest`), so "which one needs me" has an answer with the group shut.
 fn group_rollup(key: &str, count: usize, loudest: Option<&super::marks::Mark>, theme: &Theme) -> AnyElement {
     let count_id = format!("sidebar-group-count-{key}");
@@ -374,7 +372,7 @@ fn group_rollup(key: &str, count: usize, loudest: Option<&super::marks::Mark>, t
         .into_any_element()
 }
 
-/// slopty: how far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
+/// How far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
 /// a touch screen, where nothing hovers.
 pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
     if super::compact::touch_screen() {
@@ -384,13 +382,12 @@ pub(super) fn sidebar_hover_reveal(key: &str) -> f32 {
 }
 
 /// Section header glyphs (chevron, `+`, `…`) share the label's muted tone.
-// slopty: a step under the label, always shown (zeron's), where half the muted tone read as
-// absent beside the label's.
+// A step under the label, always shown: half the muted tone reads as absent beside the label's.
 pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
     theme.text_muted.opacity(0.7)
 }
 
-/// slopty: one row of the sidebar's filter menu as it draws.
+/// One row of the sidebar's filter menu as it draws.
 #[derive(Default)]
 struct MenuDetail {
     row: SpacesMenuRow,
@@ -414,7 +411,7 @@ pub(super) enum SpacesMenuRow {
     #[default]
     All,
     Space(String),
-    // slopty: a machine, by device id: the list narrowed to its sessions (`sidebar_status::Filter`).
+    // A machine, by device id: the list narrowed to its sessions (`sidebar_status::Filter`).
     Machine(String),
     AddSpace,
 }
@@ -464,7 +461,7 @@ pub(super) struct AddSpaceFlow {
     crumb_scroll: gpui::ScrollHandle,
     crumb_key: String,
     focus_pending: bool,
-    /// slopty: where the keyboard was before the picker took it, given back when it closes.
+    /// Where the keyboard was before the picker took it, given back when it closes.
     return_focus: Option<FocusHandle>,
     load_task: Option<Task<()>>,
     drives_task: Option<Task<()>>,
@@ -472,7 +469,7 @@ pub(super) struct AddSpaceFlow {
     /// Folders matching the query anywhere under the device's home (Home
     /// location only).
     home_search: HomeFolderSearch,
-    // slopty: the search field takes a repository's address, to clone into the open folder.
+    // The search field takes a repository's address, to clone into the open folder.
     cloning: bool,
     /// The crumb row as a typed path; `None` shows the crumbs.
     path_edit: Option<PathEdit>,
@@ -599,7 +596,7 @@ struct HomeFolderSearch {
     /// The host's index was still scanning at the last answer.
     indexing: bool,
     results: Vec<HomeFolderMatch>,
-    /// slopty: the folders the person goes to most, as the warming answer gave them: listed
+    /// The folders the person goes to most, as the warming answer gave them: listed
     /// first while nothing is typed.
     visited: Vec<HomeFolderMatch>,
     /// A request reached the host, so it may hold an index to release.
@@ -653,7 +650,7 @@ fn request_home_folders(
                     else {
                         return false;
                     };
-                    // slopty: the warming answer, while nothing is typed, is the folders the
+                    // The warming answer, while nothing is typed, is the folders the
                     // person goes to most: they lead the list.
                     if generation.is_none()
                         && untyped
@@ -754,11 +751,11 @@ fn add_space_target(
     }
 }
 
-// slopty: a clone may take a while: its notice stays up until the answer takes it down.
+// A clone may take a while: its notice stays up until the answer takes it down.
 /// How long the clone's notice may stay up, at most.
 const CLONE_NOTICE_LASTS: Duration = Duration::from_secs(20 * 60);
 
-// slopty: what passes for a repository's address in "Clone repository…": a URL git takes
+// What passes for a repository's address in "Clone repository…": a URL git takes
 // (`https://`, `ssh://`, `git://`) or scp-like `user@host:path`, with no spaces. A path on the
 // machine is none: the worker clones only from a remote, which the clone keeps as its origin.
 /// Whether `url` reads as an address git can clone from.
@@ -833,7 +830,7 @@ fn home_folder_row(
         None => (found.relative.as_str(), "~".to_owned()),
     };
     let (path, is_repo) = (found.path.clone(), found.is_repo);
-    row.role(gpui::Role::Button) // slopty: read as a button
+    row.role(gpui::Role::Button) // read as a button
         .aria_label(SharedString::from(format!("{name} in {parent}")))
         .child(
             icon(icons::FOLDER)
@@ -910,7 +907,7 @@ enum CrumbTarget {
 pub(super) fn device_glyph(platform: &str) -> &'static str {
     match platform {
         "macos" | "darwin" => icons::LAPTOP,
-        "linux" => icons::REMOTE_SERVER, // slopty: a worker on Linux is a server
+        "linux" => icons::REMOTE_SERVER, // a worker on Linux is a server
         "web" => icons::GLOBAL,
         "ios" | "android" => icons::SMARTPHONE,
         _ => icons::MONITOR,
@@ -945,7 +942,7 @@ fn tilde_path(path: &str, home: Option<&str>) -> String {
         .map_or_else(|| path.to_owned(), |rest| format!("~{rest}"))
 }
 
-// slopty: what removing a project does, in the dialog's words: it leaves the sidebar and its
+// What removing a project does, in the dialog's words: it leaves the sidebar and its
 // sessions move to Archived, where they are restored; nothing on the machine is deleted.
 /// What the Remove project dialog says removing `name`, with `count` sessions on `device`, does.
 fn remove_project_body(name: &str, device: &str, count: usize) -> String {
@@ -984,7 +981,7 @@ impl popover::ScrollRailHost for Shell {
     }
 }
 
-// slopty: the canvas's and a phone's capsule's one action before the first chat.
+// The canvas's and a phone's capsule's one action before the first chat.
 /// What has to exist before the first chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FirstStep {
@@ -1088,8 +1085,8 @@ impl Shell {
             .sidebar_disclosure_motion
             .get(key)
             .copied()
-            // slopty: only an opening or a shutting turns it; an open body that grows or shrinks
-            // (History's rows arriving) leaves it open.
+            // Only an opening or a shutting turns it; an open body that grows or shrinks leaves it
+            // open.
             .filter(|motion| motion.animating(self.now()) && (motion.from == 0.0 || motion.to == 0.0))
         {
             let denominator = tween.from.max(tween.to).max(1.0);
@@ -1136,7 +1133,6 @@ impl Shell {
         }
         self.close_spaces_menu(cx);
         self.schedule_save(cx);
-        // slopty: no pull-request pages.
         cx.notify();
     }
 
@@ -1177,7 +1173,7 @@ impl Shell {
             s.select_space(Some(space_id), cx);
             s.select_chat(None, cx);
         });
-        // slopty: a phone lands on the new chat's page too, off its Chats page.
+        // A phone lands on the new chat's page too, off its Chats page.
         if self.compact() {
             Self::set_compact_sessions(false, cx);
         }
@@ -1206,7 +1202,7 @@ impl Shell {
                 .into_iter()
                 .map(|ix| SpacesMenuRow::Space(projects[ix][0].id.clone())),
         );
-        // slopty: the machines after the projects, while there is more than one to tell apart:
+        // The machines after the projects, while there is more than one to tell apart:
         // the machine is a filter, not a level (`docs/decisions/layout.md`).
         if state.devices.len() > 1 {
             let machines: Vec<String> = state.devices.iter().map(|device| device.name.clone()).collect();
@@ -1219,7 +1215,7 @@ impl Shell {
         rows
     }
 
-    /// slopty: narrow the sidebar to machine `device_id`'s sessions, or to every machine's
+    /// Narrow the sidebar to machine `device_id`'s sessions, or to every machine's
     /// again when it is the one already shown.
     pub(super) fn toggle_machine_filter(&mut self, device_id: String, cx: &mut Context<Self>) {
         self.settings.machine_filter =
@@ -1265,7 +1261,7 @@ impl Shell {
         // The highlight starts ON the current filter row.
         let current = self.space_filter_key(cx);
         let handle = search.read(cx).focus_handle(cx);
-        // slopty: closed, it gives the keyboard back (`Popup::open_in`).
+        // Closed, it gives the keyboard back (`Popup::open_in`).
         self.spaces_menu.open_in(
             SpacesMenu {
                 search,
@@ -1367,7 +1363,7 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // slopty: before any project and chat there is nothing to filter: keep the row's top
+        // Before any project and chat there is nothing to filter: keep the row's top
         // breathing room only.
         if self.awaits_first_project(cx) && self.state.read(cx).chats.iter().all(|c| c.archived) {
             return div().flex_none().h(px(4.0)).into_any_element();
@@ -1394,7 +1390,7 @@ impl Shell {
                 None => (SharedString::from("All projects"), None, false),
             }
         };
-        // slopty: the machine the list is narrowed to follows the project, out of reach or not.
+        // The machine the list is narrowed to follows the project, out of reach or not.
         let (label, offline) = match self.settings.machine_filter.as_deref() {
             Some(id) => {
                 let state = self.state.read(cx);
@@ -1416,7 +1412,7 @@ impl Shell {
                 .into_any_element(),
         };
         let open = self.spaces_menu.is_open();
-        // slopty: a caret says the row opens a menu (T3's select triggers, Claude desktop's
+        // A caret says the row opens a menu (T3's select triggers, Claude desktop's
         // pickers), turning over the house's chevron morph while it is open.
         let turn = motion::state_t(
             "spaces-filter-caret",
@@ -1434,7 +1430,7 @@ impl Shell {
 
         let trigger = div()
             .id("spaces-filter")
-            // slopty: a screen reader's button that says what it filters to and whether its menu
+            // A screen reader's button that says what it filters to and whether its menu
             // is open; a keyboard stop Enter or Space opens.
             .role(gpui::Role::Button)
             .aria_label(filter_name)
@@ -1531,7 +1527,7 @@ impl Shell {
             .into_any_element()
     }
 
-    // slopty: a sidebar row's keys (`SidebarKeys`): Up and Down move to the row drawn above or
+    // A sidebar row's keys (`SidebarKeys`): Up and Down move to the row drawn above or
     // below, Delete archives it (Undo brings it back, as from its menu).
     /// Handle `key` on the focused row of `chat`; whether it was the row's.
     pub(super) fn sidebar_row_key(
@@ -1562,7 +1558,7 @@ impl Shell {
         }
     }
 
-    // slopty: what a chat needs first, offered by the canvas and by a phone's capsule alike:
+    // What a chat needs first, offered by the canvas and by a phone's capsule alike:
     // a device to work on, then a project on it, unless a chat runs outside any project.
     /// The step before the first chat can start, or `None` once one can.
     pub(super) fn first_step(&self, cx: &App) -> Option<FirstStep> {
@@ -1603,7 +1599,7 @@ impl Shell {
         // Each row is a whole repository: its artwork and name, plus the
         // offline glyph when no device holding it is reachable. Consume
         // `rows` to avoid cloning the list children per frame.
-        // slopty: a machine's row draws its kind's glyph (`device_glyph`) in the artwork's place.
+        // A machine's row draws its kind's glyph (`device_glyph`) in the artwork's place.
         let machine = self.settings.machine_filter.clone();
         let details: Vec<MenuDetail> = {
             let state = self.state.read(cx);
@@ -1680,7 +1676,7 @@ impl Shell {
                     .into_any_element(),
             })
             .collect();
-        // slopty: a machine that turns this device away wears the login badge where an
+        // A machine that turns this device away wears the login badge where an
         // unreached one wears the disconnected glyph.
         let badges: Vec<Option<AnyElement>> = details
             .iter()
@@ -1811,7 +1807,7 @@ impl Shell {
             .into_any_element()
     }
 
-    /// slopty: what the sidebar narrows its list to: the project filter and the machine filter.
+    /// What the sidebar narrows its list to: the project filter and the machine filter.
     pub(super) fn sidebar_filter(&self) -> super::sidebar_status::Filter<'_> {
         super::sidebar_status::Filter {
             project: self.settings.space_filter.as_deref(),
@@ -1827,7 +1823,7 @@ impl Shell {
         let (mut groups, next) = super::sidebar_status::list(
             state,
             self.sidebar_filter(),
-            self.sidebar_clock, // slopty: the sidebar's clock
+            self.sidebar_clock, // the sidebar's clock
         );
         if let Some(next) = next {
             self.note_sidebar_change(next);
@@ -1895,7 +1891,7 @@ impl Shell {
             if self.sidebar_collapsed_groups.remove(&key) {
                 self.queue_sidebar_reveal(&format!("group:{key}"));
             }
-            // slopty: a row behind Inactive's "Show more" shows the whole group.
+            // A row behind Inactive's "Show more" shows the whole group.
             if !self.sidebar_visible_order(cx).iter().any(|id| id == chat_id) {
                 self.sidebar_group_shown.insert(key, usize::MAX);
             }
@@ -1939,7 +1935,7 @@ impl Shell {
         }
     }
 
-    /// slopty: how long ago `then` was, by the sidebar's clock; notes when that next reads
+    /// How long ago `then` was, by the sidebar's clock; notes when that next reads
     /// differently, for the clock's tick.
     pub(super) fn sidebar_time_ago(&self, then: chrono::DateTime<Utc>) -> SharedString {
         let now = self.sidebar_clock;
@@ -1949,7 +1945,7 @@ impl Shell {
         format_time_ago(then, now).into()
     }
 
-    /// slopty: something read by the sidebar's clock next reads differently at `at`; its tick
+    /// Something read by the sidebar's clock next reads differently at `at`; its tick
     /// comes no later.
     pub(super) fn note_sidebar_change(&self, at: chrono::DateTime<Utc>) {
         let next = self.sidebar_clock_next.get();
@@ -1958,13 +1954,13 @@ impl Shell {
         }
     }
 
-    /// slopty: take the clock again when the soonest time the last sidebar showed next reads
+    /// Take the clock again when the soonest time the last sidebar showed next reads
     /// differently, and draw again then: until then every sidebar built says the same.
     pub(super) fn tick_sidebar_clock(&mut self, cx: &mut Context<Self>) {
         let Some(at) = self.sidebar_clock_next.take() else {
             return;
         };
-        // slopty: nothing else moves with the clock: a session or machine going quiet is the
+        // Nothing else moves with the clock: a session or machine going quiet is the
         // state's own transition, which draws the sidebar again (`AppState::next_clock_transition`).
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
@@ -1990,7 +1986,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         let groups = self.sidebar_list(cx);
-        // slopty: Tab reaches the open chat's row, or the first with none open (`SidebarKeys`);
+        // Tab reaches the open chat's row, or the first with none open (`SidebarKeys`);
         // the rows of chats gone let their focus go.
         {
             let selected = self.state.read(cx).selected_chat.clone();
@@ -2021,14 +2017,14 @@ impl Shell {
         let mut rendered = Vec::new();
         for group in groups {
             let super::sidebar_status::Group { key, label, rows, hidden } = group;
-            // slopty: a shut group speaks for its rows with the loudest mark among those still
+            // A shut group speaks for its rows with the loudest mark among those still
             // heard (a cached row's is the last word from a machine out of reach).
             let loudest = super::marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
             let row_count = rows.len() + hidden;
             let shown_rows = rows.len();
             let motion_key = format!("group:{key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&key);
-            // slopty: a shut group builds no rows while no motion shows them, so neither the frame
+            // A shut group builds no rows while no motion shows them, so neither the frame
             // nor a screen reader holds rows that are not on screen.
             let draws = !collapsed
                 || self.sidebar_disclosure_motion.get(&motion_key).is_some_and(|motion| motion.animating(self.now()));
@@ -2066,7 +2062,7 @@ impl Shell {
                     theme,
                     cx,
                 );
-                // slopty: on a phone, swipe to archive, press long for its menu.
+                // On a phone, swipe to archive, press long for its menu.
                 let element = self.compact_session_row(element, &chat.id, false, cx);
                 let element = div()
                     .id(SharedString::from(format!("session-slot-{}", chat.id)))
@@ -2076,7 +2072,7 @@ impl Shell {
                     .into_any_element();
                 rendered_rows.push((format!("c:{}", chat.id), height, element));
             }
-            // slopty: Inactive's rows past its page wait behind "Show more".
+            // Inactive's rows past its page wait behind "Show more".
             let more = self.render_group_more(&key, hidden, theme, cx);
             let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
                 + SIDEBAR_ROW_HEIGHT * shown_rows as f32
@@ -2101,7 +2097,7 @@ impl Shell {
                 &key,
                 None,
                 label.clone(),
-                // slopty: open, its count fades in under the pointer; shut, it stands beside the
+                // Open, its count fades in under the pointer; shut, it stands beside the
                 // loudest mark.
                 (!collapsed).then_some(row_count),
                 rollup,
@@ -2110,10 +2106,10 @@ impl Shell {
                 None,
             )
             .debug_selector({
-                let selector = format!("sidebar-group-{key}"); // slopty: for the tests
+                let selector = format!("sidebar-group-{key}"); // for the tests
                 move || selector
             })
-            // slopty: shut, a screen reader hears what the header wears.
+            // Shut, a screen reader hears what the header wears.
             .when(collapsed, |header| {
                 let words = match loudest.as_ref().and_then(super::marks::Mark::word) {
                     Some(word) => format!("{label}, {row_count}, {word}"),
@@ -2123,7 +2119,7 @@ impl Shell {
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 let was_open = !this.sidebar_collapsed_groups.contains(&toggle_key);
-                this.sidebar_group_shown.remove(&toggle_key); // slopty: its first page again
+                this.sidebar_group_shown.remove(&toggle_key); // its first page again
                 this.begin_sidebar_disclosure_motion(
                     &toggle_motion_key,
                     if was_open { body_height } else { 0.0 },
@@ -2184,12 +2180,12 @@ impl Shell {
     ) -> Option<AnyElement> {
         const INITIAL: usize = ARCHIVED_INITIAL_ROWS;
         const PAGE: usize = ARCHIVED_PAGE_ROWS;
-        let now = self.sidebar_clock; // slopty: the sidebar's clock
+        let now = self.sidebar_clock; // the sidebar's clock
         let rows = self.archived_sidebar_chats(cx);
         if rows.is_empty() {
             return None;
         }
-        // slopty: each says its project while the shelf holds more than one (`sidebar_status::shelf`).
+        // Each says its project while the shelf holds more than one (`sidebar_status::shelf`).
         let rows = super::sidebar_status::shelf(self.state.read(cx), rows, now);
         let total = rows.len();
         let open = self.archived_open;
@@ -2266,7 +2262,7 @@ impl Shell {
                     theme,
                     cx,
                 );
-                // slopty: on a phone, swipe to bring back, press long for its menu.
+                // On a phone, swipe to bring back, press long for its menu.
                 list = list.child(self.compact_session_row(element, &chat.id, true, cx));
             }
             let mut body = div().w_full().flex().flex_col().child(list);
@@ -2310,8 +2306,6 @@ impl Shell {
     }
 
     // ---- add-space flow ----
-
-    // slopty: no pull-request pages.
 
     pub(super) fn open_add_space(&mut self, cx: &mut Context<Self>) {
         self.release_home_folder_search(cx);
@@ -2358,12 +2352,12 @@ impl Shell {
             crumb_scroll: gpui::ScrollHandle::new(),
             crumb_key: String::new(),
             focus_pending: true,
-            return_focus: None, // slopty
+            return_focus: None,
             load_task: None,
             drives_task: None,
             submit_task: None,
             home_search: HomeFolderSearch::default(),
-            cloning: false, // slopty
+            cloning: false,
             path_edit: None,
             _search_events: search_events,
         });
@@ -2373,7 +2367,7 @@ impl Shell {
     /// Close the new-project picker, releasing the host's home index.
     pub(super) fn close_add_space(&mut self, cx: &mut Context<Self>) {
         self.release_home_folder_search(cx);
-        // slopty: the keyboard goes back where it was (`popover::return_focus`).
+        // The keyboard goes back where it was (`popover::return_focus`).
         if let Some(flow) = self.add_space.take()
             && let Some(before) = flow.return_focus
         {
@@ -2387,7 +2381,7 @@ impl Shell {
     fn add_space_in_home(&self) -> bool {
         self.add_space.as_ref().is_some_and(|flow| {
             flow.step == ProjectStep::Folders
-                && !flow.cloning // slopty: an address is no folder to look for
+                && !flow.cloning // an address is no folder to look for
                 && flow
                     .location
                     .as_ref()
@@ -2686,7 +2680,7 @@ impl Shell {
         } else {
             &[]
         };
-        // slopty: with nothing typed, the folders gone to most lead and the home's own follow.
+        // With nothing typed, the folders gone to most lead and the home's own follow.
         let gone_to = if self.add_space_in_home() {
             flow.home_search.visited.as_slice()
         } else {
@@ -2743,7 +2737,7 @@ impl Shell {
             }
             ProjectStep::Folders => {}
         }
-        // slopty: the address is cloned; the row after the folders asks for one.
+        // The address is cloned; the row after the folders asks for one.
         if self.add_space.as_ref().is_some_and(|flow| flow.cloning) {
             self.add_space_clone(cx);
             return;
@@ -2756,11 +2750,11 @@ impl Shell {
             let text = flow.search.read(cx).text().to_string();
             if let Some(target) = crate::pickers::typed_path_target(&text, flow.home.as_deref()) {
                 self.add_space_descend(target, false, cx);
-                return; // slopty: else the clone row, the only one
+                return; // else the clone row, the only one
             }
         }
         if flow.active >= rows.len() {
-            // slopty: "Clone repository…".
+            // "Clone repository…".
             self.add_space_begin_clone(cx);
             return;
         }
@@ -2796,7 +2790,7 @@ impl Shell {
         if self
             .add_space
             .as_ref()
-            // slopty: an address's slashes are its own.
+            // An address's slashes are its own.
             .is_none_or(|f| f.step != ProjectStep::Folders || f.cloning)
         {
             return false;
@@ -3042,7 +3036,7 @@ impl Shell {
         cx.notify();
     }
 
-    // slopty: "Clone repository…": the search field takes a repository's address, and the clone
+    // "Clone repository…": the search field takes a repository's address, and the clone
     // goes in the open folder on the picked machine (`CloneRepo`), then is added as a project.
     /// Let the search field take an address; one already typed there stays.
     fn add_space_begin_clone(&mut self, cx: &mut Context<Self>) {
@@ -3190,7 +3184,7 @@ impl Shell {
 
     /// Back traverses folders, then locations, then devices.
     fn add_space_go_up(&mut self, cx: &mut Context<Self>) {
-        // slopty: out of the address, back to the folder it would go in.
+        // Out of the address, back to the folder it would go in.
         if self.add_space.as_ref().is_some_and(|flow| flow.cloning) {
             self.add_space_end_clone(cx);
             return;
@@ -3249,7 +3243,6 @@ impl Shell {
             let Some(device) = self.add_space_devices(cx).get(flow.active).cloned() else {
                 return;
             };
-            // slopty: no Cloud device, so every device takes a path.
             self.add_space_pick_device(device, cx);
         }
         let windows = self.add_space_windows_paths();
@@ -3296,7 +3289,7 @@ impl Shell {
         let events = cx.subscribe(&input, |this: &mut Shell, _, event, cx| match event {
             ComposerInputEvent::Edited => this.add_space_path_edited(cx),
             ComposerInputEvent::Submitted => this.add_space_open_typed_path(false, cx),
-            // slopty: the field takes no pasted files (Slopty's input pastes text only).
+            // The field takes no pasted files (Slopty's input pastes text only).
             _ => {}
         });
         // `~` and ⇥ under home need the device's home: list it once.
@@ -3730,7 +3723,7 @@ impl Shell {
                 let count = match self.add_space.as_ref().map(|f| f.step) {
                     Some(ProjectStep::Devices) => self.add_space_devices(cx).len(),
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
-                    // slopty: the clone row after the folders, or the one clone row.
+                    // The clone row after the folders, or the one clone row.
                     _ if self.add_space.as_ref().is_some_and(|f| f.cloning) => 1,
                     _ => self.add_space_folder_rows(cx).len() + 1,
                 };
@@ -3751,7 +3744,7 @@ impl Shell {
             // subfolders; the usual target (a repo root full of subfolders)
             // is only ever "the folder you're standing in".
             popover::MenuKey::Enter => self.add_space_open_active(cx),
-            // slopty: while an address is typed, ⌘⏎ clones it as ⏎ does.
+            // While an address is typed, ⌘⏎ clones it as ⏎ does.
             popover::MenuKey::ModEnter if self.add_space.as_ref().is_some_and(|f| f.cloning) => {
                 self.add_space_clone(cx)
             }
@@ -3864,7 +3857,7 @@ impl Shell {
         let busy = flow.submit_busy;
         let active = flow.active;
         let loading = matches!(flow.browser, Loadable::Idle | Loadable::Loading);
-        let cloning = flow.cloning; // slopty
+        let cloning = flow.cloning;
         let drives_loading = matches!(flow.drives, Loadable::Loading);
         let home_loading = flow.home_search.loading;
         let home_status = if flow.home_search.indexing {
@@ -3890,7 +3883,6 @@ impl Shell {
                 .and_then(|(_, ghost)| ghost);
             input.update(cx, |input, cx| input.set_ghost(ghost, cx));
         }
-        // slopty: every device's crumbs are a path (no Cloud).
         let can_edit_path = matches!(step, ProjectStep::Locations | ProjectStep::Folders);
         let query = search.read(cx).text().to_string();
         // Cmd+K's row rhythm: 30px rows, 16px muted glyphs, 8px list gutters.
@@ -3926,14 +3918,14 @@ impl Shell {
             ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
-        // slopty: the clone row after the folders, not one the empty state counts.
+        // The clone row after the folders, not one the empty state counts.
         let mut clone_rows = 0;
         match step {
             ProjectStep::Devices => {
                 for (ix, device) in self.add_space_devices(cx).into_iter().enumerate() {
                     let online = self.state.read(cx).device_online(&device.id, crate::clock::utc(cx));
                     let name = device.name.clone();
-                    // slopty: a screen reader reads each row as the button it is, the dot's
+                    // A screen reader reads each row as the button it is, the dot's
                     // state in words.
                     let said = format!("{name}, {}", if online { "online" } else { "offline" });
                     rows.push(
@@ -3970,7 +3962,7 @@ impl Shell {
                     let label = name.clone();
                     rows.push(
                         row(ix)
-                            .role(gpui::Role::Button) // slopty: read as a button
+                            .role(gpui::Role::Button) // read as a button
                             .aria_label(SharedString::from(label.clone()))
                             .child(glyph_el(glyph))
                             .child(label_el(label))
@@ -3981,7 +3973,7 @@ impl Shell {
                     );
                 }
             }
-            // slopty: an address typed to clone: the clone it makes, or what to type.
+            // An address typed to clone: the clone it makes, or what to type.
             ProjectStep::Folders if cloning => {
                 clone_rows = 1;
                 if let Some((name, into)) = self.add_space_clone_target(cx) {
@@ -4057,7 +4049,7 @@ impl Shell {
                         let is_repo = entry.is_repo;
                         rows.push(
                             row(ix)
-                                .role(gpui::Role::Button) // slopty: read as a button
+                                .role(gpui::Role::Button) // read as a button
                                 .aria_label(SharedString::from(entry.name.clone()))
                                 .child(glyph_el(icons::FOLDER))
                                 .child(label_el(entry.name))
@@ -4075,7 +4067,7 @@ impl Shell {
                                 .into_any_element(),
                         );
                     }
-                    // slopty: a repository from elsewhere, cloned into this folder.
+                    // A repository from elsewhere, cloned into this folder.
                     let ix = rows.len();
                     clone_rows = 1;
                     rows.push(
@@ -4139,7 +4131,7 @@ impl Shell {
                         })),
                 ),
             );
-        } else if count == clone_rows // slopty: the clone row is no folder
+        } else if count == clone_rows // the clone row is no folder
             && !cloning
             && !(step == ProjectStep::Locations && drives_loading)
         {
@@ -4439,7 +4431,7 @@ impl Shell {
                             div()
                                 .id("project-path-open")
                                 .group("project-path-open")
-                                // slopty: a touch target on an iPad, as its neighbours.
+                                // A touch target on an iPad, as its neighbours.
                                 .size(px(24.0))
                                 .flex_none()
                                 .flex()
@@ -4534,7 +4526,7 @@ impl Shell {
                     .rounded(px(6.0))
                     .cursor_pointer()
                     .role(gpui::Role::Button)
-                    // slopty: ← goes back, as the legend says.
+                    // ← goes back, as the legend says.
                     .action_hint(back_label, Keys::Fixed("left"), cx)
                     .hover(|s| s.bg(theme.element_hover))
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -4566,7 +4558,7 @@ impl Shell {
                         .rounded(px(6.0))
                         .cursor_pointer()
                         .role(gpui::Role::Button)
-                        // slopty: its tooltip names ⌘L, the key its raw handler takes.
+                        // Its tooltip names ⌘L, the key its raw handler takes.
                         .action_hint("Edit path", Keys::Fixed("mod-l"), cx)
                         .hover(|s| s.bg(theme.element_hover))
                         .on_click(cx.listener(|this, _, _, cx| this.add_space_edit_path(cx)))
@@ -4593,7 +4585,7 @@ impl Shell {
                 Some((input, opening, _)) => !opening && !input.read(cx).text().trim().is_empty(),
                 None => listing.is_some(),
             };
-        // slopty: its keys where there are keys; a touch screen keeps only the button that adds.
+        // Its keys where there are keys; a touch screen keeps only the button that adds.
         let keys = !crate::shell::touch_screen();
         let adds = (step == ProjectStep::Folders && !cloning) || editing;
         let footer = if !keys {
@@ -4610,7 +4602,7 @@ impl Shell {
                     &theme,
                     "⏎",
                     if cloning {
-                        "Clone" // slopty
+                        "Clone"
                     } else if step == ProjectStep::Folders {
                         "Open"
                     } else {
@@ -4633,7 +4625,7 @@ impl Shell {
                     ))
                 })
         }
-        // slopty: a typed address clones from ⏎, so the add button stands down while it shows.
+        // A typed address clones from ⏎, so the add button stands down while it shows.
         .when(adds, |el| {
             el.child(div().flex_1()).child(
                 div()
@@ -4874,7 +4866,7 @@ impl Shell {
                                 })),
                         )
                         .child(
-                            popover::named_button( // slopty: a named button
+                            popover::named_button(
                                 popover::btn_primary(&theme, "Rename").id("rename-space-save"),
                                 "Rename",
                             )
@@ -4902,7 +4894,7 @@ impl Shell {
                     state.chats_in_space(&space_id).len(),
                 )
             };
-            // slopty: a session is its agent's own record, so removing a project archives its
+            // A session is its agent's own record, so removing a project archives its
             // sessions (Archived restores them) and deletes nothing on the machine.
             let copy = remove_project_body(&name, &device, count);
             let shell = cx.weak_entity();
@@ -4957,7 +4949,7 @@ mod tests {
 
     use super::compare_sidebar_chats;
 
-    /// slopty: removing a project says its sessions move to Archived, counted, and that the
+    /// Removing a project says its sessions move to Archived, counted, and that the
     /// machine keeps everything.
     #[test]
     fn removing_a_project_says_its_sessions_are_archived() {
@@ -4987,12 +4979,12 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
-            subagent: false, // slopty: subagents
+            subagent: false,
             in_parent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
-            draft: None, // slopty: new field.
+            draft: None,
         }
     }
 
@@ -5001,7 +4993,7 @@ mod tests {
         let alpha = chat("alpha");
         let beta = chat("beta");
         assert!(compare_sidebar_chats(&alpha, &beta).is_lt());
-        // slopty: newer sessions first, and a new message moves nothing.
+        // Newer sessions first, and a new message moves nothing.
         let mut newer = chat("zeta");
         newer.created_at = Utc.timestamp_opt(6, 0).unwrap();
         assert!(compare_sidebar_chats(&newer, &alpha).is_lt());
@@ -5068,8 +5060,6 @@ impl Shell {
     }
 }
 
-// slopty: no typed-path fixture (the examples are not taken).
-
 #[cfg(test)]
 mod project_flow_tests {
     use super::*;
@@ -5125,7 +5115,6 @@ mod project_flow_tests {
                 state,
                 EngineBootConfig {
                     data_dir: data.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -5268,7 +5257,6 @@ mod home_folder_search_tests {
                 state,
                 crate::EngineBootConfig {
                     data_dir,
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -5570,7 +5558,7 @@ mod home_folder_search_tests {
         assert!(matches!(&rows[1], FolderRow::Home(m) if m.relative == "dev/comet" && m.is_repo));
     }
 
-    // slopty: the folders gone to most lead Home while nothing is typed.
+    // The folders gone to most lead Home while nothing is typed.
     #[gpui::test]
     fn home_lists_the_folders_gone_to_most_first_until_a_query(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = picker(cx, "local");
@@ -5608,7 +5596,6 @@ mod home_folder_search_tests {
             (r"\\server\share\Ana", r"\\?\UNC\server\share\Ana"),
         ] {
             let (window, _dir, mut engine) = picker(cx, "remote");
-            // slopty: no History surface (ruled out).
             engine.listing["path"] = home.into();
             go_home(window, cx);
             let warm = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5714,7 +5701,7 @@ mod home_folder_search_tests {
             .unwrap();
     }
 
-    // slopty: what passes for an address to clone, and the folder it makes.
+    // What passes for an address to clone, and the folder it makes.
     #[test]
     fn a_clone_address_is_a_url_scp_or_path_and_names_its_folder() {
         for url in [
@@ -5779,7 +5766,7 @@ mod home_folder_search_tests {
         (window, dir, engine)
     }
 
-    // slopty: a clone goes in the open folder on the picked machine, then is its project.
+    // A clone goes in the open folder on the picked machine, then is its project.
     #[gpui::test]
     fn a_clone_goes_in_the_open_folder_and_becomes_the_project(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) =
@@ -5828,7 +5815,7 @@ mod home_folder_search_tests {
             .unwrap();
     }
 
-    // slopty: a clone that fails says why, and adds nothing.
+    // A clone that fails says why, and adds nothing.
     #[gpui::test]
     fn a_failed_clone_says_why_and_adds_nothing(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = clone_typed(cx, "local", "git@example.com:srv/origin.git");
@@ -5852,7 +5839,7 @@ mod home_folder_search_tests {
             .unwrap();
     }
 
-    // slopty: what is not an address clones nothing; ← goes back to the folders.
+    // What is not an address clones nothing; ← goes back to the folders.
     #[gpui::test]
     fn a_non_address_clones_nothing_and_back_returns_to_the_folders(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = clone_typed(cx, "local", "not a url");
@@ -6169,7 +6156,6 @@ mod home_folder_search_tests {
     /// What drawing the whole Shell needs beyond `picker`'s globals.
     fn renderable(cx: &mut TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        // slopty: no history to start.
         cx.update(|cx| {
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });

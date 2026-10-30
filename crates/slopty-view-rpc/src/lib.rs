@@ -1,6 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! slopty-view-rpc — the typed control plane (UiRpc / ControlRpc) over WebSocket + in-memory
-//! transports, plus the device-room relay transport ({s,k,to,from} frames — `device_room`; slopty: cut).
+//! transports.
 //!
 //! Framing: ndjson envelopes, one JSON object per WebSocket text message (or per line on
 //! byte transports), matching the shape of slopty's Effect RPC without the Effect runtime:
@@ -23,21 +23,18 @@ mod client;
 mod server;
 
 pub use client::{RpcClient, RpcSubscription};
-// slopty: device rooms (the relay transport) are cut with sync.
 pub use server::serve_connection;
 
 /// RPC method names — single source of truth for both ends.
 /// Full surface: docs/research/feature-inventory.md §2.
 pub mod methods {
-    // slopty: voice removed.
     pub const WATCH_PREVIEWS: &str = "WatchPreviews";
     pub const LIST_HARNESSES: &str = "ListHarnesses";
     pub const INSTALL_HARNESS: &str = "InstallHarness";
-    // slopty: no thread naming: an agent's thread is titled by the agent.
     /// Flip a harness's enablement on the target device (Settings → Providers);
     /// replies with the device's fresh `ListHarnesses` catalog.
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
-    // slopty: what the chats said, searched: `{query, limit}` →
+    // What the chats said, searched: `{query, limit}` →
     // `[{chatId, role: "user"|"agent", excerpt, matchStart, matchEnd}]`, byte offsets into
     // the excerpt.
     pub const SEARCH_CHATS: &str = "SearchChats";
@@ -81,7 +78,6 @@ pub mod methods {
     pub const CLONE_REPO: &str = "CloneRepo";
     pub const LIST_BRANCHES: &str = "ListBranches";
     pub const LIST_REFS: &str = "ListRefs";
-    // slopty: no History surface (ruled out).
     /// Update remote-tracking refs without changing HEAD, the index, or files.
     pub const FETCH_ALL: &str = "FetchAll";
     pub const LIST_FOLDERS: &str = "ListFolders";
@@ -120,12 +116,9 @@ pub mod methods {
     /// Current pull request for one checkout, resolved on the checkout's host device.
     pub const WATCH_CHECKOUT_CHANGE_REQUEST: &str = "WatchCheckoutChangeRequest";
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
-    // slopty: no Discard changes (ruled out).
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
-    // slopty: no agent accounts or logins: an agent signs in in its own TUI.
     // Attachments read back (ControlRpc, relay-forwardable — target the chat's host device).
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
-    // slopty: no agent visuals.
     /// Lazy full-tool-output fetch from the R2 sidecar by doc-resident ref
     /// (chat2-sync A3). Edge-direct from any device — never relay-forwarded.
     pub const FETCH_TOOL_BLOB: &str = "FetchToolBlob";
@@ -133,11 +126,11 @@ pub mod methods {
     /// Download + apply the newest release on the target device (symlink-managed
     /// installs; the service restart is scheduled after the reply flushes).
     pub const APPLY_UPDATE: &str = "ApplyUpdate";
-    // slopty: the person's one setting for how freely agents act, `[agents] autonomy` in
+    // The person's one setting for how freely agents act, `[agents] autonomy` in
     // Slopty's settings: `{ "autonomy": "auto" | "full" | "ask" }` read and written.
     pub const GET_AGENT_SETTINGS: &str = "GetAgentSettings";
     pub const SET_AGENT_SETTINGS: &str = "SetAgentSettings";
-    // slopty: Settings → Devices' Add device. `AddDevice { kind: thisMac | ssh | server |
+    // Settings → Devices' Add device. `AddDevice { kind: thisMac | ssh | server |
     // serveSsh, target }` streams the run's progress (`run`, `steps`, `share`, `failure`,
     // `choices`, `added`); `AnswerAddDevice { run, trust | password + addKey | fix | choose }`
     // answers a run that stopped to ask. Dropping the stream stops the run. `LookOnTailnet`
@@ -145,7 +138,7 @@ pub mod methods {
     pub const ADD_DEVICE: &str = "AddDevice";
     pub const ANSWER_ADD_DEVICE: &str = "AnswerAddDevice";
     pub const LOOK_ON_TAILNET: &str = "LookOnTailnet";
-    // slopty: one of a device's (or the server's, `deviceId: "server"`) actions pressed:
+    // One of a device's (or the server's, `deviceId: "server"`) actions pressed:
     // `DeviceAction { deviceId, action }`; the app runs it and says how it went in a toast.
     pub const DEVICE_ACTION: &str = "DeviceAction";
 }
@@ -476,8 +469,6 @@ mod tests {
         let frame: ServerFrame = serde_json::from_str(r#"{"id":1,"done":true}"#).unwrap();
         assert_eq!(frame.ok, None);
     }
-
-    // slopty: the WebSocket round-trip and Origin tests go with the transport.
 
     #[tokio::test]
     async fn dropping_stream_receiver_cancels_server_side() {
