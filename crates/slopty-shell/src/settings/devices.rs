@@ -16,8 +16,6 @@ use gpui::{
 /// What a phone or an iPad joining the server is called, wherever it is offered.
 pub(crate) const INVITE: &str = "Connect a phone or iPad";
 
-use slopty_view_proto::WorkspaceScope;
-
 use crate::popover;
 use crate::settings::add_device::{AddDeviceDialog, Choice, Closed};
 use crate::settings::widgets;
@@ -71,16 +69,6 @@ pub fn presence_changes(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
         DAY
     };
     at.checked_add_signed(chrono::Duration::seconds((age / step + 1) * step))
-}
-
-/// Scope-aware copy: a local registry describes only the active local
-/// workspace and must not imply that account device metadata is already live.
-pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
-    match scope {
-        Some(WorkspaceScope::Local) => "Devices in this local workspace.",
-        Some(WorkspaceScope::Synced) => "Devices synced to this workspace.",
-        Some(WorkspaceScope::Development) | None => "Devices in this workspace.",
-    }
 }
 
 /// What the page says it lists.
@@ -881,12 +869,5 @@ mod tests {
         assert!(matches!(action_tone("remove"), widgets::ActionTone::Danger));
         assert!(matches!(action_tone("ask-remove"), widgets::ActionTone::Quiet));
         assert!(matches!(action_tone("update"), widgets::ActionTone::Quiet));
-    }
-
-    #[test]
-    fn local_subtitle_does_not_claim_synced_metadata() {
-        let copy = devices_subtitle(Some(WorkspaceScope::Local));
-        assert!(copy.contains("local workspace"));
-        assert!(!copy.contains("synced"));
     }
 }
