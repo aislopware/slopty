@@ -65,7 +65,7 @@ const OWN_SIGNALS: &[&str] = &["slopty-crash"];
 /// Tests that count the instructions an operation takes against a budget, which
 /// `ThreadSanitizer` cannot run: it adds its own instructions at every memory access and atomic,
 /// so the count is the instrumentation's. `AddressSanitizer` leaves a loop of additions as it
-/// is and runs them. Only this reason puts a test here.
+/// is and runs them.
 ///
 /// The tests that wait on a child once stood beside these: `ThreadSanitizer` held the child's
 /// `SIGCHLD` for a minute (`fixtures/sigchld.rs`), and each such test waited that long or timed
@@ -74,10 +74,20 @@ const OWN_SIGNALS: &[&str] = &["slopty-crash"];
 const TSAN_COUNTS_INSTRUCTIONS: &[(&str, &str)] =
     &[("slopty-testkit", "bench::tests::a_series_reports_per_operation_and_as_json")];
 
-/// The nextest filterset that leaves out [`TSAN_COUNTS_INSTRUCTIONS`].
+/// Simulations that run on the test's one thread, so `ThreadSanitizer` has no second thread to
+/// race them with, and which its instrumentation of every access holds past their limit. The
+/// codec's clock-drift test plays eight minutes of audio through the ring, and the codec's tests
+/// get a minute on a runner (a stopped encoder hangs them): it timed out at 60 s (Deep run
+/// 40989163091). The ring's threads are `ThreadSanitizer`'s in the player's own tests and
+/// loom's in its models. Only these two reasons put a test in a list here.
+const TSAN_ONE_THREAD: &[(&str, &str)] =
+    &[("slopty-codec", "audio::latency_tests::clock_drift_is_absorbed_by_slices")];
+
+/// The nextest filterset that leaves out [`TSAN_COUNTS_INSTRUCTIONS`] and [`TSAN_ONE_THREAD`].
 fn tsan_filter() -> String {
     let skipped: Vec<String> = TSAN_COUNTS_INSTRUCTIONS
         .iter()
+        .chain(TSAN_ONE_THREAD)
         .map(|(package, test)| format!("(package({package}) & test(={test}))"))
         .collect();
     format!("not ({})", skipped.join(" | "))
@@ -993,12 +1003,13 @@ version = "0.1.0"
     }
 
     #[test]
-    fn the_thread_sanitizer_leaves_out_only_the_instruction_counts_by_their_whole_names() {
+    fn the_thread_sanitizer_leaves_out_only_its_two_lists_by_their_whole_names() {
         let filter = tsan_filter();
         assert!(filter.starts_with("not ("), "{filter}");
-        for (package, test) in TSAN_COUNTS_INSTRUCTIONS {
+        let listed: Vec<_> = TSAN_COUNTS_INSTRUCTIONS.iter().chain(TSAN_ONE_THREAD).collect();
+        for (package, test) in &listed {
             assert!(filter.contains(&format!("(package({package}) & test(={test}))")), "{filter}");
         }
-        assert_eq!(filter.matches("package(").count(), TSAN_COUNTS_INSTRUCTIONS.len());
+        assert_eq!(filter.matches("package(").count(), listed.len());
     }
 }

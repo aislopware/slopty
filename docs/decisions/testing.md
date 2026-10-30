@@ -882,20 +882,29 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     has shorter queues. xtask itself had to build there: the input-source module and a `statfs`
     field are now macOS only.
   - **Loud.** Each job uploads its report. A failed night opens the "Deep checks failing" issue,
-    or comments on it, and the next clean night closes it. A missed mutant is a finding to rank,
-    not a failure, so the mutation jobs never fail the run.
+    or comments on it, and the next clean night closes it. A missed mutant of tier B is a
+    finding to rank, not a failure; one of tier A fails its job ("Mutation in the diff").
   - **What stays here.** Metal validation needs a GPU, and a hosted runner's virtual Mac has
     none. The soak and the bench measure this machine. Locally, `cargo xtask nightly` refuses a
     full run without `--all-here`, and each check it runs gets `nice -n 19`, four build jobs and
     four test threads (MEASUREMENTS 2026-10-01, "a nightly that shares the Mac").
   - **The sanitizers' exclusions, each with its reason.** The testkit's instruction-count test
     reads retired instructions, which ThreadSanitizer's instrumentation multiplies
-    (`TSAN_COUNTS_INSTRUCTIONS`). Under both sanitizers, 5 of `slopty-crash`'s 35 tests fail: in
-    the instrumented build, the frame they look for by name resolves to the `FnOnce::call_once`
-    shim of the thread's closure, in `function.rs`. That is a fragility of those tests, reported
-    to their owner, not hidden. Under ThreadSanitizer one worker test timed out
-    (`session_actor`, a viewer whose queue was dropped) and one PTY test hit the 120 s limit
-    (`a_typed_ssh_goes_through_the_cli`). Neither raised a race report.
+    (`TSAN_COUNTS_INSTRUCTIONS`). The codec's clock-drift test plays eight minutes of audio on
+    its one thread, so ThreadSanitizer has nothing to race it with, and instrumented it passed
+    the minute a runner gives codec tests (`TSAN_ONE_THREAD`). Under both sanitizers, 5 of
+    `slopty-crash`'s 35 tests fail: in the instrumented build, the frame they look for by name
+    resolves to the `FnOnce::call_once` shim of the thread's closure, in `function.rs`. That is
+    a fragility of those tests, reported to their owner, not hidden. Under ThreadSanitizer one
+    PTY test hit the 120 s limit (`a_typed_ssh_goes_through_the_cli`) without a race report.
+    The worker test of a viewer whose queue was dropped failed every night with none either: it
+    sent eighty replies to pass the real 16 MiB cap, each 0.3 s to read and encode when
+    instrumented, past its 10 s deadline. Its session now holds 1 MiB for a viewer
+    (`SessionStart::queued_max_bytes`), and four replies pass it. The capture canvas's beat test
+    held two canvases' stamps, taken when each queue ran, within 2 ms of each other, and
+    instrumented they were 2.7 ms apart. A canvas now stamps each picture with its beat, as
+    ScreenCaptureKit stamps a frame with the display time it was composed for, so the test
+    checks every stamp against the one grid, with no bound on time.
   - **Miri** runs through nextest with a 20-minute limit per test and without the
     allocation-counting binaries: run locally, `slopty-grid`'s `tests/allocs.rs` held a run for
     55 minutes under the interpreter. The audio ring stays loom's alone: it is safe atomics, and
