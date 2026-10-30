@@ -69,6 +69,8 @@ mod tests {
                 usage: Usage::default(),
                 models: Vec::new(),
                 changed: Changed::default(),
+                mode: None,
+                context: None,
             }));
         }
         state

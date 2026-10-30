@@ -46,7 +46,7 @@ use slopty_agent::claude::draft::{self, Pictures};
 use slopty_agent::claude::history::{End, History, Out, asks_for};
 use slopty_agent::claude::sessions::{self, Live};
 use slopty_agent::conversation::{Body, Change, Transcripts};
-use slopty_agent::hooks::{Hook, Signal};
+use slopty_agent::hooks::{Hook, Ran, Signal};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::Expanded;
 use slopty_proto::thread::{
@@ -238,6 +238,8 @@ enum Say {
     /// A hook said this of the session, at this time, in the turn of this prompt (its
     /// `prompt_id`, which a `Stop` ends).
     Signal(Signal, WallMs, Option<String>),
+    /// A call of the session ended, its hook saying how long its run took, at this time.
+    Ran(Ran, WallMs),
     /// Its record says its name now.
     Named(String),
     /// Its record says it waits on the person for this (`None`: no longer), since this time.
@@ -418,6 +420,16 @@ impl Watch {
             self.drafted(terminal, at_us, hook.session_id.as_deref(), text, tmpdir);
             return;
         }
+        // How long a call ran stands whatever order its hook came in: the age rule below is the
+        // status's alone, and parallel calls end at once.
+        let ours = self
+            .terms
+            .get(&terminal)
+            .and_then(|t| t.session.as_ref())
+            .is_some_and(|f| hook.session_id.as_deref() == Some(f.native.as_str()));
+        if let Some(ran) = hook.ran().filter(|_| ours) {
+            self.say(terminal, Say::Ran(ran, wall_of(at_us)));
+        }
         let term = self.terms.entry(terminal).or_default();
         if at_us < term.hooked_us {
             tracing::debug!(%terminal, event = hook.event, "a hook older than the last, passed over");
@@ -581,9 +593,10 @@ async fn read(
                 }
                 Some(say) => {
                     // A hook comes once Claude Code wrote what it says of: the transcript is
-                    // read first, so a turn's end never shows before the turn, and a dialog its
-                    // record says is open finds the call it is about.
-                    if matches!(say, Say::Signal(..) | Say::Waits(..)) {
+                    // read first, so a turn's end never shows before the turn, a dialog its
+                    // record says is open finds the call it is about, and a call's run time
+                    // lands on the call.
+                    if matches!(say, Say::Signal(..) | Say::Ran(..) | Say::Waits(..)) {
                         let Some(back) = reader.read_off(&host).await else { return };
                         reader = back;
                     }
@@ -802,7 +815,7 @@ impl Reader {
                     let Body::Tool(call) = &entry.body else { continue };
                     self.open.retain(|o| o.id != entry.id);
                     if call.result.is_none() {
-                        let input = slopty_agent::conversation::call_input(&call.detail);
+                        let input = slopty_agent::conversation::call_input(call);
                         let (thread, id, name) =
                             (thread.clone(), entry.id.clone(), call.name.clone());
                         self.open.push(Open { thread, id, name, input });
@@ -834,10 +847,16 @@ impl Reader {
             _ if self.hooked || self.asked.is_some() => return Vec::new(),
             state => phase_of(&state),
         };
-        if status.as_ref().is_some_and(|s| s.phase == phase) {
-            return Vec::new();
-        }
         let at = ended.unwrap_or(started);
+        if let Some(had) = status.filter(|had| had.phase == phase) {
+            // The same phase keeps its time and whether its agent runs, but for a later turn's
+            // end: a turn the record alone shows (a task's notice) ended then.
+            let ends = matches!(phase, Phase::Done | Phase::Failed | Phase::Stopped);
+            if !ends || had.since_ms >= at {
+                return Vec::new();
+            }
+            return self.history.status(phase, None, had.liveness, at);
+        }
         self.history.status(phase, None, Liveness::Live, at)
     }
 
@@ -849,6 +868,7 @@ impl Reader {
                 self.open.clear();
                 self.signal(signal, prompt.as_deref(), at)
             }
+            Say::Ran(ran, at) => self.history.ran(&ran, at),
             Say::Waits(wait, at) => self.waits(wait, at),
             Say::Named(name) => self.history.named(&name),
             Say::Draft { text, tmpdir, at } => {
@@ -941,7 +961,7 @@ impl Reader {
                 outs.extend(self.history.status(Phase::Failed, None, live, at));
                 outs
             }
-            Signal::Compacting(on) => self.history.compacting(on),
+            Signal::Compacting(on) => self.history.compacting(on, at),
             // A draft goes its own way ([`Say::Draft`]).
             Signal::Ended | Signal::Nothing | Signal::Draft { .. } => Vec::new(),
         }

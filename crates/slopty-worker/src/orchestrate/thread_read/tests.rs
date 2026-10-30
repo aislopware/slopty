@@ -36,6 +36,8 @@ fn turn(n: u32, state: TurnState) -> Turn {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Changed::default(),
+        mode: None,
+        context: None,
     }
 }
 

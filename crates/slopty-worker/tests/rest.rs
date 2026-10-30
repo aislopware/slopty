@@ -53,6 +53,8 @@ mod rest {
             usage: Usage::default(),
             models: vec![],
             changed: Changed::default(),
+            mode: None,
+            context: None,
         })
     }
 

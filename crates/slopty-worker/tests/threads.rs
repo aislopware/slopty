@@ -42,6 +42,8 @@ mod threads {
             usage: Usage::default(),
             models: vec![],
             changed: Changed::default(),
+            mode: None,
+            context: None,
         })
     }
 
@@ -1088,9 +1090,10 @@ mod hooks {
     /// Each moment a recorded session shows as it is replayed, heard by its hooks or by its
     /// record alone: a dialog said of the call it is about (by the record once the transcript
     /// wrote the call, at the dialog's time), a turn its `Stop` ends and its records then
-    /// stamp, an interruption the transcript tells, a compaction shown while it runs (over the
-    /// phase it began in, and that phase's time) with the session begun again after it, the
-    /// end at its hook's moment or once its process is gone, and a hook relayed late passed over.
+    /// stamp, an interruption the transcript tells, a compaction shown while it runs (since it
+    /// began, whatever the phase beneath it says meanwhile) with the session begun again after
+    /// it, the end at its hook's moment or once its process is gone, and a hook relayed late
+    /// passed over.
     #[tokio::test(start_paused = true)]
     async fn each_recorded_session_shows_each_moment_as_it_came() {
         let pinned: [(&str, Heard, &[&str]); 5] = [
@@ -1164,9 +1167,7 @@ mod hooks {
                     "Done Live +2326 | Complete +2326 | compact",
                     "Done Live +2326 | Complete +2227 | compact",
                     "Done Live +2326 | Complete +2227, Complete +2259 | compact",
-                    "Working Live compacting: Compacting the conversation +2326 \
-                 | Complete +2227, Complete +2259 | compact",
-                    "Working Live compacting: Compacting the conversation +6877 \
+                    "Working Live compacting: Compacting the conversation +2389 \
                  | Complete +2227, Complete +2259 | compact",
                     "Idle Live +6877 | Complete +2227, Complete +2259 | compact",
                     "Idle Live +6877 | Complete +2227, Complete +2259, Complete +6883 | compact",
@@ -1182,7 +1183,9 @@ mod hooks {
 
     /// However a recorded session is heard, by its hooks or by its record alone, its turns end
     /// the same, each moment bears the name its record gives it, and it ends exited and
-    /// resumable in the phase it rested in.
+    /// resumable in the phase it rested in; a rest that ends a turn is shown from that turn's
+    /// end, by its hook's clock or its record's, never from an earlier turn's (a background
+    /// task's notice is a turn of its own).
     #[tokio::test(start_paused = true)]
     async fn a_session_ends_the_same_heard_by_its_hooks_or_its_record() {
         let names = scenarios();
@@ -1201,6 +1204,16 @@ mod hooks {
                 let phase = |m: &str| m.split(' ').next().map(str::to_owned);
                 assert_eq!(phase(rested), phase(exited), "{name}: {moments:#?}");
                 assert!(rested.contains(" Live "), "{name}: {moments:#?}");
+                let ms =
+                    |at: Option<&str>| at.and_then(|at| at.strip_prefix('+')?.parse::<u64>().ok());
+                let mut parts = rested.split(" | ");
+                let (status, turns) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let ends = ["Done ", "Failed ", "Stopped "].iter().any(|p| status.starts_with(p));
+                let ended: Vec<_> = turns.split(", ").map(|t| ms(t.split(' ').nth(1))).collect();
+                if let (true, [.., Some(earlier), _]) = (ends, ended.as_slice()) {
+                    let since = ms(status.rsplit(' ').next());
+                    assert!(since.is_some_and(|since| since > *earlier), "{name}: {moments:#?}");
+                }
                 assert!(exited.contains(" Exited { resumable: true } "), "{name}: {moments:#?}");
             }
         }
