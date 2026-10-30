@@ -803,35 +803,11 @@ impl Reader {
             return;
         }
         if !self.hooked {
-            self.calls(&changes);
+            calls(&mut self.open, &changes);
         }
         take(host, self.history.transcript(&changes, &outputs));
         take(host, self.phase_from_transcript());
         take(host, self.reworded());
-    }
-
-    /// Keep the calls `changes` leave open, the latest last.
-    fn calls(&mut self, changes: &[Change]) {
-        for change in changes {
-            match change {
-                Change::Upsert { thread, entry } => {
-                    let Body::Tool(call) = &entry.body else { continue };
-                    self.open.retain(|o| o.id != entry.id);
-                    if call.result.is_none() {
-                        let input = slopty_agent::conversation::call_input(call);
-                        let (thread, id, name) =
-                            (thread.clone(), entry.id.clone(), call.name.clone());
-                        self.open.push(Open { thread, id, name, input });
-                    }
-                }
-                Change::Remove { id, .. } => self.open.retain(|o| o.id != *id),
-                Change::Reset { thread: Some(thread) } => self.open.retain(|o| o.thread != *thread),
-                Change::Reset { thread: None } => self.open.clear(),
-                Change::Tasks { .. } | Change::Turn { .. } | Change::Queued(_) => {}
-            }
-        }
-        let over = self.open.len().saturating_sub(OPEN_CALLS);
-        drop(self.open.drain(..over));
     }
 
     /// What the transcript says of the phase: the whole of it with no hooks, an interrupt
@@ -928,18 +904,10 @@ impl Reader {
         self.history.status(Phase::NeedsYou, Some(wait), Liveness::Live, since)
     }
 
-    /// `wait` said of the call it is about, when the record says a permission or a question
-    /// and the transcript has a call open: the latest, since a dialog holds the session until it
-    /// is answered. A dialog of Claude Code's own (input) is said in the record's words.
+    /// `wait` said of the call it is about ([`worded`]): the latest open, since a dialog holds
+    /// the session until it is answered.
     fn worded(&self, wait: Wait) -> Wait {
-        let Some(open) = self.open.last() else { return wait };
-        let kind = match (open.name.as_str(), wait.kind.as_str()) {
-            (QUESTION_TOOL, PERMISSION | QUESTION) => QUESTION,
-            (PLAN_TOOL, PERMISSION) => PLAN,
-            (_, PERMISSION) => PERMISSION,
-            _ => return wait,
-        };
-        Wait { kind: kind.to_owned(), text: asks_for(&open.name, &open.input) }
+        worded(self.open.last(), wait)
     }
 
     /// What hook `signal` heard at `at` says, of the turn of `prompt` (the hook's `prompt_id`):
@@ -1020,6 +988,43 @@ fn ended(host: &Host, thread: ThreadId, at: WallMs) {
     });
 }
 
+/// Keep in `open` the calls `changes` leave open, the latest last, at most [`OPEN_CALLS`].
+fn calls(open: &mut Vec<Open>, changes: &[Change]) {
+    for change in changes {
+        match change {
+            Change::Upsert { thread, entry } => {
+                let Body::Tool(call) = &entry.body else { continue };
+                open.retain(|o| o.id != entry.id);
+                if call.result.is_none() {
+                    let input = slopty_agent::conversation::call_input(call);
+                    let (thread, id, name) = (thread.clone(), entry.id.clone(), call.name.clone());
+                    open.push(Open { thread, id, name, input });
+                }
+            }
+            Change::Remove { id, .. } => open.retain(|o| o.id != *id),
+            Change::Reset { thread: Some(thread) } => open.retain(|o| o.thread != *thread),
+            Change::Reset { thread: None } => open.clear(),
+            Change::Tasks { .. } | Change::Turn { .. } | Change::Queued(_) => {}
+        }
+    }
+    let over = open.len().saturating_sub(OPEN_CALLS);
+    drop(open.drain(..over));
+}
+
+/// `wait` said of the call `open` it is about, when the record says a permission or a question
+/// and the transcript has a call open: a question or a plan when the call asks one, whatever
+/// the record calls it. A dialog of Claude Code's own (input) is said in the record's words.
+fn worded(open: Option<&Open>, wait: Wait) -> Wait {
+    let Some(open) = open else { return wait };
+    let kind = match (open.name.as_str(), wait.kind.as_str()) {
+        (QUESTION_TOOL, PERMISSION | QUESTION) => QUESTION,
+        (PLAN_TOOL, PERMISSION) => PLAN,
+        (_, PERMISSION) => PERMISSION,
+        _ => return wait,
+    };
+    Wait { kind: kind.to_owned(), text: asks_for(&open.name, &open.input) }
+}
+
 /// The session thread `thread` is (or is a subagent of).
 fn root_of(host: &Host, thread: ThreadId) -> Option<ThreadMeta> {
     let mut at = thread;
@@ -1052,5 +1057,140 @@ fn take(host: &Host, outs: Vec<Out>) {
                 host.apply(thread, actions);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_proto::thread::{ItemId, Link};
+
+    use super::*;
+
+    /// A dialog the record says is open is said of the call it is about: a question or a plan
+    /// when the call asks one, whatever the record calls it, a permission in the call's words;
+    /// one of Claude Code's own, or with no call open, in the record's words.
+    #[test]
+    fn a_dialog_is_said_of_the_call_it_is_about() {
+        let open = |name: &str, input: serde_json::Value| Open {
+            thread: slopty_agent::conversation::ThreadId::Main,
+            id: "toolu_1".to_owned(),
+            name: name.to_owned(),
+            input,
+        };
+        let said = |kind: &str| Wait { kind: kind.to_owned(), text: "the record's".to_owned() };
+        let question = serde_json::json!({ "questions": [{ "question": "Which one?" }] });
+        let asks = open(QUESTION_TOOL, question);
+        let words = |kind: &str, call: &Open| Wait {
+            kind: kind.to_owned(),
+            text: asks_for(&call.name, &call.input),
+        };
+        assert_eq!(worded(Some(&asks), said(PERMISSION)), words(QUESTION, &asks));
+        assert_eq!(worded(Some(&asks), said(QUESTION)), words(QUESTION, &asks));
+        let plan = open(PLAN_TOOL, serde_json::json!({ "plan": "Do it" }));
+        assert_eq!(worded(Some(&plan), said(PERMISSION)), words(PLAN, &plan));
+        let bash = open("Bash", serde_json::json!({ "command": "ls" }));
+        assert_eq!(worded(Some(&bash), said(PERMISSION)), words(PERMISSION, &bash));
+        assert_eq!(worded(Some(&bash), said("input")), said("input"));
+        assert_eq!(worded(None, said(PERMISSION)), said(PERMISSION));
+        assert_ne!(words(QUESTION, &asks).text, "the record's", "the call's own words");
+    }
+
+    /// The calls open are the ones a change leaves without a result, the latest last: a call
+    /// read again moves to the end, one whose result came or that was removed goes, a thread's
+    /// file started over drops that thread's, every file started over drops them all, and only
+    /// the latest [`OPEN_CALLS`] are kept.
+    #[test]
+    fn the_calls_open_are_those_without_a_result() {
+        use slopty_agent::conversation::{
+            Clipped, Entry, ResultStatus, ThreadId as Conversation, ToolCall, ToolDetail,
+            ToolResult,
+        };
+        let clipped = |text: &str| Clipped {
+            text: text.to_owned(),
+            lines: 1,
+            chars: u32::try_from(text.len()).unwrap(),
+            full: None,
+        };
+        let done = || ToolResult {
+            status: ResultStatus::Ok,
+            text: None,
+            at_ms: WallMs::ZERO,
+            images: Vec::new(),
+            said: None,
+        };
+        let call = |thread: &Conversation, id: &str, ended: bool| Change::Upsert {
+            thread: thread.clone(),
+            entry: Entry {
+                id: id.to_owned(),
+                at_ms: WallMs::ZERO,
+                body: Body::Tool(Box::new(ToolCall {
+                    name: PLAN_TOOL.to_owned(),
+                    input: clipped("{}"),
+                    detail: ToolDetail::Plan { plan: clipped("Do it") },
+                    result: ended.then(done),
+                    title: None,
+                })),
+            },
+        };
+        let ids = |open: &[Open]| open.iter().map(|o| o.id.clone()).collect::<Vec<_>>();
+        let (main, agent) = (Conversation::Main, Conversation::Agent("a1".to_owned()));
+        let mut open = Vec::new();
+        calls(&mut open, &[call(&main, "t1", false), call(&agent, "t2", false)]);
+        calls(&mut open, &[call(&main, "t3", false)]);
+        assert_eq!(ids(&open), ["t1", "t2", "t3"]);
+        calls(&mut open, &[call(&main, "t1", false)]);
+        assert_eq!(ids(&open), ["t2", "t3", "t1"], "read again, it is the latest");
+        calls(&mut open, &[call(&main, "t3", true)]);
+        assert_eq!(ids(&open), ["t2", "t1"], "its result came");
+        calls(&mut open, &[Change::Remove { thread: main.clone(), id: "t1".to_owned() }]);
+        assert_eq!(ids(&open), ["t2"], "removed");
+        calls(&mut open, &[call(&main, "t4", false), Change::Reset { thread: Some(agent) }]);
+        assert_eq!(ids(&open), ["t4"], "the subagent's file started over");
+        calls(&mut open, &[Change::Reset { thread: None }]);
+        assert!(open.is_empty(), "every file started over");
+        let many: Vec<Change> = (0..OPEN_CALLS.saturating_add(2))
+            .map(|n| call(&main, &format!("m{n}"), false))
+            .collect();
+        calls(&mut open, &many);
+        assert_eq!(open.len(), OPEN_CALLS);
+        assert_eq!(open.first().map(|o| o.id.as_str()), Some("m2"), "the oldest go first");
+    }
+
+    /// A subagent's session is the thread at the top of its chain; a chain that ends before a
+    /// session, or a thread not kept, has none.
+    #[test]
+    fn a_subagent_belongs_to_the_session_at_the_top_of_its_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(dir.path(), crate::thread::log::Limits::default()).unwrap();
+        let meta = |origin: &str, parent: Option<ThreadId>| ThreadMeta {
+            id: ThreadId::new(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            agent_version: String::new(),
+            native: ThreadId::new().to_string(),
+            cwd: "/work".to_owned(),
+            title: String::new(),
+            parent: parent.map(|thread| Link { thread, item: ItemId("toolu_1".to_owned()) }),
+            origin: origin.to_owned(),
+            drive: Drive::named(Drive::OBSERVED),
+            facts: std::collections::BTreeMap::new(),
+            created_ms: WallMs::from_millis(1),
+        };
+        let kept = |meta: ThreadMeta| {
+            let id = meta.id;
+            host.create(meta).unwrap();
+            id
+        };
+        let session = kept(meta(ThreadMeta::PERSON, None));
+        let agent = kept(meta(ThreadMeta::SUBAGENT, Some(session)));
+        let nested = kept(meta(ThreadMeta::SUBAGENT, Some(agent)));
+        let root = |thread| root_of(&host, thread).map(|meta| meta.id);
+        assert_eq!(root(session), Some(session));
+        assert_eq!(root(agent), Some(session));
+        assert_eq!(root(nested), Some(session));
+        let orphan = kept(meta(ThreadMeta::SUBAGENT, Some(ThreadId::new())));
+        assert_eq!(root(orphan), None, "its parent is not kept");
+        let loose = kept(meta(ThreadMeta::SUBAGENT, None));
+        assert_eq!(root(loose), None, "it names no parent");
+        assert_eq!(root(ThreadId::new()), None, "not kept");
     }
 }

@@ -1245,6 +1245,8 @@ mod hooks {
         }
         let host = Host::open(&threads, Limits::default()).unwrap();
         let left = slopty_agent::claude::thread_of(&earlier.session);
+        // Its TUI held a prompt queued, which goes with it.
+        host.apply(left, vec![Action::QueuedSet(vec!["next".to_owned()])]).unwrap();
         let (claude, watching) = Claude::spawn(host.clone(), place());
         let launching = SessionId::new();
         let native = "00000000-0000-4000-8000-0000000000b9";
@@ -1305,6 +1307,8 @@ mod hooks {
             let named = host.state(thread).and_then(|(s, _)| s.meta.terminal());
             assert_eq!(named, None, "{thread} names no terminal once ended");
         }
+        let queued = host.state(left).map(|(s, _)| s.queued);
+        assert_eq!(queued, Some(Vec::new()), "its queue went with its TUI");
         let claude_code = |thread| host.state(thread).is_some_and(|(s, _)| is_claude(&s));
         assert!(claude_code(left) && claude_code(begun), "Claude Code's");
         assert!(!claude_code(row) && !claude_code(loose), "another agent's");
@@ -1435,6 +1439,123 @@ mod hooks {
                 "ended: none".to_owned(),
             ]
         );
+        drop(claude);
+        watching.abort();
+    }
+
+    /// Each hook speaks for the session it names. A session whose first hook is no start is
+    /// followed by the files the hook names, and word of its start after keeps it as it is, in
+    /// the version it names. Another session's hooks change nothing in the terminal, its end
+    /// included. Two hooks at one instant are both taken, a draft's as well. A new session's
+    /// start (as after `/clear`) is followed in place of the last, in the same Claude Code's
+    /// version, and its end ends it; a session taken up again runs in its new version.
+    #[tokio::test(start_paused = true)]
+    async fn each_hook_speaks_for_the_session_it_names() {
+        use slopty_proto::thread::{Liveness, Phase};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let place = Place { home: home.clone(), path: None, data: dir.path().join("data") };
+        let (claude, watching) = Claude::spawn(host.clone(), place);
+        let (first, second) = (SessionId::new(), SessionId::new());
+        let at = |n: u64| 1_800_000_000_000_000_u64.saturating_add(n.saturating_mul(1_000));
+        let hook = |terminal, n: u64, event: &str, session: &str, extra: Value| {
+            let main =
+                slopty_agent::claude::sessions::transcript(&home, Path::new("/work"), session);
+            let mut payload = serde_json::json!({
+                "hook_event_name": event, "session_id": session, "cwd": "/work",
+                "transcript_path": main.to_string_lossy(),
+            });
+            if let (Some(payload), Value::Object(extra)) = (payload.as_object_mut(), extra) {
+                payload.extend(extra);
+            }
+            claude.hook(terminal, at(n), payload.to_string());
+        };
+        let settle = || tokio::time::sleep(Duration::from_secs(2));
+        let state = |session: &str| {
+            host.state(slopty_agent::claude::thread_of(session)).map(|(state, _)| state)
+        };
+        let status = |session: &str| state(session).map(|s| (s.status.phase, s.status.liveness));
+        let live = |phase| Some((phase, Liveness::Live));
+        let ended = |session: &str| {
+            state(session).map(|s| s.status.liveness) == Some(Liveness::Exited { resumable: true })
+        };
+        let version = |session: &str| state(session).map(|s| s.meta.agent_version);
+
+        hook(first, 1, "UserPromptSubmit", "session-a", Value::Null);
+        settle().await;
+        assert_eq!(status("session-a"), live(Phase::Working), "followed from its first hook");
+        let word = |terminal, session: &str, version: &str| {
+            claude.begun(terminal, session.to_owned(), "/work".to_owned(), version.to_owned());
+        };
+        word(first, "session-a", "2.1.400");
+        settle().await;
+        assert_eq!(status("session-a"), live(Phase::Working), "kept, not begun again");
+        assert_eq!(version("session-a").as_deref(), Some("2.1.400"), "the version it names");
+
+        hook(first, 2, "Stop", "session-b", Value::Null);
+        hook(first, 3, "SessionEnd", "session-b", Value::Null);
+        settle().await;
+        assert_eq!(status("session-a"), live(Phase::Working), "another session's hooks");
+        assert!(state("session-b").is_none(), "a session not followed here");
+
+        hook(first, 4, "Stop", "session-a", Value::Null);
+        hook(first, 4, "UserPromptSubmit", "session-a", Value::Null);
+        let draft = |text: &str| serde_json::json!({ "prompt": text });
+        hook(first, 5, slopty_agent::hooks::DRAFT_EVENT, "session-a", draft("one"));
+        hook(first, 5, slopty_agent::hooks::DRAFT_EVENT, "session-a", draft("two"));
+        settle().await;
+        assert_eq!(status("session-a"), live(Phase::Working), "a hook at the same instant");
+        let drafted = state("session-a").and_then(|s| s.draft).map(|d| d.text);
+        assert_eq!(drafted.as_deref(), Some("two"), "a draft at the same instant");
+
+        hook(first, 6, "SessionStart", "session-b", serde_json::json!({ "source": "clear" }));
+        settle().await;
+        assert_eq!(status("session-b"), live(Phase::Idle), "the new session, followed");
+        assert!(ended("session-a"), "the last, ended: {:?}", status("session-a"));
+        assert_eq!(version("session-b").as_deref(), Some("2.1.400"));
+        hook(first, 7, "SessionEnd", "session-b", Value::Null);
+        settle().await;
+        assert!(ended("session-b"), "its end: {:?}", status("session-b"));
+        // Taken up again by a newer Claude Code: its thread runs in that one's version.
+        word(first, "session-a", "2.1.402");
+        settle().await;
+        assert_eq!(status("session-a"), live(Phase::Idle), "taken up again");
+        assert_eq!(version("session-a").as_deref(), Some("2.1.402"));
+
+        // Word of a start first: the next session there runs in the version it named.
+        word(second, "session-c", "2.1.401");
+        settle().await;
+        hook(second, 8, "SessionStart", "session-d", serde_json::json!({ "source": "clear" }));
+        settle().await;
+        assert_eq!(version("session-d").as_deref(), Some("2.1.401"));
+        drop(claude);
+        watching.abort();
+    }
+
+    /// A session Slopty started whose Claude Code never shows in the foreground (a shell is
+    /// there instead, and no process was ever seen) is taken to have ended only once a launcher
+    /// has had its ticks to start it.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_whose_agent_never_shows_ends_after_its_start_ticks() {
+        use slopty_proto::thread::Liveness;
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::open(&dir.path().join("threads"), Limits::default()).unwrap();
+        let home = dir.path().join("home");
+        let place = Place { home, path: None, data: dir.path().join("data") };
+        let (claude, watching) = Claude::spawn(host.clone(), place);
+        let terminal = SessionId::new();
+        let native = "00000000-0000-4000-8000-0000000000c3";
+        claude.begun(terminal, native.to_owned(), "/work".to_owned(), "2.1.314".to_owned());
+        let thread = slopty_agent::claude::thread_of(native);
+        let liveness = || host.state(thread).map(|(s, _)| s.status.liveness);
+        for ticks in 1..=9 {
+            claude.tick(vec![(terminal, Foreground::Other)]);
+            tokio::time::sleep(Duration::from_millis(1_100)).await;
+            let now =
+                if ticks <= 8 { Liveness::Live } else { Liveness::Exited { resumable: true } };
+            assert_eq!(liveness(), Some(now), "after {ticks} ticks");
+        }
         drop(claude);
         watching.abort();
     }
