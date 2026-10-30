@@ -793,9 +793,9 @@ fn tools_extra(checkout: &Shell, message: Option<&str>) -> Result<String> {
     Ok(extra)
 }
 
-/// the locks and the CI profile, deny, hakari, shear and typos on the snapshot (each in a shell
-/// from `on_tree`) and `committed` on the checkout's history and the pending `message`, side by
-/// side; every failure is reported.
+/// the locks and the CI profile, deny, hakari, shear, typos and the Claude Code mod's checks
+/// (`crate::claude_mod`) on the snapshot (each in a shell from `on_tree`) and `committed` on the
+/// checkout's history and the pending `message`, side by side; every failure is reported.
 fn tools_lane(
     on_tree: impl Fn() -> Result<Shell> + Sync,
     checkout: &Shell,
@@ -815,6 +815,7 @@ fn tools_lane(
             scope.spawn(move || shear(&on_tree()?, false)),
             scope.spawn(move || typos(&on_tree()?, false)),
             scope.spawn(move || repo_invariants(&tree_root(&on_tree()?)?)),
+            scope.spawn(move || crate::claude_mod::check_tree(&tree_root(&on_tree()?)?)),
         ];
         // `committed` reads the history, which only the checkout has.
         let mut results = vec![commits(checkout, message)];
