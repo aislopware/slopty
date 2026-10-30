@@ -4108,7 +4108,7 @@ impl Render for TerminalView {
             });
         }
         let focused = self.focus.is_focused(window);
-        self.note_focus(focused, cx);
+        self.note_focus(focused, window.insets().ime.bottom, cx);
         #[cfg(any(test, feature = "e2e"))]
         {
             self.renders = self.renders.saturating_add(1);
@@ -7227,6 +7227,71 @@ mod tests {
             cx.run_until_parked();
         }
         assert_eq!(thumbs_drawn_and_from_scratch(&host, cx), (0, 0), "faded: gone from both");
+    }
+
+    /// The cards centred on the terminal (the grid's size after a resize) in a frame the root
+    /// alone is told to draw (the terminal drawn again from the last frame), and in one drawn
+    /// from scratch at its moment.
+    fn sizes_drawn_and_from_scratch(
+        host: &Entity<Hosting>,
+        cx: &mut VisualTestContext,
+    ) -> (usize, usize) {
+        let terminal = cx.debug_bounds("terminal").expect("the terminal is drawn");
+        host.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| {
+            let scale = window.scale_factor();
+            let middle = terminal.center();
+            let (x, y) = (f32::from(middle.x) * scale, f32::from(middle.y) * scale);
+            let half = f32::from(terminal.size.width) * scale / 2.0;
+            let cards = |window: &Window| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|q| {
+                        let at = q.bounds.center();
+                        (at.x.0 - x).abs() < 2.0
+                            && (at.y.0 - y).abs() < 2.0
+                            && q.bounds.size.width.0 < half
+                            && q.corner_radii.top_left.0 > 0.0
+                    })
+                    .count()
+            };
+            window.draw(cx).clear(cx);
+            let drawn = cards(window);
+            window.repeat_frame_time();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            (drawn, cards(window))
+        })
+    }
+
+    /// The grid's size goes when its timer runs, not when a frame passes its 750 ms: a frame
+    /// that begins past them before the timer has run (the e2e's frame checker, as the phone's
+    /// soft keyboard rose) draws the size as a frame from scratch does, and once the timer runs
+    /// it is gone from both.
+    #[gpui::test]
+    fn a_frame_before_the_sizes_timer_draws_it_as_one_from_scratch(cx: &mut TestAppContext) {
+        let (host, view, cx) = hosted_terminal(cx);
+        cx.executor().advance_clock(overlays::SETTLING);
+        cx.simulate_resize(size(px(500.0), px(300.0)));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+        let (drawn, scratch) = sizes_drawn_and_from_scratch(&host, cx);
+        assert!(drawn > 0 && drawn == scratch, "resized: the size up in both, {drawn} {scratch}");
+
+        let built = view.read_with(cx, |view, _| view.renders);
+        clock_ahead(cx, overlays::RESIZE_SHOWN.saturating_mul(2));
+        let before = sizes_drawn_and_from_scratch(&host, cx);
+        assert_eq!(
+            view.read_with(cx, |view, _| view.renders),
+            built.saturating_add(1),
+            "drawn again only from scratch"
+        );
+        assert_eq!(before, (drawn, drawn), "past its time, before its timer ran: up in both");
+
+        cx.run_until_parked();
+        assert_eq!(sizes_drawn_and_from_scratch(&host, cx), (0, 0), "its timer ran: gone");
     }
 
     /// Every key the terminal received, oldest first, with the paste texts in between.
