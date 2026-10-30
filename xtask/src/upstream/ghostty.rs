@@ -20,8 +20,10 @@ use crate::tools::step;
 pub const WORKTREE: &str = ".research/ghostty";
 /// libghostty-vt-sys's build script, relative to the libghostty-rs checkout.
 const BUILD_RS: &str = "crates/libghostty-vt-sys/build.rs";
-/// The bindings generated from ghostty's headers, relative to the libghostty-rs checkout.
-const BINDINGS: &str = "crates/libghostty-vt-sys/src/bindings.rs";
+/// What the binding's `gen-bindings` writes from ghostty's headers, relative to the
+/// libghostty-rs checkout: the declarations every target shares, and each target's layout checks.
+const GENERATED: [&str; 2] =
+    ["crates/libghostty-vt-sys/src/bindings.rs", "crates/libghostty-vt-sys/src/layouts.rs"];
 const COMMIT_LINE: &str = "const GHOSTTY_COMMIT: &str = \"";
 const REPO_LINE: &str = "const GHOSTTY_REPO: &str = \"";
 
@@ -152,10 +154,11 @@ pub fn take_bindings(sh: &Shell, dir: &Utf8Path, patch: &Utf8Path) -> Result<()>
         return Ok(());
     }
     cmd!(sh, "git apply --index {patch}").run().context("applying the regenerated bindings")?;
-    let stray = cmd!(sh, "git diff --cached --name-only").read()?;
+    let changed = cmd!(sh, "git diff --cached --name-only").read()?;
+    let stray = strays(&changed);
     ensure!(
-        stray.lines().all(|file| file == BINDINGS),
-        "the runner's patch changes more than {BINDINGS}: {stray}"
+        stray.is_empty(),
+        "the runner's patch changes what gen-bindings does not write: {stray:?}"
     );
     let last = cmd!(sh, "git log -1 --format=%s").read()?;
     if let Some(pin) = last.strip_prefix("build: pin ghostty ") {
@@ -167,6 +170,11 @@ pub fn take_bindings(sh: &Shell, dir: &Utf8Path, patch: &Utf8Path) -> Result<()>
         step(subject, &cmd!(sh, "git commit --quiet -m {subject}"))?;
     }
     Ok(())
+}
+
+/// The files of `changed` (one path a line) that are none of what `gen-bindings` writes.
+fn strays(changed: &str) -> Vec<&str> {
+    changed.lines().filter(|file| !GENERATED.contains(file)).collect()
 }
 
 /// The commit this repository's `HEAD` records for the submodule at `checkout`.
@@ -222,7 +230,7 @@ const SHOWN: usize = 40;
 
 #[cfg(test)]
 mod tests {
-    use super::{pinned, repinned};
+    use super::{GENERATED, pinned, repinned, strays};
 
     const FORK: &str = "https://github.com/aislopware/ghostty.git";
     const OLD: &str = "7d0734aa89a85174bcf60a0c0626a6b8c2fb0bea";
@@ -252,5 +260,21 @@ mod tests {
         assert!(repinned("fn main() {}\n", NEW, FORK).is_err(), "no pin at all");
         let twice = format!("{}const GHOSTTY_COMMIT: &str = \"{OLD}\";\n", script(FORK));
         assert!(pinned(&twice).is_err(), "two pins");
+    }
+
+    /// The regenerated bindings may change what gen-bindings writes, the shared declarations and
+    /// the targets' layout checks, either or both, and nothing else.
+    #[test]
+    fn only_what_gen_bindings_writes_is_taken() {
+        let [bindings, layouts] = GENERATED;
+        assert!(strays(&format!("{bindings}\n{layouts}\n")).is_empty(), "both");
+        assert!(strays(layouts).is_empty(), "the layout checks alone");
+        assert!(strays("").is_empty(), "nothing");
+        let build = "crates/libghostty-vt-sys/build.rs";
+        assert_eq!(strays(&format!("{bindings}\n{build}")), [build]);
+        assert_eq!(
+            strays("crates/libghostty-vt-sys/src/layouts.rs.orig"),
+            ["crates/libghostty-vt-sys/src/layouts.rs.orig"]
+        );
     }
 }

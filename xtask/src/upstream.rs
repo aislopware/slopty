@@ -1127,36 +1127,9 @@ fn reconcile_local(
             .read()
             .is_ok_and(|out| !out.lines().any(|line| line.starts_with('+')))
     };
-    // A conflict resolved by hand rewrites the patch, so `git cherry` cannot vouch for it either:
-    // then accept the branch when it sits on a newer upstream than the fork and replays the
-    // fork's patches by subject, in order, before any fixes of its own. Upstream may have moved
-    // again since, so the branch's own base is what counts.
     let upstream_sha = &upstream.sha;
-    let replays_every_patch = || {
-        let read = |cmd: xshell::Cmd<'_>| cmd.quiet().read().ok();
-        let subjects = |range: &str| {
-            read(cmd!(sh, "git log --format=%s --reverse {range}"))
-                .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
-        };
-        let (Some(fork_base), Some(local_base)) = (
-            read(cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")),
-            read(cmd!(sh, "git merge-base {local} {upstream_sha}")),
-        ) else {
-            return false;
-        };
-        let (fork_base, local_base) = (fork_base.trim(), local_base.trim());
-        let rebased =
-            cmd!(sh, "git merge-base --is-ancestor {fork_base} {local_base}").quiet().run().is_ok();
-        let (Some(replayed), Some(patches)) = (
-            subjects(&format!("{local_base}..{local}")),
-            subjects(&format!("{fork_base}..{fork_sha}")),
-        ) else {
-            return false;
-        };
-        rebased && replayed.starts_with(&patches)
-    };
-    let rebased_ahead =
-        fork.strategy == Strategy::Rebase && (carries_every_patch() || replays_every_patch());
+    let replays = || replays_every_patch(sh, &local, fork_sha, upstream_sha);
+    let rebased_ahead = fork.strategy == Strategy::Rebase && (carries_every_patch() || replays());
     ensure!(
         fork_is_ancestor || rebased_ahead,
         "{}'s {} ({}) has diverged from {} ({}); reset it or push it first",
@@ -1168,6 +1141,36 @@ fn reconcile_local(
     );
     println!("  note: {branch} is ahead of the fork; taking the upstream into it too");
     Ok(())
+}
+
+/// Whether branch `local` replays the fork's patches, the commits of `fork_sha` past upstream
+/// `upstream_sha`, by subject and in order before any fixes of its own, on an upstream at least as
+/// new as the fork's. A conflict resolved by hand rewrites a patch, so `git cherry` cannot vouch
+/// for it, but its subject stays; upstream may have moved again since, so the branch's own base is
+/// what counts. A rebase replays no merge commit, so a merge in the fork's history is no patch,
+/// and it replays the rest in topological order, as they are read here.
+fn replays_every_patch(sh: &Shell, local: &str, fork_sha: &str, upstream_sha: &str) -> bool {
+    let read = |cmd: xshell::Cmd<'_>| cmd.quiet().read().ok();
+    let subjects = |range: &str| {
+        read(cmd!(sh, "git log --no-merges --topo-order --format=%s --reverse {range}"))
+            .map(|out| out.lines().map(str::to_owned).collect::<Vec<_>>())
+    };
+    let (Some(fork_base), Some(local_base)) = (
+        read(cmd!(sh, "git merge-base {fork_sha} {upstream_sha}")),
+        read(cmd!(sh, "git merge-base {local} {upstream_sha}")),
+    ) else {
+        return false;
+    };
+    let (fork_base, local_base) = (fork_base.trim(), local_base.trim());
+    let rebased =
+        cmd!(sh, "git merge-base --is-ancestor {fork_base} {local_base}").quiet().run().is_ok();
+    let (Some(replayed), Some(patches)) = (
+        subjects(&format!("{local_base}..{local}")),
+        subjects(&format!("{fork_base}..{fork_sha}")),
+    ) else {
+        return false;
+    };
+    rebased && replayed.starts_with(&patches)
 }
 
 /// A merge that git finished on its own can still leave `Cargo.lock` behind the merged manifests
@@ -1510,6 +1513,82 @@ fn days_from_civil(date: &str) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch repository: a shell in it whose git ignores the user's configuration (signing,
+    /// hooks, the default branch), on a first commit `base` on `main`.
+    fn scratch_repo(name: &str) -> Shell {
+        let dir =
+            std::env::temp_dir().join(format!("xtask-upstream-{name}-{}", std::process::id()));
+        let _gone = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let sh = Shell::new().expect("shell");
+        sh.change_dir(&dir);
+        sh.set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        sh.set_var("GIT_CONFIG_NOSYSTEM", "1");
+        for (key, value) in [
+            ("GIT_AUTHOR_NAME", "test"),
+            ("GIT_AUTHOR_EMAIL", "test@example.com"),
+            ("GIT_COMMITTER_NAME", "test"),
+            ("GIT_COMMITTER_EMAIL", "test@example.com"),
+        ] {
+            sh.set_var(key, value);
+        }
+        cmd!(sh, "git init -q -b main").run().expect("init");
+        commit(&sh, "base");
+        sh
+    }
+
+    /// A commit named `subject` adding a file of that name.
+    fn commit(sh: &Shell, subject: &str) {
+        sh.write_file(subject.replace(' ', "-"), subject).expect("write");
+        cmd!(sh, "git add -A").run().expect("add");
+        cmd!(sh, "git commit -q -m {subject}").run().expect("commit");
+    }
+
+    fn sha(sh: &Shell, rev: &str) -> String {
+        cmd!(sh, "git rev-parse {rev}").read().expect("a commit")
+    }
+
+    /// A fork whose history holds a merge (a pull request merged on GitHub) and an upstream that
+    /// moved on: the fork's patches as `fork`, upstream's head as `main`.
+    fn fork_with_a_merge(name: &str) -> Shell {
+        let sh = scratch_repo(name);
+        cmd!(sh, "git switch -q -c fork").run().expect("fork");
+        commit(&sh, "fork one");
+        cmd!(sh, "git switch -q -c pull").run().expect("pull");
+        commit(&sh, "fork two");
+        cmd!(sh, "git switch -q fork").run().expect("back");
+        cmd!(sh, "git merge -q --no-ff -m merge-the-pull pull").run().expect("merge");
+        commit(&sh, "fork three");
+        cmd!(sh, "git switch -q main").run().expect("main");
+        commit(&sh, "upstream moves");
+        sh
+    }
+
+    /// A rebase drops the fork's merge and replays its patches flat, a fix of its own after them:
+    /// that branch is ahead of the fork, not diverged.
+    #[test]
+    fn a_flat_replay_of_a_fork_with_a_merge_carries_every_patch() {
+        let sh = fork_with_a_merge("flat");
+        cmd!(sh, "git switch -q -c local fork").run().expect("local");
+        cmd!(sh, "git rebase -q main").run().expect("rebase");
+        commit(&sh, "a fix of its own");
+        let (local, fork, upstream) = (sha(&sh, "local"), sha(&sh, "fork"), sha(&sh, "main"));
+        assert!(replays_every_patch(&sh, &local, &fork, &upstream));
+    }
+
+    /// A replay that lost one of the fork's patches is still refused.
+    #[test]
+    fn a_replay_that_drops_a_patch_is_refused() {
+        let sh = fork_with_a_merge("dropped");
+        cmd!(sh, "git switch -q -c local main").run().expect("local");
+        for patch in ["fork one", "fork three"] {
+            let picked = sha(&sh, &format!(":/^{patch}"));
+            cmd!(sh, "git cherry-pick {picked}").quiet().ignore_stdout().run().expect("pick");
+        }
+        let (local, fork, upstream) = (sha(&sh, "local"), sha(&sh, "fork"), sha(&sh, "main"));
+        assert!(!replays_every_patch(&sh, &local, &fork, &upstream));
+    }
 
     /// A release counts once its numbered parts reach the awaited one's, compared as numbers.
     #[test]
