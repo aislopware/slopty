@@ -1089,24 +1089,27 @@ async fn probe(
 ) -> bool {
     let plan = workers::Probe::new(resume, link.rtt());
     let before = link.received_datagrams();
-    let started = std::time::Instant::now();
+    // The executor's clock, which a test moves by hand.
+    let started = cx.background_executor().now();
     link.ping();
     let mut doubted = false;
     loop {
-        let waited = started.elapsed();
-        if link.received_datagrams() != before {
-            if doubted {
-                view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Connected, cx));
+        let waited = cx.background_executor().now().saturating_duration_since(started);
+        let answered = link.received_datagrams() != before;
+        match plan.step(waited, answered, doubted) {
+            workers::ProbeStep::Answered => {
+                if doubted {
+                    view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Connected, cx));
+                }
+                tracing::info!(resume = resume.name(), ?waited, "link answered after a resume");
+                return true;
             }
-            tracing::info!(resume = resume.name(), ?waited, "link answered after a resume");
-            return true;
-        }
-        if waited >= plan.deadline {
-            return false;
-        }
-        if !doubted && waited >= plan.doubt_after {
-            doubted = true;
-            view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Checking, cx));
+            workers::ProbeStep::GiveUp => return false,
+            workers::ProbeStep::Doubt => {
+                doubted = true;
+                view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Checking, cx));
+            }
+            workers::ProbeStep::Wait => {}
         }
         cx.background_executor().timer(workers::PROBE_POLL).await;
     }

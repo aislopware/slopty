@@ -104,6 +104,35 @@ impl Probe {
         };
         Self { deadline, doubt_after }
     }
+
+    /// What the probe does at a look `waited` after its ping: the link counts as alive the
+    /// moment anything arrived (`answered`), is given up at the deadline, and has its views set
+    /// back once (`doubted`: they are already) from [`Self::doubt_after`].
+    #[must_use]
+    pub fn step(&self, waited: Duration, answered: bool, doubted: bool) -> ProbeStep {
+        if answered {
+            ProbeStep::Answered
+        } else if waited >= self.deadline {
+            ProbeStep::GiveUp
+        } else if !doubted && waited >= self.doubt_after {
+            ProbeStep::Doubt
+        } else {
+            ProbeStep::Wait
+        }
+    }
+}
+
+/// What a [`Probe`] does at a look.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeStep {
+    /// The worker answered: the link lives, and its views come back if they were set back.
+    Answered,
+    /// Nothing came by the deadline: the link is given up and dialled again at once.
+    GiveUp,
+    /// Set the link's views back now ([`WorkerStatus::Checking`]), and look again.
+    Doubt,
+    /// Look again after [`PROBE_POLL`].
+    Wait,
 }
 
 /// A link came up for worker `id`: its slot takes the link and the answered name.
@@ -201,6 +230,39 @@ mod tests {
         }
         assert_eq!(Probe::new(Resume::Foreground, lan).doubt_after, DOUBT_GRACE);
         assert_eq!(Probe::new(Resume::Foreground, derp).doubt_after, Duration::from_millis(240));
+    }
+
+    /// Walked look by look as the app's probe walks it, a probe nothing answers gives its link
+    /// up at the first look at its deadline, so a dead link is dialled again within a second of
+    /// the resume; an answer is taken at the look it comes by; the views are set back once, at
+    /// once after the device was away and after a healthy round trip otherwise.
+    #[test]
+    fn a_probe_gives_a_dead_link_up_at_its_deadline() {
+        let walk = |probe: Probe, answer: Option<Duration>| {
+            let (mut waited, mut doubted) = (Duration::ZERO, None);
+            loop {
+                let answered = answer.is_some_and(|at| waited >= at);
+                match probe.step(waited, answered, doubted.is_some()) {
+                    ProbeStep::Answered => return (true, waited, doubted),
+                    ProbeStep::GiveUp => return (false, waited, doubted),
+                    ProbeStep::Doubt => {
+                        doubted = Some(waited);
+                        waited = waited.saturating_add(PROBE_POLL);
+                    }
+                    ProbeStep::Wait => waited = waited.saturating_add(PROBE_POLL),
+                }
+            }
+        };
+        let ms = Duration::from_millis;
+        let (lan, derp) = (Some(ms(3)), Some(ms(120)));
+        let woke = |rtt| Probe::new(Resume::Woke, rtt);
+        let front = |rtt| Probe::new(Resume::Foreground, rtt);
+        assert_eq!(walk(woke(lan), None), (false, PROBE_FLOOR, Some(Duration::ZERO)));
+        assert_eq!(walk(woke(None), None), (false, PROBE_CEILING, Some(Duration::ZERO)));
+        assert_eq!(walk(front(derp), None), (false, ms(480), Some(ms(240))));
+        assert_eq!(walk(front(derp), Some(ms(101))), (true, ms(102), None), "a healthy answer");
+        assert_eq!(walk(front(derp), Some(ms(300))), (true, ms(300), Some(ms(240))));
+        assert_eq!(walk(woke(lan), Some(Duration::ZERO)), (true, Duration::ZERO, None));
     }
 
     /// A resume goes to a live link's check; a worker without one is dialled now.
