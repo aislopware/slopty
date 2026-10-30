@@ -28,3 +28,20 @@ runs:
       with:
         version: ${{ steps.version.outputs.version }}
         use-cache: ${{ inputs.use-cache }}
+    # The packages ghostty's build fetches (highway, wuffs and the rest of its lazy
+    # dependencies) live under the global cache's `p/`, by their hash. Only that folder is
+    # kept, keyed by the manifests that name them and by the job, since a job saves only the
+    # packages its own builds fetched (the fuzz build fetches lazy ones the others never ask
+    # for) and a key once saved is never written again. A run then fetches nothing, so an
+    # outage of deps.files.ghostty.org (a 500 failed run 41035489712's fuzz build) cannot fail
+    # a gate.
+    - id: packages
+      shell: bash
+      run: echo "dir=${ZIG_GLOBAL_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/zig}/p" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      with:
+        path: ${{ steps.packages.outputs.dir }}
+        key: zig-packages-${{ runner.os }}-${{ github.job }}-${{ hashFiles('vendor/ghostty/build.zig.zon', 'vendor/ghostty/pkg/**/build.zig.zon') }}
+        restore-keys: |
+          zig-packages-${{ runner.os }}-${{ github.job }}-
+          zig-packages-${{ runner.os }}-
