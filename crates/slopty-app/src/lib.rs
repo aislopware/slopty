@@ -1414,6 +1414,12 @@ pub fn open_workspace(cx: &mut App, handle: tokio::runtime::Handle) {
     // The self-test socket, for `cargo xtask e2e app`; never set for a normal launch.
     #[cfg(feature = "e2e")]
     if let Some(socket) = std::env::var_os(slopty_e2e::SOCKET_ENV) {
+        // The window counts as looked at, in front or not: a guest's other apps decide which
+        // window is in front, so a session open in it read as seen on one run and unread on
+        // the next. A test of the OS's own word sets `SLOPTY_E2E_AWAY`.
+        if std::env::var_os("SLOPTY_E2E_AWAY").is_none() {
+            slopty_shell::presence::hold(cx);
+        }
         let runtime = workspace.read(cx).runtime.clone();
         e2e::serve(socket.into(), workspace, window, &runtime, cx);
     }

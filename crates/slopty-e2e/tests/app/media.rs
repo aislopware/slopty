@@ -131,11 +131,6 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
         drawn.a11y.iter().all(|n| n.label.as_deref() != Some("Loading visual…")),
         "the script was read and ran"
     );
-    // The thread's row can say its finished turn again after the look, which then reads it
-    // unread unless the window is the active one, as the guest's parallel apps decide: look
-    // again, and wait for the read.
-    drv.keys("cmd-1").await.unwrap();
-    seen(drv, "the thread read", STEP, |d| node(d, "Status", "Done").is_none()).await;
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "media-visual", &[]).await;
 

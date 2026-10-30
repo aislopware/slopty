@@ -10472,7 +10472,8 @@ impl Render for Shell {
                 // nothing delivered; 2026-08-04 incident) then heals within
                 // seconds of the user looking at the app rather than waiting
                 // out the background probe cadence.
-                let window_active = window.is_window_active();
+                // slopty: whether the person looks, as the OS says or the e2e socket holds.
+                let window_active = crate::presence::looking(window, cx);
                 if window_active && !self.was_window_active {
                     self.state.update(cx, |s, cx| s.probe_sync(cx));
                 }

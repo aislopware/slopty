@@ -421,13 +421,21 @@ async fn a_closed_tab_comes_back_with_cmd_shift_t() {
         .unwrap()
         .bounds;
     drv.click(diffs[0] + diffs[2] / 2.0, diffs[1] + diffs[3] / 2.0).await.unwrap();
-    let open = drv.wait_for("the Changes tab", STEP, |d| !tab_closes(d).is_empty()).await.unwrap();
+    // The Changes tab's own close: the inspector's tab is open from the start, so any tab's
+    // close could stand in for it while the new one is on its way.
+    let changes = |d: &slopty_e2e::Dump| d.a11y_node("Button", Some("Close Changes")).is_some();
+    let open = drv.wait_for("the Changes tab", STEP, changes).await.unwrap();
     let tabs = tab_closes(&open).len();
-    let [x, y, w, h] = *tab_closes(&open).last().unwrap();
+    let [x, y, w, h] = open.a11y_node("Button", Some("Close Changes")).unwrap().bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-    drv.wait_for("the tab closed", STEP, |d| tab_closes(d).len() == tabs - 1).await.unwrap();
+    drv.wait_for("the tab closed", STEP, |d| !changes(d) && tab_closes(d).len() == tabs - 1)
+        .await
+        .unwrap();
     drv.keys("cmd-shift-t").await.unwrap();
-    let back = drv.wait_for("the tab back", STEP, |d| tab_closes(d).len() == tabs).await.unwrap();
+    let back = drv
+        .wait_for("the tab back", STEP, |d| changes(d) && tab_closes(d).len() == tabs)
+        .await
+        .unwrap();
     println!("A11Y reopened {}", slopty_e2e::frame_text(&back.a11y));
     stack.shutdown().await;
 }

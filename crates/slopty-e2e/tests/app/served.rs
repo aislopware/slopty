@@ -40,10 +40,10 @@ pub fn all_holding<'a>(dump: &'a Dump, role: &str, words: &str) -> Vec<&'a A11yN
 }
 
 /// Whether the sidebar's row of the chat titled `title` says its last turn is unread: its
-/// button followed by a "Done" status. The window of the self-test is never in front, so only
-/// opening a chat marks it seen (the shell marks the chat in front seen as it draws only while
-/// its window is active); a test that renders an opened chat waits for the mark, which goes to
-/// the worker and comes back in the chat's row.
+/// button followed by a "Done" status. The app counts its window as looked at whether or not it
+/// is in front (`slopty_shell::presence`), so the chat in front is marked seen as it opens and as
+/// its turns end; a test that renders an opened chat waits for the mark, which goes to the worker
+/// and comes back in the chat's row.
 pub fn unread(dump: &Dump, title: &str) -> bool {
     dump.a11y.windows(2).any(|pair| {
         let [row, status] = pair else { return false };

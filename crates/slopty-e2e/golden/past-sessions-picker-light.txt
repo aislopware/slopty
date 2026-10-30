@@ -2,7 +2,6 @@ Window
 Button │ Filter projects: All projects
 Button │ Done, 2
 Button │ Explain the parser
-Status │ Done
 Button │ Say hello
 Status │ Done
 Button │ Inactive, 0
@@ -15,7 +14,6 @@ Splitter │ Resize sidebar
 Group
 Terminal │ shell │ >
 Heading │ Explain the parser
-Status │ Done
 Article │ You
 Paragraph │ Explain the parser
 Button │ Copy message

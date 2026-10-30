@@ -221,10 +221,8 @@ async fn changes_files_and_settings_show_the_threads_work() {
     stack.shutdown().await;
 }
 
-/// A stand-in agent's thread in the repository, selected and read, with the files column open
-/// on its folder. Its turn has ended before it is selected, so the look reads it at once: a turn
-/// that ended after the look would stay unread or not by whether the window was the active one,
-/// which the guest's parallel apps decide, not the test.
+/// A stand-in agent's thread in the repository, selected, with the files column open on its
+/// folder.
 async fn files_column() -> ServedApp {
     let mut stack = ServedApp::launch_rooted(MACHINE, &[], |_root| {
         vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
@@ -251,15 +249,11 @@ async fn files_column() -> ServedApp {
 
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    drv.wait_for("the agent's turn ended, unread", STEP, |d| node(d, "Status", "Done").is_some())
-        .await
-        .unwrap();
     drv.keys("cmd-1").await.unwrap();
     drv.keys("cmd-e").await.unwrap();
     drv.wait_for("the files column", STEP, |d| node(d, "Button", "Hide files panel").is_some())
         .await
         .unwrap();
-    drv.wait_for("the thread read", STEP, |d| node(d, "Status", "Done").is_none()).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     stack
 }

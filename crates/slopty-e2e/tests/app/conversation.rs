@@ -24,8 +24,7 @@ async fn stack() -> ServedApp {
 }
 
 /// Open the one session once the app holds its finished turn, and wait until it reads as seen:
-/// its row says nothing more, whether or not the guest's window is the active one, so a golden
-/// of it never catches the row before or after the look.
+/// its row says nothing more, so a golden of it never catches the row before the mark is back.
 async fn open_read(drv: &mut Driver) {
     seen(drv, "the finished session's row", STEP, |d| node(d, "Status", "Done").is_some()).await;
     open_thread(drv, 1).await;

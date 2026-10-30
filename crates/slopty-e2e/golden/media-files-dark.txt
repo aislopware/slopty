@@ -2,7 +2,6 @@ Window
 Button │ Filter projects: All projects
 Button │ Done, 1
 Button │ Chart:…
-Status │ Done
 Button │ Inactive, 0
 Button │ History: past Claude Code sessions
 Button │ Server: e2e-server, Connected
@@ -11,7 +10,6 @@ Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
 Heading │ Chart:…
-Status │ Done
 Article │ You
 Paragraph │ Show the files
 Button │ Copy message

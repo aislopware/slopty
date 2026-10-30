@@ -52,6 +52,7 @@ pub mod overscroll;
 pub mod page; // slopty: a page an agent shows inline, as its card
 pub mod pickers;
 pub mod popover;
+pub mod presence; // slopty: whether the person looks at the window
 pub mod project_actions;
 pub mod rail;
 mod roll_text;
