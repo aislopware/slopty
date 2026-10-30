@@ -18,7 +18,9 @@ mod tests {
     use slopty_proto::handshake::Hello;
     use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest, SourceState};
-    use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+    use slopty_proto::terminal::{
+        OpenSession, SessionState, TermError, TermEvent, TermRequest, TermSize,
+    };
     use slopty_proto::transfer::{
         ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Purpose, Rep, TunnelHost,
         TunnelOpen, TunnelRefusal,
@@ -878,6 +880,50 @@ mod tests {
         .await
         .expect("the session stream ends");
         assert!(matches!(ended, slopty_net::NetError::Closed), "a clean end: {ended}");
+    }
+
+    /// Read `events` until one that `wanted` holds of.
+    async fn next_event(events: &mut FramedRecv<TermEvent>, wanted: impl Fn(&TermEvent) -> bool) {
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while !wanted(&tokio::time::timeout_at(deadline, events.recv()).await.unwrap().unwrap()) {}
+    }
+
+    /// ↩ on a shell that ended, through the daemon: refused while it runs, then the shell runs
+    /// again under the same id on the same session stream, below the old screen and a divider,
+    /// and the summary every client is sent runs again.
+    #[tokio::test]
+    async fn a_shell_that_ended_starts_again_on_its_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut guard, addr) = daemons(dir.path()).await;
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+        let (session, mut events) = open_shell_and_see(&mut worker, "first-run").await;
+        let state_of = |msg: &WorkerMsg| match msg {
+            WorkerMsg::SessionChanged(summary) if summary.id == session => Some(summary.state),
+            _ => None,
+        };
+        let restart = ClientMsg::Term { session, req: TermRequest::Restart };
+        worker.tx.send(&restart).await.unwrap();
+        let refused = next_msg(&mut worker, |msg| match msg {
+            WorkerMsg::Term { session: s, event: TermEvent::Error(e) } if s == session => Some(e),
+            _ => None,
+        })
+        .await;
+        assert_eq!(refused, TermError::Restart(slopty_worker::manager::STILL_RUNS.to_owned()));
+
+        let exit = TermRequest::Raw(b"exit 3\n".to_vec());
+        worker.tx.send(&ClientMsg::Term { session, req: exit }).await.unwrap();
+        next_event(&mut events, |ev| *ev == TermEvent::Exited { status: Some(3) }).await;
+        let ended = SessionState::Exited { status: Some(3) };
+        next_msg(&mut worker, |msg| state_of(&msg).filter(|state| *state == ended)).await;
+
+        worker.tx.send(&restart).await.unwrap();
+        next_event(&mut events, |ev| *ev == TermEvent::Restarted).await;
+        wait_for_text(&mut events, "Started again").await;
+        next_msg(&mut worker, |msg| state_of(&msg).filter(|s| *s == SessionState::Running)).await;
+        let echo = TermRequest::Raw(b"echo second'-run'\n".to_vec());
+        worker.tx.send(&ClientMsg::Term { session, req: echo }).await.unwrap();
+        wait_for_text(&mut events, "second-run").await;
     }
 
     /// A client that stops reading while another floods the worker with renames falls behind

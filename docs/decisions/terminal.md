@@ -1554,6 +1554,33 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   summary, the screen stays readable, `Close` ends it); workspace
   `an_exited_shell_stays_until_it_is_closed`, `an_exited_shell_offers_restart_and_close`.
 
+- ✅ **An ended session starts again in place** (2026-10-30). ↩ on the bar of a session whose
+  program ended sends `TermRequest::Restart`. Opening a new session for it would have lost the
+  item, the row, the tab and the screen. Ruling: the worker runs the program again under the same
+  id, from the session's kept recipe (`slopty_worker::restore`): its command and the
+  request's variables, in the directory its shell was last in (home when that is gone), at the
+  size it has now. ptyd closes the ended child's session and spawns the new one under the id,
+  and the session's actor takes the new master in place. Its viewers stay attached and its
+  screen stays. The ended program's modes are switched off, as for a lost shell, and a divider
+  reading "Started again" goes below the old screen. The viewers hear `TermEvent::Restarted`,
+  which clears the client's exit and so the view's bar, and everyone else gets the summary back
+  in `Running`. An agent a start opened the session for comes back by its thread, kept in the
+  recipe with the start's choices: Claude Code `--resume`s its session, pi takes its session,
+  and Codex takes its own thread up when the start named one, else Codex's list of the folder's
+  sessions opens. The agent is told nothing, because its first prompt and the seat's system text
+  are already in the conversation. Rerunning the command would have started a new conversation
+  and typed the first prompt again. The restart is refused while the program runs, while another
+  restart holds the session (two clients pressing ↩ at once), and when nothing is kept of how it
+  was started. The refusal comes back as `TermError::Restart`, in words. An exit of the new
+  program that ptyd reports while the restart still holds the session is kept until the restart
+  lets go, then applied. Otherwise the actor would take it for the old program's end, and the
+  session would read as running for good. Tests: worker
+  `an_ended_session_starts_again_below_its_screen`,
+  `a_run_that_ends_at_once_ends_after_the_restart`; daemon
+  `a_shell_that_ended_starts_again_on_its_stream`,
+  `a_claude_code_that_ended_takes_its_conversation_up_again`; client
+  `events_are_kept_and_re_emitted_as_effects`.
+
 - ✅ **A view scrolled up holds still, and a pill counts the lines below** (2026-09-25). The
   view's offset counts lines up from the bottom, so the rows it showed slid up under the
   reader as output arrived, although `TermState::apply` said it kept them anchored. Every Mac

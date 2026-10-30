@@ -257,7 +257,31 @@ impl Daemon {
         }
         closed
     }
+
+    /// Start `session`'s program again once it has ended, at the person's word
+    /// ([`slopty_proto::terminal::TermRequest::Restart`]): under the same id, below the old
+    /// screen and a divider, the command it was opened with where it last was; the agent a start
+    /// opened it for by its thread, its conversation taken up again. Every client and the
+    /// server hear how it stands after.
+    pub async fn restart_session(&self, session: SessionId) -> Result<(), WorkerError> {
+        let recipe = self.worker.restarting(session).await?;
+        let run = match (recipe.started.clone(), &self.threads) {
+            (Some(started), Some(threads)) => {
+                threads.again(session, started).await.map_err(WorkerError::NotRestarted)
+            }
+            (Some(_), None) => Err(WorkerError::NotRestarted(NO_THREADS.to_owned())),
+            (None, _) => self.worker.restart(session, &recipe.again(), None).await,
+        };
+        self.worker.restarted(session);
+        if let Some(summary) = self.worker.summary(session).await {
+            let _sent = self.events.send(slopty_proto::WorkerMsg::SessionChanged(summary));
+        }
+        run
+    }
 }
+
+/// Why an agent's terminal is not started again on a worker whose threads did not open.
+const NO_THREADS: &str = "its agent's threads are not open on this machine";
 
 /// How often the exited sessions are checked for a viewer. The bound is a day, so ten minutes
 /// late is nothing.

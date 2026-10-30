@@ -1758,6 +1758,21 @@ impl Peer<'_> {
                     }
                 });
             }
+            TermRequest::Restart => {
+                let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
+                self.tasks.spawn(async move {
+                    match daemon.restart_session(session).await {
+                        Ok(()) => tracing::info!(%client, %session, "started again on request"),
+                        Err(WorkerError::NoSuchSession) => {
+                            report(&out, client, session, TermError::NoSuchSession).await;
+                        }
+                        // Its program did not start, whatever the layer that said so.
+                        Err(e) => {
+                            report(&out, client, session, TermError::Restart(e.to_string())).await;
+                        }
+                    }
+                });
+            }
             TermRequest::DragEnter { drag, items } => self.drag_enter(session, drag, items),
             TermRequest::DragLeave => {
                 self.daemon.dnd.term_left(session, self.client);
