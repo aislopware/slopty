@@ -3,7 +3,12 @@ name = "slopty-view-rpc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish.workspace = true
+description = "The calls the Slopty shell makes of its view model, in process"
+
+[lints]
+workspace = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -13,6 +18,7 @@ serde_json = "1"
 thiserror = "2"
 async-trait = "0.1"
 tracing = "0.1"
+parking_lot.workspace = true
 
 [dev-dependencies]
 

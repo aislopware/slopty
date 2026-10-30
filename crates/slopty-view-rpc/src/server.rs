@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::StreamExt as _;
 use tokio::sync::mpsc;
 
 use crate::{ClientFrame, RpcError, RpcReply, RpcService, ServerFrame};
@@ -43,7 +43,7 @@ pub async fn serve_connection(
                 continue;
             };
             let task = tokio::spawn(handle_request(
-                service.clone(),
+                Arc::clone(&service),
                 out.clone(),
                 frame.id,
                 method,
@@ -68,7 +68,7 @@ async fn handle_request(
         let out = out.clone();
         async move {
             match serde_json::to_string(&frame) {
-                Ok(json) => out.send(json).await.map_err(|_| RpcError::Closed),
+                Ok(json) => out.send(json).await.map_err(|_closed| RpcError::Closed),
                 Err(err) => {
                     tracing::error!(error = %err, "rpc: failed to serialize server frame");
                     Err(RpcError::Closed)
@@ -78,40 +78,19 @@ async fn handle_request(
     };
     match service.handle(&method, params).await {
         Ok(RpcReply::Value(value)) => {
-            let _ = send(ServerFrame {
-                id,
-                ok: Some(value),
-                ..Default::default()
-            })
-            .await;
+            let _gone = send(ServerFrame { id, ok: Some(value), ..Default::default() }).await;
         }
         Ok(RpcReply::Stream(mut stream)) => {
             while let Some(item) = stream.next().await {
-                if send(ServerFrame {
-                    id,
-                    item: Some(item),
-                    ..Default::default()
-                })
-                .await
-                .is_err()
-                {
+                if send(ServerFrame { id, item: Some(item), ..Default::default() }).await.is_err() {
                     return; // connection gone
                 }
             }
-            let _ = send(ServerFrame {
-                id,
-                done: true,
-                ..Default::default()
-            })
-            .await;
+            let _gone = send(ServerFrame { id, done: true, ..Default::default() }).await;
         }
         Err(err) => {
-            let _ = send(ServerFrame {
-                id,
-                err: Some(err.to_string()),
-                ..Default::default()
-            })
-            .await;
+            let _gone =
+                send(ServerFrame { id, err: Some(err.to_string()), ..Default::default() }).await;
         }
     }
 }
