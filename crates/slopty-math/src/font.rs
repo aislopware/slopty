@@ -124,11 +124,7 @@ pub(crate) enum Stretched {
 }
 
 fn percent(value: i16, default: f32) -> f32 {
-    if (1..=100).contains(&value) {
-        value as f32 / 100.0
-    } else {
-        default
-    }
+    if (1..=100).contains(&value) { value as f32 / 100.0 } else { default }
 }
 
 /// Hard ceiling on parts in one assembly (a hostile `\left(` 10 km tall).
@@ -248,10 +244,7 @@ impl MathFont {
                     .collect();
                 indices.sort_unstable();
                 indices.dedup();
-                indices
-                    .into_iter()
-                    .filter_map(|i| gsub.lookups.get(i))
-                    .collect()
+                indices.into_iter().filter_map(|i| gsub.lookups.get(i)).collect()
             })
             .unwrap_or_default();
         Ok(Self {
@@ -305,14 +298,12 @@ impl MathFont {
     /// The font's full name, e.g. "STIX Two Math".
     pub fn name(&self) -> Option<String> {
         let names = self.face.names();
-        [ttf_parser::name_id::FULL_NAME, ttf_parser::name_id::FAMILY]
-            .into_iter()
-            .find_map(|id| {
-                names
-                    .into_iter()
-                    .filter(|n| n.name_id == id && n.is_unicode())
-                    .find_map(|n| n.to_string())
-            })
+        [ttf_parser::name_id::FULL_NAME, ttf_parser::name_id::FAMILY].into_iter().find_map(|id| {
+            names
+                .into_iter()
+                .filter(|n| n.name_id == id && n.is_unicode())
+                .find_map(|n| n.to_string())
+        })
     }
 
     pub fn units_per_em(&self) -> u16 {
@@ -349,10 +340,7 @@ impl MathFont {
                     height: r.y_max as f32,
                     depth: -(r.y_min as f32),
                 },
-                None => Metrics {
-                    advance,
-                    ..Metrics::default()
-                },
+                None => Metrics { advance, ..Metrics::default() },
             }
         })
     }
@@ -368,16 +356,12 @@ impl MathFont {
                     Some(SubstitutionSubtable::Single(single)) => {
                         use ttf_parser::gsub::SingleSubstitution::*;
                         match single {
-                            Format1 { coverage, delta } => coverage
-                                .get(id)
-                                .map(|_| (glyph as i32 + delta as i32) as u16),
-                            Format2 {
-                                coverage,
-                                substitutes,
-                            } => coverage
-                                .get(id)
-                                .and_then(|c| substitutes.get(c))
-                                .map(|g| g.0),
+                            Format1 { coverage, delta } => {
+                                coverage.get(id).map(|_| (glyph as i32 + delta as i32) as u16)
+                            }
+                            Format2 { coverage, substitutes } => {
+                                coverage.get(id).and_then(|c| substitutes.get(c)).map(|g| g.0)
+                            }
                         }
                     }
                     Some(SubstitutionSubtable::Alternate(alt)) => alt
@@ -419,11 +403,8 @@ impl MathFont {
 
     /// The cut-in kern at `corner` for a correction height (font units).
     pub(crate) fn kern(&self, glyph: u16, corner: Corner, height: f32) -> f32 {
-        let Some(info) = self
-            .math
-            .glyph_info
-            .and_then(|i| i.kern_infos)
-            .and_then(|k| k.get(GlyphId(glyph)))
+        let Some(info) =
+            self.math.glyph_info.and_then(|i| i.kern_infos).and_then(|k| k.get(GlyphId(glyph)))
         else {
             return 0.0;
         };
@@ -447,22 +428,14 @@ impl MathFont {
 
     fn construction(&self, glyph: u16, vertical: bool) -> Option<GlyphConstruction<'static>> {
         let v = self.math.variants?;
-        let set = if vertical {
-            v.vertical_constructions
-        } else {
-            v.horizontal_constructions
-        };
+        let set = if vertical { v.vertical_constructions } else { v.horizontal_constructions };
         set.get(GlyphId(glyph))
     }
 
     /// Ink extent along the stretch axis, in font units.
     fn extent(&self, glyph: u16, vertical: bool) -> f32 {
         let m = self.metrics(glyph);
-        if vertical {
-            m.height + m.depth
-        } else {
-            m.advance
-        }
+        if vertical { m.height + m.depth } else { m.advance }
     }
 
     /// The first size variant whose extent reaches `min` (or the base glyph if
@@ -545,11 +518,7 @@ impl MathFont {
         let gaps = seq.len().saturating_sub(1) as f32;
         let total: f32 = seq.iter().map(|p| p.full_advance as f32).sum();
         let overlap = if gaps > 0.0 {
-            let o_max = if o_max.is_finite() {
-                o_max.max(o_min)
-            } else {
-                o_min
-            };
+            let o_max = if o_max.is_finite() { o_max.max(o_min) } else { o_min };
             ((total - target) / gaps).clamp(o_min, o_max)
         } else {
             0.0
@@ -557,10 +526,7 @@ impl MathFont {
         let mut offset = 0.0;
         let mut out = Vec::with_capacity(seq.len());
         for p in &seq {
-            out.push(Part {
-                glyph: p.glyph_id.0,
-                offset,
-            });
+            out.push(Part { glyph: p.glyph_id.0, offset });
             offset += p.full_advance as f32 - overlap;
         }
         let length = total - gaps * overlap;
@@ -603,21 +569,25 @@ impl OutlineBuilder for Transform<'_> {
         let (x, y) = self.p(x, y);
         self.sink.move_to(x, y);
     }
+
     fn line_to(&mut self, x: f32, y: f32) {
         let (x, y) = self.p(x, y);
         self.sink.line_to(x, y);
     }
+
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
         let (x1, y1) = self.p(x1, y1);
         let (x, y) = self.p(x, y);
         self.sink.quad_to(x1, y1, x, y);
     }
+
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
         let (x1, y1) = self.p(x1, y1);
         let (x2, y2) = self.p(x2, y2);
         let (x, y) = self.p(x, y);
         self.sink.cubic_to(x1, y1, x2, y2, x, y);
     }
+
     fn close(&mut self) {
         self.sink.close();
     }

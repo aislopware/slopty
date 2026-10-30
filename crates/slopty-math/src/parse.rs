@@ -9,9 +9,8 @@
 use std::ops::Range;
 
 use crate::ast::{Align, Array, ArrayKind, Class, Dim, List, Node, Style};
-use crate::symbols;
 use crate::unicode::Variant;
-use crate::{Error, ErrorKind};
+use crate::{Error, ErrorKind, symbols};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Tok<'a> {
@@ -46,13 +45,7 @@ enum Infix {
 }
 
 pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
-    let mut p = Parser {
-        src,
-        pos: 0,
-        depth: 0,
-        max_depth,
-        variant: Variant::Normal,
-    };
+    let mut p = Parser { src, pos: 0, depth: 0, max_depth, variant: Variant::Normal };
     let mut rows: Vec<Vec<List>> = Vec::new();
     let mut row: Vec<List> = Vec::new();
     let mut gaps = Vec::new();
@@ -74,10 +67,7 @@ pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
             Ended::Brace => return Err(Error::new(ErrorKind::Unexpected("}".into()), r)),
             Ended::Right => return Err(Error::new(ErrorKind::Unexpected("\\right".into()), r)),
             Ended::End(name) => {
-                return Err(Error::new(
-                    ErrorKind::Unexpected(format!("\\end{{{name}}}")),
-                    r,
-                ));
+                return Err(Error::new(ErrorKind::Unexpected(format!("\\end{{{name}}}")), r));
             }
             Ended::Bracket => unreachable!("brackets only end optional arguments"),
         }
@@ -89,11 +79,7 @@ pub(crate) fn parse(src: &str, max_depth: usize) -> Result<List, Error> {
     // treat it as the environment they meant.
     trim_last_row(&mut rows);
     Ok(vec![Node::Array(Array {
-        kind: if columns {
-            ArrayKind::Aligned
-        } else {
-            ArrayKind::Gathered
-        },
+        kind: if columns { ArrayKind::Aligned } else { ArrayKind::Gathered },
         cols: Vec::new(),
         rows,
         gaps,
@@ -149,9 +135,8 @@ impl<'a> Parser<'a> {
                 match rest.chars().next() {
                     None => Tok::Cmd(""),
                     Some(c) if c.is_ascii_alphabetic() => {
-                        let len = rest
-                            .find(|c: char| !c.is_ascii_alphabetic())
-                            .unwrap_or(rest.len());
+                        let len =
+                            rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
                         self.pos += len;
                         Tok::Cmd(&rest[..len])
                     }
@@ -249,10 +234,7 @@ impl<'a> Parser<'a> {
                 }
                 Tok::Cmd(name @ ("over" | "atop" | "choose")) => {
                     if infix.is_some() {
-                        return Err(Error::new(
-                            ErrorKind::Unexpected(format!("\\{name}")),
-                            range,
-                        ));
+                        return Err(Error::new(ErrorKind::Unexpected(format!("\\{name}")), range));
                     }
                     let kind = match name {
                         "over" => Infix::Over,
@@ -456,9 +438,8 @@ impl<'a> Parser<'a> {
                         continue;
                     };
                     if next.is_ascii_alphabetic() {
-                        let len = rest
-                            .find(|c: char| !c.is_ascii_alphabetic())
-                            .unwrap_or(rest.len());
+                        let len =
+                            rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
                         let name = &rest[..len];
                         for _ in 0..len {
                             chars.next();
@@ -510,12 +491,7 @@ impl<'a> Parser<'a> {
             Tok::Char('~') => Node::Space(Dim::Em(0.25)),
             Tok::Char(c) => {
                 let (ch, class) = symbols::char_class(c);
-                Node::Char {
-                    ch,
-                    class,
-                    variant: self.variant,
-                    at,
-                }
+                Node::Char { ch, class, variant: self.variant, at }
             }
             Tok::Open => Node::group(self.group_body(&range)?),
             Tok::Cmd(name) => return self.command(name, range),
@@ -565,11 +541,7 @@ impl<'a> Parser<'a> {
                     b'm' => Rel,
                     _ => Ord,
                 };
-                Node::Big {
-                    delim: self.delim(&range)?,
-                    size,
-                    class,
-                }
+                Node::Big { delim: self.delim(&range)?, size, class }
             }
             "frac" | "dfrac" | "tfrac" | "cfrac" | "binom" | "dbinom" | "tbinom" => {
                 let num = self.arg(&range)?;
@@ -597,11 +569,7 @@ impl<'a> Parser<'a> {
             "operatorname" | "operatornamewithlimits" => {
                 let star = self.star() || name == "operatornamewithlimits";
                 let text = self.text(&range)?;
-                Node::NamedOp {
-                    name: text.trim().to_string(),
-                    default_limits: star,
-                    limits: None,
-                }
+                Node::NamedOp { name: text.trim().to_string(), default_limits: star, limits: None }
             }
             "text" | "textrm" | "textup" | "textnormal" | "mbox" | "hbox" | "textmd" | "textbf"
             | "textit" | "emph" | "textsf" | "texttt" | "fbox" => {
@@ -614,11 +582,7 @@ impl<'a> Parser<'a> {
                 };
                 let text = self.text(&range)?;
                 let node = Node::Text { text, variant, at };
-                if name == "fbox" {
-                    Node::Boxed(vec![node])
-                } else {
-                    node
-                }
+                if name == "fbox" { Node::Boxed(vec![node]) } else { node }
             }
             "mathrm" | "mathit" | "mathbf" | "mathbb" | "mathcal" | "mathscr" | "mathfrak"
             | "mathsf" | "mathtt" | "boldsymbol" | "bm" | "mathbfit" | "mathnormal" | "pmb"
@@ -671,31 +635,21 @@ impl<'a> Parser<'a> {
                 self.star();
                 Node::Space(self.dim_arg(&range)?)
             }
-            "overline" | "underline" => Node::Line {
-                over: name == "overline",
-                body: self.arg(&range)?,
-            },
-            "overbrace" | "underbrace" => Node::Brace {
-                over: name == "overbrace",
-                body: self.arg(&range)?,
-            },
+            "overline" | "underline" => {
+                Node::Line { over: name == "overline", body: self.arg(&range)? }
+            }
+            "overbrace" | "underbrace" => {
+                Node::Brace { over: name == "overbrace", body: self.arg(&range)? }
+            }
             "overset" | "stackrel" => {
                 let over = self.arg(&range)?;
                 let base = self.arg(&range)?;
-                Node::Stack {
-                    base,
-                    over: Some(over),
-                    under: None,
-                }
+                Node::Stack { base, over: Some(over), under: None }
             }
             "underset" => {
                 let under = self.arg(&range)?;
                 let base = self.arg(&range)?;
-                Node::Stack {
-                    base,
-                    over: None,
-                    under: Some(under),
-                }
+                Node::Stack { base, over: None, under: Some(under) }
             }
             "xrightarrow" | "xleftarrow" | "xRightarrow" | "xLeftarrow" | "xleftrightarrow"
             | "xLeftrightarrow" | "xmapsto" => {
@@ -718,12 +672,7 @@ impl<'a> Parser<'a> {
                 height: name != "hphantom",
             },
             "mathstrut" => Node::Phantom {
-                body: vec![Node::Char {
-                    ch: '(',
-                    class: Open,
-                    variant: Variant::Upright,
-                    at,
-                }],
+                body: vec![Node::Char { ch: '(', class: Open, variant: Variant::Upright, at }],
                 width: false,
                 height: true,
             },
@@ -755,10 +704,7 @@ impl<'a> Parser<'a> {
                     "mathinner" => Inner,
                     _ => Ord,
                 };
-                Node::Group {
-                    body: self.arg(&range)?,
-                    class: Some(class),
-                }
+                Node::Group { body: self.arg(&range)?, class: Some(class) }
             }
             "tag" => {
                 self.star();
@@ -766,11 +712,7 @@ impl<'a> Parser<'a> {
                 Node::Group {
                     body: vec![
                         Node::Space(Dim::Em(2.0)),
-                        Node::Text {
-                            text: format!("({text})"),
-                            variant: Variant::Upright,
-                            at,
-                        },
+                        Node::Text { text: format!("({text})"), variant: Variant::Upright, at },
                     ],
                     class: Some(Ord),
                 }
@@ -781,11 +723,8 @@ impl<'a> Parser<'a> {
             "pmod" | "pod" | "mod" => {
                 let arg = self.arg(&range)?;
                 let mut body = vec![Node::Space(Dim::Em(if name == "mod" { 1.0 } else { 0.667 }))];
-                let word = |text: &str| Node::Text {
-                    text: text.into(),
-                    variant: Variant::Upright,
-                    at,
-                };
+                let word =
+                    |text: &str| Node::Text { text: text.into(), variant: Variant::Upright, at };
                 let paren = |ch: char, class: Class| Node::Char {
                     ch,
                     class,
@@ -793,7 +732,9 @@ impl<'a> Parser<'a> {
                     at,
                 };
                 match name {
-                    "pmod" => body.extend([paren('(', Open), word("mod"), Node::Space(Dim::Mu(6.0))]),
+                    "pmod" => {
+                        body.extend([paren('(', Open), word("mod"), Node::Space(Dim::Mu(6.0))])
+                    }
                     "pod" => body.push(paren('(', Open)),
                     _ => body.extend([word("mod"), Node::Space(Dim::Mu(6.0))]),
                 }
@@ -801,17 +742,10 @@ impl<'a> Parser<'a> {
                 if name != "mod" {
                     body.push(paren(')', Close));
                 }
-                Node::Group {
-                    body,
-                    class: Some(Ord),
-                }
+                Node::Group { body, class: Some(Ord) }
             }
             "bmod" => Node::Group {
-                body: vec![Node::Text {
-                    text: "mod".into(),
-                    variant: Variant::Upright,
-                    at,
-                }],
+                body: vec![Node::Text { text: "mod".into(), variant: Variant::Upright, at }],
                 class: Some(Bin),
             },
             "substack" => {
@@ -856,14 +790,10 @@ impl<'a> Parser<'a> {
             "hline" | "hdashline" => return Ok(None),
             "varGamma" | "varDelta" | "varTheta" | "varLambda" | "varXi" | "varPi" | "varSigma"
             | "varUpsilon" | "varPhi" | "varPsi" | "varOmega" => {
-                let (ch, _) = symbols::symbol(&name[3..])
-                    .ok_or_else(|| Error::new(ErrorKind::UnknownCommand(name.into()), range.clone()))?;
-                Node::Char {
-                    ch,
-                    class: Ord,
-                    variant: Variant::Italic,
-                    at,
-                }
+                let (ch, _) = symbols::symbol(&name[3..]).ok_or_else(|| {
+                    Error::new(ErrorKind::UnknownCommand(name.into()), range.clone())
+                })?;
+                Node::Char { ch, class: Ord, variant: Variant::Italic, at }
             }
             "href" => {
                 self.raw_group(&range)?;
@@ -876,31 +806,13 @@ impl<'a> Parser<'a> {
             "nonumber" | "notag" | "displaybreak" | "allowbreak" | "nobreak" => return Ok(None),
             _ => {
                 if let Some((ch, class)) = symbols::symbol(name) {
-                    Node::Char {
-                        ch,
-                        class,
-                        variant: self.variant,
-                        at,
-                    }
+                    Node::Char { ch, class, variant: self.variant, at }
                 } else if let Some((ch, default_limits)) = symbols::large_op(name) {
-                    Node::LargeOp {
-                        ch,
-                        default_limits,
-                        limits: None,
-                        at,
-                    }
+                    Node::LargeOp { ch, default_limits, limits: None, at }
                 } else if let Some((text, default_limits)) = symbols::named_op(name) {
-                    Node::NamedOp {
-                        name: text.to_string(),
-                        default_limits,
-                        limits: None,
-                    }
+                    Node::NamedOp { name: text.to_string(), default_limits, limits: None }
                 } else if let Some((ch, wide)) = symbols::accent(name) {
-                    Node::Accent {
-                        ch,
-                        wide,
-                        body: self.arg(&range)?,
-                    }
+                    Node::Accent { ch, wide, body: self.arg(&range)? }
                 } else {
                     let name = if name.is_empty() { "\\" } else { name };
                     return Err(Error::new(ErrorKind::UnknownCommand(name.into()), range));
@@ -939,9 +851,7 @@ impl<'a> Parser<'a> {
             "smallmatrix" => ArrayKind::Small,
             "cases" | "dcases" => {
                 left = Some('{');
-                ArrayKind::Cases {
-                    display: name == "dcases",
-                }
+                ArrayKind::Cases { display: name == "dcases" }
             }
             "rcases" => {
                 right = Some('}');
@@ -961,10 +871,7 @@ impl<'a> Parser<'a> {
                 ArrayKind::Array
             }
             _ => {
-                return Err(Error::new(
-                    ErrorKind::UnknownEnvironment(name.into()),
-                    cmd.clone(),
-                ));
+                return Err(Error::new(ErrorKind::UnknownEnvironment(name.into()), cmd.clone()));
             }
         };
         let mut rows: Vec<Vec<List>> = Vec::new();
@@ -1005,14 +912,7 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
         trim_last_row(&mut rows);
         gaps.truncate(rows.len());
-        Ok(Array {
-            kind,
-            cols,
-            rows,
-            gaps,
-            left,
-            right,
-        })
+        Ok(Array { kind, cols, rows, gaps, left, right })
     }
 }
 
@@ -1038,23 +938,10 @@ impl Node {
 fn attach(list: &mut List, sup: bool, arg: List, range: &Range<usize>) -> Result<(), Error> {
     let mut node = match list.pop() {
         Some(n @ Node::Scripts { .. }) => n,
-        Some(base) => Node::Scripts {
-            base: Box::new(base),
-            sup: None,
-            sub: None,
-        },
-        None => Node::Scripts {
-            base: Box::new(Node::group(Vec::new())),
-            sup: None,
-            sub: None,
-        },
+        Some(base) => Node::Scripts { base: Box::new(base), sup: None, sub: None },
+        None => Node::Scripts { base: Box::new(Node::group(Vec::new())), sup: None, sub: None },
     };
-    if let Node::Scripts {
-        sup: sup_slot,
-        sub: sub_slot,
-        ..
-    } = &mut node
-    {
+    if let Node::Scripts { sup: sup_slot, sub: sub_slot, .. } = &mut node {
         let slot = if sup { sup_slot } else { sub_slot };
         match slot {
             None => *slot = Some(arg),
@@ -1068,24 +955,12 @@ fn attach(list: &mut List, sup: bool, arg: List, range: &Range<usize>) -> Result
 }
 
 fn is_prime(node: &Node) -> bool {
-    matches!(
-        node,
-        Node::Char {
-            ch: '′' | '″' | '‴',
-            ..
-        }
-    )
+    matches!(node, Node::Char { ch: '′' | '″' | '‴', .. })
 }
 
 /// `\not` before a relation with a precomposed negation uses it.
 fn negate(node: Node) -> Node {
-    if let Node::Char {
-        ch,
-        class,
-        variant,
-        at,
-    } = node
-    {
+    if let Node::Char { ch, class, variant, at } = node {
         let negated = match ch {
             '=' => Some('≠'),
             '∈' => Some('∉'),
@@ -1109,17 +984,8 @@ fn negate(node: Node) -> Node {
             _ => None,
         };
         let ch = negated.unwrap_or(ch);
-        let node = Node::Char {
-            ch,
-            class,
-            variant,
-            at,
-        };
-        return if negated.is_some() {
-            node
-        } else {
-            Node::Not(Box::new(node))
-        };
+        let node = Node::Char { ch, class, variant, at };
+        return if negated.is_some() { node } else { Node::Not(Box::new(node)) };
     }
     Node::Not(Box::new(node))
 }
@@ -1145,13 +1011,8 @@ fn column_spec(spec: &str) -> Vec<Align> {
 /// `1.5em`, `-3mu`, `4pt` … as a [`Dim`]. Points assume a 10pt em, like TeX.
 pub(crate) fn parse_dim(raw: &str) -> Option<Dim> {
     let raw = raw.trim();
-    let split = raw
-        .find(|c: char| c.is_ascii_alphabetic())
-        .unwrap_or(raw.len());
-    let number: String = raw[..split]
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let split = raw.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(raw.len());
+    let number: String = raw[..split].chars().filter(|c| !c.is_whitespace()).collect();
     let value: f32 = number.parse().ok()?;
     if !value.is_finite() || value.abs() > 1000.0 {
         return None;

@@ -99,18 +99,11 @@ impl Default for Options {
 
 impl Options {
     pub fn inline(size: f32) -> Self {
-        Self {
-            size,
-            ..Self::default()
-        }
+        Self { size, ..Self::default() }
     }
 
     pub fn display(size: f32) -> Self {
-        Self {
-            size,
-            display: true,
-            ..Self::default()
-        }
+        Self { size, display: true, ..Self::default() }
     }
 }
 
@@ -121,50 +114,21 @@ pub enum Item {
     /// Glyph `glyph` of font `font` in the [`MathFont::chain`] (0 is the
     /// font passed to [`layout()`]), its origin at (`x`, `y`), drawn at `size`
     /// points.
-    Glyph {
-        font: u8,
-        glyph: u16,
-        x: f32,
-        y: f32,
-        size: f32,
-    },
+    Glyph { font: u8, glyph: u16, x: f32, y: f32, size: f32 },
     /// A filled rectangle (fraction bars, radical overbars, …); (`x`, `y`)
     /// is its top-left corner.
-    Rule {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    },
+    Rule { x: f32, y: f32, width: f32, height: f32 },
 }
 
 impl Item {
     fn shifted(self, dx: f32, dy: f32) -> Self {
         match self {
-            Item::Glyph {
-                font,
-                glyph,
-                x,
-                y,
-                size,
-            } => Item::Glyph {
-                font,
-                glyph,
-                x: x + dx,
-                y: y + dy,
-                size,
-            },
-            Item::Rule {
-                x,
-                y,
-                width,
-                height,
-            } => Item::Rule {
-                x: x + dx,
-                y: y + dy,
-                width,
-                height,
-            },
+            Item::Glyph { font, glyph, x, y, size } => {
+                Item::Glyph { font, glyph, x: x + dx, y: y + dy, size }
+            }
+            Item::Rule { x, y, width, height } => {
+                Item::Rule { x: x + dx, y: y + dy, width, height }
+            }
         }
     }
 }
@@ -205,19 +169,10 @@ impl Formula {
     pub fn paint(&self, font: &MathFont, x: f32, y: f32, sink: &mut dyn PathSink) {
         for item in &self.items {
             match *item {
-                Item::Glyph {
-                    font: index,
-                    glyph,
-                    x: gx,
-                    y: gy,
-                    size,
-                } => font.at(index).outline(glyph, size, x + gx, y + gy, sink),
-                Item::Rule {
-                    x: rx,
-                    y: ry,
-                    width,
-                    height,
-                } => {
+                Item::Glyph { font: index, glyph, x: gx, y: gy, size } => {
+                    font.at(index).outline(glyph, size, x + gx, y + gy, sink)
+                }
+                Item::Rule { x: rx, y: ry, width, height } => {
                     let (l, t) = (x + rx, y + ry);
                     sink.move_to(l, t);
                     sink.line_to(l + width, t);
@@ -236,16 +191,19 @@ impl Formula {
             fn move_to(&mut self, x: f32, y: f32) {
                 self.0.push_str(&format!("M{x:.2} {y:.2}"));
             }
+
             fn line_to(&mut self, x: f32, y: f32) {
                 self.0.push_str(&format!("L{x:.2} {y:.2}"));
             }
+
             fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
                 self.0.push_str(&format!("Q{x1:.2} {y1:.2} {x:.2} {y:.2}"));
             }
+
             fn cubic_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-                self.0
-                    .push_str(&format!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2}"));
+                self.0.push_str(&format!("C{x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2}"));
             }
+
             fn close(&mut self) {
                 self.0.push('Z');
             }
@@ -343,9 +301,7 @@ impl std::error::Error for Error {}
 /// `\operatorname`), else the whole formula (a symbol a command produced).
 fn glyph_range(source: &str, start: usize, ch: char) -> Range<usize> {
     let token = token_at(source, start);
-    let spelled = source
-        .get(token.clone())
-        .is_some_and(|t| t.starts_with('\\') || t.contains(ch));
+    let spelled = source.get(token.clone()).is_some_and(|t| t.starts_with('\\') || t.contains(ch));
     if start > 0 && spelled {
         return token;
     }
@@ -381,10 +337,8 @@ fn token_at(source: &str, start: usize) -> Range<usize> {
 /// this on agent output in their render paths, so a panic (a layout bug) is
 /// an [`ErrorKind::Internal`] error rather than a crash.
 pub fn layout(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        lay_out(source, font, options)
-    }))
-    .unwrap_or_else(|_| Err(Error::new(ErrorKind::Internal, 0..source.len())))
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lay_out(source, font, options)))
+        .unwrap_or_else(|_| Err(Error::new(ErrorKind::Internal, 0..source.len())))
 }
 
 fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, Error> {
@@ -395,11 +349,7 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
         return Err(Error::new(ErrorKind::BadSize, 0..0));
     }
     let nodes = parse::parse(source, options.max_depth)?;
-    let style = if options.display {
-        ast::Style::Display
-    } else {
-        ast::Style::Text
-    };
+    let style = if options.display { ast::Style::Display } else { ast::Style::Text };
     // Items are bounded by the source too: real TeX emits about one per
     // character plus a few per stretchy delimiter, while nested `\left(`
     // around a tall body multiplied 434 bytes into 18,000 items — paint and
@@ -414,10 +364,7 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
         }
         e
     })?;
-    let (w, h) = (
-        options.max_width * options.size,
-        options.max_height * options.size,
-    );
+    let (w, h) = (options.max_width * options.size, options.max_height * options.size);
     // A huge `size` (or bound) overflows the bounds to infinity, which every
     // extent would pass.
     if !(w.is_finite() && h.is_finite()) {
@@ -446,14 +393,7 @@ fn lay_out(source: &str, font: &MathFont, options: &Options) -> Result<Formula, 
     let mut items = b.items;
     // Hosts keep formulas around (caches, prepared rows): drop growth slack.
     items.shrink_to_fit();
-    Ok(Formula {
-        width: b.w,
-        ascent,
-        descent,
-        left,
-        right,
-        items,
-    })
+    Ok(Formula { width: b.w, ascent, descent, left, right, items })
 }
 
 /// The extent of everything `items` paint, in points: `left`/`right` from
@@ -467,12 +407,7 @@ struct Ink {
 }
 
 fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
-    let mut ink = Ink {
-        left: 0.0,
-        right: 0.0,
-        top: f32::NEG_INFINITY,
-        bottom: f32::NEG_INFINITY,
-    };
+    let mut ink = Ink { left: 0.0, right: 0.0, top: f32::NEG_INFINITY, bottom: f32::NEG_INFINITY };
     let mut add = |left: f32, right: f32, top: f32, bottom: f32| {
         ink.left = ink.left.min(left);
         ink.right = ink.right.max(right);
@@ -481,13 +416,7 @@ fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
     };
     for item in items {
         match *item {
-            Item::Glyph {
-                font: index,
-                glyph,
-                x,
-                y,
-                size,
-            } => {
+            Item::Glyph { font: index, glyph, x, y, size } => {
                 let face = font.at(index);
                 let m = face.metrics(glyph);
                 let scale = size / face.upem();
@@ -498,12 +427,9 @@ fn ink_bounds(items: &[Item], font: &MathFont) -> Ink {
                     m.depth * scale + y,
                 );
             }
-            Item::Rule {
-                x,
-                y,
-                width,
-                height,
-            } => add(x.min(x + width), x.max(x + width), -y, y + height),
+            Item::Rule { x, y, width, height } => {
+                add(x.min(x + width), x.max(x + width), -y, y + height)
+            }
         }
     }
     ink

@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-use crate::{ErrorKind, Formula, Item, MathFont, Options, layout};
 use std::sync::{Arc, OnceLock};
+
+use crate::{ErrorKind, Formula, Item, MathFont, Options, layout};
 
 const STIX: &[u8] = include_bytes!("../fonts/STIXTwoMath-Regular.otf");
 const FIRA: &[u8] = include_bytes!("../fonts/FiraMath-Regular.otf");
@@ -10,10 +11,7 @@ pub(crate) fn fonts() -> &'static [MathFont] {
     static FONTS: OnceLock<Vec<MathFont>> = OnceLock::new();
     FONTS.get_or_init(|| {
         let stix = Arc::new(MathFont::new(STIX).unwrap());
-        vec![
-            MathFont::new(STIX).unwrap(),
-            MathFont::new(FIRA).unwrap().with_fallback(stix),
-        ]
+        vec![MathFont::new(STIX).unwrap(), MathFont::new(FIRA).unwrap().with_fallback(stix)]
     })
 }
 
@@ -30,17 +28,11 @@ fn display(src: &str) -> Formula {
 }
 
 fn glyphs(f: &Formula) -> usize {
-    f.items
-        .iter()
-        .filter(|i| matches!(i, Item::Glyph { .. }))
-        .count()
+    f.items.iter().filter(|i| matches!(i, Item::Glyph { .. })).count()
 }
 
 fn rules(f: &Formula) -> usize {
-    f.items
-        .iter()
-        .filter(|i| matches!(i, Item::Rule { .. }))
-        .count()
+    f.items.iter().filter(|i| matches!(i, Item::Rule { .. })).count()
 }
 
 /// What models actually write. Every font must lay all of it out.
@@ -142,30 +134,16 @@ fn non_math_font_is_rejected() {
 #[test]
 fn fonts_change_the_layout() {
     let src = r"\frac{a}{b} + \sqrt{x}";
-    let widths: Vec<f32> = fonts()
-        .iter()
-        .map(|f| layout(src, f, &Options::inline(16.0)).unwrap().width)
-        .collect();
-    assert!(
-        (widths[0] - widths[1]).abs() > 0.1,
-        "{widths:?}"
-    );
+    let widths: Vec<f32> =
+        fonts().iter().map(|f| layout(src, f, &Options::inline(16.0)).unwrap().width).collect();
+    assert!((widths[0] - widths[1]).abs() > 0.1, "{widths:?}");
 }
 
 #[test]
 fn superscript_rises_and_shrinks() {
     let f = inline("x^2");
-    let Item::Glyph {
-        y: base_y,
-        size: base_size,
-        ..
-    } = f.items[0]
-    else {
-        panic!()
-    };
-    let Item::Glyph { y, size, .. } = f.items[1] else {
-        panic!()
-    };
+    let Item::Glyph { y: base_y, size: base_size, .. } = f.items[0] else { panic!() };
+    let Item::Glyph { y, size, .. } = f.items[1] else { panic!() };
     assert_eq!(base_y, 0.0);
     assert!(y < -3.0, "superscript baseline {y}");
     assert!(size < base_size);
@@ -174,9 +152,7 @@ fn superscript_rises_and_shrinks() {
 #[test]
 fn subscript_drops() {
     let f = inline("x_2");
-    let Item::Glyph { y, .. } = f.items[1] else {
-        panic!()
-    };
+    let Item::Glyph { y, .. } = f.items[1] else { panic!() };
     assert!(y > 1.0, "subscript baseline {y}");
 }
 
@@ -222,11 +198,7 @@ fn left_right_grows_with_content() {
         Item::Glyph { glyph, .. } => glyph,
         _ => panic!(),
     };
-    assert_ne!(
-        first(&small),
-        first(&tall),
-        "a taller paren variant or assembly"
-    );
+    assert_ne!(first(&small), first(&tall), "a taller paren variant or assembly");
     assert!(tall.height() > small.height() * 2.0);
 }
 
@@ -236,12 +208,7 @@ fn huge_delimiters_assemble() {
     for font in fonts() {
         let f = layout(src, font, &Options::display(16.0)).unwrap();
         // 8 digits plus at least a three-part paren on each side.
-        assert!(
-            glyphs(&f) >= 8 + 6,
-            "{}: {}",
-            font.name().unwrap(),
-            glyphs(&f)
-        );
+        assert!(glyphs(&f) >= 8 + 6, "{}: {}", font.name().unwrap(), glyphs(&f));
     }
 }
 
@@ -273,18 +240,12 @@ fn errors_are_located() {
     assert_eq!(err(r"\left( x").kind, ErrorKind::MissingRight);
     assert_eq!(err(r"x^2^3").kind, ErrorKind::DoubleScript);
     assert_eq!(err(r"\frac{a}").kind, ErrorKind::MissingArgument);
-    assert!(matches!(
-        err(r"\begin{matrix} a").kind,
-        ErrorKind::MissingEnd(_)
-    ));
+    assert!(matches!(err(r"\begin{matrix} a").kind, ErrorKind::MissingEnd(_)));
     assert!(matches!(
         err(r"\begin{matrix} a \end{pmatrix}").kind,
         ErrorKind::MismatchedEnvironment { .. }
     ));
-    assert!(matches!(
-        err(r"\begin{foo} a \end{foo}").kind,
-        ErrorKind::UnknownEnvironment(_)
-    ));
+    assert!(matches!(err(r"\begin{foo} a \end{foo}").kind, ErrorKind::UnknownEnvironment(_)));
 }
 
 #[test]
@@ -301,31 +262,14 @@ fn half_streamed_formulas_fail_cleanly() {
 #[test]
 fn limits_are_enforced() {
     let deep = "{".repeat(500) + &"}".repeat(500);
-    assert_eq!(
-        layout(&deep, stix(), &Options::default()).unwrap_err().kind,
-        ErrorKind::TooDeep
-    );
+    assert_eq!(layout(&deep, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooDeep);
     let nested = r"\frac".repeat(300) + &"1".repeat(301);
-    assert_eq!(
-        layout(&nested, stix(), &Options::default())
-            .unwrap_err()
-            .kind,
-        ErrorKind::TooDeep
-    );
+    assert_eq!(layout(&nested, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooDeep);
     let long = "x".repeat(20_000);
-    assert_eq!(
-        layout(&long, stix(), &Options::default()).unwrap_err().kind,
-        ErrorKind::TooLong
-    );
+    assert_eq!(layout(&long, stix(), &Options::default()).unwrap_err().kind, ErrorKind::TooLong);
     let many = "x".repeat(10_000);
-    let opts = Options {
-        max_items: 1000,
-        ..Options::default()
-    };
-    assert_eq!(
-        layout(&many, stix(), &opts).unwrap_err().kind,
-        ErrorKind::TooLarge
-    );
+    let opts = Options { max_items: 1000, ..Options::default() };
+    assert_eq!(layout(&many, stix(), &opts).unwrap_err().kind, ErrorKind::TooLarge);
 }
 
 #[test]
@@ -335,7 +279,7 @@ fn random_input_never_panics() {
         r"\{}^_&'[]()|.x1 +=-\frac\sqrt\left\right\begin{matrix}\end{matrix}\\%$~αβ∑"
             .chars()
             .collect();
-    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut s: u64 = 0x9e37_79b9_7f4a_7c15;
     for _ in 0..20_000 {
         let len = (s % 40) as usize;
         let mut src = String::new();
@@ -421,26 +365,13 @@ fn every_symbol_resolves_in_every_font() {
 #[test]
 fn alphabets_come_from_the_fallback_when_missing() {
     for font in fonts() {
-        for v in [
-            "mathbb",
-            "mathcal",
-            "mathfrak",
-            "mathbf",
-            "mathsf",
-            "mathtt",
-            "boldsymbol",
-        ] {
+        for v in ["mathbb", "mathcal", "mathfrak", "mathbf", "mathsf", "mathtt", "boldsymbol"] {
             for c in ('A'..='Z').chain('a'..='z') {
                 let styled =
                     layout(&format!("\\{v}{{{c}}}"), font, &Options::inline(16.0)).unwrap();
                 let plain =
                     layout(&format!("\\mathrm{{{c}}}"), font, &Options::inline(16.0)).unwrap();
-                assert_ne!(
-                    styled.items,
-                    plain.items,
-                    "{}: \\{v}{{{c}}}",
-                    font.name().unwrap()
-                );
+                assert_ne!(styled.items, plain.items, "{}: \\{v}{{{c}}}", font.name().unwrap());
             }
         }
     }
@@ -511,11 +442,7 @@ fn nested_middle_with_text_stays_fast() {
     for d in [8, 10, 12, 14, 20, 30] {
         let open = "\\left.\\middle|".repeat(d);
         let fill = 16_000usize.saturating_sub(open.len() + 7 * d + 8);
-        let src = format!(
-            "{open}\\text{{{}}}{}",
-            "x".repeat(fill),
-            "\\right.".repeat(d)
-        );
+        let src = format!("{open}\\text{{{}}}{}", "x".repeat(fill), "\\right.".repeat(d));
         assert_linear(&src, &format!("d={d}")); // see `fastest`.
     }
     // `\middle` bodies are laid out once: deep honest nesting costs linear work.
@@ -554,10 +481,7 @@ fn runaway_sizes_are_too_large() {
     assert_eq!(err(r"a\\[100em]b"), ErrorKind::TooLarge);
     // Ordinary large formulas are fine.
     assert!(layout(r"\kern10em x", stix(), &Options::default()).is_ok());
-    let matrix = format!(
-        "\\begin{{pmatrix}}{}\\end{{pmatrix}}",
-        "1 \\\\ ".repeat(100)
-    );
+    let matrix = format!("\\begin{{pmatrix}}{}\\end{{pmatrix}}", "1 \\\\ ".repeat(100));
     assert!(layout(&matrix, stix(), &Options::display(16.0)).is_ok());
 }
 
@@ -572,14 +496,8 @@ fn the_box_holds_all_ink() {
         let ink = crate::ink_bounds(&f.items, stix());
         assert!(ink.top <= f.ascent + 1e-3, "{src}: ink above the box");
         assert!(ink.bottom <= f.descent + 1e-3, "{src}: ink below the box");
-        assert!(
-            ink.left >= f.left - 1e-3 && f.left <= f.width.min(0.0),
-            "{src}"
-        );
-        assert!(
-            ink.right <= f.right + 1e-3 && f.right >= f.width.max(0.0),
-            "{src}"
-        );
+        assert!(ink.left >= f.left - 1e-3 && f.left <= f.width.min(0.0), "{src}");
+        assert!(ink.right <= f.right + 1e-3 && f.right >= f.width.max(0.0), "{src}");
         f
     };
     // A negative row gap moves a row out of the TeX box; the box follows.
@@ -607,18 +525,14 @@ fn the_box_holds_all_ink() {
         r"\hspace{-100em}\hspace{-100em}".to_owned(),
     ] {
         assert_eq!(
-            layout(&src, stix(), &options)
-                .map(|_| ())
-                .map_err(|e| e.kind),
+            layout(&src, stix(), &options).map(|_| ()).map_err(|e| e.kind),
             Err(ErrorKind::TooLarge),
             "{src}"
         );
     }
     // Bounds that overflow to infinity refuse rather than pass everything.
     assert_eq!(
-        layout("x", stix(), &Options::inline(1e36))
-            .map(|_| ())
-            .map_err(|e| e.kind),
+        layout("x", stix(), &Options::inline(1e36)).map(|_| ()).map_err(|e| e.kind),
         Err(ErrorKind::TooLarge)
     );
 }
@@ -663,7 +577,9 @@ fn slopty_commands_typeset() {
     assert!(two.height() > one.height(), "{} vs {}", two.height(), one.height());
     // An unclosed `\substack` says so.
     assert_eq!(
-        layout(r"\sum_{\substack{i", stix(), &Options::inline(16.0)).map(|_| ()).map_err(|e| e.kind),
+        layout(r"\sum_{\substack{i", stix(), &Options::inline(16.0))
+            .map(|_| ())
+            .map_err(|e| e.kind),
         Err(ErrorKind::MissingBrace)
     );
 }

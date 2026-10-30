@@ -55,14 +55,13 @@ fn stix_arc() -> &'static Arc<MathFont> {
 
 /// The font for `face` (with its fallback chain), loaded on first use.
 pub fn font(face: Face) -> &'static MathFont {
-    static FONTS: [OnceLock<MathFont>; Face::ALL.len()] = [const { OnceLock::new() }; Face::ALL.len()];
+    static FONTS: [OnceLock<MathFont>; Face::ALL.len()] =
+        [const { OnceLock::new() }; Face::ALL.len()];
     if face == Face::StixTwo {
         return stix_arc();
     }
     FONTS[face as usize].get_or_init(|| {
-        MathFont::new(face.data())
-            .expect("bundled math font")
-            .with_fallback(stix_arc().clone())
+        MathFont::new(face.data()).expect("bundled math font").with_fallback(stix_arc().clone())
     })
 }
 
@@ -99,10 +98,8 @@ mod tests {
 
     #[test]
     fn every_face_resolves_through_one_table() {
-        let names: Vec<String> = Face::ALL
-            .iter()
-            .map(|&f| font_at(f.index()).name().unwrap())
-            .collect();
+        let names: Vec<String> =
+            Face::ALL.iter().map(|&f| font_at(f.index()).name().unwrap()).collect();
         for (name, part) in names.iter().zip(["Fira", "STIX"]) {
             assert!(name.contains(part), "{names:?}");
         }
@@ -113,12 +110,8 @@ mod tests {
             let raw = crate::layout(src, font(face), &opts).unwrap();
             assert_eq!(f.items.len(), raw.items.len());
             for (item, raw) in f.items.iter().zip(&raw.items) {
-                if let (
-                    Item::Glyph { font: i, glyph, .. },
-                    Item::Glyph {
-                        font: r, glyph: g, ..
-                    },
-                ) = (item, raw)
+                if let (Item::Glyph { font: i, glyph, .. }, Item::Glyph { font: r, glyph: g, .. }) =
+                    (item, raw)
                 {
                     assert!(*i < FONTS);
                     assert_eq!(glyph, g);
