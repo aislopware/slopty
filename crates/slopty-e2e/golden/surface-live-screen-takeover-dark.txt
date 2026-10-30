@@ -9,6 +9,7 @@ Splitter │ Resize sidebar
 Group
 Terminal │ shell │ >
 Button │ Window controls
+Button │ Inbox
 Button │ Command palette
 Button │ New session
 Button │ Synthetic editor

@@ -18,5 +18,6 @@ Status │ Matches │ 1/13
 Button │ Next match up
 Button │ Next match down
 Button │ Close find
+Button │ Inbox
 Button │ Command palette
 Button │ Hide sidebar

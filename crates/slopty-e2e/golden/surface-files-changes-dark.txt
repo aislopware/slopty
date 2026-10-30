@@ -23,6 +23,7 @@ Button │ Show these lines
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show inspector
+Button │ Inbox
 Button │ Command palette
 Button │ New session
 Button │ Changes

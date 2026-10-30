@@ -29,6 +29,7 @@ Button │ Enlarge image
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector
+Button │ Inbox
 Button │ Command palette
 Button │ New session
 Button │ Inspector

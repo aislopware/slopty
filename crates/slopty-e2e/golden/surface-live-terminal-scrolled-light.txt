@@ -13,5 +13,6 @@ Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ 261
 Button │ 12 new lines
+Button │ Inbox
 Button │ Command palette
 Button │ Hide sidebar

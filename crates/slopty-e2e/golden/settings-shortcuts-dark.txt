@@ -18,11 +18,11 @@ Button │ Change Next session or side pane tab shortcut: ⌃⇥
 Button │ Change Previous session or side pane tab shortcut: ⌃⇧⇥
 Button │ Change Archive session shortcut: ⇧⌘A
 Button │ Change Resume a Claude Code session shortcut: ⇧⌘O
-Button │ Change Next session that needs you shortcut: ⌘.
+Button │ Change Next session that needs you shortcut: ⌘J
+Button │ Change Inbox shortcut: ⇧⌘J
 Button │ Change Toggle sidebar shortcut: ⌘B
 Button │ Change Toggle side pane shortcut: ⌘R
 Button │ Change Toggle files panel shortcut: ⌘E
-Button │ Change Toggle terminal shortcut: ⌘J
 Button │ Change Reopen closed tab shortcut: ⇧⌘T
 Button │ Change Jump to session 1 shortcut: ⌘1
 Button │ Change Jump to session 2 shortcut: ⌘2

@@ -30,6 +30,7 @@ Button │ Copy message
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector
+Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ New session
 Button │ Inspector

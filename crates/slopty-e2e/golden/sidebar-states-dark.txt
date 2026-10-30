@@ -23,6 +23,7 @@ Group (focused)
 Terminal │ shell │ >
 Button │ Open in…
 Button │ Show inspector
+Button │ Inbox, 4 waiting
 Button │ Command palette
 Button │ New session
 Button │ Show files panel

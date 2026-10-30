@@ -13,5 +13,6 @@ Splitter │ Resize sidebar
 Heading │ No session open
 Label
 Button │ New session
+Button │ Inbox, 1 waiting
 Button │ Command palette
 Button │ Hide sidebar

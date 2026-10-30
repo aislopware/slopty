@@ -12,6 +12,7 @@ Button │ New terminal
 Button │ Hide terminal
 Group (focused)
 Terminal │ shell │ ~ %
+Button │ Inbox
 Button │ Command palette
 Button │ Hide sidebar
 Status │ Open localhost:$PORT from e2e-worker's shell? Opening forwards the port to this Mac.

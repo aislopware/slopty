@@ -12,6 +12,7 @@ Button │ New terminal
 Button │ Hide terminal
 Group
 Terminal │ shell │ 304
+Button │ Inbox
 Button │ Command palette
 Button │ Hide sidebar
 Menu │ Command block (focused)
