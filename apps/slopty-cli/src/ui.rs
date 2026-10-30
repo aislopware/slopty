@@ -23,9 +23,9 @@ const UI_WAIT: Duration = Duration::from_secs(60);
 
 /// `slopty ui --help`.
 pub const ABOUT: &str = "\
-Read and drive the person's Slopty window, from an agent's shell: open a terminal tab, a file, a \
-page or the diff in the side pane, show, hide, expand or collapse a region, put a chat on \
-screen, lay the chat and the side pane side by side, and say what the window shows.";
+Read and drive the person's Slopty window, from an agent's shell: open a shell, a file, a page \
+or the changes in a pane beside the session, show or hide a region, put a chat on screen, lay \
+the session's panes at even shares, and say what the window shows.";
 
 /// `slopty ui --help`'s epilogue.
 pub const AFTER: &str = "\
@@ -35,10 +35,11 @@ keyboard: what would move the chat or the keyboard away from a draft being typed
 region the keyboard is in, is refused, and each change is marked in the window with a notice \
 naming you. Paths are this machine's, so a file or a folder opens only beside a chat running here.
 
-Every verb prints JSON: `did` (what changed), `made` (a tab it opened, a terminal's session id in \
-`made.terminal`), `ran` (whether a terminal's command ran or waits at the prompt), and `window`: \
-its `page`, the `chat` on screen, its `regions` (`sidebar`, `pane`, `files`, `terminal`, each \
-`shown`, the pane `expanded`), its `tabs` and whether the person is `typing`. A failure prints \
+Every verb prints JSON: `did` (what changed), `made` (a pane it opened, a shell's session id in \
+`made.terminal`), `ran` (whether a shell's command ran or waits at the prompt), and `window`: its \
+`page`, the `chat` on screen, its `regions` (`sidebar`, `files`, `changes`, `inspector`, \
+`terminal`, each `shown`, and `expanded` when its pane is zoomed over the session), its `tabs` \
+(the panes beside the session) and whether the person is `typing`. A failure prints \
 {\"error\": {\"code\", \"message\"}} and exits 1; `code` is no_window (no window is open), \
 unknown (a name the window does not know; its message lists the ones it does), busy (the person \
 is typing or in Settings), elsewhere (the chat on screen runs on another machine, or none is on \
@@ -49,10 +50,10 @@ The same verbs are the ui_* tools of `slopty mcp`.";
 /// `slopty ui …`.
 #[derive(Subcommand, Debug)]
 pub enum UiCmd {
-    /// Say what the window shows: its page, the chat on screen, its regions and tabs, and
+    /// Say what the window shows: its page, the chat on screen, its regions and panes, and
     /// whether the person is typing (the default).
     State,
-    /// Open a terminal tab for the chat on screen, in the terminal drawer or the side pane.
+    /// Open a shell in a pane beside the chat on screen.
     Terminal {
         /// The folder it starts in (default: this one).
         #[arg(long)]
@@ -61,11 +62,9 @@ pub enum UiCmd {
         /// spans lines waits at the prompt for the person to run.
         #[arg(long, value_name = "LINE")]
         command: Option<String>,
-        /// Open it in the side pane rather than the terminal drawer.
-        #[arg(long)]
-        pane: bool,
     },
-    /// Show a file (`path`, `path:line`) or a web page (`https://…`) in the side pane.
+    /// Show a file (`path`, `path:line`) or a web page (`https://…`) in a pane beside the
+    /// session.
     Open {
         /// The file or the address.
         target: String,
@@ -73,14 +72,15 @@ pub enum UiCmd {
         #[arg(long)]
         line: Option<u32>,
     },
-    /// Show the chat's uncommitted changes in the side pane.
+    /// Show the chat's uncommitted changes in a pane beside the session.
     Diff,
-    /// Show a region: sidebar, pane, files or terminal.
+    /// Show a region: sidebar, files, changes, inspector or terminal (a new shell beside the
+    /// session).
     Show {
         /// The region.
         region: String,
     },
-    /// Hide a region: sidebar, pane, files or terminal.
+    /// Hide a region: sidebar, files, changes or inspector; the person closes their own shells.
     Hide {
         /// The region.
         region: String,
@@ -90,12 +90,12 @@ pub enum UiCmd {
         /// The region.
         region: String,
     },
-    /// Expand a region: the side pane over the chat; any other region shown.
+    /// Expand a region: shown, as `show` does.
     Expand {
         /// The region.
         region: String,
     },
-    /// Collapse a region: the side pane back beside the chat; any other region hidden.
+    /// Collapse a region: hidden, as `hide` does.
     Collapse {
         /// The region.
         region: String,
@@ -105,8 +105,8 @@ pub enum UiCmd {
         /// The chat.
         chat: Option<String>,
     },
-    /// Lay the chat and the side pane side by side at even widths, showing a file or a page
-    /// there first when given.
+    /// Lay the session's panes at even shares, showing a file or a page beside it first when
+    /// given.
     Split {
         /// The file or the address.
         target: Option<String>,
@@ -122,10 +122,10 @@ fn act(cmd: UiCmd, cwd: &Path) -> Result<UiAct, UiFailure> {
     let region = |region: String, change| Ok(UiAct::Region { region, change });
     match cmd {
         UiCmd::State => Ok(UiAct::State),
-        UiCmd::Terminal { folder: given, command, pane } => Ok(UiAct::Terminal {
+        UiCmd::Terminal { folder: given, command } => Ok(UiAct::Terminal {
             folder: Some(folder(given.as_deref(), cwd)?),
             command,
-            region: pane.then(|| "pane".to_owned()),
+            region: None,
         }),
         UiCmd::Open { target: given, line } => Ok(UiAct::Open(target(&given, line, cwd)?)),
         UiCmd::Diff => Ok(UiAct::Open(slopty_proto::handoff::UiTarget::Diff)),
@@ -217,11 +217,11 @@ mod tests {
         let notes = cwd.join("notes.md").to_string_lossy().into_owned();
         assert_eq!(parsed(&["state"], cwd), Ok(UiAct::State));
         assert_eq!(
-            parsed(&["terminal", "--pane", "--command", "cargo test"], cwd),
+            parsed(&["terminal", "--command", "cargo test"], cwd),
             Ok(UiAct::Terminal {
                 folder: Some(here),
                 command: Some("cargo test".to_owned()),
-                region: Some("pane".to_owned()),
+                region: None,
             })
         );
         let file = UiTarget::File { path: notes, line: Some(4) };
@@ -235,8 +235,8 @@ mod tests {
             Ok(UiAct::Open(UiTarget::Page { url: "https://example.com/".to_owned() }))
         );
         assert_eq!(parsed(&["diff"], cwd), Ok(UiAct::Open(UiTarget::Diff)));
-        let expand = UiAct::Region { region: "pane".to_owned(), change: UiChange::Expand };
-        assert_eq!(parsed(&["expand", "pane"], cwd), Ok(expand));
+        let expand = UiAct::Region { region: "inspector".to_owned(), change: UiChange::Expand };
+        assert_eq!(parsed(&["expand", "inspector"], cwd), Ok(expand));
         let hide = UiAct::Region { region: "sidebar".to_owned(), change: UiChange::Hide };
         assert_eq!(parsed(&["hide", "sidebar"], cwd), Ok(hide));
         assert_eq!(
