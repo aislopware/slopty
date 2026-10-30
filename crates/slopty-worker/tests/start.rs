@@ -19,7 +19,8 @@ mod start {
     use slopty_proto::terminal::OpenSession;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        Action, AgentId, IntentId, Liveness, Phase, Status, ThreadId, ThreadMeta,
+        Action, AgentId, Cursor, IntentId, Liveness, Phase, Status, ThreadId, ThreadMeta,
+        ThreadState,
     };
     use slopty_worker::restore::Started;
     use slopty_worker::thread::Host;
@@ -122,6 +123,8 @@ mod start {
     struct Rig {
         _dir: tempfile::TempDir,
         bin: PathBuf,
+        /// The person's home, where Claude Code keeps its records.
+        home: PathBuf,
         host: Host,
         claude: Claude,
         fake: Arc<Fake>,
@@ -153,7 +156,8 @@ mod start {
         let terminals: Arc<dyn Terminals> = shared;
         let starter =
             Starter::new(host.clone(), claude.clone(), place(), terminals, "studio".to_owned());
-        Rig { _dir: dir, bin, host, claude, fake, starter }
+        let home = dir.path().join("home");
+        Rig { _dir: dir, bin, home, host, claude, fake, starter }
     }
 
     fn start(agent: &str, args: &[&str]) -> Start {
@@ -193,24 +197,18 @@ mod start {
         host.apply(thread, vec![Action::Status(status)]);
     }
 
-    /// Claude Code's session [`SESSION`] in `terminal` ended, as its `SessionEnd` hook tells the
-    /// observer the start told of it: back once its thread `thread` shows it, exited and naming
-    /// no terminal, the session no longer followed.
-    async fn session_ended(rig: &Rig, terminal: SessionId, thread: ThreadId) {
+    /// Thread `thread` once `now` holds of it, looked at again on each change its feed tells.
+    async fn shown(
+        rig: &Rig,
+        thread: ThreadId,
+        now: impl Fn(&ThreadState, Cursor) -> bool,
+    ) -> ThreadState {
         let mut feed = rig.host.watch(thread).expect("its thread is held");
-        let hook = serde_json::json!({
-            "hook_event_name": "SessionEnd",
-            "session_id": SESSION,
-            "reason": "prompt_input_exit",
-        });
-        let at_us = WallMs::now().as_millis().saturating_mul(1_000);
-        rig.claude.hook(terminal, at_us, hook.to_string());
-        let shown = async {
+        let looks = async {
             loop {
-                let (meta, status) = rig.host.meta(thread).expect("its thread is held");
-                let exited = matches!(status.liveness, Liveness::Exited { .. });
-                if exited && meta.terminal().is_none() {
-                    return;
+                let (state, cursor) = rig.host.state(thread).expect("its thread is held");
+                if now(&state, cursor) {
+                    return state;
                 }
                 match feed.recv().await {
                     Ok(_) | Err(RecvError::Lagged(_)) => {}
@@ -218,7 +216,30 @@ mod start {
                 }
             }
         };
-        tokio::time::timeout(Duration::from_secs(30), shown).await.expect("its thread ended");
+        tokio::time::timeout(Duration::from_secs(30), looks).await.expect("its thread came to it")
+    }
+
+    fn exited(state: &ThreadState) -> bool {
+        matches!(state.status.liveness, Liveness::Exited { .. })
+    }
+
+    /// Claude Code's session [`SESSION`] in `terminal` ends, as its `SessionEnd` hook tells the
+    /// observer the start told of it.
+    fn session_ends(rig: &Rig, terminal: SessionId) {
+        let hook = serde_json::json!({
+            "hook_event_name": "SessionEnd",
+            "session_id": SESSION,
+            "reason": "prompt_input_exit",
+        });
+        let at_us = WallMs::now().as_millis().saturating_mul(1_000);
+        rig.claude.hook(terminal, at_us, hook.to_string());
+    }
+
+    /// [`session_ends`], back once its thread `thread` shows it: exited and naming no terminal,
+    /// the session no longer followed.
+    async fn session_ended(rig: &Rig, terminal: SessionId, thread: ThreadId) {
+        session_ends(rig, terminal);
+        shown(rig, thread, |state, _| exited(state) && state.meta.terminal().is_none()).await;
     }
 
     /// The thread of Claude Code's session `native`, held as it ended in `/before`, still
@@ -378,6 +399,65 @@ mod start {
         assert_eq!(rig.starter.start(IntentId::new(), &resume, None).await, refused);
         let (meta, _status) = rig.host.meta(thread).expect("the held thread stays");
         assert_eq!(meta.terminal(), Some(found), "the terminal its session was found in");
+    }
+
+    /// The observer of a session Slopty started changes of its thread only what the session's
+    /// records say: the terminal, folder, origin and facts the worker gave the thread after the
+    /// observer read it stay through its word of the title, its read of the transcript from the
+    /// start again, and its end, which takes back only the terminal it named itself.
+    #[tokio::test]
+    async fn the_observer_changes_only_what_the_records_say() {
+        let rig = rig();
+        let thread = held(&rig, SESSION, None);
+        let resume = start(AgentId::CLAUDE_CODE, &[RESUME_FLAG, SESSION]);
+        let first = IntentId::new();
+        assert_eq!(started(rig.starter.start(first, &resume, None).await), thread);
+        // The observer read the thread by the time it says the session runs.
+        shown(&rig, thread, |state, _| !exited(state)).await;
+        let moved = SessionId::new();
+        rig.host.update(thread, |state| {
+            let mut meta = state.meta.clone();
+            "/moved".clone_into(&mut meta.cwd);
+            ThreadMeta::ORCHESTRATED.clone_into(&mut meta.origin);
+            meta.facts.insert("kept".to_owned(), "yes".to_owned());
+            meta.facts.insert(ThreadMeta::TERMINAL_FACT.to_owned(), moved.to_string());
+            (vec![Action::Meta(Box::new(meta))], ())
+        });
+        let given = |state: &ThreadState| {
+            let meta = &state.meta;
+            let kept = meta.facts.get("kept").cloned();
+            (meta.cwd.clone(), meta.origin.clone(), kept, meta.terminal())
+        };
+        let origin = ThreadMeta::ORCHESTRATED.to_owned();
+        let kept = ("/moved".to_owned(), origin, Some("yes".to_owned()), Some(moved));
+
+        let transcript =
+            slopty_agent::claude::sessions::transcript(&rig.home, Path::new("/work"), SESSION);
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        let prompt = serde_json::json!({
+            "type": "user",
+            "uuid": "00000000-0000-4000-8000-000000000003",
+            "parentUuid": null,
+            "sessionId": SESSION,
+            "cwd": "/work",
+            "isSidechain": false,
+            "userType": "external",
+            "timestamp": "2026-10-30T07:38:06.461Z",
+            "version": "2.1.314",
+            "message": {"role": "user", "content": "Fix the build"},
+        });
+        std::fs::write(&transcript, format!("{prompt}\n")).unwrap();
+        let titled = shown(&rig, thread, |state, _| !state.meta.title.is_empty()).await;
+        assert_eq!(given(&titled), kept, "through its word of the title");
+
+        let epoch = rig.host.state(thread).unwrap().1.epoch;
+        std::fs::write(&transcript, "").unwrap();
+        let again = shown(&rig, thread, |_, cursor| cursor.epoch != epoch).await;
+        assert_eq!(given(&again), kept, "through its read from the start again");
+
+        session_ends(&rig, terminal_of(first));
+        let gone = shown(&rig, thread, |state, _| exited(state)).await;
+        assert_eq!(given(&gone), kept, "through its end, the terminal not the one it named");
     }
 
     /// A terminal whose agent ended starts it again in place: Claude Code resumes its own

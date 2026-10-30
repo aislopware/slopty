@@ -643,6 +643,8 @@ struct Reader {
     stores: Stores,
     /// A draft one of whose pictures was not there yet, looked for again.
     relook: Option<Relook>,
+    /// What it said last of each thread's meta ([`take`]).
+    said: Said,
 }
 
 /// A draft looked for again, its picture not yet stored when it came.
@@ -688,22 +690,27 @@ impl Reader {
         let Begin { terminal, native, cwd, version, transcript, since } = at;
         let thread = slopty_agent::claude::thread_of(&native);
         let now = WallMs::now();
-        let mut history = match host.meta(thread) {
-            Some((mut meta, _status)) => {
-                // Read, not driven: nothing to switch to from here.
-                meta.drive = Drive::named(Drive::OBSERVED);
-                History::of(meta)
-            }
-            None => History::new(&native, &version, &cwd, now),
+        // What it reads the thread from is what its first word changes.
+        let (mut history, read) = if let Some((read, _status)) = host.meta(thread) {
+            let mut meta = read.clone();
+            // Read, not driven: nothing to switch to from here.
+            meta.drive = Drive::named(Drive::OBSERVED);
+            (History::of(meta), read)
+        } else {
+            let history = History::new(&native, &version, &cwd, now);
+            let read = history.meta().clone();
+            (history, read)
         };
-        take(host, history.drain());
+        let mut said = Said::from([(thread, read)]);
+        take(host, &mut said, history.drain());
         if !version.is_empty() {
-            take(host, history.version(&version));
+            take(host, &mut said, history.version(&version));
         }
-        take(host, history.fact(ThreadMeta::TERMINAL_FACT, Some(&terminal.to_string())));
-        take(host, history.status(Phase::Idle, None, Liveness::Live, now));
+        let named = history.fact(ThreadMeta::TERMINAL_FACT, Some(&terminal.to_string()));
+        take(host, &mut said, named);
+        take(host, &mut said, history.status(Phase::Idle, None, Liveness::Live, now));
         if let Some(since) = since {
-            take(host, history.run_began(since));
+            take(host, &mut said, history.run_began(since));
         }
         let uid = rustix::process::getuid().as_raw();
         let pictures = Pictures::new(uid, Path::new(&cwd), &native);
@@ -719,6 +726,7 @@ impl Reader {
             pictures,
             stores,
             relook: None,
+            said,
         }
     }
 
@@ -752,7 +760,7 @@ impl Reader {
             (true, Some(store)) => drop(self.stores.lock().insert(thread, store.to_path_buf())),
             _ => drop(self.stores.lock().remove(&thread)),
         }
-        take(host, self.history.draft(draft));
+        take(host, &mut self.said, self.history.draft(draft));
         self.relook = (missing && looks > 0).then(|| Relook {
             text,
             tmpdir,
@@ -805,9 +813,12 @@ impl Reader {
         if !self.hooked {
             calls(&mut self.open, &changes);
         }
-        take(host, self.history.transcript(&changes, &outputs));
-        take(host, self.phase_from_transcript());
-        take(host, self.reworded());
+        let told = self.history.transcript(&changes, &outputs);
+        take(host, &mut self.said, told);
+        let phase = self.phase_from_transcript();
+        take(host, &mut self.said, phase);
+        let reworded = self.reworded();
+        take(host, &mut self.said, reworded);
     }
 
     /// What the transcript says of the phase: the whole of it with no hooks, an interrupt
@@ -860,7 +871,7 @@ impl Reader {
                 Vec::new()
             }
         };
-        take(host, outs);
+        take(host, &mut self.said, outs);
     }
 
     /// What the record says the session waits on since `at`, for a session none of whose hooks
@@ -945,7 +956,7 @@ impl Reader {
         drop(self.stores.lock().remove(&self.history.main()));
         let mut outs = self.history.gone(at);
         outs.extend(self.history.fact(ThreadMeta::TERMINAL_FACT, None));
-        take(host, outs);
+        take(host, &mut self.said, outs);
         tracing::debug!(cwd = self.cwd, home = %self.home.display(), "a session's thread ended");
     }
 }
@@ -1038,26 +1049,108 @@ fn root_of(host: &Host, thread: ThreadId) -> Option<ThreadMeta> {
     None
 }
 
+/// What a follower said last of each thread's meta: the meta it read the thread from, then each
+/// it wrote. What it says next changes only what differs from that.
+type Said = HashMap<ThreadId, ThreadMeta>;
+
 /// Put what the mapping made into the host: a thread begun anew if the host holds it already.
-fn take(host: &Host, outs: Vec<Out>) {
+///
+/// The mapping keeps the whole meta of each thread and says it whole, but the thread is also
+/// the worker's: its start names the terminal and folder, its seat its facts, the person their
+/// marks. So what is said of a thread's meta changes only what it changes from what was said
+/// before (`said`), and only where nobody changed it since ([`merged`]), in one step with the
+/// look at the thread; a thread nothing was said of yet takes it whole.
+fn take(host: &Host, said: &mut Said, outs: Vec<Out>) {
     for out in outs {
         match out {
             Out::Begin(meta) => {
                 let id = meta.id;
-                let begun = if host.holds(id) {
-                    host.reset(id, ThreadState::new(*meta)).map(|_| ())
-                } else {
-                    host.create(*meta).map(|_| ())
-                };
+                let before = said.remove(&id);
+                let state = ThreadState::new((*meta).clone());
+                let begun =
+                    host.begin(state, |held| merged(before.as_ref().unwrap_or(held), &meta, held));
                 if let Err(e) = begun {
                     tracing::warn!(thread = %id, "a Claude Code thread could not begin: {e}");
                 }
+                said.insert(id, *meta);
+            }
+            Out::Actions(thread, actions)
+                if !actions.iter().any(|action| matches!(action, Action::Meta(_))) =>
+            {
+                host.apply(thread, actions);
             }
             Out::Actions(thread, actions) => {
-                host.apply(thread, actions);
+                let before = said.get(&thread).cloned();
+                let last = host.update(thread, |state| {
+                    let mut held = state.meta.clone();
+                    let mut before = before;
+                    let mut put = Vec::with_capacity(actions.len());
+                    for action in actions {
+                        let Action::Meta(meta) = action else {
+                            put.push(action);
+                            continue;
+                        };
+                        let next = merged(before.as_ref().unwrap_or(&held), &meta, &held);
+                        before = Some(*meta);
+                        if next != held {
+                            held = next.clone();
+                            put.push(Action::Meta(Box::new(next)));
+                        }
+                    }
+                    (put, before)
+                });
+                if let Some(Some(last)) = last {
+                    said.insert(thread, last);
+                }
             }
         }
     }
+}
+
+/// The meta `said` makes of `held`, `before` being what was said before it: each part `said`
+/// changes from `before` is `said`'s where `held` still has it as `before` did, and `held`'s
+/// where another changed it since, or where `said` left it alone. Facts go one by one.
+fn merged(before: &ThreadMeta, said: &ThreadMeta, held: &ThreadMeta) -> ThreadMeta {
+    fn part<T: PartialEq + Clone>(before: &T, said: &T, held: &T) -> T {
+        if said != before && held == before { said.clone() } else { held.clone() }
+    }
+    let ThreadMeta {
+        id,
+        agent,
+        agent_version,
+        native,
+        cwd,
+        title,
+        parent,
+        origin,
+        drive,
+        facts,
+        created_ms,
+    } = said;
+    let mut meta = ThreadMeta {
+        id: *id,
+        agent: part(&before.agent, agent, &held.agent),
+        agent_version: part(&before.agent_version, agent_version, &held.agent_version),
+        native: part(&before.native, native, &held.native),
+        cwd: part(&before.cwd, cwd, &held.cwd),
+        title: part(&before.title, title, &held.title),
+        parent: part(&before.parent, parent, &held.parent),
+        origin: part(&before.origin, origin, &held.origin),
+        drive: part(&before.drive, drive, &held.drive),
+        facts: held.facts.clone(),
+        created_ms: part(&before.created_ms, created_ms, &held.created_ms),
+    };
+    for name in before.facts.keys().chain(facts.keys()) {
+        let (was, now) = (before.facts.get(name), facts.get(name));
+        if was == now || held.facts.get(name) != was {
+            continue;
+        }
+        match now {
+            Some(value) => drop(meta.facts.insert(name.clone(), value.clone())),
+            None => drop(meta.facts.remove(name)),
+        }
+    }
+    meta
 }
 
 #[cfg(test)]

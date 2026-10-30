@@ -79,6 +79,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       turn it ends; a `Stop` ends the turn there, since the records that close it come after
       the hook, and an Esc's interrupt record ends it in the decoder, since Esc fires no hook
       and Claude Code writes no end of its own for it.
+    - *Two writers of a thread's meta* (2026-10-30, `thread/{start,claude,host}.rs`). The
+      start names a thread's terminal and folder, its seat its origin and facts; the observer
+      says its title, version and drive from the session's records, which hold the whole meta
+      and say it whole. So the observer keeps what it said last of each thread and writes only
+      what it changes from that, and only where nobody changed it since, in one step with the
+      look (`take`, `merged`): a transcript read from the start, a title or its end never
+      undoes the worker's, and its end takes back only the terminal it named. A start whose
+      terminal does not open takes back only what it did. The host never makes a thread over
+      one held, and makes or changes one, or begins it anew, in one step
+      (`Host::create_or_update`, `Host::begin`).
     - *Typing.* The worker's submit pastes (bracketed when the program asked for it), then
       writes Enter 200 ms later; it is refused while the session needs the person. Only
       `agent_tell` submits (`SessionHandle::submit`); the client link carries no submit, and
