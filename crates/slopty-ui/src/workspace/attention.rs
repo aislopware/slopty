@@ -1,15 +1,16 @@
-//! Attention on a pocketed phone: which moments become a system notification while the app is
-//! not in front, and where a tapped one leads.
+//! Attention: which moments become a system notification, and where a tapped one leads
+//! (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
 //!
 //! Four moments notify. An agent starts to need the human (a permission, a question, input it
-//! asks for), a program's status record starts to wait on them (`OSC 7501`'s `blocked`, said as
-//! an agent's need is and taken back the same way), an agent's turn that ran at least the
-//! slow-command time ends, or a shell command that ran that long ends. Nothing notifies while
-//! the app is in front, since the shell shows it there. A session has at most one
-//! notification up: the note's identifier is its session's, so a newer one replaces the older,
-//! and an agent answered anywhere takes its own back. Coming back to the app takes back every
-//! note it posted, because the shell now shows the same things. The icon badge counts what is
-//! left for the person.
+//! asks for) while this device hears its worker, a program asks for a notification (`OSC 9`),
+//! an agent's turn that ran at least the slow-command time ends, or a shell command that ran
+//! that long ends. A moment notifies when
+//! its session is in the background: the app is not in front, or it is and shows another
+//! session ([`Attention::set_on_screen`]). The session on screen never notifies, since the
+//! person sees it. A session has at most one notification up: the note's identifier is its
+//! session's, so a newer one replaces the older, and an agent answered anywhere takes its own
+//! back. Once the person looks at a session, its note goes. The icon badge counts the sessions
+//! that need the person and those that failed.
 //!
 //! A note answers nothing and sends nothing to the agent (TUI-first, `docs/decisions/agents.md`):
 //! a tap opens the session, whose TUI the person answers in.
@@ -23,8 +24,8 @@
 //! devices never both say it. Its notices are then the only agent moments that post here
 //! ([`Attention::notice`], made by [`WorkspaceView::heard`]); the workspace's own look still
 //! takes back what no longer waits, and keeps the badge.
-//! A shell's moments and a program's records are this client's own and post as before: the
-//! server never hears a program's records.
+//! A shell's moments and a program's notes are this client's own and post as before: the
+//! server never hears them.
 //!
 //! A note of an agent that needs the person is Time Sensitive (`Note::urgent`), so it reaches
 //! them through a Focus and past the notification summary; a finished turn, a failure, a
@@ -39,7 +40,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::Entity;
 use slopty_client::WorkerKey;
@@ -52,12 +53,6 @@ use slopty_terminal::TerminalView;
 
 use super::agents::{agent_ask_text, agent_status_word};
 use super::{Finished, WorkspaceView};
-
-/// How long after a program's record sounded or notified another of the same program's may.
-///
-/// A program is any program, and one that flips between waiting and working would otherwise
-/// sound with each flip.
-pub const PROGRAM_QUIET: Duration = Duration::from_secs(10);
 
 /// What a note is about: a terminal, whose shell or program it speaks of, or an agent's
 /// thread.
@@ -138,9 +133,9 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_text`), else its state in a word or two.
     pub body: String,
-    /// This client's own moment: a program waiting on the person (`OSC 7501`), which no
-    /// server's ladder ranks, so it posts here even while a server leads.
-    pub own: bool,
+    /// It started to wait while this device heard its worker. One already waiting when the
+    /// worker was first heard here is no moment: the list shows it, and no note says it.
+    pub fresh: bool,
 }
 
 impl Asking {
@@ -175,7 +170,7 @@ pub struct Look {
     /// The agents whose turn finished unwatched while this device heard their worker, and is
     /// unread.
     pub turns: Vec<Turn>,
-    /// What is left for the person: the icon badge.
+    /// The sessions that need the person, and those that failed: the icon badge.
     pub unread: usize,
 }
 
@@ -213,6 +208,8 @@ pub struct Attention {
     notifier: Rc<dyn Notifier>,
     /// The app is in front.
     active: bool,
+    /// The session the app shows, which never notifies while the app is in front.
+    on_screen: Option<About>,
     /// Notes are wanted at all (Settings → Notifications' Desktop switch).
     enabled: bool,
     /// The person is at another of their devices.
@@ -234,8 +231,6 @@ pub struct Attention {
     /// The app still hears the server's notices on its link: it has not told the server it is
     /// about to be suspended, after which the server pushes instead.
     listening: bool,
-    /// When each program's record last posted a note: at most once in [`PROGRAM_QUIET`].
-    own_posted: HashMap<About, Instant>,
 }
 
 impl std::fmt::Debug for Attention {
@@ -256,6 +251,7 @@ impl Attention {
         Self {
             notifier,
             active: true,
+            on_screen: None,
             enabled: true,
             elsewhere: false,
             server_led: false,
@@ -266,7 +262,6 @@ impl Attention {
             unsaid: false,
             said_off: false,
             listening: true,
-            own_posted: HashMap::new(),
         }
     }
 
@@ -293,40 +288,55 @@ impl Attention {
         self.active
     }
 
-    /// The app came to the front or left it. Coming back takes back every note it put up but a
-    /// live ask's, which stays in the Notification Centre and goes once the agent stops
-    /// waiting. The notes pushed while it was away are the system's to list
-    /// ([`Self::delivered`]).
+    /// The app came to the front or left it. Coming back takes back the note of the session it
+    /// shows, which the person now sees; every other note stays, pointing at a session in the
+    /// background, until that session is looked at, answered or read. The notes pushed while it
+    /// was away are the system's to list ([`Self::delivered`]).
     pub fn set_active(&mut self, active: bool) {
-        if active && !self.active {
-            let asking = &self.asking;
-            let (kept, stale): (Vec<_>, Vec<_>) = self
-                .posted
-                .drain()
-                .partition(|(about, why)| *why == Why::Asks && asking.contains(about));
-            for (about, _) in stale {
-                self.notifier.withdraw(&about.note_id());
-            }
-            self.posted.extend(kept);
-        }
         self.active = active;
+        self.withdraw_on_screen();
     }
 
-    /// The notes the system shows now, by identifier, as it listed them once the app came back:
-    /// the ones a push put up while the app was away, which it never posted, go as its own do,
-    /// but a live ask's, which stays and goes once answered. Nothing goes while the app is away
-    /// again by the time the list came.
+    /// The app shows `about`'s session now, or none: it never notifies while the app is in
+    /// front, and its note goes once the person looks at it.
+    pub fn set_on_screen(&mut self, about: Option<About>) {
+        self.on_screen = about;
+        self.withdraw_on_screen();
+    }
+
+    /// Take back the note of the session the person looks at.
+    fn withdraw_on_screen(&mut self) {
+        let Some(about) = self.on_screen.filter(|_| self.active) else { return };
+        if self.posted.remove(&about).is_some() {
+            self.notifier.withdraw(&about.note_id());
+        }
+    }
+
+    /// The notes the system shows now, by identifier, as it listed them once the app came back;
+    /// a push put up those the app never posted. One whose moment still stands (an ask still
+    /// waiting, a turn still unread) is followed as the app's own, and goes as they do; any
+    /// other goes now, and so does the note of the session on screen. Nothing goes while the
+    /// app is away again by the time the list came.
     pub fn delivered(&mut self, ids: &[String]) {
         if !self.active {
             return;
         }
         for id in ids {
-            if let Some(about) = self.asking.iter().find(|a| a.note_id() == *id) {
-                self.posted.entry(*about).or_insert(Why::Asks);
-            } else if !self.posted.keys().any(|about| about.note_id() == *id) {
-                self.notifier.withdraw(id);
+            if self.posted.keys().any(|about| about.note_id() == *id) {
+                continue;
+            }
+            let of = |set: &HashSet<About>| set.iter().find(|a| a.note_id() == *id).copied();
+            match (of(&self.asking), of(&self.turns)) {
+                (Some(about), _) => {
+                    self.posted.insert(about, Why::Asks);
+                }
+                (None, Some(about)) => {
+                    self.posted.insert(about, Why::Finished);
+                }
+                (None, None) => self.notifier.withdraw(id),
             }
         }
+        self.withdraw_on_screen();
     }
 
     /// Notes are wanted or not: turned off, every note up goes and none posts until they are
@@ -360,19 +370,19 @@ impl Attention {
         self.listening = listening;
     }
 
-    /// Whether the server's notices decide which agent moments post and sound.
+    /// Whether the server's notices decide which agent moments post.
     #[must_use]
     pub const fn server_led(&self) -> bool {
         self.server_led
     }
 
-    /// The server picked this client to say `heard`: posted while the app is not in front,
+    /// The server picked this client to say `heard`: posted unless its session is on screen,
     /// where the shell already shows it.
     pub fn notice(&mut self, heard: &Heard) {
-        if self.active || !self.listening {
+        let session = heard.route.about;
+        if !self.listening || !self.due(session) {
             return;
         }
-        let session = heard.route.about;
         let note = Note {
             id: session.note_id(),
             title: heard.title.clone(),
@@ -384,25 +394,12 @@ impl Attention {
         self.post(session, why, note);
     }
 
-    /// Whether a program's record in `about` may post a note now: none posted in the last
-    /// [`PROGRAM_QUIET`]. Noted as posting when it may.
-    fn own_due(&mut self, about: About) -> bool {
-        let now = Instant::now();
-        self.own_posted.retain(|_, at| now.saturating_duration_since(*at) < PROGRAM_QUIET);
-        let quiet = self
-            .own_posted
-            .get(&about)
-            .is_some_and(|at| now.saturating_duration_since(*at) < PROGRAM_QUIET);
-        if !quiet {
-            self.own_posted.insert(about, now);
-        }
-        !quiet
-    }
-
-    /// Whether a moment is worth a note now: the app is not in front, and the person is not
-    /// at another device.
-    const fn away(&self) -> bool {
-        !self.active && !self.elsewhere
+    /// Whether a moment in `about`'s session is worth a note now: the session is in the
+    /// background (the app is not in front, or shows another), and the person is not at
+    /// another device.
+    fn due(&self, about: About) -> bool {
+        let looked_at = self.active && self.on_screen == Some(about);
+        !self.elsewhere && !looked_at
     }
 
     fn withdraw_all(&mut self) {
@@ -411,19 +408,19 @@ impl Attention {
         }
     }
 
-    /// The workspace changed: an agent that has just started to wait notifies while the app is
-    /// away, one that stopped takes its note back, and the badge follows the bell.
+    /// The workspace changed: an agent in the background that has just started to wait
+    /// notifies, one that stopped takes its note back, and the badge follows what needs the
+    /// person.
     pub fn look(&mut self, look: &Look) {
         let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
-        if self.away() {
-            for asking in &look.asking {
-                let session = asking.route.about;
-                if !self.asking.contains(&session)
-                    && (!self.server_led || asking.own)
-                    && (!asking.own || self.own_due(session))
-                {
-                    self.post(session, Why::Asks, asking.note());
-                }
+        for asking in &look.asking {
+            let session = asking.route.about;
+            if asking.fresh
+                && self.due(session)
+                && !self.asking.contains(&session)
+                && !self.server_led
+            {
+                self.post(session, Why::Asks, asking.note());
             }
         }
         let stopped: Vec<About> = self.asking.difference(&now).copied().collect();
@@ -435,9 +432,12 @@ impl Attention {
         }
         self.asking = now;
         let turns: HashSet<About> = look.turns.iter().map(|t| t.route.about).collect();
-        if self.away() && !self.server_led {
-            let fresh: Vec<&Turn> =
-                look.turns.iter().filter(|t| !self.turns.contains(&t.route.about)).collect();
+        if !self.server_led {
+            let fresh: Vec<&Turn> = look
+                .turns
+                .iter()
+                .filter(|t| self.due(t.route.about) && !self.turns.contains(&t.route.about))
+                .collect();
             for turn in fresh {
                 let note = Note {
                     id: turn.route.about.note_id(),
@@ -465,7 +465,7 @@ impl Attention {
     }
 
     /// A shell command ended in `route`'s session after running `done.elapsed`: it notifies when
-    /// that is at least `slow` and the app is away. `title` is the tile's name.
+    /// that is at least `slow` and the session is in the background. `title` is the tile's name.
     pub fn command_finished(
         &mut self,
         route: Route,
@@ -473,7 +473,7 @@ impl Attention {
         done: &Finished,
         slow: Duration,
     ) {
-        if !self.away() || done.elapsed < slow {
+        if !self.due(route.about) || done.elapsed < slow {
             return;
         }
         let command = done.command.lines().next().unwrap_or_default().trim();
@@ -487,10 +487,10 @@ impl Attention {
         self.post(route.about, Why::Finished, note);
     }
 
-    /// A program in `route`'s session asked for a desktop notification: it notifies while the
-    /// app is away. In front, the tile's own attention mark is enough.
+    /// A program in `route`'s session asked for a desktop notification: it notifies while its
+    /// session is in the background. On screen, the program's own output is enough.
     pub fn program(&mut self, route: Route, title: String, body: String) {
-        if !self.away() {
+        if !self.due(route.about) {
             return;
         }
         let note =
@@ -512,7 +512,7 @@ impl Attention {
 
 impl WorkspaceView {
     /// What notifications follow now: the agents waiting on the human, with their thread's
-    /// name and what they ask, and the bell's count.
+    /// name and what they ask, and the badge's count: what needs the person and what failed.
     #[must_use]
     pub fn attention_look(&self) -> Look {
         let asking = self
@@ -523,7 +523,8 @@ impl WorkspaceView {
                 let body = agent_ask_text(stand).unwrap_or_else(|| agent_status_word(stand));
                 let route = Route { worker: w.worker, item: None, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
-                Some(Asking { route, title, body, own: false })
+                let fresh = !self.waited_when_heard(w.thread);
+                Some(Asking { route, title, body, fresh })
             })
             .collect();
         let turns = self
@@ -543,7 +544,8 @@ impl WorkspaceView {
                 Some(Turn { route, title, body })
             })
             .collect();
-        Look { asking, turns, unread: self.bell_count() }
+        let failed = self.threads_on(slopty_proto::thread::attention::Rung::Failed).len();
+        Look { asking, turns, unread: self.needs_you_count().saturating_add(failed) }
     }
 
     /// The note the server's `notice` makes here; `None` for a finished turn shorter than the
@@ -616,7 +618,108 @@ mod tests {
     use slopty_core::{SessionId, WorkerId};
     use slopty_platform::notify::Memory;
 
-    use super::{About, Attention, Route};
+    use super::{About, Asking, Attention, Look, Route};
+
+    fn route(session: SessionId) -> Route {
+        Route {
+            worker: crate::workspace::worker_key(WorkerId::new()),
+            item: None,
+            about: About::Session(session),
+        }
+    }
+
+    /// What the workspace shows with `waiting` asking the person.
+    fn asking(waiting: &[SessionId]) -> Look {
+        let asking = waiting
+            .iter()
+            .map(|session| Asking {
+                route: route(*session),
+                title: "claude".to_owned(),
+                body: "Allow Bash?".to_owned(),
+                fresh: true,
+            })
+            .collect();
+        Look { asking, turns: Vec::new(), unread: waiting.len() }
+    }
+
+    /// slopty: in front, the session on screen never notifies and one in the background does;
+    /// its note goes once the person looks at it. Away, every session notifies.
+    #[test]
+    fn the_session_on_screen_stays_quiet_and_one_behind_it_notifies() {
+        let memory = Rc::new(Memory::default());
+        let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+        let (shown, behind) = (SessionId::new(), SessionId::new());
+        attention.set_on_screen(Some(About::Session(shown)));
+        attention.look(&asking(&[shown]));
+        assert!(memory.posted().is_empty(), "the session on screen asks quietly");
+        attention.look(&asking(&[shown, behind]));
+        let posted = memory.posted();
+        assert_eq!(posted.len(), 1, "the one behind it notifies");
+        assert_eq!(posted[0].id, About::Session(behind).note_id());
+        assert!(posted[0].urgent, "a need breaks through a Focus");
+
+        attention.set_on_screen(Some(About::Session(behind)));
+        assert_eq!(memory.withdrawn(), [About::Session(behind).note_id()], "looked at, it goes");
+
+        attention.set_active(false);
+        attention.program(route(behind), "make".to_owned(), "done".to_owned());
+        assert_eq!(memory.posted().len(), 2, "away, even the session on screen notifies");
+        attention.set_active(true);
+        assert_eq!(memory.withdrawn().len(), 2, "back in front, the one on screen goes again");
+    }
+
+    /// slopty: a wait already under way when its worker was first heard here is no moment: the
+    /// list shows it, and no note says it; one that starts after notifies.
+    #[test]
+    fn a_wait_found_under_way_posts_no_note() {
+        let memory = Rc::new(Memory::default());
+        let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+        let (found, started) = (SessionId::new(), SessionId::new());
+        attention.set_active(false);
+        let mut look = asking(&[found]);
+        look.asking[0].fresh = false;
+        attention.look(&look);
+        assert!(memory.posted().is_empty(), "found waiting, it says nothing");
+        let mut look = asking(&[found, started]);
+        look.asking[0].fresh = false;
+        attention.look(&look);
+        let posted = memory.posted();
+        assert_eq!(posted.len(), 1, "a wait that starts after notifies");
+        assert_eq!(posted[0].id, About::Session(started).note_id());
+    }
+
+    /// slopty: back in front, a note pointing at a session in the background stays until that
+    /// session is looked at or answered; a pushed one whose moment passed goes.
+    #[test]
+    fn coming_back_keeps_the_notes_that_still_point_somewhere() {
+        let memory = Rc::new(Memory::default());
+        let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
+        let (shown, behind, pushed) = (SessionId::new(), SessionId::new(), SessionId::new());
+        attention.set_active(false);
+        attention.look(&asking(&[shown, behind]));
+        assert_eq!(memory.posted().len(), 2, "away, both notify");
+
+        attention.set_on_screen(Some(About::Session(shown)));
+        attention.set_active(true);
+        assert_eq!(
+            memory.withdrawn(),
+            [About::Session(shown).note_id()],
+            "only the one on screen goes"
+        );
+        attention.delivered(&[About::Session(behind).note_id(), About::Session(pushed).note_id()]);
+        assert_eq!(
+            memory.withdrawn()[1..],
+            [About::Session(pushed).note_id()],
+            "a push whose moment passed goes; a live ask's stays"
+        );
+
+        attention.look(&asking(&[shown]));
+        assert_eq!(
+            memory.withdrawn().last(),
+            Some(&About::Session(behind).note_id()),
+            "answered, it goes"
+        );
+    }
 
     /// The notes' switch off takes back every note up and posts none while away; on again,
     /// notes post as before.
@@ -624,11 +727,6 @@ mod tests {
     fn notes_switched_off_go_and_post_none_until_switched_on() {
         let memory = Rc::new(Memory::default());
         let mut attention = Attention::new(Rc::<Memory>::clone(&memory));
-        let route = |session| Route {
-            worker: crate::workspace::worker_key(WorkerId::new()),
-            item: None,
-            about: About::Session(session),
-        };
         let (first, second) = (SessionId::new(), SessionId::new());
         attention.set_active(false);
         attention.program(route(first), "make".to_owned(), "done".to_owned());

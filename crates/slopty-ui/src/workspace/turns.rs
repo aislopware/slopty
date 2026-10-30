@@ -1,19 +1,20 @@
-//! Agents' turns that ended while nobody looked: which are left for the person to review. They
-//! are what the icon badge counts beside the agents that need the person, those that failed and
-//! the tasks ready to merge, and what a note says while the app is away (`attention`).
+//! Agents' turns that ended while nobody looked: which are left for the person to review, and
+//! what a note says while their session is in the background (`attention`). The icon badge
+//! leaves them out: it counts what needs the person and what failed.
 //!
 //! What is unread is the worker's word, not this device's: each thread's row carries its latest
 //! turn that ended and the person's seen mark, set by whichever device looked
-//! ([`Intent::Seen`]). So a turn read on the phone leaves the Mac's bell, and a turn that ended
+//! ([`Intent::Seen`]). So a turn read on the phone is read on the Mac, and a turn that ended
 //! while this app was not running is unread here when it next hears the worker. A chat the
 //! person opens in the shell (`markChatSeen`) marks its thread seen; the mark shows here at once
 //! and goes to the worker, which tells every other device.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use gpui::Context;
 use slopty_client::WorkerKey;
+use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{Intent, TurnEnded};
 use slopty_proto::thread::{ThreadId, TurnId};
 
@@ -23,24 +24,23 @@ use super::{AgentTurn, Finished, WorkspaceView};
 /// What an agent's finished turn says when its worker gave no words of the turn's own.
 pub(super) const TURN_FINISHED: &str = "Turn finished";
 
-/// The seen marks this device has set and its workers have not yet said back.
+/// The seen marks this device has set and its workers have not yet said back, and the waits it
+/// found already under way.
 #[derive(Debug, Default)]
 pub(super) struct Turns {
     /// The turn each thread was seen through here, ahead of its row's mark: shown at once,
     /// let go once the row says as much.
     seen: HashMap<ThreadId, TurnId>,
+    /// The threads already waiting on the person when their worker was first heard here, let
+    /// go once they stop: their wait is no moment, so no note says it (`attention`).
+    waited_when_heard: HashSet<ThreadId>,
 }
 
 impl WorkspaceView {
-    /// What the bell counts: the agents and threads that need the person, those whose turn
-    /// failed, and the agents' turns left unread. A shell's finish is not counted.
-    #[must_use]
-    pub fn bell_count(&self) -> usize {
-        use slopty_proto::thread::attention::Rung;
-        let on = |rung: Rung| self.threads_on(rung).len();
-        self.needs_you_count()
-            .saturating_add(on(Rung::Failed))
-            .saturating_add(self.agent_turns().count())
+    /// Whether `thread` was already waiting on the person when its worker was first heard here,
+    /// and waits still.
+    pub(super) fn waited_when_heard(&self, thread: ThreadId) -> bool {
+        self.turns.waited_when_heard.contains(&thread)
     }
 
     /// The turn `thread` is seen through: its row's mark, or this device's own ahead of it.
@@ -50,15 +50,24 @@ impl WorkspaceView {
 
     /// `key`'s table came: each of its threads whose latest turn the agent answered, long
     /// enough to be worth a word, and past the person's seen mark is unread: it earns a header
-    /// badge, a row under *To review*, a count on the bell, the tile's unseen dot and, if it
-    /// ended while this device heard the worker, a note while the app is away
+    /// badge, a row under *To review*, the tile's unseen dot and, if it ended while this
+    /// device heard the worker, a note while its session is in the background
     /// ([`super::attention::Look::turns`]). One no longer unread (seen on another device, or a
-    /// new turn under way) leaves them all. `first` is the worker's first table here.
+    /// new turn under way) leaves them all. `first` is the worker's first table here: a thread
+    /// waiting on the person in it waited before this device heard it
+    /// ([`Self::waited_when_heard`]).
     pub(super) fn turns_heard(&mut self, key: WorkerKey, first: bool, cx: &mut Context<Self>) {
-        let stands: Vec<(ThreadId, Option<TurnEnded>, TurnId)> =
-            self.table_stands(key).map(|(id, stand)| (id, stand.ended, stand.seen)).collect();
+        let stands: Vec<(ThreadId, Option<TurnEnded>, TurnId, Rung)> = self
+            .table_stands(key)
+            .map(|(id, stand)| (id, stand.ended, stand.seen, stand.rung))
+            .collect();
         let mut moved = false;
-        for (thread, ended, row_seen) in stands {
+        for (thread, ended, row_seen, rung) in stands {
+            if rung != Rung::NeedsYou {
+                self.turns.waited_when_heard.remove(&thread);
+            } else if first {
+                self.turns.waited_when_heard.insert(thread);
+            }
             if self.turns.seen.get(&thread).is_some_and(|here| *here <= row_seen) {
                 self.turns.seen.remove(&thread);
             }
@@ -84,6 +93,16 @@ impl WorkspaceView {
                 Some(_) => {}
                 None => moved |= held.is_some() && self.finished.remove(&about).is_some(),
             }
+        }
+        let gone: Vec<ThreadId> = self
+            .turns
+            .waited_when_heard
+            .iter()
+            .filter(|thread| self.thread_stand(**thread).is_none())
+            .copied()
+            .collect();
+        for thread in gone {
+            self.turns.waited_when_heard.remove(&thread);
         }
         if moved {
             cx.notify();

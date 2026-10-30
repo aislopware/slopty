@@ -29,7 +29,7 @@ use slopty_view_proto::{
 /// Whether every device the workspace knows is reached now, so what the lists leave out is gone.
 pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chrono::Utc>) -> bool {
     !state.devices.is_empty()
-        && state.devices.iter().all(|device| state.device_online(&device.id, now))
+        && state.devices.iter().all(|device| !super::sidebar_status::out_of_reach(state, &device.id, now))
 }
 
 #[cfg(test)]
@@ -390,11 +390,28 @@ pub(super) fn sidebar_header_glyph(theme: &Theme) -> gpui::Hsla {
     theme.text_muted.opacity(0.7)
 }
 
+/// slopty: one row of the sidebar's filter menu as it draws.
+#[derive(Default)]
+struct MenuDetail {
+    row: SpacesMenuRow,
+    label: SharedString,
+    /// A project's row: its project, whose artwork it draws.
+    space: Option<slopty_view_proto::Space>,
+    /// Out of reach: the disconnected glyph.
+    offline: bool,
+    selected: bool,
+    /// A machine's row: its kind's glyph in the artwork's place (`device_glyph`).
+    glyph: Option<&'static str>,
+    /// A machine that turns this device away: why, for its login badge.
+    turned_away: Option<SharedString>,
+}
+
 /// One activatable row of the open dropdown, in nav order. `AddSpace` names
 /// the card's pinned "New project" footer, not a list row — keyboard nav
 /// maps the list-length index to it.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Default)]
 pub(super) enum SpacesMenuRow {
+    #[default]
     All,
     Space(String),
     // slopty: a machine, by device id: the list narrowed to its sessions (`sidebar_status::Filter`).
@@ -1232,7 +1249,7 @@ impl Shell {
             .map_or_else(|| id.to_owned(), slopty_view_proto::view::project_key)
     }
 
-    fn open_spaces_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_spaces_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // "PaletteSearch" context: ↑↓/⏎ stay unbound in the input and bubble
         // to the card's key handler.
         let search =
@@ -1382,7 +1399,7 @@ impl Shell {
             Some(id) => {
                 let state = self.state.read(cx);
                 let name = state.device_name(id).unwrap_or("?");
-                let reached = state.device_online(id, crate::clock::utc(cx));
+                let reached = !super::sidebar_status::out_of_reach(state, id, crate::clock::utc(cx));
                 (SharedString::from(format!("{label} \u{b7} {name}")), offline || !reached)
             }
             None => (label, offline),
@@ -1588,68 +1605,50 @@ impl Shell {
         // `rows` to avoid cloning the list children per frame.
         // slopty: a machine's row draws its kind's glyph (`device_glyph`) in the artwork's place.
         let machine = self.settings.machine_filter.clone();
-        let details: Vec<(
-            SpacesMenuRow,
-            SharedString,
-            Option<slopty_view_proto::Space>,
-            bool,
-            bool,
-            Option<&'static str>,
-        )> = {
+        let details: Vec<MenuDetail> = {
             let state = self.state.read(cx);
+            let now = crate::clock::utc(cx);
             rows.into_iter()
                 .map(|row| match row {
-                    SpacesMenuRow::All => (
-                        SpacesMenuRow::All,
-                        SharedString::from("All projects"),
-                        None,
-                        false,
-                        filter.is_none(),
-                        None,
-                    ),
+                    SpacesMenuRow::All => MenuDetail {
+                        row: SpacesMenuRow::All,
+                        label: SharedString::from("All projects"),
+                        selected: filter.is_none(),
+                        ..MenuDetail::default()
+                    },
                     SpacesMenuRow::Machine(id) => {
                         let device = state.devices.iter().find(|device| device.id == id);
-                        let online = state.device_online(&id, crate::clock::utc(cx));
-                        let selected = machine.as_deref() == Some(id.as_str());
-                        (
-                            SpacesMenuRow::Machine(id),
-                            SharedString::from(device.map_or("?", |device| device.name.as_str()).to_owned()),
-                            None,
-                            !online,
-                            selected,
-                            Some(device_glyph(device.map_or("", |device| device.platform.as_str()))),
-                        )
+                        MenuDetail {
+                            label: SharedString::from(device.map_or("?", |device| device.name.as_str()).to_owned()),
+                            offline: super::sidebar_status::out_of_reach(state, &id, now),
+                            selected: machine.as_deref() == Some(id.as_str()),
+                            glyph: Some(device_glyph(device.map_or("", |device| device.platform.as_str()))),
+                            turned_away: super::sidebar_status::turned_away(state, &id)
+                                .map(|why| SharedString::from(why.to_owned())),
+                            row: SpacesMenuRow::Machine(id),
+                            ..MenuDetail::default()
+                        }
                     }
                     SpacesMenuRow::Space(id) => match state.space_row(&id) {
                         Some(space) => {
                             let key = slopty_view_proto::view::project_key(space);
-                            let selected = filter_key.as_deref() == Some(key.as_str());
                             let members = state.project_members(space);
-                            let (_, offline) = state.project_device_tag(&members, crate::clock::utc(cx));
-                            (
-                                SpacesMenuRow::Space(id),
-                                state
-                                    .representative_space(space)
-                                    .display_name()
-                                    .to_string()
-                                    .into(),
-                                Some(space.clone()),
+                            let (_, offline) = state.project_device_tag(&members, now);
+                            MenuDetail {
+                                row: SpacesMenuRow::Space(id),
+                                label: state.representative_space(space).display_name().to_string().into(),
+                                space: Some(space.clone()),
                                 offline,
-                                selected,
-                                None,
-                            )
+                                selected: filter_key.as_deref() == Some(key.as_str()),
+                                ..MenuDetail::default()
+                            }
                         }
-                        None => {
-                            let selected = filter.as_deref() == Some(id.as_str());
-                            (
-                                SpacesMenuRow::Space(id),
-                                SharedString::from("?"),
-                                None,
-                                false,
-                                selected,
-                                None,
-                            )
-                        }
+                        None => MenuDetail {
+                            selected: filter.as_deref() == Some(id.as_str()),
+                            row: SpacesMenuRow::Space(id),
+                            label: SharedString::from("?"),
+                            ..MenuDetail::default()
+                        },
                     },
                     // spaces_menu_rows never yields this variant — the
                     // footer is rendered by the card, not the list.
@@ -1663,12 +1662,12 @@ impl Shell {
         let profile = self.active_profile_key(cx);
         let icons: Vec<AnyElement> = details
             .iter()
-            .map(|(_, _, space, _, selected, glyph)| match (space, glyph) {
+            .map(|detail| match (&detail.space, detail.glyph) {
                 (Some(space), _) => self.project_icons.render(
                     &self.state,
                     Some(space),
                     profile.clone(),
-                    *selected,
+                    detail.selected,
                     cx,
                 ),
                 (None, Some(glyph)) => icon(glyph)
@@ -1679,6 +1678,21 @@ impl Shell {
                     .size(px(14.0))
                     .text_color(theme.text_muted)
                     .into_any_element(),
+            })
+            .collect();
+        // slopty: a machine that turns this device away wears the login badge where an
+        // unreached one wears the disconnected glyph.
+        let badges: Vec<Option<AnyElement>> = details
+            .iter()
+            .enumerate()
+            .map(|(ix, detail)| match (&detail.row, &detail.turned_away) {
+                (SpacesMenuRow::Machine(id), Some(why)) => Some(self.turned_away_badge(
+                    format!("spaces-menu-turned-away-{ix}").into(),
+                    id.clone(),
+                    why.clone(),
+                    cx,
+                )),
+                _ => None,
             })
             .collect();
 
@@ -1692,8 +1706,8 @@ impl Shell {
                     .gap(px(2.0))
                     // Same scroll budget as the composer project menu.
                     .max_h(px(224.0))
-                    .children(details.into_iter().zip(icons).enumerate().map(
-                        |(ix, ((row, label, _, offline, selected, _), art))| {
+                    .children(details.into_iter().zip(icons).zip(badges).enumerate().map(
+                        |(ix, ((MenuDetail { row, label, offline, selected, .. }, art), badge))| {
                             let menu_space = match &row {
                                 SpacesMenuRow::Space(id) => Some(id.clone()),
                                 _ => None,
@@ -1721,13 +1735,16 @@ impl Shell {
                             .child(popover::picker_icon_slot(art))
                             .child(div().flex_1().min_w_0().truncate().child(label))
                             // Disconnected glyph, not the word (user request).
-                            .when(offline, |el| {
-                                el.child(
-                                    icon(icons::WIFI_OFF)
-                                        .size(px(12.0))
-                                        .flex_none()
-                                        .text_color(theme.warning.opacity(0.8)),
-                                )
+                            .map(|el| match badge {
+                                Some(badge) => el.child(div().flex_none().child(badge)),
+                                None => el.when(offline, |el| {
+                                    el.child(
+                                        icon(icons::WIFI_OFF)
+                                            .size(px(12.0))
+                                            .flex_none()
+                                            .text_color(theme.warning.opacity(0.8)),
+                                    )
+                                }),
                             })
                             // No check glyph — the selected row's glass plate
                             // is the selection signal.

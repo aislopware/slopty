@@ -209,6 +209,59 @@ fn archive_tooltip(
 }
 
 impl Shell {
+    /// slopty: the login badge of a machine that turns this device away: a quiet lock whose
+    /// tooltip says why, and whose press dials the machine again now. It never asks for a
+    /// credential (`docs/decisions/layout.md`, "The session list is stable").
+    pub(super) fn turned_away_badge(
+        &self,
+        id: SharedString,
+        device: String,
+        why: SharedString,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = Theme::of(cx);
+        div()
+            .id(id.clone())
+            .debug_selector(move || id.to_string())
+            .role(gpui::Role::Button)
+            .aria_label("Retry")
+            .aria_description(why.clone())
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon(icons::LOCK).size(px(12.0)).text_color(theme.warning.opacity(0.8)))
+            .tooltip(crate::settings::widgets::text_tooltip(why))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.redial_device(device.clone(), cx);
+            }))
+            .into_any_element()
+    }
+
+    /// slopty: dial `device` again now, as its login badge asks: the app's `redial` action
+    /// (`DeviceAction::REDIAL`), which skips the link's wait. A call that does not reach the app
+    /// is said in the sidebar's notice.
+    pub(super) fn redial_device(&mut self, device: String, cx: &mut Context<Self>) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else { return };
+        cx.spawn(async move |this, cx| {
+            let params = serde_json::json!({
+                "deviceId": device,
+                "action": slopty_view_proto::DeviceAction::REDIAL,
+            });
+            let result =
+                engine.client().call(slopty_view_rpc::methods::DEVICE_ACTION, params).await;
+            if let Err(err) = result {
+                let _gone = this.update(cx, |this, cx| {
+                    this.sidebar_notice = Some(format!("Couldn\u{2019}t retry: {err}").into());
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Scroll the sidebar so the renamed row (painted at `row`) clears the
     /// list's edge fades, while the rename is still revealing it.
     fn keep_rename_row_in_view(&mut self, row: gpui::Bounds<Pixels>, cx: &mut Context<Self>) {
@@ -454,7 +507,13 @@ impl Shell {
         let cached = compact
             && pr_device
                 .as_deref()
-                .is_some_and(|device| !self.state.read(cx).device_online(device, now));
+                .is_some_and(|device| super::sidebar_status::out_of_reach(self.state.read(cx), device, now));
+        // slopty: a machine that turns this device away wears the login badge in the row's mark
+        // slot: why, and a press dials it again (`turned_away_badge`).
+        let turned_away = pr_device.as_deref().filter(|_| cached).and_then(|device| {
+            let why = super::sidebar_status::turned_away(self.state.read(cx), device)?;
+            Some((device.to_owned(), SharedString::from(why.to_owned())))
+        });
         // slopty: a need's glyph says which need; its words are the hover card's and a screen
         // reader's, never a line of the row (`docs/decisions/layout.md`, "A state is a glyph").
         // A cached row asks nothing in its name.
@@ -513,7 +572,9 @@ impl Shell {
         // slopty: the state's mark trails the title in a slot of its own, kept while at rest so
         // every title ends at one edge; a cached row's slot says so instead.
         let mark_slot = compact.then(|| {
-            let glyph = if cached {
+            let glyph = if let Some((device, why)) = turned_away.clone() {
+                Some(self.turned_away_badge(format!("chat-turned-away-{id}").into(), device, why, cx))
+            } else if cached {
                 Some(
                     div()
                         .debug_selector({
@@ -778,12 +839,7 @@ impl Shell {
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, _, cx| {
                     this.dismiss_session_card(cx);
-                    this.chat_menu.open(ChatMenuState {
-                        tab: None,
-                        chat_id: menu_id.clone(),
-                        position: event.position,
-                        page: ChatMenuPage::Root,
-                    });
+                    this.chat_menu.open(ChatMenuState::for_row(menu_id.clone(), event.position));
                     cx.notify();
                 }),
             )
@@ -1987,6 +2043,43 @@ mod tests {
         draw(cx);
         assert_eq!(shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx)), ["a", "b"], "every machine's again");
         assert!(shell.read_with(cx, |shell, _| shell.settings.machine_filter.is_none()));
+    }
+
+    /// slopty: a machine that turns this device away keeps its rows, cached, each wearing the
+    /// login badge in its mark's slot: a lock that says why and offers Retry, never a credential.
+    /// Its card and its filter entry say so too.
+    #[gpui::test]
+    fn a_machine_that_turns_this_device_away_wears_the_login_badge(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        let why = "closed to this device by the tailnet policy";
+        let device = |id: &str, turned_away: Option<&str>| -> slopty_view_proto::Device {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "platform": "linux", "lastSeenAt": Utc::now(),
+                "turnedAway": turned_away,
+                "actions": [{"id": "redial", "label": "Retry"}],
+            }))
+            .unwrap()
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.devices = vec![device("local", None), device("studio", Some(why))];
+                state.chats.iter_mut().find(|chat| chat.id == "b").unwrap().device_id = "studio".into();
+            });
+            cx.notify();
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-turned-away-b").is_some(), "its row wears the badge");
+        assert!(cx.debug_bounds("chat-turned-away-a").is_none(), "a machine that lets it in does not");
+        let nodes = tree(cx);
+        let badge = find(&nodes, Role::Button, "Retry").expect("a button a screen reader hears");
+        assert_eq!(badge.description.as_deref(), Some(why), "saying why");
+        let card = shell.read_with(cx, |shell, cx| {
+            super::super::sidebar_status::chat_card(shell.state.read(cx), "b", Utc::now()).map(|card| card.status)
+        });
+        assert_eq!(card.as_deref(), Some("Cached \u{b7} studio is closed to this device by the tailnet policy"));
+        shell.update_in(cx, |shell, window, cx| shell.open_spaces_menu(window, cx));
+        let retries = tree(cx).into_values().filter(|node| node.role == Role::Button && node.label == "Retry");
+        assert_eq!(retries.count(), 2, "its filter entry wears it too");
     }
 
     fn init_settings_test(

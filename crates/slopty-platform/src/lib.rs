@@ -177,13 +177,17 @@ pub fn user_interactive_thread() {
     }
 }
 
-/// Get the human's attention: the user's alert sound on macOS, a haptic on iOS.
+/// Get the human's attention without a sound: a haptic on iOS, nothing on macOS.
 ///
-/// Fire-and-forget; the system sound server plays asynchronously. On iOS the Taptic
-/// engine's "warning" notification pattern (`UINotificationFeedbackGenerator`, main thread
-/// only, a no-op on the simulator and on a phone whose haptics are off); off the main thread
-/// the old vibration pattern, which any thread may ask for.
+/// On macOS the Dock's [`bounce`] says it. Slopty plays no sound (`docs/decisions/layout.md`,
+/// "Attention is an inbox and a jump, never a feed": the person works over Parsec).
+///
+/// Fire-and-forget. On iOS the Taptic engine's "warning" notification pattern
+/// (`UINotificationFeedbackGenerator`, main thread only, a no-op on the simulator and on a
+/// phone whose haptics are off); off the main thread the old vibration pattern, which any
+/// thread may ask for.
 #[cfg(target_vendor = "apple")]
+#[cfg_attr(target_os = "macos", expect(clippy::missing_const_for_fn, reason = "a no-op here"))]
 pub fn attention() {
     #[cfg(target_os = "ios")]
     if let Some(mtm) = objc2::MainThreadMarker::new() {
@@ -192,19 +196,11 @@ pub fn attention() {
         tracing::debug!("attention: notification haptic");
         return;
     }
-    #[cfg(target_os = "macos")]
-    // SAFETY: AudioToolbox documents `AudioServicesPlayAlertSound` as callable from any thread
-    // with any `SystemSoundID`; `kSystemSoundID_UserPreferredAlert` is the constant it names for
-    // the alert chosen in System Settings.
-    unsafe {
-        objc2_audio_toolbox::AudioServicesPlayAlertSound(
-            objc2_audio_toolbox::kSystemSoundID_UserPreferredAlert,
-        );
-    }
     #[cfg(target_os = "ios")]
-    // SAFETY: as above; `kSystemSoundID_Vibrate` is the documented constant for the vibration
-    // pattern (a no-op on devices without a vibrator, such as the simulator). Reached only off
-    // the main thread, where the feedback generator may not be made.
+    // SAFETY: AudioToolbox documents `AudioServicesPlaySystemSound` as callable from any thread
+    // with any `SystemSoundID`; `kSystemSoundID_Vibrate` is the documented constant for the
+    // vibration pattern (a no-op on devices without a vibrator, such as the simulator). Reached
+    // only off the main thread, where the feedback generator may not be made.
     unsafe {
         objc2_audio_toolbox::AudioServicesPlaySystemSound(
             objc2_audio_toolbox::kSystemSoundID_Vibrate,
@@ -327,7 +323,8 @@ pub fn set_badge(count: usize) {
     tracing::trace!(count, "icon badge needs notification authorisation; kept in-app");
 }
 
-/// Bounce the Dock icon until the app is activated.
+/// Bounce the Dock icon once, as information, never until the app is activated
+/// (terminal-craft #5).
 ///
 /// macOS only, and a no-op when the app is already active. Pairs with [`attention`] for an
 /// agent that needs the human.
@@ -339,8 +336,9 @@ pub fn bounce() {
         let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
         if !app.isActive() {
             // The returned request id is only for cancelling early; the activation cancels it.
-            let request = app
-                .requestUserAttention(objc2_app_kit::NSRequestUserAttentionType::CriticalRequest);
+            let request = app.requestUserAttention(
+                objc2_app_kit::NSRequestUserAttentionType::InformationalRequest,
+            );
             tracing::trace!(request, "dock bounce");
         }
     }

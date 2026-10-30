@@ -132,7 +132,6 @@ struct Wake {
 #[derive(Serialize)]
 struct Aps<'a> {
     alert: Alert<'a>,
-    sound: &'a str,
     #[serde(rename = "mutable-content")]
     mutable_content: u8,
     #[serde(rename = "thread-id")]
@@ -178,7 +177,6 @@ pub fn request(push: &Push, topic: &str, bearer: &str) -> Result<Request, Unfit>
             let payload = Payload {
                 aps: Aps {
                     alert: Alert { title: TITLE, body: if note.urgent { URGENT } else { NEWS } },
-                    sound: "default",
                     mutable_content: 1,
                     thread_id: &note.thread,
                     interruption_level: note.urgent.then_some("time-sensitive"),

@@ -246,6 +246,7 @@ pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>,
 pub(super) struct Node {
     pub role: Role,
     pub label: String,
+    pub description: Option<String>,
     pub expanded: Option<bool>,
     pub disabled: bool,
     pub bounds: gpui::Bounds<Pixels>,
@@ -270,6 +271,7 @@ pub(super) fn tree(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
                     Node {
                         role: node.role(),
                         label: node.label().unwrap_or_default().to_owned(),
+                        description: node.description().map(str::to_owned),
                         expanded: node.is_expanded(),
                         disabled: node.is_disabled(),
                         bounds: gpui::Bounds::from_corners(

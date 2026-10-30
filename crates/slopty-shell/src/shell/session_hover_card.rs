@@ -240,13 +240,14 @@ impl Shell {
         let now = crate::clock::utc(cx);
         // slopty: Slopty's facts of the row (`sidebar_status::chat_card`).
         let facts = super::sidebar_status::chat_card(self.state.read(cx), chat_id, now)?;
-        let (title, project, local, online, branch, change_request) = {
+        let (title, project, local, online, turned_away, branch, change_request) = {
             let state = self.state.read(cx);
             let chat = state.chats.iter().find(|chat| chat.id == chat_id)?;
             let space = state.space_for_chat(chat);
             let project = space.map(|space| SharedString::from(space.display_name().to_owned()));
             let local = state.local_device_id.as_deref() == Some(chat.device_id.as_str());
-            let online = state.device_online(&chat.device_id, now);
+            let online = !super::sidebar_status::out_of_reach(state, &chat.device_id, now);
+            let turned_away = super::sidebar_status::turned_away(state, &chat.device_id).is_some();
             let branch = crate::change_requests::conversation_branch(chat, &state.spaces)
                 .map(str::trim)
                 .filter(|branch| !branch.is_empty())
@@ -266,6 +267,7 @@ impl Shell {
                 project,
                 local,
                 online,
+                turned_away,
                 branch,
                 change_request,
             )
@@ -298,8 +300,10 @@ impl Shell {
         };
 
         // ── The title and its age on one quiet line, the device's glyph in
-        // the corner (this one, another, or out of reach).
-        let device = icon(if !online {
+        // the corner (this one, another, out of reach, or turning this device away).
+        let device = icon(if turned_away {
+            icons::LOCK
+        } else if !online {
             icons::WIFI_OFF
         } else if local {
             icons::LAPTOP

@@ -95,6 +95,18 @@ pub(super) struct Row {
     pub cached: bool,
 }
 
+/// Why `device` turns this device away, in its own words (the login badge's tooltip); `None`
+/// while it lets this device in. The badge retries and never asks for a credential.
+pub(super) fn turned_away<'a>(state: &'a AppState, device: &str) -> Option<&'a str> {
+    state.devices.iter().find(|d| d.id == device)?.turned_away.as_deref()
+}
+
+/// Whether `device` is out of reach: not heard lately, or turning this device away. Its rows
+/// show the last word heard from there.
+pub(super) fn out_of_reach(state: &AppState, device: &str, now: DateTime<Utc>) -> bool {
+    !state.device_online(device, now) || turned_away(state, device).is_some()
+}
+
 /// What the sidebar narrows its list to: a project, a machine, both or neither (the machine is
 /// a filter, not a level: `docs/decisions/layout.md`, "The session list is stable").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -146,7 +158,7 @@ pub(super) fn list(
         let row = Row {
             chat: chat.clone(),
             status,
-            cached: !state.device_online(&chat.device_id, now),
+            cached: out_of_reach(state, &chat.device_id, now),
             mark,
             hint: None,
         };
@@ -209,7 +221,7 @@ pub(super) fn shelf(state: &AppState, chats: Vec<Chat>, now: DateTime<Utc>) -> V
                 status,
                 mark: Mark::of(status, state.session_for(&chat.id), now),
                 hint: None,
-                cached: !state.device_online(&chat.device_id, now),
+                cached: out_of_reach(state, &chat.device_id, now),
             }
         })
         .collect();
@@ -459,7 +471,7 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         words.extend(config.reasoning.map(|level| crate::pickers::reasoning_label(level).to_owned()));
         words.join(" \u{b7} ")
     });
-    let cached = !state.device_online(&chat.device_id, now);
+    let cached = out_of_reach(state, &chat.device_id, now);
     let need = match Mark::of(status, session, now) {
         Mark::NeedsYou(need) if !cached => Some(need),
         _ => None,
@@ -472,8 +484,12 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         .map(SharedString::from);
     let subagents = state.running_subagents_for(chat_id, now);
     let status = if cached {
-        // What the row shows is the last word from there.
-        format!("Cached \u{b7} {} is out of reach", device.unwrap_or("its machine"))
+        // What the row shows is the last word from there, and why.
+        let machine = device.unwrap_or("its machine");
+        match turned_away(state, &chat.device_id) {
+            Some(why) => format!("Cached \u{b7} {machine} is {why}"),
+            None => format!("Cached \u{b7} {machine} is out of reach"),
+        }
     } else {
         status_words(chat, status, session, now)
     };

@@ -1,5 +1,8 @@
-//! Local notifications: a banner and a sound when something wants the human while the app is
-//! not in front, the tap that brings the app back where it points, and the icon badge.
+//! Local notifications: a banner when a session in the background wants the human, the tap that
+//! brings the app back where it points, and the icon badge.
+//!
+//! A note makes no sound: Slopty plays none (`docs/decisions/layout.md`, "Attention is an inbox
+//! and a jump, never a feed").
 //!
 //! Everything goes through [`Notifier`]. What to say, and when, is decided elsewhere (the
 //! workspace's `attention`) and tested against [`Memory`], so no test ever raises the system's
@@ -227,8 +230,7 @@ mod apple {
         UNAuthorizationOptions, UNAuthorizationStatus, UNMutableNotificationContent,
         UNNotification, UNNotificationDefaultActionIdentifier, UNNotificationInterruptionLevel,
         UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
-        UNNotificationSettings, UNNotificationSound, UNUserNotificationCenter,
-        UNUserNotificationCenterDelegate,
+        UNNotificationSettings, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
     use parking_lot::Mutex;
     use tokio::sync::mpsc::error::SendError;
@@ -473,12 +475,11 @@ mod apple {
             .getNotificationSettingsWithCompletionHandler(&read);
     }
 
-    /// The options the app asks for: alerts, sounds and the badge.
-    const ASKED: UNAuthorizationOptions = UNAuthorizationOptions::Alert
-        .union(UNAuthorizationOptions::Sound)
-        .union(UNAuthorizationOptions::Badge);
+    /// The options the app asks for: alerts and the badge, no sound.
+    const ASKED: UNAuthorizationOptions =
+        UNAuthorizationOptions::Alert.union(UNAuthorizationOptions::Badge);
 
-    /// Ask for alerts, sounds and the badge (the system's prompt, which shows once ever) and
+    /// Ask for alerts and the badge (the system's prompt, which shows once ever) and
     /// hand the answer to `then`, on the framework's queue.
     fn request(then: impl Fn(Alerts) + 'static) {
         request_with(ASKED, then);
@@ -766,7 +767,6 @@ mod apple {
         let content = UNMutableNotificationContent::new();
         content.setTitle(&NSString::from_str(&note.title));
         content.setBody(&NSString::from_str(&note.body));
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
         if note.urgent {
             content.setInterruptionLevel(UNNotificationInterruptionLevel::TimeSensitive);
         }

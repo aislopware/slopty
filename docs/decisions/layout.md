@@ -275,6 +275,42 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     `shell::sidebar::tests::the_machine_filter_narrows_the_list_to_one_machine`,
     `shell::session_hover_card::tests::the_ports_read_as_one_line` and
     `settings::tests::round_trip` (the filter kept).
+- ✅ **Notifications as built (2026-10-30).** `slopty_ui`'s `workspace::attention` decides them.
+  - A moment notifies when its session is in the background: the app is not in front, or it is
+    and shows another session. The shell says which session is on screen as it draws
+    (`presence::OnScreen`), and the app hands it to `Attention::set_on_screen`. The session on
+    screen never notifies, and its note goes the moment the person looks at it, the app in front.
+  - The real wait is the one Slopty already kept: a finished turn or a shell command notifies
+    only past the slow-command time, while a need notifies at once. A need already under way
+    when its machine is first heard is no moment: the list shows it and no note says it, so
+    opening the app never sets off a burst of notes.
+  - Coming back to the app no longer takes every note back. A note that still points at a
+    session in the background stays until that session is looked at, answered or read. A pushed
+    note whose moment still stands is followed as the app's own; one whose moment passed goes.
+  - The icon badge counts what needs the person and what failed; a turn left unread is the
+    list's done-unseen mark, not the badge's.
+  - No sound anywhere, as the ruling says: a note asks for no sound and carries none, a push
+    carries none, the shell's chimes and their four switches are gone, and so is the shell's own
+    banner (its "Connection unavailable"), with the background-only switch that gated it. The
+    Dock bounces once, as information, never until the app comes forward. iPhone keeps its
+    haptic.
+  - A tapped note lands on its session, whose terminal wears one 0.4 s accent border fade
+    (Ghostty's presenting of a surface, without its repeating glow).
+  - Tests: `workspace::attention::tests::the_session_on_screen_stays_quiet_and_one_behind_it_notifies`,
+    `workspace::attention::tests::coming_back_keeps_the_notes_that_still_point_somewhere`,
+    `workspace::attention::tests::a_wait_found_under_way_posts_no_note` and
+    `presence::tests::what_is_on_screen_is_said_once_per_change`.
+- ✅ **The login badge as built (2026-10-30).** A machine that turns this device away (its
+  tailnet policy grants this device no role there, or its allow ranges do not hold its address)
+  is out of reach like one that dropped: its rows stay, cached, and refuse input.
+  - Each of its rows wears a quiet lock in the mark's slot, warning-hued like the disconnected
+    glyph it replaces. Its tooltip, and a screen reader's description of its Retry button, are
+    the machine's own words for why (`Device::turned_away`). A press dials the machine again
+    now through its `redial` action, the link's wait skipped. Nothing asks for a credential.
+  - The machine's entry in the filter menu wears the same badge in the disconnected glyph's
+    place, the filter's trigger reads it as unreached, and the hover card's status says
+    "Cached · {machine} is {why}" under a lock.
+  - Test: `shell::sidebar::tests::a_machine_that_turns_this_device_away_wears_the_login_badge`.
 
 - ✅ **The titlebar row as built (2026-10-30)** (terminal-craft §1, rex §2.1).
   - Past the traffic lights stands only the sidebar's toggle. Back, Forward and the
