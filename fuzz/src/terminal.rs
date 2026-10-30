@@ -28,14 +28,20 @@
 //! cell never written comes back as a space, and a space's pen can differ where it shows
 //! nothing (a foreground colour, bold or blink).
 //!
-//! Two metamorphic relations hold the engine where no oracle says what a run should show:
+//! Four metamorphic relations hold the engine where no oracle says what a run should show:
 //! - **byte chunking:** the second engine is fed the same bytes a byte at a time (after its first
 //!   write, which a fresh engine reads whole for a checkpoint it may carry), so every sequence,
 //!   character and string is split at every point a read from a PTY may split it; after each write
 //!   it must show the same screen, cursor and modes, and report the same session state;
 //! - **resize round trip:** on the primary screen, a resize keeps the logical lines (soft wraps
 //!   joined) and the cursor's place in them, when nothing is evicted past the scrollback and no
-//!   prompt is on screen (whose redraw the shell owns, and the engine clears for it).
+//!   prompt is on screen (whose redraw the shell owns, and the engine clears for it);
+//! - **expansion:** on the alternate screen, which never reflows, a resize that takes neither rows
+//!   nor columns away keeps every cell where it was, and the cursor (but for one waiting to wrap on
+//!   the last column, which a wider screen moves on);
+//! - **paging:** a page of scrollback is the history's lines from where it starts, however the
+//!   history is cut into pages: the lines at its indexes, every one the asked range and the history
+//!   share.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -127,23 +133,10 @@ pub fn run(data: &[u8]) {
             0xf0..=0xf3 => {
                 let Some((&[cols, rows], rest)) = script.split_first_chunk::<2>() else { return };
                 script = rest;
-                let size = pick_size(cols, rows);
-                let before = Logical::of(&mut mirror);
-                subject.resize(size).expect("a resize");
-                mirror.resize(size).expect("the mirror's resize");
-                if let Some(before) = before
-                    && let Some(after) = Logical::of(&mut mirror)
-                {
-                    before.holds_through(&after, size);
-                }
+                resized(&mut subject, &mut mirror, &mut viewers, pick_size(cols, rows));
                 // A replay writes a blank cell as a space, which draws the same but reflows
                 // differently, so a replay that went through a resize is no longer compared.
                 replica = None;
-                // A resize is sent whole to everyone.
-                let frame = round_trip(&subject.full_frame(0).expect("a full frame"));
-                for viewer in &mut viewers {
-                    viewer.apply(&frame);
-                }
             }
             0xf4..=0xf7 => {
                 // What changed since the last frame is the others'; it goes out first.
@@ -162,17 +155,48 @@ pub fn run(data: &[u8]) {
                 let Some((&start, rest)) = script.split_first() else { return };
                 script = rest;
                 let count = u32::from(op % 4).saturating_mul(8).saturating_add(1);
-                let (_, lines) = subject
-                    .lines(slopty_grid::LineIndex(u64::from(start)), count)
-                    .expect("a scrollback page");
+                let start = u64::from(start);
+                let (first, lines) =
+                    subject.lines(slopty_grid::LineIndex(start), count).expect("a scrollback page");
                 let asked = usize::try_from(count).unwrap_or(usize::MAX);
                 assert!(lines.len() <= asked, "{} lines for a page of {asked}", lines.len());
+                paged(&subject, start, count, first.0, &lines);
             }
             0xfc..=0xff => {
                 let size = subject.size();
                 replayed(&mut subject, &mut mirror, &mut replica, &session, size);
             }
         }
+    }
+}
+
+/// Resize `subject` and `mirror` to `size`, holding the mirror to the resize round trip and the
+/// expansion relation, and send every viewer the whole screen, as a resize is sent.
+fn resized(
+    subject: &mut GhosttyEngine,
+    mirror: &mut GhosttyEngine,
+    viewers: &mut [Viewer],
+    size: TermSize,
+) {
+    let before = Logical::of(mirror);
+    let alternate = Alternate::of(mirror);
+    subject.resize(size).expect("a resize");
+    mirror.resize(size).expect("the mirror's resize");
+    if let Some(before) = before
+        && let Some(after) = Logical::of(mirror)
+    {
+        before.holds_through(&after, size);
+    }
+    if let Some(before) = alternate
+        && size.cols >= before.size.0
+        && size.rows >= before.size.1
+        && let Some(after) = Alternate::of(mirror)
+    {
+        before.holds_through(&after);
+    }
+    let frame = round_trip(&subject.full_frame(0).expect("a full frame"));
+    for viewer in viewers {
+        viewer.apply(&frame);
     }
 }
 
@@ -262,6 +286,82 @@ impl Logical {
             after.cursor, self.cursor,
             "a resize to {}×{} moved the cursor",
             size.cols, size.rows
+        );
+    }
+}
+
+/// The paging relation: the page `lines`, asked for from `start` for `count` lines and given from
+/// `first`, is the whole history's lines at the same indexes, and holds every line the asked range
+/// and the history share.
+fn paged(engine: &GhosttyEngine, start: u64, count: u32, first: u64, lines: &[Line]) {
+    let (oldest, history) =
+        engine.lines(slopty_grid::LineIndex(0), u32::MAX).expect("the whole history");
+    let total = oldest.0.saturating_add(u64::try_from(history.len()).unwrap_or(u64::MAX));
+    let shared_from = start.max(oldest.0);
+    let shared_to = start.saturating_add(u64::from(count)).min(total);
+    let shared = usize::try_from(shared_to.saturating_sub(shared_from)).unwrap_or(usize::MAX);
+    assert_eq!(lines.len(), shared, "a page from {start} of {count} in [{}, {total})", oldest.0);
+    if lines.is_empty() {
+        return;
+    }
+    assert_eq!(first, shared_from, "where a page from {start} starts");
+    let at = usize::try_from(first.saturating_sub(oldest.0)).unwrap_or(usize::MAX);
+    let kept = history.get(at..at.saturating_add(lines.len())).expect("the page's lines");
+    assert_eq!(lines, kept, "a page from {start} is not the history's lines there");
+}
+
+/// The alternate screen as its cells show it, for the expansion relation.
+#[derive(Debug)]
+struct Alternate {
+    /// Columns and rows.
+    size: (u16, u16),
+    /// Each row's text, a cell never written as a space, its trailing blanks off.
+    rows: Vec<String>,
+    cursor: (u16, u16),
+}
+
+impl Alternate {
+    /// `engine`'s screen, when it is the alternate one outside a synchronized update.
+    fn of(engine: &mut GhosttyEngine) -> Option<Self> {
+        if engine.hold_remaining().is_some() {
+            return None;
+        }
+        let frame = engine.full_frame(0).expect("a frame");
+        if !frame.modes.contains(slopty_grid::TermModes::ALT_SCREEN) {
+            return None;
+        }
+        let mut rows = vec![String::new(); usize::from(frame.rows)];
+        for update in &frame.updates {
+            let Some(row) = rows.get_mut(usize::from(update.row)) else { continue };
+            for cell in &update.line.cells {
+                let text = cell.text.as_str();
+                row.push_str(if text.is_empty() { " " } else { text });
+            }
+            row.truncate(row.trim_end_matches(' ').len());
+        }
+        let size = (frame.cols, frame.rows);
+        Some(Self { size, rows, cursor: (frame.cursor.row, frame.cursor.col) })
+    }
+
+    /// `after`, this screen once grown, shows these rows at the top and the cursor where it was.
+    fn holds_through(&self, after: &Self) {
+        let grown = format!("{}×{}", after.size.0, after.size.1);
+        let kept = after.rows.get(..self.rows.len()).expect("as many rows at least");
+        assert_eq!(kept, self.rows, "growing the alternate screen to {grown} moved its cells");
+        assert!(
+            after.rows.iter().skip(self.rows.len()).all(String::is_empty),
+            "growing the alternate screen to {grown} drew in its new rows"
+        );
+        // A cursor on the last column may wait to wrap: a wider screen resolves that into the
+        // column after it.
+        let (row, col) = self.cursor;
+        let waited = col.saturating_add(1) == self.size.0 && after.size.0 > self.size.0;
+        let on = (row, col.saturating_add(1));
+        assert!(
+            after.cursor == self.cursor || (waited && after.cursor == on),
+            "growing the alternate screen to {grown} moved the cursor from {:?} to {:?}",
+            self.cursor,
+            after.cursor
         );
     }
 }
