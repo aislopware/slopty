@@ -17,9 +17,26 @@ pub fn now(cx: &App) -> Instant {
 }
 
 /// The wall date at the moment the frame being drawn shows ([`now`]): the dates a row says
-/// ("2m ago", "online") read it, so they stand still within a frame drawn twice.
+/// ("2m ago", "online") read it, so they stand still within a frame drawn twice. While the
+/// self-test pins the clock ([`pin`]), the date it pinned.
 pub fn utc(cx: &App) -> DateTime<Utc> {
-    utc_at(cx.frame_time())
+    cx.try_global::<Pinned>().and_then(|pinned| pinned.0).unwrap_or_else(|| utc_at(cx.frame_time()))
+}
+
+/// The date [`utc`] reads while the self-test pins it.
+struct Pinned(Option<DateTime<Utc>>);
+
+impl gpui::Global for Pinned {}
+
+/// Read every date the shell draws as at `at_ms`, Unix milliseconds, from now on, or by the wall
+/// clock again for `None` (and for a moment no date can hold): the self-test's `PinClock`, so a
+/// golden that shows an age ("now", "5m") or a date holds the same one whenever it is taken. A
+/// surface that keeps the date it last read (a page's clock, the session list's) reads the pin
+/// the next time it reads the clock, as its state moves or its tick comes, so a test pins before
+/// the step it draws. The caller draws the window again.
+pub fn pin(at_ms: Option<u64>, cx: &mut App) {
+    let at = at_ms.and_then(|ms| i64::try_from(ms).ok()).and_then(DateTime::from_timestamp_millis);
+    cx.set_global(Pinned(at));
 }
 
 thread_local! {
@@ -100,5 +117,25 @@ mod tests {
         assert_eq!(utc_at(at), first);
         let later = utc_at(at + std::time::Duration::from_secs(90));
         assert_eq!(later - first, chrono::TimeDelta::seconds(90));
+    }
+
+    /// A pinned date holds however the clock moves, and the wall clock runs again once the pin
+    /// is lifted, or when the pin names a moment no date holds.
+    #[gpui::test]
+    fn a_pinned_date_holds_until_the_pin_lifts(cx: &mut gpui::TestAppContext) {
+        const PINNED: i64 = 1_792_000_000_000;
+        let pinned = DateTime::from_timestamp_millis(PINNED).unwrap_or_default();
+        let running = |cx: &mut gpui::TestAppContext| cx.update(|cx| utc(cx) != pinned);
+        cx.update(|cx| pin(u64::try_from(PINNED).ok(), cx));
+        assert_eq!(cx.update(|cx| utc(cx)), pinned);
+        cx.executor().advance_clock(std::time::Duration::from_secs(90));
+        assert_eq!(cx.update(|cx| utc(cx)), pinned, "the clock moved; the pinned date did not");
+        cx.update(|cx| pin(None, cx));
+        assert!(running(cx), "unpinned, the wall clock runs");
+        let before = cx.update(|cx| utc(cx));
+        cx.executor().advance_clock(std::time::Duration::from_secs(90));
+        assert_eq!(cx.update(|cx| utc(cx)) - before, chrono::TimeDelta::seconds(90));
+        cx.update(|cx| pin(Some(u64::MAX), cx));
+        assert!(running(cx), "a moment no date holds pins nothing");
     }
 }

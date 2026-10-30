@@ -770,7 +770,9 @@ fn apply(
         | Command::Release { .. }
         | Command::Scroll { .. } => Reply::Error { message: "input goes through dispatch".into() },
         Command::PinClock { at_ms } => {
+            // The terminal's readouts read the kit's clock, the shell's ages and dates its own.
             slopty_kit::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
+            slopty_shell::clock::pin(at_ms, cx);
             // Nothing that showed a time was told: every view is built again.
             window.refresh();
             Reply::Ok

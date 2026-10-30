@@ -1161,6 +1161,13 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   (`icons::PINNED_STEPS`) and wakes nothing, so `agent-screen` matches its golden to the pixel
   run after run. The same drift hid a real change: the composer's help button is gone, and every
   composer golden still drew it under the tolerance. They are taken again.
+  Since 2026-10-30 the shell's ages and dates read its own clock, `slopty_shell::clock::utc`,
+  at the frame's moment, and the same command pins that one too. It had stopped obeying once the
+  shell's clock moved to the frame's moment, so `settings-archived` said "now" or "1m" by how
+  long the steps before it took. That test pins the clock half a minute after it asks for the
+  agent whose row it archives. A surface that keeps the date it last read (a page's clock, the
+  session list's) takes the pin the next time it reads the clock, so a test pins before the step
+  it draws.
 
 
 - ✅ **The goldens that moved run to run hold still** (2026-10-05). Four goldens differed
