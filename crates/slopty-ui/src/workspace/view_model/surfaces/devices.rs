@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use gpui::{AppContext as _, Context};
 use slopty_client::WorkerKey;
 use slopty_proto::server::Os;
-use slopty_view_proto::Device;
+use slopty_view_proto::{Device, DeviceAction};
 use slopty_view_rpc::RpcError;
 
 use crate::workspace::{WorkerStatus, WorkspaceView};
@@ -95,6 +95,20 @@ const fn platform(os: Os) -> &'static str {
     }
 }
 
+/// Why a machine in `status` turns this device away, in its badge's words
+/// ([`Device::turned_away`]): its tailnet policy grants this device no role there, or its allow
+/// ranges do not hold this device's address. `None` in any other state, which its link retries
+/// on its own.
+fn turned_away(status: &WorkerStatus) -> Option<String> {
+    match status {
+        WorkerStatus::Refused(Some(me)) => {
+            Some(format!("{}, which do not hold {me}", status.text()))
+        }
+        WorkerStatus::Refused(None) | WorkerStatus::NotGranted => Some(status.text()),
+        _ => None,
+    }
+}
+
 /// The version a build string starts with (`0.4.0` of `0.4.0+wire.…`).
 fn version(build: &str) -> Option<String> {
     let version = build.split('+').next().unwrap_or_default().trim();
@@ -102,8 +116,9 @@ fn version(build: &str) -> Option<String> {
 }
 
 impl WorkspaceView {
-    /// The worker `key` as the shell's device: its name, what it runs, and whether this app
-    /// reaches it now (seen `now`) or since when it has been away.
+    /// The worker `key` as the shell's device: its name, what it runs, whether this app
+    /// reaches it now (seen `now`) or since when it has been away, and why it turns this device
+    /// away when it does, with Retry first among its actions.
     pub(in crate::workspace) fn surface_device_row(
         &self,
         key: WorkerKey,
@@ -117,6 +132,14 @@ impl WorkspaceView {
             .and_then(|ago| chrono::TimeDelta::from_std(ago).ok())
             .and_then(|ago| now.checked_sub_signed(ago));
         let caps = worker.caps.as_ref();
+        let turned_away = turned_away(&worker.status);
+        let mut actions = self.device_actions.get(&key).cloned().unwrap_or_default();
+        // Its badge's click, offered for as long as it turns this device away.
+        if turned_away.is_some() {
+            let redial =
+                DeviceAction { id: DeviceAction::REDIAL.to_owned(), label: "Retry".to_owned() };
+            actions.insert(0, redial);
+        }
         Some(Device {
             id: key.to_string(),
             name: worker.name.clone(),
@@ -126,9 +149,10 @@ impl WorkspaceView {
             version: caps.and_then(|caps| version(&caps.build)),
             cursor_sdk_version: None,
             capabilities: Vec::new(),
-            actions: self.device_actions.get(&key).cloned().unwrap_or_default(),
+            actions,
             // An editor reaches a folder there over SSH by it; this machine's own needs none.
             ssh_host: worker.address.clone().filter(|_| !self.surface_is_local(key)),
+            turned_away,
         })
     }
 
@@ -155,7 +179,7 @@ impl WorkspaceView {
     pub fn set_device_actions(
         &mut self,
         key: WorkerKey,
-        actions: Vec<slopty_view_proto::DeviceAction>,
+        actions: Vec<DeviceAction>,
         cx: &mut Context<Self>,
     ) {
         if self.device_actions.get(&key).map_or(actions.is_empty(), |had| *had == actions) {
@@ -249,6 +273,76 @@ mod tests {
         assert_eq!(host_of("studio.tail.ts.net").as_deref(), Some("studio.tail.ts.net"));
         assert_eq!(host_of("fd7a:115c::1").as_deref(), Some("fd7a:115c::1"));
         assert_eq!(host_of(" ").as_deref(), None);
+    }
+
+    /// A machine that turns this device away says why on its badge; one out of reach for any
+    /// other reason has none, as its link retries it alone.
+    #[test]
+    fn only_a_machine_that_turns_this_device_away_says_so() {
+        assert_eq!(
+            turned_away(&WorkerStatus::NotGranted).as_deref(),
+            Some("closed to this device by the tailnet policy")
+        );
+        assert_eq!(
+            turned_away(&WorkerStatus::Refused(None)).as_deref(),
+            Some("closed to this device by its allow ranges")
+        );
+        assert_eq!(
+            turned_away(&WorkerStatus::Refused(Some("100.64.0.9".to_owned()))).as_deref(),
+            Some("closed to this device by its allow ranges, which do not hold 100.64.0.9")
+        );
+        let others = [
+            WorkerStatus::Connected,
+            WorkerStatus::NoAnswer,
+            WorkerStatus::Unreachable,
+            WorkerStatus::Reconnecting("reset".to_owned()),
+        ];
+        for status in others {
+            assert_eq!(turned_away(&status), None, "{status:?}");
+        }
+    }
+
+    /// A machine that turns this device away carries why on its row with Retry first, and
+    /// Retry pressed reaches the app as that machine's action; once it lets this device in,
+    /// both go.
+    #[gpui::test]
+    fn a_machine_that_turns_this_device_away_offers_retry(cx: &mut gpui::TestAppContext) {
+        use crate::workspace::WorkspaceEvent;
+        use crate::workspace::rig::KEY;
+        let workspace = cx.new(|_| WorkspaceView::new(slopty_theme::Theme::default()));
+        let pressed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let heard = std::rc::Rc::clone(&pressed);
+        let _heard = cx.update(|cx| {
+            cx.subscribe(&workspace, move |_, event: &WorkspaceEvent, _| {
+                if let WorkspaceEvent::DeviceAction { worker, action } = event {
+                    heard.borrow_mut().push((*worker, action.clone()));
+                }
+            })
+        });
+        let now = Utc::now();
+        let row = |cx: &mut gpui::TestAppContext| {
+            workspace.read_with(cx, |v, _| v.surface_device_row(KEY, now).expect("its row"))
+        };
+        workspace.update(cx, |v, cx| {
+            v.add_worker(KEY, "studio".to_owned(), cx);
+            v.set_worker_status(KEY, WorkerStatus::NotGranted, cx);
+        });
+        let turned = row(cx);
+        assert_eq!(
+            turned.turned_away.as_deref(),
+            Some("closed to this device by the tailnet policy")
+        );
+        let ids: Vec<&str> = turned.actions.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(ids, [DeviceAction::REDIAL]);
+        let press =
+            serde_json::json!({ "deviceId": KEY.to_string(), "action": DeviceAction::REDIAL });
+        workspace.update(cx, |v, cx| v.device_action(&press, cx)).expect("pressed");
+        assert_eq!(*pressed.borrow(), [(Some(KEY), DeviceAction::REDIAL.to_owned())]);
+
+        workspace.update(cx, |v, cx| v.set_worker_status(KEY, WorkerStatus::Connected, cx));
+        let back = row(cx);
+        assert_eq!(back.turned_away, None);
+        assert!(back.actions.is_empty(), "{:?}", back.actions);
     }
 
     #[test]
