@@ -117,6 +117,14 @@ pub struct Server {
 impl Server {
     /// Load the state file, bind the listener and start serving.
     pub async fn start(config: Config) -> Result<Self, ServerError> {
+        let listener = ServerListener::bind(config.quic, config.admission.clone())?;
+        Self::start_on(config, listener).await
+    }
+
+    /// [`Self::start`] on a listener made elsewhere, which `config.quic` does not name: one on
+    /// `slopty_shape::sim`'s network ([`ServerListener::on`]), where a test runs the server and
+    /// its links on tokio's paused clock.
+    pub async fn start_on(config: Config, listener: ServerListener) -> Result<Self, ServerError> {
         let store = Store::in_dir(&config.data_dir);
         let unreadable = |path: &std::path::Path| {
             let path = path.to_owned();
@@ -127,7 +135,6 @@ impl Server {
         let devices = phones.load().await.map_err(unreadable(phones.path()))?;
         let devices = hub.keep_phones(devices);
         push_as(&hub, config.push)?;
-        let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
         if let Some(api) = config.admission.local_api() {
             tokio::spawn(say_relay(api));

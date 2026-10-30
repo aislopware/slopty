@@ -218,17 +218,18 @@ async fn read_worker(
 /// Return once the worker has said nothing for [`slopty_net::liveness::PONG_WITHIN`]: its
 /// control stream no longer carries, whatever the connection under it says. A server that was
 /// itself away (its machine asleep) counts only the silence before
-/// ([`slopty_net::liveness::Beat`]).
+/// ([`slopty_net::liveness::Beat`]). Its silence is counted on tokio's clock, which a paused
+/// runtime simulates.
 async fn silence(lease: &Lease, heard: &tokio::sync::Notify) {
     use slopty_net::liveness::{Beat, LOOK_EVERY, Pulse};
-    let mut beat = Beat::new(std::time::Instant::now());
+    let mut beat = Beat::new(tokio::time::Instant::now().into_std());
     let mut look = tokio::time::interval(LOOK_EVERY);
     look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
-            () = heard.notified() => beat.heard(std::time::Instant::now()),
+            () = heard.notified() => beat.heard(tokio::time::Instant::now().into_std()),
             _ = look.tick() => {
-                if let Pulse::Dead(gap) = beat.pulse(std::time::Instant::now()) {
+                if let Pulse::Dead(gap) = beat.pulse(tokio::time::Instant::now().into_std()) {
                     tracing::info!(worker = %lease.worker(), ?gap, "worker silent on its control stream");
                     return;
                 }

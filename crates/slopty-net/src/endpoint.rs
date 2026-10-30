@@ -448,6 +448,21 @@ pub fn bind_on(
         .map_err(|source| NetError::Bind { addr, source })
 }
 
+/// [`bind_lease`] on a socket that is not the OS's, as [`bind_on`] is [`bind`]'s: the server's
+/// endpoint on `slopty_shape::sim`'s network, every link on the lease's idle timeout.
+pub fn bind_lease_on(
+    socket: Box<dyn noq::AsyncUdpSocket>,
+    seed: Option<u64>,
+) -> Result<Endpoint, NetError> {
+    let addr =
+        socket.local_addr().map_or_else(|_| "an abstract socket".to_owned(), |a| a.to_string());
+    let mut config = crate::crypto::endpoint_config();
+    config.rng_seed(seed.map(spread_seed));
+    let mut transport = seeded_transport_config(seed);
+    transport.max_idle_timeout(IdleTimeout::try_from(LEASE_IDLE_TIMEOUT).ok());
+    endpoint_with(socket, true, transport, config).map_err(|source| NetError::Bind { addr, source })
+}
+
 /// `seed` spread over the `N` bytes of a generator's seed, each eight of them mixed apart.
 fn spread_seed<const N: usize>(seed: u64) -> [u8; N] {
     let mut bytes = [0_u8; N];
