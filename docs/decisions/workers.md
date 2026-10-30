@@ -391,7 +391,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   first run. The address is typed into the first-run panel and entered. Both workers then have
   to arrive from the directory, each with a shell that answers a command. A permission hook
   played on `remote` through `slopty hook` has to badge the pill. `remote` is then killed and
-  restarted twice, and each time is measured against a bound.
+  restarted twice, and each time is measured.
   - **The directory has to lead through the relay.** The server lists a worker at the IP it
     registered from and the port it listens on, and the app dials exactly that. So `remote`
     listens on `127.0.0.1` only (`SLOPTY_BIND`) and registers over IPv6. The directory then
@@ -405,15 +405,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the app's own link: its pings draw the new process's reset before the server has noticed
     anything. A restart after the server has called the worker unreachable, while the app holds
     it instead of redialling, is found because the server lists it online again, which wakes
-    the dial. That second path is the one only this suite can see. The narrower rule, where a
+    the dial. That second path is the one only this suite sees end to end; the wake itself is
+    proved in virtual time by `a_wake_dials_a_held_worker_once_rather_than_holding_again`
+    (`slopty_app`). The narrower rule, where a
     link that is still up but silent is given up when the server says the worker is back, does
     not happen in an unscripted run. The server holds a killed worker's lease for 5 s and turns
     the restarted one away until then, and by that time the app's ping has drawn the reset or
     its drop bar has given the link up. The unit test stays its proof.
-  - **Bounds.** Shown down within 5 s of the kill, and connected within 2 s of either restart.
-    Five runs (`docs/MEASUREMENTS.md`, "the app through a server") read 2.4 to 3.1 s down, 0.76
-    to 0.88 s back by the app's own link, and 0.12 to 0.13 s back through the server. The bounds held
-    without a change to the app.
+  - **Times.** Five runs (`docs/MEASUREMENTS.md`, "the app through a server") read 2.4 to
+    3.1 s down, 0.76 to 0.88 s back by the app's own link, and 0.12 to 0.13 s back through the
+    server. The e2e held them to 5 s and 2 s until 2026-10-30. It now waits on each status and
+    prints its time, and the bounds are proved where only their own code runs
+    (`docs/decisions/testing.md`, "A test waits on the event it means").
   - **Golden.** `through-server` shows two workers from one server in one layout, with the
     pill counting the remote worker's waiting agent. No other golden has more than one worker.
     The second worker's private `HOME` is canonicalised, so its prompt reads `~` and not a

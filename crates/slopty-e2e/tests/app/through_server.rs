@@ -5,23 +5,22 @@
 //!
 //! `far` is then killed and restarted twice: once as soon as the app shows it down, which its own
 //! link finds again; once after the server has called it unreachable and the app holds it, where
-//! the server listing it online again is what wakes the dial. Each is measured and bounded.
+//! the server listing it online again is what wakes the dial. Each step waits on the event it
+//! means and prints how long it took, and none is held to a time: an app, two workers, a server
+//! and a relay on one loaded machine move every number (`docs/decisions/testing.md`, "A test
+//! waits on the event it means"). The bounds are proved where only their own code runs: shown
+//! silent one missed ping after the last pong, in virtual time (`slopty_app::workers`); a ping
+//! drawing a restarted worker's reset at once (`slopty-net` loopback); a held worker dialled at
+//! once when the server lists it online, in virtual time (`slopty_app`).
 
 use std::time::{Duration, Instant};
 
 use slopty_e2e::harness::{ServerFleet, TAILNET};
 use slopty_e2e::{A11yNode, Driver, Dump};
 
-/// A round trip over the shaped link, the directory arriving.
+/// How long a step may take before it counts as hung, well past the server's 5 s lease, a
+/// worker's start and a round trip over the shaped link. No step is held to a time.
 const STEP: Duration = Duration::from_secs(30);
-/// A killed worker must show down within this: the app's silence bar is three missed
-/// keep-alives, 3 s.
-const DOWN_BOUND: Duration = Duration::from_secs(5);
-/// A restarted worker must be connected again within this, whichever path finds it.
-const BACK_BOUND: Duration = Duration::from_secs(2);
-/// The server's lease ends 5 s after a worker goes silent; this leaves the app's dial the time
-/// to have failed and the server's word the time to arrive.
-const HELD_BOUND: Duration = Duration::from_secs(15);
 const NEAR: &str = "studio";
 const FAR: &str = "remote";
 
@@ -55,8 +54,8 @@ async fn liveness(fleet: &ServerFleet, name: &str) -> String {
 }
 
 /// The server's address typed into Add device on "A server" and connected: both workers come
-/// from the directory, nobody adds them; far, killed, shows down and comes back within bounds,
-/// both while the app shows it down and after the server holds it unreachable.
+/// from the directory, nobody adds them; far, killed, shows down and comes back, both while the
+/// app shows it down and after the server holds it unreachable.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_app_finds_its_workers_through_the_server() {
@@ -101,15 +100,13 @@ async fn the_app_finds_its_workers_through_the_server() {
         "MEASURE through-server: far connected again {:.2} s after a restart while shown down",
         back.as_secs_f64()
     );
-    assert!(down <= DOWN_BOUND, "shown down after {down:?}, over {DOWN_BOUND:?}");
-    assert!(back <= BACK_BOUND, "back after {back:?}, over {BACK_BOUND:?}");
 
     // Killed until the server calls it unreachable and the app holds it; restarted, the server
     // lists it online and that wakes the dial.
     fleet.far.kill_worker().await;
     fleet
         .driver
-        .wait_for("far held as unreachable", HELD_BOUND, |d| status(d, FAR) == Some("unreachable"))
+        .wait_for("far held as unreachable", STEP, |d| status(d, FAR) == Some("unreachable"))
         .await
         .unwrap();
     assert_eq!(liveness(&fleet, FAR).await, "unreachable");
@@ -123,7 +120,6 @@ async fn the_app_finds_its_workers_through_the_server() {
         back.as_secs_f64(),
         started.elapsed().as_secs_f64()
     );
-    assert!(back <= BACK_BOUND, "back from the hold after {back:?}, over {BACK_BOUND:?}");
     assert_eq!(liveness(&fleet, FAR).await, "online");
     fleet.shutdown().await;
 }

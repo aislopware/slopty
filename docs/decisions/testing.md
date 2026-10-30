@@ -1121,6 +1121,21 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     one more give-up for each that stayed inside at least half the patience (a healthy turn
     takes milliseconds), with one session built for each. A replacement turn made to wait 2.6 s
     passes with three sessions; the same wait hidden from the timing fails.
+  - The through-server e2e (2026-10-30) held a whole app, two workers, a server and a shaped
+    relay to 5 s from a kill to the worker shown down, and to 2 s from each restart to the
+    worker connected again. The first is the liveness clock's arithmetic: the kill lands
+    anywhere in the 2 s between pings, the link shows silent one missed ping (4 s) after the
+    last pong, and the app looks every half second, so a quiet run reads 2 to 4.5 s and a
+    loaded one passes 5 s. Its comment still named the bar of three missed keep-alives the
+    pongs replaced. Each step now waits for the status it means and prints its time, and one
+    that never comes fails at the 30 s step. The bounds are proved where only their own code
+    runs: silent and relinked on the pongs' clock in virtual time
+    (`a_link_lives_by_its_pongs_and_is_relinked_six_seconds_after_the_last`), a ping drawing a
+    restarted worker's reset on loopback (`a_ping_draws_a_restarted_worker_s_reset_at_once`),
+    and a held worker dialled at once when the server lists it online, in virtual time
+    (`a_wake_dials_a_held_worker_once_rather_than_holding_again`). Only the e2e's 2 s bound
+    had covered that last one, since the hold's own 10 s retry brings the worker back within
+    the step without it.
 
 - ✅ **A stand-in agent's transcript is named for its session** (2026-10-05). Claude Code writes
   `<session id>.jsonl`, and the worker takes a session's id from a hook's `session_id` or from
