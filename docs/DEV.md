@@ -565,7 +565,8 @@ corpus is empty or past 2 MiB. On a plain build each target is also a binary tha
 function in `fuzz/src`, an entry in its `TARGETS`, a file in `fuzz/fuzz_targets` and a
 `[[bin]]`; that test fails when the three disagree. The crate has its own `Cargo.lock`, so
 `cargo update --manifest-path fuzz/Cargo.toml` moves its dependencies, and the gate checks its
-formatting and lints it.
+formatting and lints it. `cargo xtask remote -p slopty-fuzz` checks that crate as the gate does
+(fmt, clippy, the replay), in the lane's warm target dir.
 
 `cargo xtask profile -- <command…>` records a CPU profile of any command with samply into
 `target/profile/<epoch>.json.gz`; `samply load <file>` opens it in the Firefox Profiler.

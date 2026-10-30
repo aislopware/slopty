@@ -21,6 +21,9 @@
 //! (`docs/decisions/tooling.md`, "Lanes never wait on a check" and "rustdoc runs in the quick
 //! check").
 //!
+//! `-p slopty-fuzz` names the fuzz crate, a workspace of its own that only the gate's host lint
+//! reached before: its fmt, clippy and the replay of its kept inputs and corpora ([`fuzz`]).
+//!
 //! A clean run is what an agent reports back. The session that lands the work still gates the
 //! index.
 
@@ -49,13 +52,21 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     if crates.is_empty() {
         bail!("name the crates to check: `cargo xtask check -p <crate> [-p <crate>…]`");
     }
+    let (fuzzed, crates): (Vec<String>, Vec<String>) =
+        crates.iter().cloned().partition(|c| c == FUZZ);
+    if !fuzzed.is_empty() {
+        fuzz(sh, part)?;
+    }
+    if crates.is_empty() {
+        return Ok(());
+    }
     let started = std::time::Instant::now();
     // The tree the shell stands in: the checkout, a runner's, or a local check's commit.
     let here = camino::Utf8PathBuf::from_path_buf(sh.current_dir())
         .map_err(|p| anyhow::anyhow!("the tree's path is not UTF-8: {}", p.display()))?;
     let workspace = packages_in(&here)?;
     let mut owned = Vec::new();
-    for name in crates {
+    for name in &crates {
         match workspace.iter().find(|p| &p.name == name) {
             Some(p) => owned.push(p),
             None => bail!("no workspace package is named `{name}`"),
@@ -139,6 +150,40 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     let d = &dirs;
     quiet_step("typos", cmd!(sh, "typos --force-exclude {d...}"))?;
     println!("✔ checked {} ({:.1?})", crates.join(", "), started.elapsed());
+    Ok(())
+}
+
+/// The fuzz crate's package, which `-p` names beside the workspace's.
+const FUZZ: &str = "slopty-fuzz";
+
+/// The fuzz crate's half of the gate's host lint (`gate::lint_host`): fmt, clippy and typos, then
+/// its kept inputs and corpora replayed through their targets (`fuzz::replay`), which link them
+/// and so run with the lint's environment gone. A local check replays in the lane's warm target
+/// dir, beside its tree, not in a cold one inside it.
+fn fuzz(sh: &Shell, part: Part) -> Result<()> {
+    let started = std::time::Instant::now();
+    if part != Part::Tests {
+        quiet_step(
+            "cargo fmt (fuzz)",
+            cmd!(sh, "cargo +nightly fmt --manifest-path fuzz/Cargo.toml -- --check"),
+        )?;
+        let host = TRIPLES[0];
+        let (cargo, _env) = crate::tools::apple_cargo(sh, false)?;
+        quiet_step(
+            "clippy (fuzz)",
+            cmd!(
+                sh,
+                "{cargo} clippy --manifest-path fuzz/Cargo.toml --locked --all-targets --target {host} -- -D warnings"
+            ),
+        )?;
+        quiet_step("typos", cmd!(sh, "typos --force-exclude fuzz"))?;
+    }
+    if part != Part::Lint {
+        let local = sh.var_os(crate::local::LOCAL).is_some();
+        let _target = local.then(|| sh.push_env("CARGO_TARGET_DIR", "../target"));
+        crate::fuzz::replay(sh)?;
+    }
+    println!("✔ checked {FUZZ} ({:.1?})", started.elapsed());
     Ok(())
 }
 
