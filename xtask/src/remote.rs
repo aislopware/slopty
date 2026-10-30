@@ -493,7 +493,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         None
     };
     let guest_said = if in_guest {
-        format!("; e2e {case} in the guest {}", guest::GUEST)
+        format!("; e2e {case} in an e2e guest, {} here", crate::vm::E2E_GUESTS.join(" or "))
     } else {
         String::new()
     };
@@ -540,8 +540,9 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     };
     let e2e_said = e2e.as_ref().map(|e| match e {
         Ok(o) => format!(
-            "{}: {} (built in {}s, copied and tested in {}s)",
+            "{} in {}: {} (built in {}s, copied and tested in {}s)",
             if o.passed { "passed" } else { "FAILED" },
+            o.guest,
             o.summary,
             o.build.as_secs(),
             o.tests.as_secs()
@@ -643,6 +644,7 @@ fn record_e2e(root: &Path, opts: &RemoteOpts, outcome: &guest::Outcome) {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
         "name": opts.name,
+        "guest": outcome.guest,
         "filter": opts.filter,
         "passed": outcome.passed,
         "build_s": outcome.build.as_secs(),

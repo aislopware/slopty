@@ -1678,3 +1678,75 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `.cargo/mutants.toml` with a reason, and `Debug`/`Display` bodies are excluded there.
     Coverage moved to the weekly run: it held a Mac for over an hour a night, and the mutation
     score is the strength measure now.
+
+- ✅ **Two e2e guests, one in each of this Mac's two macOS slots** (2026-10-30). One guest,
+  `slopty-27-e2e`, served every lane's `--e2e app|ios`, and a lane waited up to an hour while
+  another held it. macOS runs two macOS guests at once (its licence, enforced by
+  Virtualization.framework); the Linux guests (the warm runner's, Docker's) do not count.
+  - Now `slopty-27-e2e` and `slopty-27-e2e-2` are both clones of `slopty-27-xcode`, set up the
+    same way on every boot (`remote::guest::up`), so they run the same macOS, Xcode, runtimes
+    and settings. Each has its own simulators and data. A run takes its lane's last guest if
+    it is free (the lane's binaries are already copied there), else one that is running (no
+    boot), else the other; a third lane waits for whichever frees first and is told who holds
+    each (`remote::guest::hold`). A run's renders and diffs come back to
+    `target/remote/<name>/artifacts/`, its own, since two runs now finish at once.
+  - The two guests and the live lane's run guests (`cargo xtask vm live|e2e|deploy --app`) share
+    the two slots (`vm::Slot`). A slot's lock is its e2e guest's lock file, so an older xtask
+    that knows only `slopty-27-e2e` holds the same lock. A run guest takes a free slot and stops
+    that slot's idle e2e guest first, and nothing asks for a third macOS guest.
+  - Two runs at once share this Mac's cores: the guests take 8 of its 10, and the lanes'
+    builds want all of them. A lane no longer waits for another's whole run, but a run beside
+    another and the builds can take longer in its guest than alone: 394 and 1,270 s against
+    227–653 s for the same case, the slow one failing its worker's 30 s start
+    (`docs/MEASUREMENTS.md`, "Two e2e guests").
+  - `lockf` removes its lock file as it lets go unless given `-k`. The idle watcher and the
+    spare simulator ran it so, and a run waiting on the removed file and one opening a new file
+    could both hold the guest. Both now pass `-k`, and taking a slot checks that the locked file
+    is still the one at the lock's path.
+  - Cost on disk: a clone shares every block with its base until written, and the guests' disk
+    format (ASIF) gives a block back to this Mac when the guest deletes it. The second guest
+    took 0.3 GB at its first boot and 1.6 GB after its first run. A full night's runs had left
+    the first holding 13.3 GB of its own; inside it the simulators took 8 GB, the harness's
+    copies of binaries 4 and lanes' trees 3, part of it shared with the base. Deleting the
+    pulled OCI image and the live lane's base `slopty-27` gave back 6.6 GB; `cargo xtask vm
+    create` pulls the image again. Measured in `docs/MEASUREMENTS.md`, "Two e2e guests".
+  - The guests' sound is muted on every boot (`QUIET`). tart passes a guest's sound to this
+    Mac's speakers, and the app's chimes played there, where the person hears this Mac over
+    Parsec. Muting, not `tart run --no-audio`, keeps the output device, so the app's audio player
+    opens as it does on a runner.
+
+- ⏸ **The e2e guests' kernel panic is macOS 27.0's GPU stack, which 27.0.1 ships unchanged; the
+  fix waits for 27.2 here and on the runners** (2026-10-30). The guest panicked twice in one
+  night, at 03:50 and 05:35: in WindowServer, `IOGPUEventMachine.cpp:1378`, "Merge from
+  non-scrubbed src event", guest macOS 27.0 26A428.
+  - **Where it is.** The panicking thread was WindowServer's main thread on SkyLight's Metal
+    submit queue (`com.apple.SkyLight.mtl_submit`), committing a composite. The kernel stack went
+    from `AppleParavirtGPUIOGPUFamily` (15.0), the paravirtual GPU's driver, into
+    `IOGPUFamily` (162.11), whose event machine asserts that an event is brought up to date
+    ("scrubbed") before another is merged into it. A user process cannot break a kernel
+    invariant legitimately, so this is Apple's bug, a race between a client's GPU work on a
+    surface and the compositor waiting on it.
+  - **27.0.1 does not fix it.** This Mac runs 27.0.1 (26A434), as the runners do. Its kernel is
+    the same build as the guest's (xnu-13432.1.9, built 2026-08-11), and `IOGPUFamily`,
+    `IOSurface`, `IOGraphicsFamily` and `IOAVFamily` load with the same UUIDs here as in the
+    guest. Apple lists no security content for 27.0.1. tart 2.41.1 is the newest release, and
+    none of 2.38 to 2.41.1 touches graphics; the panic is in the guest's kernel, not in tart.
+  - **27.2 is the candidate.** macOS 27.2 (26B123) was released on 2026-10-26. Its security
+    notes fix a race in `IOSurface` "with improved locking" (CVE-2026-112477) and change
+    `IOGPUFamily`'s state management (CVE-2026-112533). The guests do not move to it yet. The
+    runners' `xcode-27` image (20261026.0314) is still on 27.0.1, and goldens hold only where
+    guest and runner draw alike. This Mac is on 27.0.1 too, and updating it means restarting it,
+    which is the person's call. Moving then means: `softwareupdate` 27.2 in `slopty-27-xcode`,
+    about 26 GB of new system the clones do not share plus the update's staging while it
+    applies; both guests cloned again from it; then the old ones deleted. Cirrus Labs has no
+    27.2 base image yet (its `macos-golden-gate-base` is the 2026-10-03 27.0).
+  - **What we do around it.** At the panic, three apps of three test threads had started in
+    the last 10 s, each with its server and worker, and one was playing four chimes. Nothing was
+    short of memory (the kernel reported no memory pressure; 181 MB free, 277 MB compressed),
+    and the first panic predates the `CAMetalDisplayLink` import. The display is tart's
+    1024×768, and memory is 6 GB. Nothing there is unusual for a GUI test; the race needs only
+    windows composited while their apps draw and exit. A VM's virtual CPUs pause whenever this
+    Mac is loaded, which widens any race between CPUs.
+  - Meanwhile a panic costs one run, not the pool: the run ends within 20 s of the guest's new
+    boot ("A guest run ends when its guest boots again", above), the guest is back in about a
+    minute, and the other guest goes on.

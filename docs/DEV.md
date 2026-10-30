@@ -53,17 +53,21 @@ zed itself so it is never behind zed while longbridge lags.
   dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the failed
   log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
   '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
-  failed). The `app` and `ios` cases run here, in the headless macOS guest `slopty-27-e2e`
-  (tart, cloned from `slopty-27-xcode`, which is made once from the live lane's base with this
-  Mac's Xcode and the runners' iOS simulator runtime, about half an hour): the lane's tree is
-  built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's Xcode),
-  the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), those that code video
-  after the rest and only when the guest's encoder codes a keyframe in time, the simulator's one
-  at a time in a fresh clone of the guest's simulator (`--sim iphone|ipad`), one lane's run at
-  a time; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and probes
-  always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything
-  else, which no accept writes, is refused whole and its paths named), and `--goldens review`
-  brings every changed frame's render and diff to `target/e2e/artifacts/`. A flake gets
+  failed). The `app` and `ios` cases run here, in one of two headless macOS guests,
+  `slopty-27-e2e` and `slopty-27-e2e-2`, so two lanes' runs go at once (tart clones of
+  `slopty-27-xcode`, which is made once from the live lane's base with this Mac's Xcode and the
+  runners' iOS simulator runtime, about half an hour; a run takes its lane's last guest when it
+  is free, else a running one, and a third lane waits for whichever frees first): the lane's
+  tree is built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's
+  Xcode), the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), those that code
+  video after the rest and only when the guest's encoder codes a keyframe in time, the simulator's
+  one at a time in a fresh clone of the guest's simulator (`--sim iphone|ipad`), one lane's run at a
+  time in each guest; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and
+  probes always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the
+  tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything else,
+  which no accept writes, is refused whole and its paths named), and `--goldens review`
+  brings every changed frame's render and diff to `target/remote/<name>/artifacts/` (from a
+  runner, to `target/e2e/artifacts/`). A flake gets
   measured, not rerun by hand. `--repeat N` runs the guest's case N times in one session, with
   one boot and one copy and a fresh app and simulator each time, and prints "k of N failed"
   with the clean runs in a row a fix needs at 95 %. `--until-fail N` stops at the first failure.
@@ -467,8 +471,10 @@ startup disk (any volume of its APFS container, symlinks followed).
 - `cargo xtask vm live -p <crate> [--test <target>] -- <nextest filters>`: a fresh guest per run,
   `slopty-27-run-<pid>-<time>`, deleted when the run ends or on Ctrl-C, SIGTERM or SIGHUP.
   `--keep` names it `slopty-27-kept-<pid>-<time>` and leaves it. The run prints the clone, boot
-  and deploy times, and the results land under `target/vm/<guest>/`. Run guests take one of two
-  fixed MACs, locked for the run, so DHCP leases stay at two however many runs there are.
+  and deploy times, and the results land under `target/vm/<guest>/`. A run guest takes one of
+  the two macOS slots for its life, stopping that slot's idle e2e guest (it waits for none: with
+  both e2e guests in runs it fails at once), and the slot's fixed MAC, so DHCP leases stay at two
+  however many runs there are.
 - `cargo xtask vm e2e`: the lane's proof (a host test against the guest's worker, a real HID
   event in the guest).
 - `cargo xtask vm list`.
@@ -478,9 +484,11 @@ startup disk (any volume of its APFS container, symlinks followed).
   the pulled images and the key, and refuses while any run's process lives.
 
 Guests never show a window here (`--no-graphics`), and nothing in them reaches this Mac's pointer,
-screen or TCC. A guest's logs are in `/Volumes/Lacie/vms/logs/<guest>.log`. macOS runs at most
-two macOS guests at once. To look at a guest's screen, run `tart run <name> --vnc` by hand; no
-command of the lane does.
+screen or TCC, and the e2e guests' sound is muted (tart plays a guest's sound on this Mac's
+speakers). A guest's logs are in `/Volumes/Lacie/vms/logs/<guest>.log`. macOS runs at most two
+macOS guests at once: the e2e guests and the run guests share two slots, and `vm start` and
+`vm create` take none, so start them only while an e2e guest is down. To look at a guest's
+screen, run `tart run <name> --vnc` by hand; no command of the lane does.
 
 ## Deep checks (on a schedule, not per commit)
 The `Deep` workflow (`.github/workflows/deep.yml`) runs these on main's head every day at 04:37

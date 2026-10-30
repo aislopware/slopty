@@ -46,10 +46,13 @@
 //! A run's guest is `<base>-run-<pid>-<time>`, or `<base>-kept-<pid>-<time>` with `--keep`. It is
 //! removed when the run ends, and on SIGINT, SIGTERM or SIGHUP ([`watch_signals`]). A run killed
 //! outright leaves its guest behind; the next `live`, `e2e` or `prune` removes each run guest whose
-//! process is gone, and never one whose process lives. Run guests take one of two fixed MACs
-//! ([`RUN_MACS`]), held by a lock for the run's life, so the host's DHCP server leases two
-//! addresses for them however many runs there are. macOS lets two macOS guests run at once (its
-//! licence, enforced by Virtualization.framework).
+//! process is gone, and never one whose process lives. macOS lets two macOS guests run at once
+//! (its licence, enforced by Virtualization.framework), so this Mac runs them in two slots
+//! ([`Slot`]), each the home of one of the e2e pool's guests (`remote::guest`): a run guest takes
+//! a free slot for its life, stopping that slot's idle e2e guest, and the slot's fixed MAC
+//! ([`RUN_MACS`]), so the host's DHCP server leases two addresses for run guests however many
+//! runs there are. The long-lived dev guest and `create`'s new base take no slot: start them
+//! only while a slot's e2e guest is down.
 //!
 //! [tart]: https://github.com/openai/tart
 
@@ -100,8 +103,8 @@ const GUEST_STAGE: &str = "/Users/admin/slopty-live";
 pub const NO_UPDATES: &str = "for key in AutomaticCheckEnabled AutomaticDownload \
      AutomaticallyInstallMacOSUpdates CriticalUpdateInstall ConfigDataInstall; do \
      sudo defaults write /Library/Preferences/com.apple.SoftwareUpdate \"$key\" -bool false; done";
-/// The MACs run guests take, one each: two, because macOS runs two macOS guests at most. Locally
-/// administered, so they collide with no real interface.
+/// The MACs run guests take, one to each slot ([`Slot`]). Locally administered, so they collide
+/// with no real interface.
 const RUN_MACS: [&str; 2] = ["7e:51:0b:7e:00:01", "7e:51:0b:7e:00:02"];
 /// The options every `ssh` to a guest takes after its key.
 const SSH_OPTIONS: [&str; 9] = [
@@ -956,29 +959,90 @@ fn reap_orphans(home: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-/// A lock on one of [`RUN_MACS`], held until dropped (or the process ends).
-struct MacLock {
+/// The e2e guests (`remote::guest`), one to each of the two slots this Mac runs macOS guests in
+/// ([`Slot`]). The first keeps the name the pool grew from, so a run of an older xtask, which
+/// knows only it, holds the same lock as one of this.
+pub const E2E_GUESTS: [&str; 2] = ["slopty-27-e2e", "slopty-27-e2e-2"];
+
+/// One of the two macOS guests this Mac may run at once (its licence, enforced by
+/// Virtualization.framework): held by its lock until dropped, or until the process ends. Each
+/// slot is the home of one of [`E2E_GUESTS`], which runs there between runs; a live run's clone
+/// borrows the slot and stops that guest first ([`claim_mac`]). Neither ever starts while the
+/// other holds the slot, so no third macOS guest is ever asked for.
+pub struct Slot {
     _file: File,
-    mac: &'static str,
+    guest: &'static str,
 }
 
-/// Take a free one of [`RUN_MACS`].
-fn claim_mac(home: &Utf8Path) -> Result<MacLock> {
-    for (slot, mac) in RUN_MACS.iter().enumerate() {
-        let path = home.join(format!("locks/mac-{slot}.lock"));
+impl Slot {
+    /// The e2e guest at home in this slot.
+    pub const fn guest(&self) -> &'static str {
+        self.guest
+    }
+}
+
+/// The lock file of the slot `guest` is at home in. Its text names who holds it, for one who
+/// waits.
+pub fn slot_lock(home: &Utf8Path, guest: &str) -> Utf8PathBuf {
+    home.join("locks").join(format!("{guest}.lock"))
+}
+
+/// Take `guest`'s slot for `holder` unless someone holds it (`None`). A slot's lock is the file
+/// at its path: one that `lockf` without `-k`, as an older xtask ran it, removed while this
+/// process locked it is no lock, so the lock is taken again on the file there now.
+pub fn try_slot(home: &Utf8Path, guest: &'static str, holder: &str) -> Result<Option<Slot>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let path = slot_lock(home, guest);
+    loop {
         let file = File::options()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
             .with_context(|| format!("open {path}"))?;
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
-            Ok(()) => return Ok(MacLock { _file: file, mac }),
-            Err(rustix::io::Errno::WOULDBLOCK) => {}
-            Err(e) => return Err(e).with_context(|| format!("lock {path}")),
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("lock {path}"));
+            }
+        }
+        let held = file.metadata()?.ino();
+        if std::fs::metadata(&path).is_ok_and(|now| now.ino() == held) {
+            file.set_len(0)?;
+            (&file).write_all(holder.as_bytes())?;
+            return Ok(Some(Slot { _file: file, guest }));
         }
     }
-    bail!("both run MACs are taken by runs in progress (macOS runs two guests at most)")
+}
+
+/// Who holds `guest`'s slot, as its lock file says.
+pub fn slot_holder(home: &Utf8Path, guest: &str) -> String {
+    let said = std::fs::read_to_string(slot_lock(home, guest)).unwrap_or_default();
+    let said = said.trim();
+    if said.is_empty() { "someone".to_owned() } else { said.to_owned() }
+}
+
+/// A slot for a run guest, and the one of [`RUN_MACS`] that goes with it, held until dropped.
+struct MacLock {
+    _slot: Slot,
+    mac: &'static str,
+}
+
+/// Take a free slot for a run guest: its e2e guest, idle while no one holds the slot, is stopped
+/// first, so the run's clone is the slot's one macOS guest.
+fn claim_mac(home: &Utf8Path) -> Result<MacLock> {
+    let holder = format!("a live run (pid {})", std::process::id());
+    for (guest, mac) in E2E_GUESTS.into_iter().zip(RUN_MACS) {
+        let Some(slot) = try_slot(home, guest, &holder)? else { continue };
+        if running(home, guest)? {
+            tart_out(home, &["stop", guest, "--timeout", "30"])?;
+            println!("  stopped the idle {guest}: this run takes its slot");
+        }
+        return Ok(MacLock { _slot: slot, mac });
+    }
+    let held: Vec<String> = E2E_GUESTS.map(|guest| slot_holder(home, guest)).into();
+    bail!("both macOS guest slots are taken ({}): macOS runs two guests at most", held.join("; "))
 }
 
 /// Give guest `name` the MAC `mac`, before it boots.
@@ -1651,20 +1715,32 @@ mod tests {
         assert!(profiles["default"].get("overrides").is_some(), "the rest is kept");
     }
 
-    /// Two runs never hold one MAC, and a lock goes with its holder.
+    /// A slot has one holder at a time, whose name it says, and goes with its holder. A lock
+    /// file removed under its holder (as `lockf` without `-k` does when it lets go) is no lock:
+    /// the next taker locks the file there now.
     #[test]
-    fn two_runs_take_two_macs_and_a_third_waits() {
-        let dir = std::env::temp_dir().join(format!("slopty-vm-macs-{}", std::process::id()));
+    fn a_slot_has_one_holder_and_a_removed_lock_file_holds_none() {
+        let dir = std::env::temp_dir().join(format!("slopty-vm-slots-{}", std::process::id()));
         let home = Utf8PathBuf::try_from(dir).expect("utf-8");
         std::fs::create_dir_all(home.join("locks")).expect("mkdir");
-        let first = claim_mac(&home).expect("a first MAC");
-        let second = claim_mac(&home).expect("a second MAC");
-        assert_ne!(first.mac, second.mac);
-        assert!(claim_mac(&home).is_err(), "a third run has no MAC");
-        let freed = first.mac;
+        let [one, two] = E2E_GUESTS;
+        let first = try_slot(&home, one, "lane A").expect("locks").expect("free");
+        assert_eq!(first.guest(), one);
+        assert!(try_slot(&home, one, "lane B").expect("locks").is_none(), "held by A");
+        assert_eq!(slot_holder(&home, one), "lane A");
+        let second = try_slot(&home, two, "lane B").expect("locks").expect("the other is free");
         drop(first);
-        assert_eq!(claim_mac(&home).expect("the freed MAC").mac, freed);
+        let again = try_slot(&home, one, "lane C").expect("locks").expect("freed by A");
+        assert_eq!(slot_holder(&home, one), "lane C");
+        // An older xtask's `lockf` held the file, and removed it as it let go.
+        let path = slot_lock(&home, two);
         drop(second);
+        let stale = File::options().write(true).open(&path).expect("open");
+        stale.lock().expect("lock");
+        std::fs::remove_file(&path).expect("remove");
+        let fresh = try_slot(&home, two, "lane D").expect("locks").expect("the file there is free");
+        assert!(try_slot(&home, two, "lane E").expect("locks").is_none(), "held by D");
+        drop((again, fresh, stale));
         std::fs::remove_dir_all(&home).expect("clean up");
     }
 }

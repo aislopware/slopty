@@ -18249,3 +18249,67 @@ gh run view 40862351365 --json jobs --jq '.jobs[] | [.name, .startedAt, .complet
 cargo xtask deep canary thread     # prints "SIGCHLD heard in …", then the planted race
 cargo xtask deep canary miri; cargo xtask deep canary address; cargo xtask deep canary mutants
 ```
+
+## 2026-10-30 — Two e2e guests: two runs at once, and what the second costs on disk
+
+This Mac (M1 Max, ten cores, 32 GB, macOS 27.0.1 26A434), the guests on the external disk
+(`/Volumes/Lacie`, APFS), tart 2.41.1, both guests macOS 27.0 26A428 clones of
+`slopty-27-xcode`, 4 cores and 6 GB each (`docs/decisions/testing.md`, "Two e2e guests, one in
+each of this Mac's two macOS slots").
+
+**Two runs at once.** Lane D's and lane F's iOS runs held the two guests together from 08:46 to
+09:11: two of D's in `slopty-27-e2e` (its lock held by `D`), F's in `slopty-27-e2e-2` (held by
+`F`), `tart list` showing both running. Neither waited for a guest; before, F would have waited
+for D's whole runs. The Mac's lanes were building beside them, at a load of 20–121.
+
+| run | guest | beside it | build | in the guest | outcome |
+| --- | --- | --- | --- | --- | --- |
+| D, `a_session_is_its_terminal_and_shows_its_inspector`, 06:59 | `slopty-27-e2e` | — | 510 s | 227 s | passed |
+| the same, 07:05 | `slopty-27-e2e` | — | 33 s | 284 s | passed |
+| the same, 07:57 | `slopty-27-e2e` | — | 335 s | 653 s | passed |
+| the same, 08:37–08:58 | `slopty-27-e2e` | F's run | 67 s | 1,270 s | failed: the worker did not print its address within 30 s |
+| the same, 08:57–09:07 | `slopty-27-e2e` | F's run | 136 s | 394 s | passed |
+
+F's run, `a_finger_over_a_live_page_scrolls_the_chat_or_the_page` asked for twice, was the new
+guest's first: its boot took 51 s, the copy of 13 binaries, the archive and the sources 125 s, its
+pristine iPhone's boot 160.5 s and that simulator's one settle 722 s, which the first guest paid
+once too and no later run in either guest pays. Then its run's clone settled, a `top` of 8 s taking
+67 s to come back from the guest, and its test ran at 09:11 in 38 s (failed on purpose, F's
+diagnostic, to keep the run's root).
+
+A run beside another can be slower than one alone, for both share this Mac: the two guests take 8 of
+its 10 cores, and the lanes' builds the rest and more. During the 08:58 run each guest ran at 0 %
+idle, with loads of 136–321 on its 4 cores: 700–770 processes, one iOS simulator each, WindowServer
+at 79 % of a core, and the 6 GB of the first in swap (81,368 swap-outs since its boot). Its iOS 27.0
+simulators crash-loop two services in bursts as they boot, `AppIntentsLiveEntityService` and
+`intelligencetasksd` (`EXC_BREAKPOINT`; 54 and 51 reports between 20:07 and 02:02 UTC), each crash a
+`ReportCrash` pass of 20 % of a core.
+
+**Disk.** `du` counts each clone's file whole, so it read 266 GB for what holds far less.
+Each figure here is a disk image's private bytes, the blocks no other file shares
+(`getattrlist`'s `ATTR_CMNEXT_PRIVATESIZE`), or the volume's free space by `df`.
+
+| what | private bytes |
+| --- | --- |
+| `slopty-27-e2e-2` cloned | 0.00 GB |
+| booted (6 s) / a minute later | 0.23 / 0.29 GB |
+| a 3 GiB file written in the guest | 3.51 GB |
+| that file deleted, 30 s later | 0.32 GB |
+| after boot and shutdown | 0.63–0.67 GB |
+| after its first run (F's, above) | 1.62 GB |
+| `slopty-27-e2e` after a night of runs | 13.3–13.4 GB |
+| `slopty-27-xcode`, before / after `-2` was cloned from it | 2.16 / 0.35 GB |
+| the pulled OCI image / `slopty-27` | 4.22 / 0.33 GB |
+
+A guest's disk is an ASIF image whose virtio-blk device unmaps what the guest deletes, so a
+deletion comes back to the Mac within 30 s. The second guest costs what its runs leave, up to
+the first's 13 GB, and nothing it deletes. Deleting the OCI image and `slopty-27`, which nothing
+needs once `slopty-27-xcode` is made: 55.78 GB free before, 62.33 GB after (+6.55 GB).
+
+```sh
+SLOPTY_LANE=D cargo xtask remote --e2e ios -E 'test(a_session_is_its_terminal_and_shows_its_inspector)' &
+SLOPTY_LANE=F cargo xtask remote --e2e ios -E 'test(a_finger_over_a_live_page_scrolls_the_chat_or_the_page)' --repeat 2
+cat /Volumes/Lacie/vms/locks/slopty-27-e2e*.lock; TART_HOME=/Volumes/Lacie/vms/tart tart list
+jq -c 'select(.name == "D" or .name == "F")' target/remote/e2e-history.jsonl
+df -g /Volumes/Lacie
+```

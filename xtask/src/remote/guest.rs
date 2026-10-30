@@ -4,19 +4,25 @@
 //! On a runner an e2e case spent two thirds of its time compiling: about two minutes of setup,
 //! then a p50 of 501 s building the daemons and the app on three cores, for a p50 of 68 s of
 //! tests (`.research/devloop-2026-10-17.md`). Here the build is incremental, in the lane's own
-//! warm directory, and the tests run in a long-lived guest ([`GUEST`]) that shows nothing on this
-//! Mac (`--no-graphics`) and touches none of its windows, input or grants, as the live lane's
-//! guests do (`docs/TESTING.md`, "Live lane in a VM"). The guest runs the runners' very macOS
-//! build (27.0.1, 26A434, `xcode-27`) on Apple's paravirtual GPU, as a runner does.
+//! warm directory, and the tests run in one of two long-lived guests ([`crate::vm::E2E_GUESTS`])
+//! that show nothing on this Mac (`--no-graphics`), play nothing on its speakers ([`QUIET`]) and
+//! touch none of its windows, input or grants, as the live lane's guests do (`docs/TESTING.md`,
+//! "Live lane in a VM"). The guests run macOS 27.0 (26A428), Cirrus Labs' image, beside the
+//! runners' 27.0.1 (26A434, `xcode-27`), whose kernel and GPU kexts are the same builds, on
+//! Apple's paravirtual GPU, as a runner's. Both are clones of one base, so they match.
 //!
 //! - The lane's tree is the check's commit (`gate::snapshot_commit`), built into
 //!   `target/local/<lane>/e2e-target` with the e2e features, apart from the check's own target dir,
 //!   whose test-profile builds of the same binaries would replace these in `debug/`.
 //! - The test binary goes over as a nextest archive, the binaries the suite spawns beside it, and
 //!   the e2e crate's directory (its goldens) at the very path the tests were compiled with.
-//! - One run at a time per guest, under a lock; a second lane waits and says so.
-//! - Renders and diffs come back to `target/e2e/artifacts/`; accepted goldens come back into the
-//!   tree, only those the run wrote; the log goes where `-E failed` reads it.
+//! - Two lanes' runs at once, one in each guest, each under its guest's lock ([`hold`]): a run
+//!   takes the guest its lane used last if it is free, else a running one, else the other; a third
+//!   lane waits for whichever frees first and says who holds them. Each guest has its own
+//!   simulators and data; nothing a run keeps on this Mac is shared with another lane's run.
+//! - Renders and diffs come back to `target/remote/<name>/artifacts/`, the check's own; accepted
+//!   goldens come back into the tree, only those the run wrote; the log goes where `-E failed`
+//!   reads it.
 //! - The simulator case (`ios`) builds the app for the simulator here too, with this Mac's Xcode,
 //!   and runs it in the guest's own simulator on the runners' iOS runtime ([`IOS_RUNTIME`]); the
 //!   base holds that Xcode and runtime ([`make_base`]).
@@ -31,15 +37,12 @@ use xshell::Shell;
 
 use super::Goldens;
 
-/// The guest that runs the e2e cases, a clone of [`BASE`].
-pub const GUEST: &str = "slopty-27-e2e";
-
-/// The base it is cloned from: [`ORIGIN`] with Xcode and the runners' iOS simulator runtime
-/// ([`make_base`]).
+/// The base the e2e guests ([`crate::vm::E2E_GUESTS`]) are cloned from: [`ORIGIN`] with Xcode
+/// and the runners' iOS simulator runtime ([`make_base`]).
 const BASE: &str = "slopty-27-xcode";
 
-/// The live lane's base (`cargo xtask vm create`), which [`BASE`] is made from: the runners'
-/// macOS build.
+/// The live lane's base (`cargo xtask vm create`), which [`BASE`] is made from: Cirrus Labs'
+/// macOS 27.0.
 const ORIGIN: &str = "slopty-27";
 
 /// The iOS simulator runtime the runners' simulators run on (iOS 27.0: on the image of
@@ -65,6 +68,11 @@ const MEMORY_MB: &str = "6144";
 const RUNNERS_DISPLAY: &str = "defaults write com.apple.universalaccess reduceMotion -bool true && \
      defaults write com.apple.universalaccess reduceTransparency -bool true";
 
+/// The guest's sound output muted: tart passes a guest's audio to this Mac's speakers, and the
+/// app's chimes (`afplay`, three apps at a time) played there, where the person hears this Mac
+/// over Parsec. The device stays, so the app's audio player opens as on a runner.
+const QUIET: &str = "osascript -e 'set volume output muted true'";
+
 /// The account the guest logs in as.
 const USER: &str = "admin";
 
@@ -87,11 +95,13 @@ fn threads() -> usize {
 const IDLE_STOP_S: u64 = 20 * 60;
 
 /// Mark the guest used now, and leave a detached watcher that stops it once it has been idle for
-/// [`IDLE_STOP_S`]: unused since, and no run holding its lock.
-fn stop_when_idle(home: &Path) {
+/// [`IDLE_STOP_S`]: unused since, and no run holding its lock. `lockf -k`, since without it
+/// `lockf` removes the lock file as it lets go, under any process waiting on that file.
+fn stop_when_idle(home: &Path, slot: &crate::vm::Slot) {
     use std::os::unix::process::CommandExt as _;
-    let stamp = home.join("locks").join(format!("{GUEST}.used"));
-    let lock = home.join("locks").join(format!("{GUEST}.lock"));
+    let guest = slot.guest();
+    let stamp = home.join("locks").join(format!("{guest}.used"));
+    let lock = crate::vm::slot_lock(home, guest);
     if std::fs::write(&stamp, b"").is_err() {
         return;
     }
@@ -99,7 +109,7 @@ fn stop_when_idle(home: &Path) {
     let script = format!(
         "sleep {IDLE_STOP_S}; now=$(date +%s); used=$(stat -f %m '{stamp}'); \
          [ $((now - used)) -ge {IDLE_STOP_S} ] || exit 0; \
-         /usr/bin/lockf -t 0 '{lock}' /usr/bin/env TART_HOME='{tart_home}' tart stop {GUEST} --timeout 30"
+         /usr/bin/lockf -k -t 0 '{lock}' /usr/bin/env TART_HOME='{tart_home}' tart stop {guest} --timeout 30"
     );
     let _watcher = Command::new("/bin/sh")
         .args(["-c", &script])
@@ -200,6 +210,8 @@ fn repeat_verdict(repeat: Repeat, failed: u32, ran: u32) -> String {
 pub struct Outcome {
     /// Whether every test passed (or the filter matched none in a filtered run).
     pub passed: bool,
+    /// The e2e guest it ran in.
+    pub guest: &'static str,
     /// The build and the archive.
     pub build: Duration,
     /// The copy into the guest and the tests.
@@ -317,12 +329,12 @@ const FREE: &str = "df -k /System/Volumes/Data | awk 'NR == 2 { print \"free\", 
 /// (109 of them filled the guest's 90 GB disk on 2026-10-17). Then the least recently used
 /// lanes' directories beyond [`KEPT_LANES`], and more of them, oldest first, while the volume
 /// has less than [`FREE_GIB`] free; the running lane's never.
-fn prune(home: &Path, ip: &str, dir: &Path) -> Result<()> {
+fn prune(home: &Path, guest: &str, ip: &str, dir: &Path) -> Result<()> {
     let started = Instant::now();
     let target = dir.join("e2e-target");
     let lanes = dir.parent().context("a lane's directory sits in target/local")?;
     let lane = dir.file_name().context("a lane's directory has a name")?;
-    let _unavailable = simctl(home, GUEST, &["delete", "unavailable"]);
+    let _unavailable = simctl(home, guest, &["delete", "unavailable"]);
     let listing = ssh_out(
         home,
         ip,
@@ -348,7 +360,7 @@ fn prune(home: &Path, ip: &str, dir: &Path) -> Result<()> {
     }
     if !dropped.is_empty() {
         println!(
-            "  dropped {} from {GUEST}, least recently used; {:.1} GiB free ({:.1?})",
+            "  dropped {} from {guest}, least recently used; {:.1} GiB free ({:.1?})",
             dropped.join(", "),
             gib(free),
             started.elapsed()
@@ -356,9 +368,9 @@ fn prune(home: &Path, ip: &str, dir: &Path) -> Result<()> {
     }
     ensure!(
         free >= FREE_GIB << 20,
-        "{GUEST} has {:.1} GiB free, short of the {FREE_GIB} GiB a run needs, with only lane \
+        "{guest} has {:.1} GiB free, short of the {FREE_GIB} GiB a run needs, with only lane \
          {lane}'s directory left to drop: see what fills it with `sudo du -xh -d 4 \
-         /System/Volumes/Data | sort -h | tail -30` over `ssh admin@$(tart ip {GUEST})`",
+         /System/Volumes/Data | sort -h | tail -30` over `ssh admin@$(tart ip {guest})`",
         gib(free)
     );
     Ok(())
@@ -410,30 +422,40 @@ fn rsync(home: &Path, args: &[&str], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The guest booted, cloned from the base first if it is not there; its address.
-fn up(home: &Path) -> Result<String> {
-    let listed = tart_out(home, &["list"])?;
-    let state = listed
-        .lines()
-        .find(|l| l.split_whitespace().nth(1) == Some(GUEST))
-        .map(|l| l.split_whitespace().last().unwrap_or("").to_owned());
-    match state.as_deref() {
-        Some("running") => return tart_out(home, &["ip", GUEST, "--wait", "60"]),
+/// `guest` booted, cloned from the base first if it is not there; its address. Every guest is
+/// a clone of the one base, set up the same way on every boot, so the pool's two match.
+fn up(home: &Path, guest: &str) -> Result<String> {
+    match state(home, guest)?.as_deref() {
+        Some("running") => return tart_out(home, &["ip", guest, "--wait", "60"]),
         Some(_) => {}
         None => {
             if !has_guest(home, BASE)? {
                 make_base(home, BASE)?;
             }
-            println!("  making the e2e guest {GUEST} from {BASE}");
-            tart_out(home, &["clone", BASE, GUEST])?;
+            println!("  making the e2e guest {guest} from {BASE}");
+            tart_out(home, &["clone", BASE, guest])?;
         }
     }
-    tart_out(home, &["set", GUEST, "--memory", MEMORY_MB])?;
-    let ip = boot(home, GUEST, &[])?;
+    tart_out(home, &["set", guest, "--memory", MEMORY_MB])?;
+    let ip = boot(home, guest, &[])?;
     // On every boot, so a guest cloned from a base made before takes them.
     ssh(home, &ip, crate::vm::NO_UPDATES)?;
     ssh(home, &ip, RUNNERS_DISPLAY)?;
+    exec(home, guest, QUIET)?;
     Ok(ip)
+}
+
+/// `guest`'s state as `tart list` says it (`running`, `stopped`, …), `None` when there is none.
+fn state(home: &Path, guest: &str) -> Result<Option<String>> {
+    Ok(tart_out(home, &["list"])?
+        .lines()
+        .find(|l| l.split_whitespace().nth(1) == Some(guest))
+        .map(|l| l.split_whitespace().last().unwrap_or("").to_owned()))
+}
+
+/// `script` run by `sh` in `guest`'s logged-in session (`tart exec`).
+fn exec(home: &Path, guest: &str, script: &str) -> Result<()> {
+    tart_out(home, &["exec", guest, "/bin/sh", "-c", script]).map(|_said| ())
 }
 
 /// Boot `name` headless, as a process of its own; its address once a command runs in its
@@ -552,24 +574,63 @@ fn fill_base(home: &Path, making: &str) -> Result<()> {
 /// What the guest's lock file says while a spare simulator boots under it ([`spare`]).
 const SPARE_HOLDER: &str = "spare simulator";
 
-/// The guest's lock, held for one run.
-fn lock(home: &Path, lane: &str) -> Result<File> {
-    let dir = home.join("locks");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{GUEST}.lock"));
-    let file = File::options().create(true).truncate(false).write(true).open(&path)?;
-    if file.try_lock().is_err() {
-        let holder = std::fs::read_to_string(&path).unwrap_or_default();
-        let holder = holder.trim();
-        if holder == SPARE_HOLDER {
-            println!("  waiting for the e2e guest: the next run's simulator is booting");
-        } else {
-            println!("  waiting for the e2e guest: {holder}'s run holds it");
+/// How often a run that waits for an e2e guest looks again.
+const POOL_WAIT: Duration = Duration::from_secs(2);
+
+/// An e2e guest's slot, held for one run of lane `lane` (whose directory is `dir`): the guest
+/// the lane used last when it is free (its copies of the lane's binaries are there), else a free
+/// one that is running (no boot), else any free one; with both taken, whichever frees first.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; waiting a turn")]
+fn hold(home: &Path, lane: &str, dir: &Path) -> Result<crate::vm::Slot> {
+    std::fs::create_dir_all(home.join("locks"))?;
+    let last = dir.join("e2e-guest");
+    let order = preferred(
+        std::fs::read_to_string(&last).ok().as_deref().map(str::trim),
+        &tart_out(home, &["list"])?,
+    );
+    let started = Instant::now();
+    let mut told = false;
+    loop {
+        for &guest in &order {
+            if let Some(slot) = crate::vm::try_slot(home, guest, lane)? {
+                if told {
+                    println!("  waited {:.0?} for {}", started.elapsed(), slot.guest());
+                }
+                std::fs::write(&last, slot.guest())?;
+                return Ok(slot);
+            }
         }
-        file.lock().with_context(|| format!("lock {path}"))?;
+        if !told {
+            let held: Vec<String> = crate::vm::E2E_GUESTS
+                .map(|guest| {
+                    let holder = crate::vm::slot_holder(home, guest);
+                    let holder = if holder == SPARE_HOLDER {
+                        "the next run's simulator, booting".to_owned()
+                    } else {
+                        format!("{holder}'s run")
+                    };
+                    format!("{guest} by {holder}")
+                })
+                .into();
+            println!("  waiting for an e2e guest: {}", held.join(", "));
+            told = true;
+        }
+        std::thread::sleep(POOL_WAIT);
     }
-    std::fs::write(&path, lane)?;
-    Ok(file)
+}
+
+/// The order a run tries the e2e guests in: the one named `last` (the lane's last), then those
+/// `tart list`'s `listed` says run, then the rest, each group in the pool's order.
+fn preferred(last: Option<&str>, listed: &str) -> Vec<&'static str> {
+    let running = |guest: &str| {
+        listed.lines().any(|l| {
+            let words: Vec<&str> = l.split_whitespace().collect();
+            words.get(1) == Some(&guest) && words.last() == Some(&"running")
+        })
+    };
+    let mut order = crate::vm::E2E_GUESTS.to_vec();
+    order.sort_by_key(|&guest| (Some(guest) != last, !running(guest)));
+    order
 }
 
 /// nextest's config for the guest: the tree's, less its setup scripts, which run cargo (the
@@ -650,13 +711,14 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     let built = started.elapsed();
 
     let home = home();
-    let _held = lock(&home, lane)?;
-    stop_when_idle(&home);
+    let slot = hold(&home, lane, &dir)?;
+    let guest = slot.guest();
+    stop_when_idle(&home, &slot);
     let booting = Instant::now();
-    let ip = up(&home)?;
+    let ip = up(&home, guest)?;
     let booted = booting.elapsed();
     let copying = Instant::now();
-    prune(&home, &ip, &dir)?;
+    prune(&home, guest, &ip, &dir)?;
     ssh(
         &home,
         &ip,
@@ -703,7 +765,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         rsync(&home, &["--whole-file", "--delete", &from, &to], &stage)?;
     }
     println!(
-        "  {GUEST} up in {booted:.1?}; {} binaries, the archive and sources copied in {:.1?}",
+        "  {guest} up in {booted:.1?}; {} binaries, the archive and sources copied in {:.1?}",
         bins.len(),
         copying.elapsed()
     );
@@ -724,7 +786,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     if run.ios.is_none() {
         // A booted simulator holds CoreAudio, and the app's audio player then takes tens of
         // seconds to open: no simulator stays up through the app's case.
-        quiet(&home, None)?;
+        quiet(&home, guest, None)?;
     }
     let logs = root.join("target/remote").join(run.name).join("logs/logs-run");
     if logs.exists() {
@@ -741,7 +803,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         std::fs::create_dir_all(&kept)?;
     }
     println!(
-        "▶ e2e {case} in {GUEST}{}{}",
+        "▶ e2e {case} in {guest}{}{}",
         run.filter.map(|f| format!(" -E {f}")).unwrap_or_default(),
         match run.repeat {
             Repeat::Times(1) => String::new(),
@@ -768,7 +830,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         // The simulator booted and the app installed in the session the tests run in: a
         // fresh clone each run, as a run alone starts.
         let simulator = match run.ios {
-            Some(sim) => Some(simulator(&home, sim, &stage.join("Slopty.app"))?),
+            Some(sim) => Some(simulator(&home, guest, sim, &stage.join("Slopty.app"))?),
             None => None,
         };
         // The app's tests run in two groups, those that code video last and apart
@@ -812,13 +874,13 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
                     format!("perl -e 'alarm 20; exec @ARGV' '{debug}/{}'", crate::e2e::PROBE);
                 if ssh(&home, &ip, &probe).is_err() {
                     println!(
-                        "  ⚠ {GUEST}'s encoder does not answer: the tests that code video are skipped"
+                        "  ⚠ {guest}'s encoder does not answer: the tests that code video are skipped"
                     );
                     continue;
                 }
             }
             let mut command = tart(&home);
-            command.args(["exec", GUEST, "/usr/bin/env"]);
+            command.args(["exec", guest, "/usr/bin/env"]);
             for (key, value) in env {
                 command.arg(format!("{key}={value}"));
             }
@@ -840,7 +902,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
             } else {
                 this_log.with_extension(format!("{group}.log"))
             };
-            let ran_group = teed(command, &group_log, &home, &ip);
+            let ran_group = teed(command, &group_log, &home, guest, &ip);
             if group > 0 {
                 append(&this_log, &group_log)?;
             }
@@ -893,15 +955,16 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
     }
     if let Some(sim) = run.ios {
         // The run's simulator goes, and the next run's is made ready while the guest idles.
-        let _dropped = drop_devices(&home, &run_device(sim));
-        spare(&home, sim);
+        let _dropped = drop_devices(&home, guest, &run_device(sim));
+        spare(&home, &slot, sim);
     }
     let status = status.context("no run")??;
     let tests = copying.elapsed();
-    stop_when_idle(&home);
+    stop_when_idle(&home, &slot);
 
-    // Renders and diffs of changed frames, as a runner's come back.
-    let renders = root.join("target/e2e/artifacts");
+    // Renders and diffs of changed frames, as a runner's come back: the check's own, since
+    // another lane's run in the other guest brings back its own at the same time.
+    let renders = root.join("target/remote").join(run.name).join("artifacts");
     if renders.exists() {
         std::fs::remove_dir_all(&renders)?;
     }
@@ -941,7 +1004,7 @@ pub fn e2e(root: &Path, lane: &str, sha: &str, run: &Run<'_>) -> Result<Outcome>
         }
         println!("  every line: {log}; renders and diffs: {renders}");
     }
-    Ok(Outcome { passed, build: built, tests, summary })
+    Ok(Outcome { passed, build: built, tests, summary, guest })
 }
 
 /// Keep a failed run's whole data directory (its log, dumps and frames) and every stack root it
@@ -1084,15 +1147,16 @@ fn spare_device(sim: crate::ios::SimKind) -> String {
 /// more, all of it on a run's way before; the next run takes the spare as it is, booted, booting
 /// or settling, and clones its own only when there is none. Nothing runs in a spare before a run
 /// takes it, so it is as fresh as one cloned for the run.
-fn spare(home: &Path, sim: crate::ios::SimKind) {
+fn spare(home: &Path, slot: &crate::vm::Slot, sim: crate::ios::SimKind) {
     use std::os::unix::process::CommandExt as _;
+    let guest = slot.guest();
     let name = spare_device(sim);
     let ready = || -> Result<Option<String>> {
-        let devices = simctl(home, GUEST, &["list", "devices", "-j"])?;
+        let devices = simctl(home, guest, &["list", "devices", "-j"])?;
         if named_device(&devices, &name)?.is_some() {
             return Ok(None);
         }
-        Ok(Some(pristine(home, GUEST, sim)?))
+        Ok(Some(pristine(home, guest, sim)?))
     };
     let Ok(Some(source)) = ready() else { return };
     let script = format!(
@@ -1101,15 +1165,16 @@ fn spare(home: &Path, sim: crate::ios::SimKind) {
     );
     // Under the guest's lock, taken once this run lets go of it (or given up after a minute): a
     // spare booting beside another run's tests took its cores, and one booting into an app run
-    // its CoreAudio. A run that comes meanwhile waits for it, then takes it or drops it.
-    let lock = home.join("locks").join(format!("{GUEST}.lock"));
+    // its CoreAudio. A run that comes meanwhile waits for it, then takes it or drops it. `-k`,
+    // as for the idle watcher ([`stop_when_idle`]).
+    let lock = crate::vm::slot_lock(home, guest);
     let tart_home = home.join("tart");
     let held = format!(
         "printf '{SPARE_HOLDER}' > '{lock}'; exec /usr/bin/env TART_HOME='{tart_home}' \
-         tart exec {GUEST} /bin/sh -c \"$0\""
+         tart exec {guest} /bin/sh -c \"$0\""
     );
     let _spare = Command::new("/usr/bin/lockf")
-        .args(["-t", "60", lock.as_str(), "/bin/sh", "-c", &held, &script])
+        .args(["-k", "-t", "60", lock.as_str(), "/bin/sh", "-c", &held, &script])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1117,49 +1182,49 @@ fn spare(home: &Path, sim: crate::ios::SimKind) {
         .spawn();
 }
 
-/// A simulator for one run in [`GUEST`], booted with `app` installed; its UDID. A clone of the
+/// A simulator for one run in `guest`, booted with `app` installed; its UDID. A clone of the
 /// pristine one, so every run starts as a runner's freshly made simulator does: no app data,
 /// notifications not yet asked, the keyboard, appearance and pasteboard as made (a simulator
 /// the runs kept kept the app's notification grant, and every iOS frame showed it). A clone of a
 /// migrated simulator boots in a reboot's time, and the tests wait until it has settled.
-fn simulator(home: &Path, sim: crate::ios::SimKind, app: &Path) -> Result<String> {
+fn simulator(home: &Path, guest: &str, sim: crate::ios::SimKind, app: &Path) -> Result<String> {
     let started = Instant::now();
     let name = run_device(sim);
-    let devices = simctl(home, GUEST, &["list", "devices", "-j"])?;
+    let devices = simctl(home, guest, &["list", "devices", "-j"])?;
     let spare = named_device(&devices, &spare_device(sim))?;
     // Only the run's simulator is up: two beside the tests left the guest 64 MB free, in swap,
     // and the app hung 15 s at a time.
-    quiet(home, spare.as_deref())?;
+    quiet(home, guest, spare.as_deref())?;
     let (udid, how) = if let Some(udid) = spare {
-        simctl(home, GUEST, &["rename", &udid, &name])?;
+        simctl(home, guest, &["rename", &udid, &name])?;
         (udid, "took the spare")
     } else {
-        let source = pristine(home, GUEST, sim)?;
-        let udid = simctl(home, GUEST, &["clone", &source, &name])?;
-        let _booting = simctl(home, GUEST, &["boot", &udid]);
+        let source = pristine(home, guest, sim)?;
+        let udid = simctl(home, guest, &["clone", &source, &name])?;
+        let _booting = simctl(home, guest, &["boot", &udid]);
         (udid, "booted a fresh")
     };
     // Boots it if it is not yet (a spare its process has not booted yet), else waits for it.
-    simctl(home, GUEST, &["bootstatus", &udid, "-b"])?;
-    simctl(home, GUEST, &["install", &udid, app.as_str()])?;
+    simctl(home, guest, &["bootstatus", &udid, "-b"])?;
+    simctl(home, guest, &["install", &udid, app.as_str()])?;
     let installed = started.elapsed();
     let sim = sim.name();
     // The tests start once its daemons are done, not at every core beside them.
-    match settle(home, GUEST, RUN_SETTLE)? {
+    match settle(home, guest, RUN_SETTLE)? {
         Some(after) => println!(
-            "  {how} {sim} in {GUEST} and installed the app ({installed:.1?}), settled {after:.0?} after"
+            "  {how} {sim} in {guest} and installed the app ({installed:.1?}), settled {after:.0?} after"
         ),
         None => println!(
-            "  {how} {sim} in {GUEST} and installed the app ({installed:.1?}), still busy \
+            "  {how} {sim} in {guest} and installed the app ({installed:.1?}), still busy \
              {RUN_SETTLE:?} after: a test may wait past its time"
         ),
     }
     Ok(udid)
 }
 
-/// Every simulator in [`GUEST`] down but `keep`: runs' and spares' deleted, any other shut down.
-fn quiet(home: &Path, keep: Option<&str>) -> Result<()> {
-    let listed = simctl(home, GUEST, &["list", "devices", "-j"])?;
+/// Every simulator in `guest` down but `keep`: runs' and spares' deleted, any other shut down.
+fn quiet(home: &Path, guest: &str, keep: Option<&str>) -> Result<()> {
+    let listed = simctl(home, guest, &["list", "devices", "-j"])?;
     let pristine = [crate::ios::SimKind::Iphone.name(), crate::ios::SimKind::Ipad.name()];
     for device in devices(&listed)? {
         if Some(device.udid.as_str()) == keep {
@@ -1167,24 +1232,25 @@ fn quiet(home: &Path, keep: Option<&str>) -> Result<()> {
         }
         if pristine.contains(&device.name.as_str()) {
             if device.state != "Shutdown" {
-                simctl(home, GUEST, &["shutdown", &device.udid])?;
+                simctl(home, guest, &["shutdown", &device.udid])?;
             }
         } else if device.name.ends_with(" run") || device.name.ends_with(" spare") {
-            let _shut = simctl(home, GUEST, &["shutdown", &device.udid]);
-            simctl(home, GUEST, &["delete", &device.udid])?;
+            let _shut = simctl(home, guest, &["shutdown", &device.udid]);
+            simctl(home, guest, &["delete", &device.udid])?;
         } else if device.state != "Shutdown" {
-            simctl(home, GUEST, &["shutdown", &device.udid])?;
+            simctl(home, guest, &["shutdown", &device.udid])?;
         }
     }
     Ok(())
 }
 
-/// Shut down and delete every simulator named `name` (a run's, a stopped run's, a spare).
-fn drop_devices(home: &Path, name: &str) -> Result<()> {
-    let devices = simctl(home, GUEST, &["list", "devices", "-j"])?;
+/// Shut down and delete every simulator named `name` in `guest` (a run's, a stopped run's, a
+/// spare).
+fn drop_devices(home: &Path, guest: &str, name: &str) -> Result<()> {
+    let devices = simctl(home, guest, &["list", "devices", "-j"])?;
     for udid in named_devices(&devices, name)? {
-        let _shut = simctl(home, GUEST, &["shutdown", &udid]);
-        simctl(home, GUEST, &["delete", &udid])?;
+        let _shut = simctl(home, guest, &["shutdown", &udid]);
+        simctl(home, guest, &["delete", &udid])?;
     }
     Ok(())
 }
@@ -1292,6 +1358,7 @@ fn teed(
     mut command: Command,
     log: &Path,
     home: &Path,
+    guest: &'static str,
     ip: &str,
 ) -> Result<std::process::ExitStatus> {
     use std::io::{BufRead as _, Write as _};
@@ -1310,7 +1377,7 @@ fn teed(
         let (home, ip, pid) = (home.to_owned(), ip.to_owned(), child.id());
         let (done, ended) = (Arc::clone(&done), Arc::clone(&ended));
         std::thread::spawn(move || {
-            if let Some(why) = watch_boot(&home, &ip, &booted, &done) {
+            if let Some(why) = watch_boot(&home, guest, &ip, &booted, &done) {
                 let _set = ended.set(why);
                 // Its pipes close with it, and the lines below end.
                 let _killed = Command::new("/bin/kill").arg(pid.to_string()).status();
@@ -1368,6 +1435,7 @@ fn boot_session(home: &Path, ip: &str) -> Result<String> {
 #[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling a guest")]
 fn watch_boot(
     home: &Path,
+    guest: &str,
     ip: &str,
     booted: &str,
     done: &std::sync::atomic::AtomicBool,
@@ -1385,11 +1453,11 @@ fn watch_boot(
         match boot_session(home, ip) {
             Ok(now) if now == booted => answered = Instant::now(),
             Ok(_) => {
-                return Some(format!("{GUEST} booted again mid-run; {}", panic_report(home, ip)));
+                return Some(format!("{guest} booted again mid-run; {}", panic_report(home, ip)));
             }
             Err(_) if answered.elapsed() >= UNANSWERED => {
                 return Some(format!(
-                    "{GUEST} has not answered for {:.0?}; {}",
+                    "{guest} has not answered for {:.0?}; {}",
                     answered.elapsed(),
                     panic_report(home, ip)
                 ));
@@ -1450,6 +1518,27 @@ mod tests {
         assert!(runtimes.contains(super::IOS_RUNTIME), "{runtimes}");
         super::tart_out(&home, &["stop", base, "--timeout", "60"]).expect("stop");
         super::tart_out(&home, &["delete", base]).expect("delete");
+    }
+
+    /// A run tries the guest its lane used last first, then a running one, then the rest, in
+    /// the pool's order; a name the pool no longer has, or a guest of another name that runs,
+    /// changes nothing.
+    #[test]
+    fn a_run_tries_its_lane_s_guest_then_a_running_one() {
+        let [first, second] = crate::vm::E2E_GUESTS;
+        let list = |running: &[&str]| {
+            let rows = [first, second, "slopty-27-e2e-20", "slopty-27-xcode"].map(|guest| {
+                let state = if running.contains(&guest) { "running" } else { "stopped" };
+                format!("local {guest} 90 GB 71 GB 1 hour ago {state}")
+            });
+            format!("Source Name Disk Size Accessed State\n{}\n", rows.join("\n"))
+        };
+        assert_eq!(super::preferred(None, &list(&[])), [first, second]);
+        assert_eq!(super::preferred(None, &list(&[second])), [second, first]);
+        assert_eq!(super::preferred(Some(first), &list(&[second])), [first, second]);
+        assert_eq!(super::preferred(Some(second), &list(&[])), [second, first]);
+        let others = super::preferred(Some("slopty-26-e2e"), &list(&["slopty-27-e2e-20"]));
+        assert_eq!(others, [first, second]);
     }
 
     /// The guest's simulator is found by name across runtimes, never by another's name; one is
