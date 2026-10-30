@@ -1085,39 +1085,6 @@ pub struct CheckoutFileDiffText {
     pub stale: bool,
 }
 
-/// Who is signed in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UserProfile {
-    /// Their id.
-    pub id: String,
-    /// Their email address.
-    pub email: String,
-    /// Their name, when they gave one.
-    pub name: Option<String>,
-}
-
-/// Whether anyone is signed in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "camelCase")]
-pub enum AuthState {
-    /// Nobody is.
-    SignedOut,
-    /// Someone is, and has no organization yet.
-    NeedsOrganization {
-        /// Who.
-        user: UserProfile,
-    },
-    /// Someone is.
-    #[serde(rename_all = "camelCase")]
-    SignedIn {
-        /// Who.
-        user: UserProfile,
-        /// Their organization.
-        org_id: Option<String>,
-    },
-}
-
 /// An open PTY session on the owning device (`OpenTerminal` reply).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

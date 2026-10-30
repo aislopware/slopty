@@ -61,8 +61,6 @@ pub mod methods {
     pub const LOCAL_DEVICE: &str = "LocalDevice";
     /// The view model's fixed device and workspace identity.
     pub const ENGINE_INFO: &str = "EngineInfo";
-    /// Who is signed in; the view model answers that nobody is.
-    pub const AUTH_STATUS: &str = "AuthStatus";
     /// Clone a repository into a folder on a device.
     pub const CLONE_REPO: &str = "CloneRepo";
     /// A repository's branches on a device.

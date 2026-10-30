@@ -4,6 +4,3 @@
 
 pub mod harness;
 pub mod registry;
-
-/// The org a dev-mode engine runs under.
-pub const DEFAULT_ORG_ID: &str = "dev-org";

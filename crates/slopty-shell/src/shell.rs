@@ -1878,7 +1878,6 @@ impl Shell {
             crate::browser::profile::BrowserProfile::for_workspace(
                 &self.data_dir,
                 state.workspace_scope,
-                state.auth.as_ref(),
                 state.local_device_id.as_deref(),
             )
         };
@@ -2693,7 +2692,6 @@ impl Shell {
             let state = self.state.read(cx);
             crate::links::workspace_locator(
                 state.workspace_scope,
-                state.auth.as_ref(),
                 state.local_device_id.as_deref(),
             )
             .map(|workspace| crate::links::slopty_conversation_link(chat_id, &workspace))
@@ -3209,11 +3207,7 @@ impl Shell {
 
     fn active_profile_key(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        workspace_profile_key(
-            state.workspace_scope,
-            state.auth.as_ref(),
-            None,
-        )
+        workspace_profile_key(state.workspace_scope)
     }
 
     /// The Archive session shortcut. With no chat open, or with an already
@@ -3691,7 +3685,7 @@ impl Shell {
 
     /// Slopty-drawn Linux caption controls, one overlay per populated side.
     /// Shell-level chrome like the Windows cluster: mounted at the root so
-    /// they stay above the splash and every auth/org/error gate.
+    /// they stay above the splash and the connection's error page.
     fn render_linux_caption_controls(&self, window: &Window, cx: &App) -> Vec<AnyElement> {
         let Some(layout) = self.linux_captions else {
             return Vec::new();
@@ -5691,7 +5685,7 @@ impl Render for Shell {
         };
 
         // Caption controls are shell-level chrome, not Ready-page content:
-        // keep them above the splash and every auth/org/error gate as well as
+        // keep them above the splash and the connection's error page as well as
         // the full application. Gate pages also need a drag surface because
         // they do not render the unified tabs/settings titlebar — on Windows
         // the native `Drag` control area, on Linux the explicit

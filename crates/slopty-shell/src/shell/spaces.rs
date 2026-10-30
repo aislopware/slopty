@@ -6093,7 +6093,6 @@ mod home_folder_search_tests {
             .update(cx, |shell, _, cx| {
                 shell.state.update(cx, |state, _| {
                     state.connection = slopty_view_proto::view::ConnectionStatus::Ready;
-                    state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Development);
                 })
             })
             .unwrap();

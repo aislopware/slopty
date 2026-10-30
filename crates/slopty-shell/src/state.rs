@@ -31,9 +31,9 @@ use serde::de::DeserializeOwned;
 mod slow_calls; // a call that runs long says so
 use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
 use slopty_view_proto::{
-    AuthState, Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
+    Chat, ChatIndicator, Device, EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
-use slopty_view_rpc::{RpcClient, RpcError, RpcService, memory_client, methods};
+use slopty_view_rpc::{RpcClient, RpcService, memory_client, methods};
 
 // Recently viewed transcripts stay renderable while a fresh watch opens. Move
 // ownership on navigation; never clone whale payloads or retain live watches.
@@ -159,7 +159,7 @@ impl EngineHandle {
         // Every call passes the slow-call watch.
         let (service, slow) = slow_calls::SlowCallWatch::wrap(service, slow_calls::SLOW_AFTER);
         let client = memory_client(service.clone());
-        let engine_info = query_engine_info(&client).await?;
+        let engine_info = client.call_as(methods::ENGINE_INFO, serde_json::json!({})).await?;
         Ok(EngineHandle {
             inner: Arc::new(ServiceEngine {
                 client,
@@ -203,32 +203,6 @@ impl EngineHandle {
     }
 }
 
-/// Query the current protocol first, with a conservative fallback for daemons
-/// from before `EngineInfo` existed. Old daemons are always treated as synced.
-async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
-    match client
-        .call_as(methods::ENGINE_INFO, serde_json::json!({}))
-        .await
-    {
-        Ok(info) => Ok(info),
-        Err(RpcError::UnknownMethod(method)) if method == methods::ENGINE_INFO => {
-            #[derive(serde::Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct LocalDevice {
-                device_id: String,
-            }
-            let legacy: LocalDevice = client
-                .call_as(methods::LOCAL_DEVICE, serde_json::json!({}))
-                .await?;
-            Ok(EngineInfo {
-                device_id: legacy.device_id,
-                workspace_scope: WorkspaceScope::Synced,
-            })
-        }
-        Err(err) => Err(err),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Pure state + reducers
 // ---------------------------------------------------------------------------
@@ -240,7 +214,7 @@ async fn query_engine_info(client: &RpcClient) -> Result<EngineInfo, RpcError> {
 pub use slopty_view_proto::view::{
     ChatGroup, ConnectionStatus, GatePhase, Indicator, SESSION_STALE_MS, chat_location,
     display_status, effective_indicator, format_time_ago, gate_phase, group_chats,
-    parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
+    project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
 /// When `format_time_ago(then, …)`, read at `now`, next says something else: the next
@@ -377,11 +351,8 @@ pub(crate) struct CanvasTarget {
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
 pub struct AppState {
     pub connection: ConnectionStatus,
-    /// Fixed data boundary of the attached engine. Authentication may change
-    /// in place, but changing this scope requires assembling a new runtime.
+    /// The data the attached engine holds; `None` until it attaches.
     pub workspace_scope: Option<WorkspaceScope>,
-    /// Auth stream value; `None` until the engine reports one (M4).
-    pub auth: Option<AuthState>,
     pub devices: Vec<Device>,
     // Last published device presentation. Heartbeats refresh the underlying
     // timestamps without invalidating every view when no displayed value changed.
@@ -519,7 +490,6 @@ impl AppState {
         Self {
             connection: ConnectionStatus::Connecting,
             workspace_scope: None,
-            auth: None,
             devices: Vec::new(),
             device_presentation: None,
             session_presence_presentation: Vec::new(),
@@ -891,33 +861,6 @@ impl AppState {
             .and_then(|d| sorted.iter().find(|s| s.device_id == d).copied())
             .or_else(|| sorted.first().copied())
             .map(|s| s.id.clone())
-    }
-
-    pub fn apply_auth(&mut self, auth: AuthState) -> bool {
-        if self.auth.as_ref() == Some(&auth) {
-            return false;
-        }
-        self.auth = Some(auth);
-        true
-    }
-
-    /// Tolerant AuthStatus frame reducer (see [`parse_auth_state`]).
-    pub fn apply_auth_value(&mut self, value: serde_json::Value) -> bool {
-        match parse_auth_state(&value) {
-            Some(auth) => self.apply_auth(auth),
-            None => {
-                tracing::warn!("dropping unrecognized AuthStatus frame");
-                false
-            }
-        }
-    }
-
-    /// The signed-in user, if the engine reports one.
-    pub fn auth_user(&self) -> Option<&slopty_view_proto::UserProfile> {
-        match self.auth.as_ref()? {
-            AuthState::SignedIn { user, .. } | AuthState::NeedsOrganization { user } => Some(user),
-            AuthState::SignedOut => None,
-        }
     }
 
     pub fn apply_transcript(&mut self, entries: Vec<SessionMessageEntry>) {
@@ -1527,16 +1470,14 @@ impl AppState {
         self.engine = Some(handle);
     }
 
-    /// Drop every account-scoped view and subscription after its runtime has
-    /// stopped. The next bootstrap must never render rows from the previous
-    /// account while the local profile is opening.
+    /// Drop every view and subscription of a runtime after it has stopped, so the next
+    /// bootstrap never shows the old runtime's rows while its own are loading.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.engine = None;
         self.watch_tasks.clear();
         self.transcript_task = None;
         self.connection = ConnectionStatus::Connecting;
         self.workspace_scope = None;
-        self.auth = None;
         self.devices.clear();
         self.device_presentation = None;
         self.session_presence_presentation.clear();
@@ -1579,7 +1520,6 @@ impl AppState {
         state.update(cx, |s, cx| {
             s.connection = ConnectionStatus::Connecting;
             s.workspace_scope = None;
-            s.auth = None;
             s.data_dir = Some(data_dir);
             cx.notify();
         });
@@ -1607,9 +1547,8 @@ impl AppState {
         .detach();
     }
 
-    /// Wire the connected engine: mark Ready and start the standing watches.
-    /// Methods the engine doesn't serve yet (chats/devices/auth land with the
-    /// workspace doc in M4) fail their subscribe and are skipped gracefully.
+    /// Wire the connected engine: mark Ready and start the standing watches. A watch the
+    /// engine does not serve fails its subscribe and is skipped.
     fn attach_engine(&mut self, handle: EngineHandle, cx: &mut Context<Self>) {
         let engine_info = handle.engine_info();
         self.workspace_scope = Some(engine_info.workspace_scope);
@@ -1665,13 +1604,6 @@ impl AppState {
                 methods::WATCH_SPACES,
                 AppState::apply_spaces,
             ),
-            // Auth frames parse tolerantly — engine and proto tags differ today.
-            spawn_watch(
-                cx,
-                handle.clone(),
-                methods::AUTH_STATUS,
-                AppState::apply_auth_value,
-            ),
             spawn_local_device_probe(cx, handle.clone()),
         ]);
         self.watch_tasks = watch_tasks;
@@ -1701,11 +1633,9 @@ impl AppState {
         let Some(link) = self.pending_deep_link.clone() else {
             return false;
         };
-        let Some(locator) = crate::links::workspace_locator(
-            self.workspace_scope,
-            self.auth.as_ref(),
-            self.local_device_id.as_deref(),
-        ) else {
+        let Some(locator) =
+            crate::links::workspace_locator(self.workspace_scope, self.local_device_id.as_deref())
+        else {
             return false;
         };
         if locator != link.workspace {
@@ -2245,41 +2175,9 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
     use gpui::AppContext;
-    use slopty_view_rpc::RpcReply;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `slopty_view_proto::view`.
-    use slopty_view_proto::{SessionStatus, UserProfile};
-
-    struct LegacyIdentityRpc;
-
-    #[async_trait]
-    impl RpcService for LegacyIdentityRpc {
-        async fn handle(
-            &self,
-            method: &str,
-            _params: serde_json::Value,
-        ) -> Result<RpcReply, RpcError> {
-            match method {
-                methods::LOCAL_DEVICE => {
-                    RpcReply::value(&serde_json::json!({ "deviceId": "legacy-device" }))
-                }
-                other => Err(RpcError::UnknownMethod(other.into())),
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn legacy_daemon_identity_falls_back_to_synced_scope() {
-        let client = memory_client(Arc::new(LegacyIdentityRpc));
-
-        let info = query_engine_info(&client).await.unwrap();
-
-        assert_eq!(info.device_id, "legacy-device");
-        assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
-    }
-
-    // The tests of the embedded engine, its daemon probe, IPC listener and sign-in
-    // deferral are cut with them.
+    use slopty_view_proto::SessionStatus;
 
     fn chat(id: &str, created_min: i64, last_msg_min: Option<i64>) -> Chat {
         let base = DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
@@ -2534,7 +2432,7 @@ mod tests {
         let mut state = AppState::new();
         state.selected_chat = Some("c".into());
         let initial = state.transcript_revision;
-        state.apply_auth(AuthState::SignedOut);
+        state.apply_devices(Vec::new());
         assert_eq!(
             state.transcript_revision, initial,
             "unrelated notifications are inert"
@@ -3383,21 +3281,6 @@ mod tests {
     }
 
     #[test]
-    fn identical_auth_frames_report_no_change() {
-        let mut state = AppState::new();
-        assert!(state.apply_auth(AuthState::SignedOut));
-        assert!(!state.apply_auth_value(serde_json::json!({ "state": "signedOut" })));
-        let user = UserProfile {
-            id: "u".into(),
-            email: "w@example.com".into(),
-            name: None,
-        };
-        assert!(state.apply_auth(AuthState::NeedsOrganization { user: user.clone() }));
-        assert!(!state.apply_auth(AuthState::NeedsOrganization { user }));
-        assert!(!state.apply_auth_value(serde_json::json!({ "bogus": true })));
-    }
-
-    #[test]
     fn visible_chats_filters_archived() {
         let mut state = AppState::new();
         let mut archived = chat("a", 0, Some(99));
@@ -3528,66 +3411,6 @@ mod tests {
             GatePhase::Failed("boom".into())
         );
         assert_eq!(gate_phase(&ConnectionStatus::Ready), GatePhase::Ready);
-    }
-
-    #[test]
-    fn auth_changes_do_not_change_a_local_runtime_scope_or_watches() {
-        let mut state = AppState::new();
-        state.workspace_scope = Some(WorkspaceScope::Local);
-        state.watch_tasks.push(Task::ready(()));
-
-        state.apply_auth(AuthState::NeedsOrganization {
-            user: UserProfile {
-                id: "u".into(),
-                email: "w@example.com".into(),
-                name: None,
-            },
-        });
-        assert_eq!(state.workspace_scope, Some(WorkspaceScope::Local));
-        assert_eq!(state.watch_tasks.len(), 1);
-
-        state.apply_auth(AuthState::SignedIn {
-            user: UserProfile {
-                id: "u".into(),
-                email: "w@example.com".into(),
-                name: None,
-            },
-            org_id: Some("org-1".into()),
-        });
-        assert_eq!(state.workspace_scope, Some(WorkspaceScope::Local));
-        assert_eq!(state.watch_tasks.len(), 1);
-    }
-
-    #[test]
-    fn auth_frames_parse_both_wire_shapes() {
-        // Proto shape.
-        let proto = serde_json::json!({ "state": "signedOut" });
-        assert_eq!(parse_auth_state(&proto), Some(AuthState::SignedOut));
-        // Engine shape (`_tag`, PascalCase, orgId).
-        let engine = serde_json::json!({
-            "_tag": "SignedIn",
-            "user": { "id": "u1", "email": "w@example.com" },
-            "orgId": "org-1",
-        });
-        let Some(AuthState::SignedIn { user, org_id }) = parse_auth_state(&engine) else {
-            panic!("expected SignedIn");
-        };
-        assert_eq!(user.email, "w@example.com");
-        assert_eq!(org_id.as_deref(), Some("org-1"));
-        let needs = serde_json::json!({
-            "_tag": "NeedsOrganization",
-            "user": { "id": "u1", "email": "w@example.com", "name": "W" },
-        });
-        assert!(matches!(
-            parse_auth_state(&needs),
-            Some(AuthState::NeedsOrganization { .. })
-        ));
-        // Garbage → None (frame dropped, not a crash).
-        assert_eq!(
-            parse_auth_state(&serde_json::json!({ "_tag": "Wat" })),
-            None
-        );
-        assert_eq!(parse_auth_state(&serde_json::json!(42)), None);
     }
 
     fn chat_with_cwd(id: &str, created_min: i64, cwd: Option<&str>) -> Chat {

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use gpui::{App, Global, Task};
 use serde::{Deserialize, Serialize};
-use slopty_view_proto::{AuthState, WorkspaceScope};
+use slopty_view_proto::WorkspaceScope;
 
 // Settings → Devices' Add device dialog.
 pub mod add_device;
@@ -789,45 +789,12 @@ impl From<KeymapConfig> for StoredKeymap {
     }
 }
 
-/// Stable key for device-local preferences that belong to one workspace
-/// profile. Authentication may arrive after `EngineInfo`, so callers must
-/// treat `None` as "identity not ready" and avoid destructive cleanup.
-pub fn workspace_profile_key(
-    scope: Option<WorkspaceScope>,
-    auth: Option<&AuthState>,
-    development_org_id: Option<&str>,
-) -> Option<String> {
-    match scope? {
-        WorkspaceScope::Local => Some("local".to_string()),
-        WorkspaceScope::Synced => {
-            let AuthState::SignedIn {
-                user,
-                org_id: Some(org_id),
-            } = auth?
-            else {
-                return None;
-            };
-            Some(format!("synced:{org_id}:{}", user.id))
-        }
-        WorkspaceScope::Development => {
-            let AuthState::SignedIn { user, .. } = auth? else {
-                return None;
-            };
-            let (user_id, token_org_id) = user
-                .id
-                .split_once('@')
-                .map_or((user.id.as_str(), None), |(user_id, org_id)| {
-                    (user_id, (!org_id.is_empty()).then_some(org_id))
-                });
-            if user_id.is_empty() {
-                return None;
-            }
-            let org_id = token_org_id
-                .or(development_org_id.filter(|org_id| !org_id.is_empty()))
-                .unwrap_or(crate::catalog::DEFAULT_ORG_ID);
-            Some(format!("development:{org_id}:{user_id}"))
-        }
-    }
+/// Stable key for device-local preferences that belong to one workspace profile; `None` until
+/// the engine has attached, which callers read as "identity not ready", never as a reason for
+/// destructive cleanup.
+pub fn workspace_profile_key(scope: Option<WorkspaceScope>) -> Option<String> {
+    let WorkspaceScope::Local = scope?;
+    Some("local".to_owned())
 }
 
 impl Default for KeymapConfig {
@@ -1938,72 +1905,11 @@ mod tests {
         }
     }
 
-    fn signed_in(user_id: &str, org_id: Option<&str>) -> AuthState {
-        AuthState::SignedIn {
-            user: slopty_view_proto::UserProfile {
-                id: user_id.to_string(),
-                email: format!("{user_id}@example.com"),
-                name: None,
-            },
-            org_id: org_id.map(str::to_string),
-        }
-    }
-
     #[test]
-    fn workspace_profile_keys_include_the_full_workspace_identity() {
-        assert_eq!(
-            workspace_profile_key(Some(WorkspaceScope::Local), None, None).as_deref(),
-            Some("local")
-        );
-        assert_eq!(
-            workspace_profile_key(
-                Some(WorkspaceScope::Synced),
-                Some(&signed_in("user-1", Some("org-1"))),
-                None,
-            )
-            .as_deref(),
-            Some("synced:org-1:user-1")
-        );
-        assert_eq!(
-            workspace_profile_key(
-                Some(WorkspaceScope::Development),
-                Some(&signed_in("dev-user@dev-org-2", None)),
-                Some("ignored-org"),
-            )
-            .as_deref(),
-            Some("development:dev-org-2:dev-user")
-        );
-        assert_eq!(
-            workspace_profile_key(
-                Some(WorkspaceScope::Development),
-                Some(&signed_in("dev-user", None)),
-                Some("configured-org"),
-            )
-            .as_deref(),
-            Some("development:configured-org:dev-user")
-        );
+    fn the_workspace_profile_key_waits_for_the_engine() {
+        assert_eq!(workspace_profile_key(None), None);
+        assert_eq!(workspace_profile_key(Some(WorkspaceScope::Local)).as_deref(), Some("local"));
     }
-
-    #[test]
-    fn workspace_profile_key_waits_for_a_complete_remote_identity() {
-        assert_eq!(
-            workspace_profile_key(Some(WorkspaceScope::Synced), None, None),
-            None
-        );
-        assert_eq!(
-            workspace_profile_key(
-                Some(WorkspaceScope::Synced),
-                Some(&signed_in("user-1", None)),
-                None,
-            ),
-            None
-        );
-        assert_eq!(
-            workspace_profile_key(Some(WorkspaceScope::Development), None, None),
-            None
-        );
-    }
-
 
     #[test]
     fn loaded_values_are_clamped() {

@@ -2,7 +2,7 @@
 //! Stable conversation links shared by sidebar copy actions and inbound URL routing.
 
 use sha2::{Digest, Sha256};
-use slopty_view_proto::{AuthState, Chat, HarnessId, WorkspaceScope};
+use slopty_view_proto::{Chat, HarnessId, WorkspaceScope};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationDeepLink {
@@ -16,27 +16,14 @@ pub struct HarnessConversationLink {
     pub url: String,
 }
 
-/// Opaque locator: enough to reject links for a different local/synced
-/// workspace without putting device, user, or organization ids in the URL.
+/// Opaque locator: enough to reject a link from another device's workspace without putting
+/// the device's id in the URL. `None` until the engine has attached and named its device.
 pub fn workspace_locator(
     scope: Option<WorkspaceScope>,
-    auth: Option<&AuthState>,
     local_device_id: Option<&str>,
 ) -> Option<String> {
     let scope = scope?;
-    let identity = match scope {
-        WorkspaceScope::Synced | WorkspaceScope::Development => {
-            let Some(AuthState::SignedIn { user, org_id }) = auth else {
-                return None;
-            };
-            format!(
-                "user:{}:org:{}",
-                user.id,
-                org_id.as_deref().unwrap_or("personal")
-            )
-        }
-        WorkspaceScope::Local => format!("device:{}", local_device_id?),
-    };
+    let identity = format!("device:{}", local_device_id?);
     let mut hash = Sha256::new();
     hash.update(format!("{scope:?}\0{identity}"));
     Some(data_encoding::HEXLOWER.encode(&hash.finalize()[..8]))
@@ -171,53 +158,12 @@ mod tests {
 
     #[test]
     fn local_workspace_locator_waits_for_device_identity() {
-        assert_eq!(
-            workspace_locator(Some(WorkspaceScope::Local), None, None),
-            None
-        );
-        let first = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-a"));
-        let second = workspace_locator(Some(WorkspaceScope::Local), None, Some("device-b"));
+        assert_eq!(workspace_locator(Some(WorkspaceScope::Local), None), None);
+        assert_eq!(workspace_locator(None, Some("device-a")), None);
+        let first = workspace_locator(Some(WorkspaceScope::Local), Some("device-a"));
+        let second = workspace_locator(Some(WorkspaceScope::Local), Some("device-b"));
         assert!(first.is_some());
         assert_ne!(first, second);
-    }
-
-    #[test]
-    fn synced_workspace_locator_waits_for_signed_in_identity() {
-        let scope = Some(WorkspaceScope::Synced);
-        assert_eq!(workspace_locator(scope, None, Some("device-a")), None);
-        assert_eq!(
-            workspace_locator(scope, Some(&AuthState::SignedOut), Some("device-a")),
-            None
-        );
-        assert_eq!(
-            workspace_locator(
-                scope,
-                Some(&AuthState::NeedsOrganization {
-                    user: slopty_view_proto::UserProfile {
-                        id: "user-a".into(),
-                        email: "user@example.com".into(),
-                        name: None,
-                    },
-                }),
-                Some("device-a"),
-            ),
-            None
-        );
-        assert!(
-            workspace_locator(
-                scope,
-                Some(&AuthState::SignedIn {
-                    user: slopty_view_proto::UserProfile {
-                        id: "user-a".into(),
-                        email: "user@example.com".into(),
-                        name: None,
-                    },
-                    org_id: Some("org-a".into()),
-                }),
-                None,
-            )
-            .is_some()
-        );
     }
 
     #[test]

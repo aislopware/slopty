@@ -582,15 +582,6 @@ where
     .boxed()
 }
 
-/// A watch whose one value never changes, held open so the interface does not ask again.
-fn still<T: Serialize>(value: &T) -> Result<RpcReply, RpcError> {
-    let value = serde_json::to_value(value)
-        .map_err(|e| RpcError::Failed(format!("serialize response: {e}")))?;
-    Ok(RpcReply::Stream(
-        futures::stream::once(async move { value }).chain(futures::stream::pending()).boxed(),
-    ))
-}
-
 #[async_trait]
 impl RpcService for ViewModel {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -624,7 +615,6 @@ impl RpcService for ViewModel {
             methods::WATCH_CONNECTIVITY => {
                 Ok(RpcReply::Stream(value_frames(self.feed.connectivity.subscribe())))
             }
-            methods::AUTH_STATUS => still(&serde_json::json!({ "_tag": "SignedOut" })),
             // A chat's tray and dock, followed as its transcript is.
             calls::WATCH_WORK | calls::WATCH_DOCK => {
                 let chat = chat_param(&params)

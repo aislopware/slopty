@@ -534,7 +534,6 @@ mod tests {
     fn test_shell(data_dir: &std::path::Path, cx: &mut Context<Shell>) -> Shell {
         let state = cx.new(|_| {
             let mut state = AppState::new();
-            state.workspace_scope = Some(WorkspaceScope::Development);
             state.connection = ConnectionStatus::Ready;
             state.chats = vec![test_chat("hover-test"), test_chat("next")];
             state

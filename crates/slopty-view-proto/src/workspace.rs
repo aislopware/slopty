@@ -3,19 +3,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The fixed data boundary selected when an engine runtime is assembled.
-///
-/// Authentication can change while a runtime is alive, but its workspace scope
-/// cannot. Switching scopes requires assembling a new runtime.
+/// The data an engine runtime holds. Slopty has no accounts, so it is always this device's own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspaceScope {
     /// This device's own data.
     Local,
-    /// An account's data, synced between its devices.
-    Synced,
-    /// A development account's data.
-    Development,
 }
 
 /// Stable information about the engine runtime reached by a client.
@@ -34,14 +27,9 @@ mod tests {
 
     #[test]
     fn workspace_scope_uses_wire_safe_names() {
-        for (scope, encoded) in [
-            (WorkspaceScope::Local, "\"local\""),
-            (WorkspaceScope::Synced, "\"synced\""),
-            (WorkspaceScope::Development, "\"development\""),
-        ] {
-            assert_eq!(serde_json::to_string(&scope).unwrap(), encoded);
-            assert_eq!(serde_json::from_str::<WorkspaceScope>(encoded).unwrap(), scope);
-        }
+        let scope = WorkspaceScope::Local;
+        assert_eq!(serde_json::to_string(&scope).unwrap(), "\"local\"");
+        assert_eq!(serde_json::from_str::<WorkspaceScope>("\"local\"").unwrap(), scope);
     }
 
     #[test]

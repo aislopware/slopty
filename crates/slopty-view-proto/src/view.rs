@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Utc};
 
-use crate::{AuthState, Chat, ChatIndicator, Session, SessionStatus, Space};
+use crate::{Chat, ChatIndicator, Session, SessionStatus, Space};
 
 // ---------------------------------------------------------------------------
 // Connection + status
@@ -245,34 +245,6 @@ mod gate_tests {
         let stale = running_session(3, now - chrono::Duration::milliseconds(SESSION_STALE_MS + 1));
         assert_eq!(running_subagents(Some(&stale), now), 0);
         assert_eq!(running_subagents(None, now), 0);
-    }
-}
-
-/// Parse an `AuthStatus` frame tolerantly.
-///
-/// Both spellings read: the engine's own enum (`{"_tag": "SignedIn", ...}`) and the proto
-/// type's `{"state": "signedIn", ...}`.
-pub fn parse_auth_state(value: &serde_json::Value) -> Option<AuthState> {
-    if let Ok(state) = serde_json::from_value::<AuthState>(value.clone()) {
-        return Some(state);
-    }
-    let tag = value.get("_tag").and_then(serde_json::Value::as_str)?;
-    let user = || -> Option<crate::UserProfile> {
-        let u = value.get("user")?;
-        Some(crate::UserProfile {
-            id: u.get("id")?.as_str()?.to_owned(),
-            email: u.get("email")?.as_str()?.to_owned(),
-            name: u.get("name").and_then(serde_json::Value::as_str).map(str::to_owned),
-        })
-    };
-    match tag {
-        "SignedOut" => Some(AuthState::SignedOut),
-        "NeedsOrganization" => Some(AuthState::NeedsOrganization { user: user()? }),
-        "SignedIn" => Some(AuthState::SignedIn {
-            user: user()?,
-            org_id: value.get("orgId").and_then(serde_json::Value::as_str).map(str::to_owned),
-        }),
-        _ => None,
     }
 }
 
