@@ -599,6 +599,11 @@ impl TermState {
                 self.program = program;
                 Vec::new()
             }
+            // Its program runs again below the old screen: the end it had is over.
+            TermEvent::Restarted => {
+                self.exited = None;
+                Vec::new()
+            }
             TermEvent::Restored(restored) => {
                 self.restored = Some(restored);
                 Vec::new()
@@ -1584,6 +1589,9 @@ mod tests {
         assert_eq!(state.apply(exited), vec![Effect::Exited(Some(3))]);
         assert_eq!(state.exited(), Some(Exit(Some(3))));
         assert!(state.running.is_none());
+        // Started again, it runs.
+        assert_eq!(state.apply(TermEvent::Restarted), Vec::<Effect>::new());
+        assert_eq!(state.exited(), None);
     }
 
     /// The input column is a cell: a wide glyph in the prompt (a starship's, a Powerline
