@@ -252,21 +252,20 @@ pub struct UiAsk {
 pub enum UiAct {
     /// Say what the window shows.
     State,
-    /// Open a terminal tab for the chat on screen.
+    /// Open a shell in a pane beside the chat on screen.
     Terminal {
         /// The folder it starts in; the chat's own when `None`.
         folder: Option<String>,
         /// A command line to run in it once its shell is up. One that acts as root or
         /// destroys, or that spans lines, is left at the prompt for the person to read.
         command: Option<String>,
-        /// The region it opens in: `terminal` (the drawer, the default) or `pane`.
-        region: Option<String>,
     },
-    /// Show something in the side pane of the chat on screen.
+    /// Show something in a pane beside the session.
     Open(UiTarget),
     /// Show, hide, expand or collapse one region of the window.
     Region {
-        /// `sidebar`, `pane`, `files` or `terminal`, as [`UiWindow::regions`] names them.
+        /// `sidebar`, `files`, `changes`, `inspector` or `terminal`, as [`UiWindow::regions`]
+        /// names them.
         region: String,
         /// What becomes of it.
         change: UiChange,
@@ -276,12 +275,11 @@ pub enum UiAct {
         /// Its id, a prefix of its id, or its title; the agent's own chat when `None`.
         chat: Option<String>,
     },
-    /// Lay the chat and the side pane side by side at even widths, showing `target` there
-    /// first when given.
+    /// Lay the session's panes at even shares, showing `target` beside it first when given.
     Split(Option<UiTarget>),
 }
 
-/// What the side pane shows for an agent.
+/// What a pane beside the session shows for an agent.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UiTarget {
@@ -311,9 +309,9 @@ pub enum UiChange {
     Hide,
     /// The other of the two.
     Toggle,
-    /// As large as it goes: the side pane over the chat; any other region shown.
+    /// As large as it goes: shown.
     Expand,
-    /// Back to its share: the side pane beside the chat; any other region hidden.
+    /// Back out of the way: hidden.
     Collapse,
 }
 
@@ -323,9 +321,9 @@ pub struct UiDone {
     /// What changed, in words, as the window marked it (`opened a terminal in ~/app`); `None`
     /// when nothing changed.
     pub did: Option<String>,
-    /// The tab it opened.
+    /// The pane it opened.
     pub made: Option<UiTab>,
-    /// For a terminal opened with a command: whether it ran, or waits at the prompt for the
+    /// For a shell opened with a command: whether it ran, or waits at the prompt for the
     /// person to read and run.
     pub ran: Option<bool>,
     /// The window after it.
@@ -341,7 +339,7 @@ pub struct UiWindow {
     pub chat: Option<UiChat>,
     /// Its regions and whether each shows.
     pub regions: Vec<UiRegion>,
-    /// The tabs open for the chat on screen, in order, the side pane's then the terminal's.
+    /// The panes beside the session, in reading order.
     pub tabs: Vec<UiTab>,
     /// The person is typing a draft: what would move the keyboard or the chat away from it is
     /// refused ([`UiError::Busy`]).
@@ -362,28 +360,28 @@ pub struct UiChat {
 /// One region of the window.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct UiRegion {
-    /// Its name: `sidebar`, `pane`, `files`, `terminal`.
+    /// Its name: `sidebar`, `files`, `changes`, `inspector`, `terminal`.
     pub name: String,
     /// It is on screen.
     pub shown: bool,
-    /// It takes the room of the chat beside it (the side pane's full width).
+    /// Its pane fills the session's view (zoomed).
     pub expanded: bool,
 }
 
-/// One tab of the window.
+/// One pane beside the session.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct UiTab {
     /// The window's name for it, stable while it is open (`pane/file/3`, `terminal/2`).
     pub id: String,
     /// What it shows: `file`, `page`, `diff`, `terminal`, `chat`, `screen`…
     pub kind: String,
-    /// Its title as its tab shows it.
+    /// Its title as its header shows it.
     pub title: String,
-    /// The region it is in.
+    /// The region it belongs to, or `pane` for a view of none (a file, a page, a screen).
     pub region: String,
-    /// It is the one its region shows.
+    /// It has the keyboard.
     pub selected: bool,
-    /// A terminal's session id, once its shell is up.
+    /// A shell's session id, once it is up.
     pub terminal: Option<String>,
     /// The file it shows, or the page's address.
     pub target: Option<String>,
@@ -538,7 +536,6 @@ mod tests {
             UiAct::Terminal {
                 folder: Some("/w/app".to_owned()),
                 command: Some("cargo test".to_owned()),
-                region: None,
             },
             UiAct::Open(file.clone()),
             UiAct::Open(UiTarget::Page { url: "https://example.com/".to_owned() }),
@@ -565,7 +562,7 @@ mod tests {
         let window = UiWindow {
             page: "chat".to_owned(),
             chat: Some(UiChat { id: "c1".to_owned(), title: None, machine: Some("studio".into()) }),
-            regions: vec![UiRegion { name: "pane".to_owned(), shown: true, expanded: false }],
+            regions: vec![UiRegion { name: "inspector".to_owned(), shown: true, expanded: false }],
             tabs: vec![tab.clone()],
             typing: true,
         };

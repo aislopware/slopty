@@ -122,11 +122,9 @@ fn act(cmd: UiCmd, cwd: &Path) -> Result<UiAct, UiFailure> {
     let region = |region: String, change| Ok(UiAct::Region { region, change });
     match cmd {
         UiCmd::State => Ok(UiAct::State),
-        UiCmd::Terminal { folder: given, command } => Ok(UiAct::Terminal {
-            folder: Some(folder(given.as_deref(), cwd)?),
-            command,
-            region: None,
-        }),
+        UiCmd::Terminal { folder: given, command } => {
+            Ok(UiAct::Terminal { folder: Some(folder(given.as_deref(), cwd)?), command })
+        }
         UiCmd::Open { target: given, line } => Ok(UiAct::Open(target(&given, line, cwd)?)),
         UiCmd::Diff => Ok(UiAct::Open(slopty_proto::handoff::UiTarget::Diff)),
         UiCmd::Show { region: r } => region(r, UiChange::Show),
@@ -218,11 +216,7 @@ mod tests {
         assert_eq!(parsed(&["state"], cwd), Ok(UiAct::State));
         assert_eq!(
             parsed(&["terminal", "--command", "cargo test"], cwd),
-            Ok(UiAct::Terminal {
-                folder: Some(here),
-                command: Some("cargo test".to_owned()),
-                region: None,
-            })
+            Ok(UiAct::Terminal { folder: Some(here), command: Some("cargo test".to_owned()) })
         );
         let file = UiTarget::File { path: notes, line: Some(4) };
         assert_eq!(parsed(&["open", "notes.md:4"], cwd), Ok(UiAct::Open(file.clone())));

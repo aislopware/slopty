@@ -199,9 +199,7 @@ impl WorkspaceView {
     fn shell_act(&self, key: WorkerKey, act: UiAct) -> Result<agent_ui::Act, UiFailure> {
         Ok(match act {
             UiAct::State => agent_ui::Act::State,
-            UiAct::Terminal { folder, command, region } => {
-                agent_ui::Act::Terminal { folder, command, region }
-            }
+            UiAct::Terminal { folder, command } => agent_ui::Act::Terminal { folder, command },
             UiAct::Open(target) => agent_ui::Act::Open(self.shell_target(key, target)?),
             UiAct::Region { region, change } => {
                 agent_ui::Act::Region { region, change: shell_change(change) }

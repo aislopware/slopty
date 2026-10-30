@@ -1,16 +1,16 @@
 //! The person's Slopty window, driven by an agent: the `ui_*` tools, and the arguments they and
 //! `slopty ui` share.
 //!
-//! An agent reads what the window shows and changes it with open verbs: a terminal tab, a file,
-//! a page or the diff in the side pane, a region shown, hidden, expanded or collapsed, a chat
-//! put on screen, the chat and the side pane side by side. The ask goes to the window of the
+//! An agent reads what the window shows and changes it with open verbs: a shell, a file, a page
+//! or the changes in a pane beside the session, a region shown or hidden, a chat put on screen,
+//! the session's panes at even shares. The ask goes to the window of the
 //! person in front of the agent's session through its worker ([`crate::Dispatch::window`]),
 //! never to a window on another person's machines. The window does it without taking the
 //! keyboard, refuses what would move it away from a draft being typed, and marks each change
 //! with a notice naming the agent (`docs/decisions/agents.md`, "Agents drive the person's window
 //! through open verbs").
 //!
-//! Every answer is JSON: what the ask did (`did`), the tab it opened (`made`), and the window
+//! Every answer is JSON: what the ask did (`did`), the pane it opened (`made`), and the window
 //! after it (`window`: its `page`, the `chat` on screen, its `regions`, its `tabs`, and whether
 //! the person is `typing`); or `{"error": {"code", "message"}}`, `code` one of `no_window`,
 //! `unknown`, `busy`, `elsewhere`, `failed`.
@@ -29,38 +29,39 @@ pub(crate) const NAMES: [&str; 6] =
 
 pub(crate) const STATE_DESCRIPTION: &str = "\
 What the person's Slopty window shows: the `page` (`chat` or `settings/...`), the `chat` on screen \
-(`id`, `title`, `machine`), its `regions` (`sidebar`, `pane` the side pane, `files`, `terminal` \
-the drawer; each `shown`, the pane `expanded` over the chat), its `tabs` (`id`, `kind`, `title`, \
-`region`, `selected`, a terminal's session `terminal`, a file's or page's `target`), and whether \
-the person is `typing` a draft. Every ui_* tool answers with this as `window`.";
+(`id`, `title`, `machine`), its `regions` (`sidebar`, `files`, `changes`, `inspector`, \
+`terminal`; each `shown`, and `expanded` when its pane is zoomed over the session), its `tabs`, \
+the panes beside the session (`id`, `kind`, `title`, `region`, `selected` when it has the \
+keyboard, a shell's session `terminal`, a file's or page's `target`), and whether the person is \
+`typing` a draft. Every ui_* tool answers with this as `window`.";
 
 pub(crate) const TERMINAL_DESCRIPTION: &str = "\
-Open a terminal tab for the chat on screen in the person's window, in `folder` (your working \
-folder when omitted), in the terminal drawer or the side pane (`region`: `terminal` or `pane`), \
-and type `command` once its shell is up. A command that acts as root, destroys, or spans lines \
-waits at the prompt for the person to read and run (`ran`: false). Returns the tab as `made`, its \
-session id as `made.terminal`. The tab never takes the keyboard.";
+Open a shell in a pane beside the chat on screen in the person's window, in `folder` (your \
+working folder when omitted), and type `command` once it is up. A command that acts as root, \
+destroys, or spans lines waits at the prompt for the person to read and run (`ran`: false). \
+Returns the pane as `made`, its session id as `made.terminal`. The pane never takes the \
+keyboard.";
 
 pub(crate) const OPEN_DESCRIPTION: &str = "\
-Show one thing in the side pane of the chat on screen: a `file` on this machine (relative to \
+Show one thing in a pane beside the chat on screen: a `file` on this machine (relative to \
 your working folder; `line` to start at, or `path:line`), a web page `url`, or the chat's \
 uncommitted changes (`diff`: true). A page on this machine's localhost opens at the port that \
 forwards it to the person. The chat on screen must run on this machine for a file; ui_chat puts \
 yours there.";
 
 pub(crate) const REGION_DESCRIPTION: &str = "\
-Show, hide, toggle, expand or collapse one region of the person's window: `sidebar`, `pane` (the \
-side pane; expand lays it over the chat, collapse puts it back beside it), `files` (the files \
-panel) or `terminal` (the drawer). A region the person's keyboard is in is not hidden, and the \
-pane is not expanded over a draft being typed.";
+Show, hide or toggle one region of the person's window (expand shows, collapse hides): \
+`sidebar`, `files`, `changes` (the chat's uncommitted changes), `inspector` (the session's \
+trace) or `terminal` (shown, a new shell beside the session; the person closes their own \
+shells). A region the person's keyboard is in is not hidden.";
 
 pub(crate) const CHAT_DESCRIPTION: &str = "\
 Put a chat on screen in the person's window: `chat` by id, id prefix or title; your own chat \
 when omitted. Refused while the person types a draft or is in Settings.";
 
 pub(crate) const SPLIT_DESCRIPTION: &str = "\
-Lay the chat on screen and the side pane side by side at even widths, first showing a `file`, \
-`url` or the `diff` there when given, as ui_open does.";
+Lay the session's panes at even shares, first showing a `file`, `url` or the `diff` beside it \
+when given, as ui_open does.";
 
 /// `ui_terminal`.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -71,8 +72,6 @@ pub(crate) struct TerminalArgs {
     folder: Option<String>,
     /// A command line to type once its shell is up.
     command: Option<String>,
-    /// `terminal` (the drawer, the default) or `pane` (the side pane).
-    region: Option<String>,
 }
 
 /// `ui_open`, and what `ui_split` shows first.
@@ -94,7 +93,7 @@ pub(crate) struct OpenArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RegionArgs {
-    /// `sidebar`, `pane`, `files` or `terminal`.
+    /// `sidebar`, `files`, `changes`, `inspector` or `terminal`.
     region: String,
     /// What becomes of it.
     change: ChangeArg,
@@ -110,9 +109,9 @@ pub(crate) enum ChangeArg {
     Hide,
     /// The other of the two.
     Toggle,
-    /// As large as it goes: the side pane over the chat.
+    /// As large as it goes: shown.
     Expand,
-    /// Back to its share: the side pane beside the chat.
+    /// Back out of the way: hidden.
     Collapse,
 }
 
@@ -171,7 +170,7 @@ pub fn file(given: &str, line: Option<u32>, cwd: &Path) -> Result<UiTarget, UiFa
     };
     let path = std::path::absolute(&path).unwrap_or(path);
     if path.is_dir() {
-        return Err(unknown(format!("{} is a folder; the side pane shows files", path.display())));
+        return Err(unknown(format!("{} is a folder; a pane shows a file", path.display())));
     }
     if !path.is_file() {
         return Err(unknown(format!("no file at {}", path.display())));
@@ -189,7 +188,7 @@ pub fn target(given: &str, line: Option<u32>, cwd: &Path) -> Result<UiTarget, Ui
     if given.contains("://") { page(given) } else { file(given, line, cwd) }
 }
 
-/// The folder a terminal starts in, relative to `cwd`; `cwd` itself when none is named.
+/// The folder a shell starts in, relative to `cwd`; `cwd` itself when none is named.
 ///
 /// # Errors
 ///
@@ -247,11 +246,8 @@ fn act(
         }
         "ui_terminal" => {
             let a: TerminalArgs = args(arguments)?;
-            folder(a.folder.as_deref(), cwd).map(|folder| UiAct::Terminal {
-                folder: Some(folder),
-                command: a.command,
-                region: a.region,
-            })
+            folder(a.folder.as_deref(), cwd)
+                .map(|folder| UiAct::Terminal { folder: Some(folder), command: a.command })
         }
         "ui_open" => {
             let a: OpenArgs = args(arguments)?;
@@ -319,7 +315,6 @@ mod tests {
             Ok(Ok(UiAct::Terminal {
                 folder: Some(cwd.join("src").to_string_lossy().into_owned()),
                 command: Some("ls".to_owned()),
-                region: None,
             }))
         );
         let opened = |path: &str, line| UiAct::Open(UiTarget::File { path: path.to_owned(), line });
@@ -338,8 +333,8 @@ mod tests {
             Ok(Ok(UiAct::Split(Some(UiTarget::Diff))))
         );
         assert_eq!(
-            read("ui_region", json!({ "region": "pane", "change": "expand" })),
-            Ok(Ok(UiAct::Region { region: "pane".to_owned(), change: UiChange::Expand }))
+            read("ui_region", json!({ "region": "inspector", "change": "expand" })),
+            Ok(Ok(UiAct::Region { region: "inspector".to_owned(), change: UiChange::Expand }))
         );
         assert_eq!(read("ui_chat", json!({})), Ok(Ok(UiAct::Chat { chat: None })));
         let code =
@@ -358,7 +353,7 @@ mod tests {
         assert_eq!(code(json!({ "folder": "nowhere" }), "ui_terminal"), Ok(Some(UiError::Unknown)));
         let invalid = |name: &str, value: Value| read(name, value).map_err(|e| e.code);
         assert_eq!(invalid("ui_state", json!({ "x": 1 })), Err(ErrorCode::Invalid));
-        let shrink = json!({ "region": "pane", "change": "shrink" });
+        let shrink = json!({ "region": "inspector", "change": "shrink" });
         assert_eq!(invalid("ui_region", shrink), Err(ErrorCode::Invalid));
         Ok(())
     }

@@ -381,13 +381,6 @@ expression: tools
             "string",
             "null"
           ]
-        },
-        "region": {
-          "description": "`terminal` (the drawer, the default) or `pane` (the side pane).",
-          "type": [
-            "string",
-            "null"
-          ]
         }
       },
       "title": "TerminalArgs",
@@ -458,12 +451,12 @@ expression: tools
             },
             {
               "const": "expand",
-              "description": "As large as it goes: the side pane over the chat.",
+              "description": "As large as it goes: shown.",
               "type": "string"
             },
             {
               "const": "collapse",
-              "description": "Back to its share: the side pane beside the chat.",
+              "description": "Back out of the way: hidden.",
               "type": "string"
             }
           ]
@@ -478,7 +471,7 @@ expression: tools
           "description": "What becomes of it."
         },
         "region": {
-          "description": "`sidebar`, `pane`, `files` or `terminal`.",
+          "description": "`sidebar`, `files`, `changes`, `inspector` or `terminal`.",
           "type": "string"
         }
       },

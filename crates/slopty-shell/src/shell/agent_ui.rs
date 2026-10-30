@@ -64,8 +64,6 @@ pub enum Act {
         folder: Option<String>,
         /// A command line to type once its shell is up.
         command: Option<String>,
-        /// Where it opens: `terminal` or `pane`, both a pane beside the session.
-        region: Option<String>,
     },
     /// Something in a pane beside the session.
     Open(Target),
@@ -373,9 +371,9 @@ impl Shell {
         let seen = self.asker_on_screen(chat.as_deref());
         let did = match act {
             Act::State => Ok(None),
-            Act::Terminal { folder, command, region } => {
+            Act::Terminal { folder, command } => {
                 let device = device.as_deref();
-                self.agent_terminal(folder, command, region, who, device, answered, cx);
+                self.agent_terminal(folder, command, who, device, answered, cx);
                 return keep_keyboard(keyboard, window, cx);
             }
             Act::Open(target) => self.agent_open(&target, device.as_deref(), window, cx),
@@ -708,25 +706,15 @@ impl Shell {
 
     /// `slopty ui terminal`: a shell in a pane beside the chat on screen, in `folder`, where there
     /// is most room; `answered` hears once its shell is up and `command` typed.
-    #[expect(clippy::too_many_arguments, reason = "an ask's parts, each its own")]
     fn agent_terminal(
         &mut self,
         folder: Option<String>,
         command: Option<String>,
-        region: Option<String>,
         who: String,
         device: Option<&str>,
         answered: Answered,
         cx: &mut Context<Self>,
     ) {
-        let beside = region.as_deref().is_none_or(|region| {
-            region_named(region) == Some("terminal") || region.trim().eq_ignore_ascii_case("pane")
-        });
-        if !beside {
-            let message =
-                format!("a terminal opens in a pane beside the session, not {}", region.unwrap_or_default());
-            return answered(fail(Code::Unknown, message), cx);
-        }
         if let Err(failure) = self.agent_chat_here(folder.as_ref().and(device), cx) {
             return answered(Err(failure), cx);
         }
@@ -1029,8 +1017,7 @@ mod tests {
     }
 
     /// A path names a file on the agent's machine, so it opens only beside a chat there; a page
-    /// and the diff need a chat on screen; a terminal needs the window's link to its machines
-    /// and a place it opens in.
+    /// and the diff need a chat on screen; a terminal needs the window's link to its machines.
     #[gpui::test]
     fn what_opens_needs_its_chat_and_its_machine(cx: &mut TestAppContext) {
         let (_dir, shell, cx) = setup(cx);
@@ -1039,17 +1026,14 @@ mod tests {
         elsewhere.device = Some("laptop".into());
         let refused = asked(cx, elsewhere);
         assert_eq!(code(&refused), Some(Code::Elsewhere), "{refused:?}");
-        let terminal = |folder: Option<&str>, region: Option<&str>| Act::Terminal {
+        let terminal = |folder: Option<&str>| Act::Terminal {
             folder: folder.map(str::to_owned),
             command: Some("cargo test".into()),
-            region: region.map(str::to_owned),
         };
-        let mut far = ask(terminal(Some("/w/app"), None));
+        let mut far = ask(terminal(Some("/w/app")));
         far.device = Some("laptop".into());
         assert_eq!(code(&asked(cx, far)), Some(Code::Elsewhere));
-        assert_eq!(code(&asked(cx, ask(terminal(None, Some("sidebar"))))), Some(Code::Unknown));
-        assert_eq!(code(&asked(cx, ask(terminal(None, Some("pane"))))), Some(Code::Failed), "a pane too, no link");
-        assert_eq!(code(&asked(cx, ask(terminal(None, None)))), Some(Code::Failed), "no link");
+        assert_eq!(code(&asked(cx, ask(terminal(None)))), Some(Code::Failed), "no link");
         shell.update(cx, |shell, _| shell.active_chat.clear());
         let page = Act::Open(Target::Page("https://example.com/".into()));
         assert_eq!(code(&asked(cx, ask(page))), Some(Code::Elsewhere), "no chat on screen");
