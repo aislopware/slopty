@@ -174,7 +174,7 @@ pub(crate) struct ImageKey {
 /// What a frame paints for one key.
 #[derive(Clone)]
 pub(crate) enum Thumb {
-    /// slopty: its shape once its first bytes said it, so its room can be the final one.
+    /// Its shape once its first bytes said it, so its room can be the final one.
     Loading {
         aspect: Option<f32>,
     },
@@ -228,7 +228,6 @@ impl ToolImages {
         self.bytes
     }
 
-    // slopty: appshots removed.
 
     /// An expanded chip shows `keys`: cancel their release and start any
     /// missing loads. Returns one thumb per key.
@@ -382,7 +381,7 @@ impl ToolImages {
         let task_key = key.clone();
         let task = cx.spawn(async move |view, cx| {
             let executor = cx.background_executor().clone();
-            // slopty: its size from its first bytes, while the rest arrives.
+            // Its size from its first bytes, while the rest arrives.
             let (sized_view, mut sized_cx, sized_key) = (view.clone(), cx.clone(), task_key.clone());
             let raw = crate::attachments::read_attachment_bytes_with(
                 &engine,
@@ -427,7 +426,7 @@ impl ToolImages {
         );
     }
 
-    /// slopty: a load's first bytes said its shape.
+    /// A load's first bytes said its shape.
     fn sized(&mut self, key: &ImageKey, aspect: f32) {
         if let Some(Entry { state: State::Loading(_, shape), .. }) = self.entries.get_mut(key) {
             *shape = Some(aspect);

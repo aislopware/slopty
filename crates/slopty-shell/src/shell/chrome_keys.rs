@@ -1,4 +1,4 @@
-//! slopty: the window's keys beyond zeron's (T3 Code's set, in the Mac's spelling).
+//! The window's own keys (T3 Code's set, in the Mac's spelling).
 //!
 //! - ⌘F finds in the chat's thread, or in the diff when the Changes surface has focus; ⌘G and
 //!   ⌘⇧G step through the matches. The finding itself is the transcript's and the diff's own
@@ -44,16 +44,16 @@ actions!(
         ReopenClosedTab,
         UndoArchive,
         NextNeedsYou,
-        // slopty: what needs the person, across sessions and machines (`inbox`).
+        // What needs the person, across sessions and machines (`inbox`).
         Inbox,
         OpenIn,
-        // slopty: ⌘I summons the session's inspector (`docs/decisions/layout.md`, "No permanent
+        // ⌘I summons the session's inspector (`docs/decisions/layout.md`, "No permanent
         // right column"): ⌘ is free of the terminal's keys and of every TUI's.
         ToggleInspector,
-        // slopty: views the palette summons beside the session.
+        // Views the palette summons beside the session.
         OpenBrowser,
         OpenRemoteWindow,
-        // slopty: a session's panes.
+        // A session's panes.
         SplitRight,
         SplitDown,
         SplitAuto,
@@ -213,7 +213,7 @@ impl Shell {
                 cx.propagate();
             }
         }))
-        // slopty: from the terminal too, which never takes ⌘I.
+        // From the terminal too, which never takes ⌘I.
         .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
             if !this.view_keys_live() {
                 cx.propagate();
@@ -285,7 +285,7 @@ impl Shell {
         }
     }
 
-    /// slopty: the inspector's changed file: the chat's Changes in front, at that file.
+    /// The inspector's changed file: the chat's Changes in front, at that file.
     pub(super) fn show_change_at(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         crate::changes::show_file(path, cx);
         if matches!(self.route, Route::Chat) && !self.active_chat.is_empty() {

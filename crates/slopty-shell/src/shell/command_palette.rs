@@ -60,7 +60,7 @@ pub(super) struct CommandPalette {
     files_ready: Option<WorkspaceTarget>,
     /// Content matches in the focused chat's workspace.
     content: WorkspaceQuery<Vec<WorkspaceContentMatch>>,
-    // slopty: what the chats said that matches the query.
+    // What the chats said that matches the query.
     chat_words: ChatWordsQuery,
     /// How often and how lately each command ran, as of the palette's opening: its commands
     /// rank by it, so a run (an appearance chosen with the palette held open) moves no row
@@ -207,16 +207,16 @@ enum Section {
     Commands,
     Files,
     InFiles,
-    // slopty: chats whose words match, below the title matches.
+    // Chats whose words match, below the title matches.
     InThreads,
 }
 
 impl Section {
     fn title(self) -> &'static str {
         match self {
-            // slopty: sentence case, as every label in the app.
+            // Sentence case, as every label in the app.
             Self::RecentFiles => "Recent files",
-            // slopty: one name for what an agent works in, "session" (TUI-first).
+            // One name for what an agent works in, "session" (TUI-first).
             Self::Threads => "Sessions",
             Self::Commands => "Commands",
             Self::Files => "Files",
@@ -233,7 +233,7 @@ enum Command {
     Settings,
     Theme(AppearanceMode),
     ArchiveThread,
-    /// slopty: a command of the menu bar's table (`app_menus::window_commands`), dispatched as
+    /// A command of the menu bar's table (`app_menus::window_commands`), dispatched as
     /// its key would.
     Window(crate::app_menus::WindowCommand),
 }
@@ -242,8 +242,8 @@ impl Command {
     fn label(&self) -> &'static str {
         match self {
             Self::NewChat => "New session",
-            Self::NewProject => "New project\u{2026}", // slopty: it opens a picker
-            Self::Settings => "Settings", // slopty: the name its menu and button use
+            Self::NewProject => "New project\u{2026}",
+            Self::Settings => "Settings", // the name its menu and button use
             // The View menu's Appearance, one row a mode, the one in use ticked.
             Self::Theme(AppearanceMode::System) => "Appearance: System",
             Self::Theme(AppearanceMode::Light) => "Appearance: Light",
@@ -255,7 +255,7 @@ impl Command {
 
     fn icon(&self) -> &'static str {
         match self {
-            Self::NewChat => icons::PLUS, // slopty: the titlebar's glyph for it
+            Self::NewChat => icons::PLUS,
             Self::NewProject => icons::FOLDER,
             Self::Settings => icons::SETTINGS,
             Self::Theme(mode) => mode.icon(),
@@ -302,7 +302,7 @@ enum RowKind {
     },
     /// A line of a file in the focused chat's workspace.
     Content(WorkspaceContentMatch),
-    // slopty: a chat by what was said in it.
+    // A chat by what was said in it.
     /// A chat whose words matched.
     ChatWords(ChatWordsMatch),
 }
@@ -665,7 +665,7 @@ impl Shell {
         }));
     }
 
-    // slopty: what the chats said, searched once typing pauses (`SearchChats`); a query too
+    // What the chats said, searched once typing pauses (`SearchChats`); a query too
     // short to send clears the matches.
     /// Look the query up in every chat's words.
     /// Look the query up in what the chats said, once typing pauses (`session_search`).
@@ -754,7 +754,7 @@ impl Shell {
             )
             .with_status(palette.content.status())
         };
-        // slopty: chats by their words, each chat once, none a title match already lists.
+        // Chats by their words, each chat once, none a title match already lists.
         let in_threads = |limit, titled: &[String]| {
             let state = self.state.read(cx);
             PaletteSection::new(
@@ -880,7 +880,7 @@ impl Shell {
             RowKind::Command(Command::Settings) => self.open_last_settings(cx),
             RowKind::Command(Command::Theme(_)) => unreachable!(),
             RowKind::Command(Command::ArchiveThread) => self.archive_selected_chat(cx),
-            // slopty: after the palette closed, so the key's handler sees the window as it is.
+            // After the palette closed, so the key's handler sees the window as it is.
             RowKind::Command(Command::Window(command)) => {
                 window.dispatch_action((command.action)(), cx)
             }
@@ -975,7 +975,7 @@ impl Shell {
             Command::Settings => return Some(crate::keys::combo_text("mod-,").to_string()),
             Command::ArchiveThread => ShortcutId::ArchiveSession,
             Command::Theme(_) => return None,
-            // slopty: the key the keymap holds for it now.
+            // The key the keymap holds for it now.
             Command::Window(command) => {
                 return crate::keys::for_action_anywhere((command.action)().as_ref(), cx)
                     .map(|keys| keys.to_string());
@@ -1008,7 +1008,7 @@ impl Shell {
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
                     .aria_label(label)
-                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1072,7 +1072,7 @@ impl Shell {
                     .rounded(px(popover::PALETTE_ITEM_RADIUS))
                     .role(gpui::Role::Button)
                     .aria_label(SharedString::from(path.clone()))
-                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1118,7 +1118,7 @@ impl Shell {
                         "{}:{} {}",
                         found.path, found.line, found.preview
                     )))
-                    .min_h(px(PALETTE_ROW_HEIGHT)) // slopty: a list row's 32
+                    .min_h(px(PALETTE_ROW_HEIGHT)) // a list row's 32
                     .py(px(PALETTE_ROW_PAD))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.activate_palette_row(target.clone(), window, cx)
@@ -1153,7 +1153,7 @@ impl Shell {
                     )
                     .into_any_element()
             }
-            // slopty: the chat's title, and under it who said the words and the words, the
+            // The chat's title, and under it who said the words and the words, the
             // match in `text` over the faint line.
             RowKind::ChatWords(found) => {
                 let state = self.state.read(cx);
@@ -1265,7 +1265,7 @@ impl Shell {
             let mut header = div()
                 .flex_none()
                 .when(section_ix == 0, |header| header.pt(px(8.0)));
-            // slopty: groups stand 16 apart with no rule between them (opencode's command
+            // Groups stand 16 apart with no rule between them (opencode's command
             // dialog), the space alone parting them.
             if section_ix > 0 {
                 header = header.pt(px(14.0));
@@ -1366,7 +1366,7 @@ impl Shell {
                     .map_or_else(div, |keys| popover::kbd_hint(&theme, keys.as_ref())),
             ))
             .child(body)
-            // slopty: the keys, where there are keys.
+            // The keys, where there are keys.
             .when(!crate::shell::touch_screen(), |card| {
                 card.child(
                     palette_footer()
@@ -1393,7 +1393,7 @@ fn palette_section_header(
         .flex()
         .items_center()
         .gap(px(8.0))
-        // slopty: opencode's group title, 13 at the body's weight in the muted ink.
+        // Opencode's group title, 13 at the body's weight in the muted ink.
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted)
         .child(title)
@@ -1440,12 +1440,12 @@ pub(super) fn palette_card(
     viewport: gpui::Size<Pixels>,
     theme: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
-    // slopty: its footer's caps sink while their keys are held.
+    // Its footer's caps sink while their keys are held.
     crate::live::chrome::track_held_keys(div().id(id))
-        .debug_selector(move || id.to_owned()) // slopty: for the tests
+        .debug_selector(move || id.to_owned())
         .track_focus(focus)
         .w(px(PALETTE_WIDTH.min(f32::from(viewport.width) - 32.0)))
-        // slopty: between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
+        // Between 280 and 480 tall (`PALETTE_MIN_HEIGHT`), within the window under its
         // top, its footer at its foot. A touch screen has no footer of keys to hold there: the
         // card hugs its rows.
         .when(!crate::shell::touch_screen(), |card| {
@@ -1457,7 +1457,7 @@ pub(super) fn palette_card(
         .flex()
         .flex_col()
         .rounded(px(16.0))
-        // slopty: Amp's floating elevation, a ring inside the edge and the long soft shadows.
+        // Amp's floating elevation, a ring inside the edge and the long soft shadows.
         .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .bg(popover::surface_bg(theme))
         .text_color(theme.text)
@@ -1483,14 +1483,14 @@ pub(super) fn palette_header(theme: &Theme, search: AnyElement, hint: gpui::Div)
                 .text_size(crate::typography::ui_rems(14.0))
                 .child(search),
         )
-        // slopty: a key to press, where there are keys.
+        // A key to press, where there are keys.
         .when(!crate::shell::touch_screen(), |header| header.child(hint))
 }
 
 pub(super) fn palette_footer() -> gpui::Div {
     div()
         .flex_none()
-        .mt_auto() // slopty: at the card's foot, however few rows answer
+        .mt_auto() // at the card's foot, however few rows answer
         .px(px(16.0))
         .py(px(7.0))
         .border_t_1()
@@ -1501,7 +1501,7 @@ pub(super) fn palette_footer() -> gpui::Div {
         .gap(px(12.0))
 }
 
-/// slopty: a palette row's height, a list row's as Claude desktop draws them, and as the pickers'
+/// A palette row's height, a list row's as Claude desktop draws them, and as the pickers'
 /// rows stand (`popover::PICKER_ROW_HEIGHT`).
 const PALETTE_ROW_HEIGHT: f32 = popover::PICKER_ROW_HEIGHT;
 
@@ -1534,7 +1534,7 @@ pub(super) fn palette_top(height: Pixels) -> Pixels {
 }
 
 /// Mount a palette card over the scrimmed window, frosted like the composer.
-// slopty: pinned from the top (`palette_top`), not centred, so the field does not move as the
+// Pinned from the top (`palette_top`), not centred, so the field does not move as the
 // results change. It stands whole on the frame its key opens it, scrim and all, as Raycast's
 // does: what a key opens many times a day never makes the person wait on its entrance
 // (`docs/decisions/ui.md`, "What a key opens is there at once").
@@ -1567,7 +1567,7 @@ pub(super) fn palette_overlay(viewport: gpui::Size<Pixels>, card: gpui::Stateful
 /// the plain inline legends) and the verb after it. Arrow and return keys
 /// are icons, which sit optically centered on the cap where font glyphs
 /// don't; other keys ("Esc") are text.
-// slopty: the cap sinks while its key is held (`live::chrome::pressable_cap`).
+// The cap sinks while its key is held (`live::chrome::pressable_cap`).
 pub(super) fn command_key_hint(
     theme: &Theme,
     keys: &str,
@@ -1595,7 +1595,7 @@ pub(super) fn command_key_hint(
     };
     let selector = format!("key-cap-{keys}");
     let cap = crate::live::chrome::pressable_cap(cap, keys, 0.05, window, cx)
-        .debug_selector(move || selector); // slopty: for the tests
+        .debug_selector(move || selector);
     div()
         .flex()
         .items_center()
@@ -1630,7 +1630,6 @@ mod tests {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -1643,7 +1642,7 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": archived,
             "parentChatId": parent,
-            // slopty: recent, so a chat stays out of the sidebar's shut Inactive group.
+            // Recent, so a chat stays out of the sidebar's shut Inactive group.
             "createdAt": Utc::now() - chrono::Duration::minutes(age),
         }))
         .unwrap()
@@ -1669,7 +1668,7 @@ mod tests {
             .collect()
     }
 
-    /// slopty: a footer cap sinks while its key is held and rises as it comes up; a key that
+    /// A footer cap sinks while its key is held and rises as it comes up; a key that
     /// closed the palette, coming up where nothing listened, leaves no cap sunk next time.
     #[gpui::test]
     fn a_footer_cap_sinks_while_its_key_is_held(cx: &mut TestAppContext) {
@@ -1932,7 +1931,7 @@ mod tests {
             .unwrap();
     }
 
-    // slopty: the palette's headings are in sentence case, as every label in the app; New session
+    // The palette's headings are in sentence case, as every label in the app; New session
     // wears the titlebar's glyph for it, and New project, which opens a picker, says so.
     #[test]
     fn the_palette_speaks_as_the_app_does() {
@@ -1983,7 +1982,7 @@ mod tests {
             self.take_after(method, CONTENT_DEBOUNCE, cx)
         }
 
-        // slopty: what was asked once the clock moved `step` per round; zero asks what was
+        // What was asked once the clock moved `step` per round; zero asks what was
         // sent without letting any pause end.
         fn take_after(
             &mut self,
@@ -2151,7 +2150,7 @@ mod tests {
                     engine.reply(&request, serde_json::json!({ "state": warm }))
                 }
                 methods::SEARCH_WORKSPACE_FILES => engine.reply(&request, serde_json::json!([])),
-                // slopty: the chats' words search is not the workspace's.
+                // The chats' words search is not the workspace's.
                 methods::SEARCH_CHATS => {
                     engine.reply(&request, serde_json::json!([]));
                     continue;
@@ -2170,7 +2169,7 @@ mod tests {
         engine.take(methods::SEARCH_CHATS, cx)
     }
 
-    // slopty: chats whose words match come after the title matches, a title match never twice,
+    // Chats whose words match come after the title matches, a title match never twice,
     // and only once typing paused on two characters.
     #[gpui::test]
     fn chat_words_follow_title_matches_after_the_pause(cx: &mut TestAppContext) {
@@ -2238,7 +2237,7 @@ mod tests {
         assert!(palette_section(window, Section::InThreads, cx).is_none());
     }
 
-    // slopty: an answer to an older query is dropped; a failed search shows no words.
+    // An answer to an older query is dropped; a failed search shows no words.
     #[gpui::test]
     fn stale_or_failed_chat_word_answers_show_nothing(cx: &mut TestAppContext) {
         let (window, _dir, mut engine) = engine_palette(cx, false);
@@ -2908,7 +2907,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             crate::composer::init(cx);
             apply_keymap(
                 cx,

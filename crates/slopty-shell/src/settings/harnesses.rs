@@ -32,7 +32,6 @@ use slopty_view_rpc::methods;
 
 use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
-// slopty: no agent accounts: Slopty never touches a credential.
 use crate::settings::widgets;
 use crate::state::AppState;
 use crate::theme::Theme;
@@ -41,7 +40,7 @@ use crate::theme::Theme;
 /// gap, so it starts on the title's edge.
 const DETAILS_INSET: f32 = 4.0 + 36.0 + 12.0;
 
-// slopty: how freely agents act (`[agents] autonomy`): the value, its label, and the note under
+// How freely agents act (`[agents] autonomy`): the value, its label, and the note under
 // the row title for the chosen one. The names are Claude Code's own for its permission modes, so
 // the choice reads as its TUI says it.
 const AUTONOMY: [(&str, &str, &str); 3] = [
@@ -55,7 +54,7 @@ const AUTONOMY_DEFAULT: usize = 0;
 /// Where `full` sits: the one that asks nothing, so its note is a warning.
 const AUTONOMY_FULL: usize = 1;
 
-// slopty: what an installed agent's row says where nothing else does.
+// What an installed agent's row says where nothing else does.
 const INSTALLED: &str = "Installed";
 
 fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> bool {
@@ -79,7 +78,7 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     } else {
         format!("Install the {} CLI to enable", cli_name(harness))
     };
-    // slopty: the command is drawn in its own mono span ([`install_command`]), not quoted.
+    // The command is drawn in its own mono span ([`install_command`]), not quoted.
     if install_command(harness, can_install).is_some() {
         format!("{hint}. Install with")
     } else {
@@ -87,7 +86,7 @@ fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String 
     }
 }
 
-// slopty: the command a hint names, set in the code face beside it rather than in backticks.
+// The command a hint names, set in the code face beside it rather than in backticks.
 /// The command the person runs to install `harness`, where Slopty does not install it.
 fn install_command(harness: HarnessId, can_install: bool) -> Option<&'static str> {
     if harness == HarnessId::ANTIGRAVITY || can_install {
@@ -96,13 +95,13 @@ fn install_command(harness: HarnessId, can_install: bool) -> Option<&'static str
     crate::catalog::harness::install::manual_command(harness)
 }
 
-// slopty: how tall the installer's terminal stands under its row.
+// How tall the installer's terminal stands under its row.
 const INSTALL_TERMINAL_HEIGHT: f32 = 240.0;
-// slopty: how often, and how many times, the agents are listed again after an installer ends.
+// How often, and how many times, the agents are listed again after an installer ends.
 const RELIST_EVERY: std::time::Duration = std::time::Duration::from_millis(1_500);
 const RELIST_TRIES: u32 = 10;
 
-// slopty: the installer's terminal, by the agent it installs.
+// The installer's terminal, by the agent it installs.
 struct InstallRun {
     harness: HarnessId,
     /// The terminal's id (`InstallHarness`'s `terminalId`).
@@ -133,7 +132,7 @@ pub fn cli_name(harness: HarnessId) -> &'static str {
         HarnessId::OPENCODE => "opencode",
         HarnessId::ANTIGRAVITY => "Antigravity",
         HarnessId::MOCK => "mock",
-        // slopty: any other agent's program is named by its harness.
+        // Any other agent's program is named by its harness.
         other => other.as_str(),
     }
 }
@@ -154,11 +153,10 @@ pub struct HarnessesPage {
     pending_toggle: Option<(HarnessId, bool)>,
     installing: Option<HarnessId>,
     install_task: Option<Task<()>>,
-    // slopty: the installer's terminal on the target machine, while the page shows it.
+    // The installer's terminal on the target machine, while the page shows it.
     install_run: Option<InstallRun>,
 
-    // slopty: no agent accounts, and no update island: agents update themselves.
-    // slopty: the person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
+    // The person's one autonomy setting (`[agents] autonomy`), its index in AUTONOMY.
     autonomy: Option<usize>,
     autonomy_select: widgets::SelectState,
     autonomy_task: Option<Task<()>>,
@@ -179,7 +177,6 @@ impl HarnessesPage {
             installing: None,
             install_task: None,
             install_run: None, // slopty
-            // slopty: no agent accounts, and no update island: agents update themselves.
             autonomy: None, // slopty
             autonomy_select: widgets::SelectState::default(), // slopty
             autonomy_task: None, // slopty
@@ -188,7 +185,7 @@ impl HarnessesPage {
         page
     }
 
-    // slopty: read `[agents] autonomy`, after writing `set` (an index in AUTONOMY) when given.
+    // Read `[agents] autonomy`, after writing `set` (an index in AUTONOMY) when given.
     fn load_autonomy(
         &mut self,
         engine: crate::state::EngineHandle,
@@ -222,7 +219,7 @@ impl HarnessesPage {
         cx.notify();
     }
 
-    // slopty: the Autonomy section under the agents.
+    // The Autonomy section under the agents.
     fn render_autonomy(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.autonomy.unwrap_or(AUTONOMY_DEFAULT);
         let select = widgets::select(
@@ -231,7 +228,7 @@ impl HarnessesPage {
             theme,
             |page: &mut Self| &mut page.autonomy_select,
         )
-        // slopty: Auto is marked the default and the recommended one; Bypass permissions says
+        // Auto is marked the default and the recommended one; Bypass permissions says
         // what it costs (M10).
         .options(
             AUTONOMY.iter().enumerate().map(|(ix, (_, label, _))| {
@@ -299,7 +296,6 @@ impl HarnessesPage {
         value
     }
 
-    // slopty: no agent accounts: Slopty never touches a credential.
 
     /// Retarget the page at another device: a different device is a different
     /// install/enablement world, so drop the rows and reload through it.
@@ -313,9 +309,8 @@ impl HarnessesPage {
         }
         self.installing = None;
         self.install_task = None;
-        self.close_install(cx); // slopty: the installer's terminal is the old machine's
+        self.close_install(cx); // the installer's terminal is the old machine's
         self.target_device = target;
-        // slopty: no agent accounts: Slopty never touches a credential.
         self.error = None;
         self.harnesses = Loadable::Idle;
         self.load(cx);
@@ -355,7 +350,7 @@ impl HarnessesPage {
         self.set_enabled(harness, enabled, cx);
     }
 
-    // slopty: Cancel while the installer runs, Close once it ended: its terminal ends and goes.
+    // Cancel while the installer runs, Close once it ended: its terminal ends and goes.
     fn cancel_install(&mut self, cx: &mut Context<Self>) {
         self.close_install(cx);
         self.installing = None;
@@ -363,7 +358,7 @@ impl HarnessesPage {
         cx.notify();
     }
 
-    // slopty: Install runs the vendor's installer in a terminal on the target machine
+    // Install runs the vendor's installer in a terminal on the target machine
     // (`InstallHarness` answers its `terminalId`), which the row shows until the person closes it.
     fn install(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -403,7 +398,7 @@ impl HarnessesPage {
         cx.notify();
     }
 
-    // slopty: follow the installer's terminal: once it ends, ask the machine again what it has.
+    // Follow the installer's terminal: once it ends, ask the machine again what it has.
     fn show_install(&mut self, harness: HarnessId, id: String, cx: &mut Context<Self>) {
         let page = cx.weak_entity();
         let watch = crate::live::watch(
@@ -417,7 +412,7 @@ impl HarnessesPage {
         self.follow_install(cx);
     }
 
-    // slopty: what the installer's terminal says of itself now.
+    // What the installer's terminal says of itself now.
     fn follow_install(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.install_run.as_ref().map(|run| run.id.clone()) else {
             return;
@@ -438,7 +433,7 @@ impl HarnessesPage {
         cx.notify();
     }
 
-    // slopty: list the machine's agents again until the one installed shows, its worker seeing
+    // List the machine's agents again until the one installed shows, its worker seeing
     // the install a beat after the installer ends; `tries` more times at most.
     fn relist(&mut self, tries: u32, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -472,7 +467,7 @@ impl HarnessesPage {
         }));
     }
 
-    // slopty: end the installer's terminal on its machine (`CloseTerminal`) and stop showing it.
+    // End the installer's terminal on its machine (`CloseTerminal`) and stop showing it.
     fn close_install(&mut self, cx: &mut Context<Self>) {
         let Some(run) = self.install_run.take() else {
             return;
@@ -493,7 +488,7 @@ impl HarnessesPage {
         .detach();
     }
 
-    // slopty: the installer's terminal under its agent's row, and once it ended, what it ended
+    // The installer's terminal under its agent's row, and once it ended, what it ended
     // with and Close.
     fn render_install(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let run = self.install_run.as_ref()?;
@@ -702,7 +697,7 @@ impl HarnessesPage {
                 // installed); turning ON still does.
                 let interactive = !last_enabled && (enabled || installed);
                 let (icon_path, tint) = crate::pickers::harness_brand_icon(harness);
-                // slopty: an agent on or off against its default (installed and not the mock)
+                // An agent on or off against its default (installed and not the mock)
                 // offers "Reset" (M10).
                 let default_on = installed && harness != HarnessId::MOCK;
                 let reset = widgets::reset_action(
@@ -739,7 +734,7 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 } else if !installed {
-                    // slopty: the command in the code face, after the words.
+                    // The command in the code face, after the words.
                     let command = install_command(harness, descriptor.can_install).map(|command| {
                         div()
                             .font_family(crate::typography::code_effective_family_name(cx))
@@ -763,7 +758,7 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                // slopty: an installed agent says so, where nothing else speaks for it.
+                // An installed agent says so, where nothing else speaks for it.
                 if meta.is_empty() && installed {
                     meta.push(
                         div()
@@ -893,7 +888,7 @@ impl HarnessesPage {
                     .flex()
                     .flex_col()
                     .child(header)
-                    // slopty: the installer's terminal, under the agent it installs.
+                    // The installer's terminal, under the agent it installs.
                     .when(self.install_run.as_ref().is_some_and(|run| run.harness == harness), |row| {
                         row.children(self.render_install(&theme, cx))
                     })
@@ -982,7 +977,7 @@ impl Render for HarnessesPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: one page head (`widgets::page_head`).
+                                // One page head (`widgets::page_head`).
                                 .child(widgets::page_head(
                                     &theme,
                                     "Providers",
@@ -1002,7 +997,7 @@ impl Render for HarnessesPage {
 
 #[cfg(test)]
 mod tests {
-    // slopty: the autonomy choices read as the composer's mode menu reads them; Auto is the
+    // The autonomy choices read as the composer's mode menu reads them; Auto is the
     // default and the recommended one, and the one that asks nothing says so (M10).
     #[test]
     fn autonomy_names_its_default_and_what_full_costs() {
@@ -1019,7 +1014,7 @@ mod tests {
     }
 }
 
-// slopty: an installed agent's row says so; no row opens, there being nothing under it.
+// An installed agent's row says so; no row opens, there being nothing under it.
 #[cfg(test)]
 mod row_tests {
     use gpui::AppContext as _;
@@ -1059,7 +1054,7 @@ mod row_tests {
     }
 }
 
-// slopty: Install runs the vendor's installer in a terminal on the machine, shown under the row;
+// Install runs the vendor's installer in a terminal on the machine, shown under the row;
 // once it ends the agent arrives in the list, and Close ends the terminal. An install the
 // machine refuses is said, and nothing is left running.
 #[cfg(test)]
@@ -1287,7 +1282,7 @@ fn install_phase_copy_and_cancel_target_match_install() {
             serde_json::to_value(&target).unwrap()
         );
     }
-    // slopty: the command stands on its own, with no backticks around it.
+    // The command stands on its own, with no backticks around it.
     assert_eq!(
         install_hint(HarnessId::CODEX, false, false),
         "Install the codex CLI to enable. Install with"

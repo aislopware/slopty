@@ -511,7 +511,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        // slopty: the editor and its Delete confirmation are one modal: the keyboard goes back
+        // The editor and its Delete confirmation are one modal: the keyboard goes back
         // to what had it before the editor opened, once neither is shown.
         self.project_action_focus.sync(self.project_actions.editor.is_some(), window, cx);
         let shell = cx.weak_entity();
@@ -721,7 +721,7 @@ impl Shell {
                                     })),
                             )
                             .child(
-                                popover::named_button( // slopty: a named button
+                                popover::named_button(
                                     popover::btn_primary(
                                         &theme,
                                         if saving { "Saving…" } else { "Save action" },

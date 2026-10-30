@@ -1,5 +1,3 @@
-// slopty: Slopty's review aids on the copied pane, in zeron's components: find in the diff,
-// whitespace ignored, and the changed files as a tree beside the diff.
 //! The Changes pane's find bar, whitespace toggle and file tree.
 
 use std::ops::Range;
@@ -241,7 +239,7 @@ impl Changes {
             this.toggle_tree(cx);
         }))
         .into_any_element();
-        // slopty: the set's pilcrow, not the font's "¶", which sat heavier and off its baseline.
+        // The set's pilcrow, not the font's "¶", which sat heavier and off its baseline.
         let whitespace = Self::header_toggle(
             "changes-whitespace",
             crate::icons::PILCROW,
@@ -264,7 +262,7 @@ impl Changes {
         let tally = review::tally(&query, self.found_active, self.found.len());
         let popup = theme.for_popup();
         let any = !self.found.is_empty();
-        // slopty: the shared find card: the search row's anatomy, frosted, entering as a menu
+        // The shared find card: the search row's anatomy, frosted, entering as a menu
         // does, its steps naming their keys and dimming with no match to go to (M19).
         let card = popover::find_card(&popup)
             .id("changes-find-card")
@@ -366,7 +364,7 @@ impl Changes {
                             .flex_none()
                             .flex()
                             .gap(px(4.0))
-                            // slopty: counts in the file headers' tabular figures (item 18).
+                            // Counts in the file headers' tabular figures (item 18).
                             .font_features(crate::typography::tabular())
                             .text_size(crate::typography::ui_rems(11.0))
                             .when(diff.additions > 0, |el| {
@@ -409,7 +407,7 @@ impl Changes {
                             }
                         })
                         .when_some(file, |el, ix| {
-                            // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                            // A keyboard stop with the shell's ring, inside the tree (M8).
                             el.map(|el| crate::surface_chrome::key_stop_inset(el, theme))
                                 .on_click(cx.listener(move |this, _, _, cx| this.scroll_to_file(ix, cx)))
                         })

@@ -1,4 +1,3 @@
-// slopty: Slopty's own module (not in zeron).
 //! Links to chats as live chips. A `slopty://open/chat/…` link in a reply (the link the
 //! sidebar's Copy link puts on the clipboard) shows the chat as it stands now, its title and
 //! whether it works or waits on the person, in a wash, rather than the words or address it was

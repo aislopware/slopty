@@ -1,4 +1,4 @@
-//! slopty: an agent drives the person's window (`slopty ui`, the `ui_*` tools): it opens a
+//! An agent drives the person's window (`slopty ui`, the `ui_*` tools): it opens a
 //! shell, a file, a page or the changes in a pane beside the session (`docs/decisions/layout.md`,
 //! "No permanent right column"), shows or hides a region, puts a chat on screen, lays the panes
 //! at even shares, and reads what the window shows. Slopty's workspace hands each ask here through [`act`] once the shell's
@@ -351,7 +351,7 @@ const fn in_region(pane: Pane, region: &str) -> bool {
 }
 
 impl Shell {
-    /// slopty: whether the chat `asker` is on screen, read before its ask moves anything.
+    /// Whether the chat `asker` is on screen, read before its ask moves anything.
     fn asker_on_screen(&self, asker: Option<&str>) -> bool {
         asker.is_some_and(|chat| chat == self.active_chat && matches!(self.route, Route::Chat))
     }
@@ -366,7 +366,7 @@ impl Shell {
     ) {
         let keyboard = window.focused(cx);
         let Ask { act, chat, device, who } = ask;
-        // slopty: the asking agent's chat on screen already shows what it did (its call's row,
+        // The asking agent's chat on screen already shows what it did (its call's row,
         // and the change beside it), so no toast says it again over the pane it just filled.
         let seen = self.asker_on_screen(chat.as_deref());
         let did = match act {
@@ -936,7 +936,7 @@ mod tests {
         assert!(!done.window.typing);
     }
 
-    /// slopty: what an agent does in the window is toasted only when its chat is not the one
+    /// What an agent does in the window is toasted only when its chat is not the one
     /// on screen, which already shows the call and the change beside it.
     #[gpui::test]
     fn an_agent_on_screen_is_not_toasted_over_its_own_change(cx: &mut TestAppContext) {

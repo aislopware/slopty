@@ -1,4 +1,3 @@
-// slopty: Slopty's own, drawn from zeron's dialog, settings and segmented-tab anatomy.
 //! Settings → Devices' Add device dialog: this Mac shared, a machine installed over ssh (or the
 //! server set up there), or the server this app follows. The app runs each (`AddDevice`); the
 //! dialog draws its steps, the host key or password a run stops to ask for, this Mac's
@@ -334,7 +333,7 @@ impl AddDeviceDialog {
         if self.focus.contains(&focused, window) {
             return false;
         }
-        // slopty: the field of the choice on show is drawn in this frame, though the last frame
+        // The field of the choice on show is drawn in this frame, though the last frame
         // drew the other choice's: a tab just chosen gave it the keyboard, which stays.
         if self.shown_field().is_some_and(|field| field.focus_handle(cx) == focused) {
             return false;
@@ -541,7 +540,7 @@ impl AddDeviceDialog {
                 .aria_label(choice.label())
                 .aria_selected(selected)
                 .tab_index(0)
-                // slopty: the shell's keyboard ring (M8).
+                // The shell's keyboard ring (M8).
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .cursor_pointer()
                 .on_click(cx.listener(move |this, _, window, cx| this.choose(choice, window, cx)))
@@ -570,7 +569,7 @@ impl AddDeviceDialog {
         } else {
             None
         };
-        // slopty: its label and words start on the paragraph's edge above them, one left edge
+        // Its label and words start on the paragraph's edge above them, one left edge
         // down the dialog; the rows keep their own inset, as a picker's do.
         let mut list = div().mt(px(12.0)).flex().flex_col().gap(px(2.0)).child(
             widgets::section_label(theme, "On your tailnet")
@@ -611,7 +610,7 @@ impl AddDeviceDialog {
             if node.ready {
                 row = row
                     .tab_index(0)
-                    // slopty: the shell's keyboard ring, inside the row (M8).
+                    // The shell's keyboard ring, inside the row (M8).
                     .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(format!(
@@ -641,7 +640,7 @@ impl AddDeviceDialog {
         let waits = self.open;
         let mut list = div().mt(px(16.0)).flex().flex_col().gap(px(2.0));
         for (ix, step) in progress.steps.iter().enumerate() {
-            // slopty: one mark morphs from working to done, failed or waiting on the person
+            // One mark morphs from working to done, failed or waiting on the person
             // (`loaders::status_mark`), where a spinner, a check and a cross cut.
             let status_mark = |state| {
                 crate::loaders::status_mark::StatusMark::new(
@@ -680,7 +679,7 @@ impl AddDeviceDialog {
                     .id(("add-device-fix", ix))
                     .flex_none()
                     .tab_index(0)
-                    // slopty: the shell's keyboard ring (M8).
+                    // The shell's keyboard ring (M8).
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(fix.label)
@@ -736,7 +735,7 @@ impl AddDeviceDialog {
                     .id(("add-device-choose", ix))
                     .debug_selector(move || format!("add-device-choose-{ix}"))
                     .tab_index(0)
-                    // slopty: the shell's keyboard ring, inside the row (M8).
+                    // The shell's keyboard ring, inside the row (M8).
                     .map(|el| crate::surface_chrome::focus_ring_inset(el, theme))
                     .role(gpui::Role::Button)
                     .aria_label(format!("Join {}", choose.name))
@@ -855,7 +854,7 @@ impl Render for AddDeviceDialog {
             let serve = self.serve;
             let label =
                 if serve { "Install a machine there instead" } else { "Set up the server there instead" };
-            // slopty: a link in the accent, underlined under the pointer, its words on the
+            // A link in the accent, underlined under the pointer, its words on the
             // body's edge: muted words alone did not read as something to press.
             div().mt(px(8.0)).flex().child(
                 div()
@@ -1004,7 +1003,7 @@ impl Render for AddDeviceDialog {
                             .id("add-device-go")
                             .track_focus(&self.go_focus)
                             .role(gpui::Role::Button)
-                            .aria_label(label) // slopty: named in the accessibility tree.
+                            .aria_label(label) // named in the accessibility tree.
                             .map(|el| crate::surface_chrome::focus_ring_revealing(el, &theme))
                             .on_click(cx.listener(|this, _, window, cx| this.go(window, cx)))
                     })),
@@ -1012,7 +1011,7 @@ impl Render for AddDeviceDialog {
     }
 }
 
-// slopty: gpui-base's Input draws no accessibility node; its frame here is the node a screen
+// gpui-base's Input draws no accessibility node; its frame here is the node a screen
 // reader reads, and the keyboard on the field inside is announced on it.
 /// One of the dialog's fields in the dialog's frame, named for a screen reader and saying its
 /// words, the password's never.

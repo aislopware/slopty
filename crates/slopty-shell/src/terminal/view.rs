@@ -1,10 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Terminal paint metrics and the panel fill.
 //!
-//! slopty: the grid is Slopty's own terminal view ([`crate::live`]); zeron's cell
-//! palette, keystroke encoding, input coalescer and grid element are not taken. What
-//! stays is the look the panel hands that view: the font metrics, the padding and the
-//! fill behind the grid.
+//! The grid is Slopty's own terminal view ([`crate::live`]); what lives here is the look the
+//! panel hands that view: the font metrics, the padding and the fill behind the grid.
 
 use gpui::Hsla;
 
@@ -26,5 +24,5 @@ pub const TERM_PADDING: f32 = 12.0;
 /// true tone. Explicit cell backgrounds (vim colorschemes etc.) still paint
 /// their own opaque quads on top.
 pub fn terminal_panel_bg(theme: &Theme) -> Hsla {
-    theme.session_ground() // slopty: one ground per session
+    theme.session_ground() // one ground per session
 }

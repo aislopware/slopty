@@ -1,4 +1,4 @@
-//! slopty: a page an agent shows inline, as its card in the transcript (Slopty's own; not in
+//! A page an agent shows inline, as its card in the transcript (Slopty's own; not in
 //! zeron): Slopty's `show_page`, an MCP App's UI, an `.html` or `.svg` file the agent wrote.
 //!
 //! The web view is the app's (`slopty_platform::web::page::PageHost`), handed over by the page's
@@ -58,9 +58,9 @@ const PAGE_MAX_HEIGHT: f32 = 720.0;
 const PAGE_VIEWPORT_SHARE: f32 = 0.8;
 /// How long a page stays live after the pointer and the keyboard leave it.
 const REST_AFTER: Duration = Duration::from_secs(2);
-/// slopty: the header bar over a page, the height of a code card's (`markdown::render`).
+/// The header bar over a page, the height of a code card's (`markdown::render`).
 const HEADER_HEIGHT: f32 = 28.0;
-/// slopty: the card's corner, the transcript's one card corner (a code or diagram card's).
+/// The card's corner, the transcript's one card corner (a code or diagram card's).
 const CARD_RADIUS: f32 = crate::transcript::TRANSCRIPT_CARD_RADIUS;
 /// How long an action shows it is done.
 const DONE_FOR: Duration = Duration::from_millis(1500);
@@ -72,7 +72,7 @@ const SAVE: &str = "save";
 
 type ActionFn = Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
-// slopty: a card's header action is the surfaces' own icon button (`live::chrome::icon_button`:
+// A card's header action is the surfaces' own icon button (`live::chrome::icon_button`:
 // its size, its faded hover, its focus ring and tab stop); a quiet one fades in with the card's
 // hover, or shows while it has the keyboard.
 /// One of a card's header actions: a button named `label`, faded out until the card under
@@ -182,7 +182,7 @@ pub fn theme_variables(theme: &Theme) -> Vec<(String, String)> {
 
 /// What the person reads of how a page stands: its card's assistive value.
 ///
-/// slopty: live only once its document has `loaded`: a web view made live comes up empty and
+/// Live only once its document has `loaded`: a web view made live comes up empty and
 /// takes no touch until its document is in it.
 pub fn presence_words(
     presence: Option<PagePresence>,
@@ -199,12 +199,12 @@ pub fn presence_words(
     }
 }
 
-/// slopty: what a card says while its document waits for `machine`, out of reach.
+/// What a card says while its document waits for `machine`, out of reach.
 pub fn waiting_words(machine: &str) -> SharedString {
     format!("Waiting for {machine}…").into()
 }
 
-/// slopty: a page card's header words past its title: where the page comes from, an MCP App's
+/// A page card's header words past its title: where the page comes from, an MCP App's
 /// server, a file's path or a chart's language. The tool that showed it is never named: HTML the
 /// agent wrote (`show_page`) has no source of its own.
 pub fn source_words(card: &PageCard) -> Option<String> {
@@ -340,13 +340,13 @@ impl PageCardView {
     }
 
     fn engage(&mut self, cx: &mut Context<Self>) {
-        // slopty: a card with none of its body in the clear band would rest the moment it went
+        // A card with none of its body in the clear band would rest the moment it went
         // live, and the picture its rest draws takes the hover again: it waits for the band.
         if !self.shows_in_band() {
             return;
         }
         self.rest = None;
-        // slopty: a page rested while the card stayed engaged (a fade band, the device's cap)
+        // A page rested while the card stayed engaged (a fade band, the device's cap)
         // wakes again at the next press or hover.
         if !self.engaged || !self.placed_live {
             self.engaged = true;
@@ -584,14 +584,13 @@ impl PageCardView {
                     .items_center()
                     .cursor_pointer()
                     .text_color(theme.text)
-                    // slopty: the faded hover.
                     .bg(crate::motion::hover_blend(
                         &format!("{}-bring-back", self.card.page),
                         crate::theme::ink(0.06),
                         crate::theme::ink(0.1),
                     ))
                     .hover_fade(format!("{}-bring-back", self.card.page))
-                    .tab_index(0) // slopty: a tab stop.
+                    .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     .on_click(cx.listener(|this, _, _, cx| this.move_to_pane(false, cx)))
                     .child(SharedString::from("Bring back")),
@@ -613,7 +612,7 @@ impl PageCardView {
                     .role(gpui::Role::Link)
                     .aria_label(SharedString::from(format!("Open {path}")))
                     .cursor_pointer()
-                    // slopty: a faded hover, and a tab stop.
+                    // A faded hover, and a tab stop.
                     .text_color(crate::motion::hover_blend(&fade, theme.text_muted, theme.text))
                     .hover_fade(fade)
                     .tab_index(0)
@@ -643,7 +642,7 @@ impl Render for PageCardView {
 
         // A live page that scrolled wholly out of the clear band rests at once; one in the pane is
         // the pane's.
-        // slopty: asked once the frame is drawn. The host tells the card what changed; asked
+        // Asked once the frame is drawn. The host tells the card what changed; asked
         // while the window draws, the card it tells would wait for whatever draws next.
         let key = self.card.page.clone();
         let ask = |act: PageAct, cx: &mut Context<Self>| {
@@ -683,11 +682,11 @@ impl Render for PageCardView {
                 .clamp(PAGE_MIN_HEIGHT, cap)
         };
         let snapshot = hosted.as_ref().and_then(|page| page.snapshot.clone());
-        // slopty: a document that waits for its machine out of reach says so.
+        // A document that waits for its machine out of reach says so.
         let waiting = hosted.as_ref().and_then(|page| page.waiting.clone()).filter(|_| {
             !failed && doc.is_none() && snapshot.is_none() && presence != Some(PagePresence::Live)
         });
-        // slopty: a PDF or a table draws here natively: once read, it is live.
+        // A PDF or a table draws here natively: once read, it is live.
         let value = if doc.is_some() && !failed {
             "live"
         } else if waiting.is_some() {
@@ -707,7 +706,7 @@ impl Render for PageCardView {
             .unwrap_or_else(|| "The page could not be shown".into());
 
         let body_content: AnyElement = match (&hosted, presence) {
-            // slopty: why, and Try again unless the call that showed it failed.
+            // Why, and Try again unless the call that showed it failed.
             _ if failed => failed_body(&self.card.page, why.clone(), !self.card.failed, &self.card.page, &theme),
             (
                 Some(live::HostedPage {
@@ -716,7 +715,7 @@ impl Render for PageCardView {
                 }),
                 Some(PagePresence::Live),
             ) => {
-                // slopty: the wheel passes to the chat under the card. On the Mac the page
+                // The wheel passes to the chat under the card. On the Mac the page
                 // takes it first, and hands the window what it cannot scroll
                 // (`slopty_platform::web::page`'s wheel); GPUI then scrolls what is under it.
                 // Over the page the native's hitbox is topmost, so the body hears no hover: the
@@ -730,7 +729,7 @@ impl Render for PageCardView {
                         }
                     }))
                     .size_full();
-                // slopty: the page shows within the clear band alone; past it, under the
+                // The page shows within the clear band alone; past it, under the
                 // titlebar's fade and the composer's frost, its picture stands in, so a page
                 // taller than the band (a phone's, an expanded one) is live where it shows.
                 div()
@@ -751,8 +750,8 @@ impl Render for PageCardView {
                     .size_full()
                     .object_fit(ObjectFit::Fill)
                     .into_any_element(),
-                // slopty: the surfaces' loading anatomy, the spinner over its caption.
-                // slopty: the machine it waits for is read out, as a status.
+                // The surfaces' loading anatomy, the spinner over its caption.
+                // The machine it waits for is read out, as a status.
                 None => match waiting.as_ref().filter(|_| !self.card.streaming) {
                     Some(machine) => {
                         let words = waiting_words(machine);
@@ -773,7 +772,7 @@ impl Render for PageCardView {
             },
         };
         let probe = self.bounds.clone();
-        // slopty: the card is built again when where it lies asks something of it (a live page
+        // The card is built again when where it lies asks something of it (a live page
         // gone into a fade band rests, a new width is told to the page), so the frame shown is
         // the one a frame built from scratch, which reads the same bounds, draws.
         let live_now = presence == Some(PagePresence::Live) && !in_pane;
@@ -853,7 +852,7 @@ impl Render for PageCardView {
             .relative()
             .w_full()
             .h(px(height))
-            // slopty: the frame's lower corners, inside its hairline.
+            // The frame's lower corners, inside its hairline.
             .rounded_b(px(CARD_RADIUS - 1.0))
             .overflow_hidden()
             .bg(theme.bg)
@@ -882,7 +881,7 @@ impl Render for PageCardView {
             .items_center()
             .gap(px(2.0))
             .children(self.actions(doc.as_ref(), &theme, cx));
-        // slopty: a code card's header bar: the page's title and where it comes from, its actions
+        // A code card's header bar: the page's title and where it comes from, its actions
         // on the right.
         let header = div()
             .h(px(HEADER_HEIGHT))
@@ -989,7 +988,7 @@ impl Render for PageCardView {
             .flex()
             .flex_col()
             .child(
-                // slopty: one frame for every card that shows something made (a page, an app's
+                // One frame for every card that shows something made (a page, an app's
                 // view, a chart), a code or diagram card's: its corner, hairline and surface.
                 div()
                     .w_full()
@@ -1008,12 +1007,12 @@ impl Render for PageCardView {
     }
 }
 
-/// slopty: whether `bounds` (window points) meets the band `(top, bottom)` a live page shows in.
+/// Whether `bounds` (window points) meets the band `(top, bottom)` a live page shows in.
 fn meets_band(bounds: Bounds<Pixels>, (top, bottom): (f32, f32)) -> bool {
     f32::from(bounds.top()) < bottom && f32::from(bounds.bottom()) > top
 }
 
-/// slopty: draws its child clipped to the band `(top, bottom)` of the window (the transcript's, as
+/// Draws its child clipped to the band `(top, bottom)` of the window (the transcript's, as
 /// the frame began), so a native placed in it shows, and takes the pointer, only there.
 struct BandClip {
     band: Option<(f32, f32)>,
@@ -1116,14 +1115,13 @@ fn ask_line(
             .cursor_pointer()
             .text_size(crate::typography::ui_rems(12.0))
             .text_color(theme.text)
-            // slopty: the faded hover.
             .bg(crate::motion::hover_blend(
                 &format!("{id}-{text}-hover"),
                 crate::theme::ink(0.06),
                 crate::theme::ink(0.1),
             ))
             .hover_fade(format!("{id}-{text}-hover"))
-            .tab_index(0) // slopty: a tab stop.
+            .tab_index(0)
             .map(|el| crate::surface_chrome::focus_ring(el, theme))
             .on_click(move |event, window, cx| on_click(event, window, cx))
             .child(SharedString::from(text))
@@ -1179,7 +1177,7 @@ mod card_tests;
 mod tests {
     use super::*;
 
-    // slopty: Slopty's own conversation surfaces follow the font-size setting (`ui_rems`); only
+    // Slopty's own conversation surfaces follow the font-size setting (`ui_rems`); only
     // code, diffs, tool output and terminal text keep px. Each file lists the px sizes it may
     // keep, so a new chrome size in px fails here.
     #[test]
@@ -1210,7 +1208,7 @@ mod tests {
         }
     }
 
-    /// slopty: a wheel event the page hands on (one it cannot scroll) scrolls the chat under its
+    /// A wheel event the page hands on (one it cannot scroll) scrolls the chat under its
     /// card, the whole of it, as a browser's nested scroll goes on to what holds it.
     #[gpui::test]
     fn a_wheel_the_page_hands_on_scrolls_the_chat(cx: &mut gpui::TestAppContext) {
@@ -1303,7 +1301,7 @@ mod tests {
         assert_eq!(presence_words(Some(PagePresence::Live), true, false, false), "snapshot");
     }
 
-    /// slopty: a card's header says its title and where the page comes from (an app's server, a
+    /// A card's header says its title and where the page comes from (an app's server, a
     /// file's path), never the tool that showed it.
     #[test]
     fn a_cards_header_names_its_source_and_no_tool() {

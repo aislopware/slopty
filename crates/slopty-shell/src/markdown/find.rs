@@ -1,4 +1,4 @@
-//! slopty: find in a thread, the paint half. The transcript names what it looks for and which
+//! Find in a thread, the paint half. The transcript names what it looks for and which
 //! match is current ([`set`]); every painted text element of a row with matches washes its
 //! matches under the glyphs, the current one stronger. Elements paint in document order, so
 //! counting a row's matches as its elements paint finds the current one again, the way
@@ -113,7 +113,7 @@ fn runs_text(runs: &[InlineRun]) -> String {
 pub fn block_texts(block: &Block, out: &mut Vec<String>) {
     match block {
         Block::Paragraph { runs } | Block::Heading { runs, .. } => out.push(runs_text(runs)),
-        // slopty: terminal output paints its text, its escapes taken out.
+        // Terminal output paints its text, its escapes taken out.
         Block::CodeBlock { language, code } if super::ansi::is_ansi_fence(language.as_deref(), code) => {
             out.extend(super::ansi::parse(language.as_deref(), code).into_iter().map(|line| line.text));
         }
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(matches("éÉ", "é"), [0..2, 2..4]);
     }
 
-    /// slopty: dark's matches wash stronger than light's, every one and the current (#16).
+    /// Dark's matches wash stronger than light's, every one and the current (#16).
     #[test]
     fn dark_matches_stay_visible() {
         let (dark, light) = (crate::theme::Theme::dark(), crate::theme::Theme::light());
@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(count(&texts, "find"), 5);
     }
 
-    /// slopty: terminal output's texts are what it paints, its escapes taken out, spelled or not:
+    /// Terminal output's texts are what it paints, its escapes taken out, spelled or not:
     /// what find matches and what a screen reader reads.
     #[test]
     fn terminal_output_reads_without_its_escapes() {

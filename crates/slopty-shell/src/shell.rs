@@ -26,18 +26,15 @@ use crate::motion::HoverFade as _;
 #[cfg(test)] // the shell's tests set a workspace scope through `use super::*`
 use slopty_view_proto::WorkspaceScope;
 
-// slopty: no accounts, sync or sign-in.
 use slopty_view_rpc::methods;
 
-use crate::changes::{Changes, ChangesEvent}; // slopty: no Discard changes (ruled out).
+use crate::changes::{Changes, ChangesEvent};
 use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::files::{FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface};
 use crate::icons::{self, icon};
 use crate::loaders;
 use crate::motion::{self, AnimationExt as _, MotionSpec, PANEL_RESIZE, RESIZE, SPLASH_OUT};
 use crate::popover::{self, Loadable};
-// slopty: no pull-request pages.
-// slopty: no agent accounts: Slopty never touches a credential.
 use crate::settings::appearance::{AppearancePage, AppearanceSettingsEvent};
 use crate::settings::archived::ArchivedPage;
 use crate::settings::devices::DevicesPage;
@@ -52,10 +49,10 @@ use crate::settings::{
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator,
-    format_time_ago, // slopty: no accounts, sync or sign-in.
+    format_time_ago,
 };
 use crate::terminal::panel::TerminalPanel;
-use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips with their key
+use crate::settings::widgets::{ActionHint as _, Keys};
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript};
 
@@ -77,45 +74,44 @@ mod views; // the views summoned beside a session: what each shows, names, focus
 #[cfg(test)]
 mod panel_interaction_tests;
 #[cfg(test)]
-mod retention_tests; // slopty: the whole shell under retention; the tests' shell window and tree
+mod retention_tests; // the whole shell under retention; the tests' shell window and tree
 #[cfg(test)]
-mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
+mod fuzz_tests; // seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
-mod inbox; // slopty: the inbox behind the titlebar's eye
+mod inbox; // the inbox behind the titlebar's eye
 pub(crate) mod marks; // the five states, their mark and hues, on every surface
 mod sidebar; // the sidebar column, its list, rows and the server foot
-mod sidebar_status; // slopty: the list's groups, its rows' hints and the hover card's facts
+mod sidebar_status; // the list's groups, its rows' hints and the hover card's facts
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
 mod session_search; // finding sessions by title and by what was said in them
 mod tabs;
-mod live_surfaces; // slopty: remote window and desktop views
-mod kept_tabs; // slopty: the views beside each session kept across launches
-mod page_panes; // slopty: a page an agent showed, as a view (M)
-mod compact; // slopty: the phone's anatomy
-pub(crate) use compact::touch_screen; // slopty: the keyboard waits for a tap
+mod live_surfaces; // remote window and desktop views
+mod kept_tabs; // the views beside each session kept across launches
+mod page_panes; // a page an agent showed, as a view (M)
+mod compact;
+pub(crate) use compact::touch_screen;
 #[cfg(test)]
-pub(crate) use compact::force_touch; // slopty: tests lay a view out for a finger
-mod chrome_keys; // slopty: find, history, pane and view keys, and undoing an archive
-// slopty: the window's own commands, for the menu bar (`app_menus`).
+pub(crate) use compact::force_touch; // tests lay a view out for a finger
+mod chrome_keys; // find, history, pane and view keys, and undoing an archive
+// The window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
     FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Inbox, NavigateBack, NavigateForward,
     NextNeedsYou, NextPane, OpenBrowser, OpenIn, OpenRemoteWindow, PreviousPane, ReopenClosedTab,
     SplitAuto, SplitDown, SplitRight, ToggleInspector, ZoomPane,
 };
-mod closed_tabs; // slopty: the views closed last, opened again
-mod open_in; // slopty: a chat's folder in the person's editor
-mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
-mod new_session; // slopty: New session…: an agent's TUI, or a terminal, in a project at once
-mod past_sessions; // slopty: Claude Code's past sessions, found in the picker and taken up again
-mod picker; // slopty: the session picker (⌘K) and Go to Directory (⇧⌘G)
-pub use picker::{GoToDirectory, OpenPicker}; // slopty: for the menu bar's Go menu
+mod closed_tabs; // the views closed last, opened again
+mod open_in; // a chat's folder in the person's editor
+mod terminal_runs; // a transcript's Run in the chat's own shell terminal
+mod new_session; // New session…: an agent's TUI, or a terminal, in a project at once
+mod past_sessions; // Claude Code's past sessions, found in the picker and taken up again
+mod picker; // the session picker (⌘K) and Go to Directory (⇧⌘G)
+pub use picker::{GoToDirectory, OpenPicker}; // for the menu bar's Go menu
 #[cfg(test)]
-mod chrome_tests; // slopty: the chrome as a person and assistive tech meet it
-pub mod agent_ui; // slopty: an agent drives this window (`slopty ui`)
-// slopty: voice removed.
+mod chrome_tests; // the chrome as a person and assistive tech meet it
+pub mod agent_ui; // an agent drives this window (`slopty ui`)
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
 
@@ -286,7 +282,7 @@ fn is_host_absolute_path(path: &str) -> bool {
             && matches!(bytes[2], b'\\' | b'/'))
 }
 
-/// slopty: how long a started session's main column says "Starting…" while no terminal shows.
+/// How long a started session's main column says "Starting…" while no terminal shows.
 const STARTS_WITHIN: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Open the session at `slot` (zero-based) of the sidebar's active list. One
@@ -363,7 +359,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             platform_combo(fallback)
         }
     }
-    // slopty: appshots removed.
     let equivalents = crate::settings::key_equivalents(cx);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
@@ -371,7 +366,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // rebuilding Slopty's bindings so the file editor keymap remains active.
     gpui_base::init(cx);
     crate::composer::init(cx);
-    // slopty: dictation removed.
     // Fixed app-level shortcuts (Settings on every platform; ⌘Q quit, ⌘W
     // close, ⌘M minimize, ⌘H hide on macOS) — these back the native menu
     // key equivalents and must survive keymap re-application.
@@ -447,14 +441,14 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         crate::keys::binding(&platform_combo("mod-shift-g"), picker::GoToDirectory, None, cx),
     ]);
     crate::browser::bind_keys(cx, keymap);
-    // slopty: the files surface's and the diff's fixed keys, in their own contexts.
+    // The files surface's and the diff's fixed keys, in their own contexts.
     crate::files::bind_keys(cx);
     crate::changes::bind_keys(cx);
-    chrome_keys::bind_keys(cx, keymap); // slopty: find, history, tab, picker and undo keys
+    chrome_keys::bind_keys(cx, keymap); // find, history, tab, picker and undo keys
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
-    let jumps: Vec<_> = (0..JUMP_SLOTS).filter_map(|slot| { // slopty: built before binding
+    let jumps: Vec<_> = (0..JUMP_SLOTS).filter_map(|slot| { // built before binding
         let id = ShortcutId::JumpSession(slot);
         let combo = keymap.get(id);
         if combo.is_empty() {
@@ -468,7 +462,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         ))
     }).collect();
     cx.bind_keys(jumps);
-    // slopty: Slopty's views' own keys, last, so they hold in their contexts.
+    // Slopty's views' own keys, last, so they hold in their contexts.
     crate::live::bind_keys(cx);
     localize_key_bindings(cx, &equivalents);
     crate::settings::set_bound_key_equivalents(equivalents);
@@ -494,7 +488,7 @@ fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquival
     cx.bind_keys(bindings);
 }
 
-// slopty: gpui-fast parses and spells a keystroke for the OS the app runs on.
+// gpui-fast parses and spells a keystroke for the OS the app runs on.
 fn localize_binding(
     binding: &gpui::KeyBinding,
     equivalents: &crate::settings::KeyEquivalents,
@@ -551,16 +545,13 @@ pub enum SettingsSection {
     Appearance,
     Files,
     Notifications,
-    // slopty: voice and appshots removed.
     Shortcuts,
-    // slopty: no General page: its one choice, the key that sends a message, went with the
-    // GUI's sending.
     Archived,
 }
 
 impl SettingsSection {
     /// Sections shown in Settings.
-    pub const ALL: [SettingsSection; 7] = [ // slopty: voice, appshots, permissions and General removed.
+    pub const ALL: [SettingsSection; 7] = [
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Shortcuts,
@@ -650,15 +641,12 @@ fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<Setti
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Chat,
-    // slopty: no pull-request pages.
     Settings(SettingsSection),
 }
 
 /// A view summoned beside a session's terminal as a pane of its own (`docs/decisions/layout.md`,
 /// "No permanent right column"): the session's files, a file of them, its changes, a web page, its
 /// inspector, a remote window or desktop, or a page an agent showed.
-// slopty: no subagent view: a subagent lives in its parent's chat (`docs/decisions/ui.md`,
-// "Subagents live in their parent's chat").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RightSurface {
     /// The session's files, the explorer of its folder.
@@ -666,13 +654,13 @@ pub enum RightSurface {
     File(u64),
     Browser(u64),
     Diff(u64),
-    // slopty: the session's inspector, one per chat, following it (`crate::inspector`).
+    // The session's inspector, one per chat, following it (`crate::inspector`).
     Inspector,
-    Screen(u64), // slopty: a remote window or desktop (`live_surfaces`)
-    Page(u64), // slopty: a page an agent showed (`page_panes`)
+    Screen(u64), // a remote window or desktop (`live_surfaces`)
+    Page(u64), // a page an agent showed (`page_panes`)
 }
 
-// slopty: what a remote window tab's chip wears: the window glyph for a window (its choice's id
+// What a remote window tab's chip wears: the window glyph for a window (its choice's id
 // is `window:<n>`), the monitor for a desktop or before anything is chosen.
 fn screen_chip_glyph(chosen: Option<&str>) -> &'static str {
     match chosen {
@@ -691,7 +679,6 @@ fn workspace_file_title(path: &str) -> SharedString {
 pub enum NavEntry {
     /// A chat route; the id of the selected chat ("" = the new-chat canvas).
     Chat(String),
-    // slopty: no pull-request pages.
     Settings(SettingsSection),
 }
 
@@ -772,7 +759,7 @@ impl NavHistory {
     }
 }
 
-/// slopty: the transcript's fade at the bottom stack: `(inset, band)` for a stack `stack_h` tall
+/// The transcript's fade at the bottom stack: `(inset, band)` for a stack `stack_h` tall
 /// over the transcript whose composer footer reaches `floor` under the pill. Opaque from the
 /// pill's top (the status strip above it is empty air), zero by the pill's bottom, and nothing
 /// under the footer.
@@ -793,7 +780,7 @@ const SIDEBAR_DRAG_SCROLL_FRAME_MS: u64 = 16;
 /// The sidebar footer's profile and settings buttons share one hit target.
 const SIDEBAR_FOOTER_BUTTON_SIZE: f32 = 28.0;
 
-/// slopty: the window's cursor while a drag runs, wherever the pointer is (Zed's
+/// The window's cursor while a drag runs, wherever the pointer is (Zed's
 /// `pane_group.rs`): a resize that outruns its handle keeps its cursor.
 fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
     gpui::canvas(|_, _, _| {}, move |_, _, window, _| window.set_window_cursor_style(style))
@@ -805,7 +792,6 @@ fn drag_cursor(style: gpui::CursorStyle) -> impl IntoElement {
 /// [`gpui::EdgeFade`] scope — per-primitive, so text fades per glyph).
 const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
-// slopty: no Star on GitHub banner.
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -838,7 +824,7 @@ struct SidebarSessionRows {
     rows: Vec<SidebarKeyedRow>,
 }
 
-// slopty: a tab's tooltip is the house chip (`settings::widgets::text_tooltip`).
+// A tab's tooltip is the house chip (`settings::widgets::text_tooltip`).
 /// Invisible drag ghost — resize drags render nothing at the cursor.
 struct DragGhost;
 
@@ -913,7 +899,6 @@ struct ChatRename {
     _blur: Option<Subscription>,
 }
 
-// slopty: no accounts, sync or sign-in.
 
 /// When the shell next has render-only clock pixels to repaint, as of `now`:
 /// every second while the selected chat is Working (the trailer's elapsed
@@ -972,16 +957,12 @@ impl ClockRedraw {
     }
 }
 
-// slopty: Escape over a turn under way stops it on its second press (Amp); the first arms it and
+// Escape over a turn under way stops it on its second press (Amp); the first arms it and
 // the working line says so (`composer::escape_stops`). Anything that takes Escape first (a menu,
 // the find bar) still does.
-// slopty: no accounts, sync or sign-in.
 
-// slopty: no Discard changes (ruled out).
 
-// slopty: no accounts, sync or sign-in.
 
-// slopty: no accounts, sync or sign-in.
 
 /// Sidebar render identity lets transcript/caret frames reuse its GPUI scene.
 /// State and event handlers stay on Shell. Explicit Shell notifications still
@@ -1005,44 +986,41 @@ impl Render for SidebarPane {
     }
 }
 
-// slopty: no self-updater.
 
 #[derive(Debug, Clone)]
 enum PendingExit {
     CloseWindow,
     Quit,
-    // slopty: no accounts, sync or sign-in.
-    // slopty: no self-updater.
 }
 
 pub struct Shell {
     state: Entity<AppState>,
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
-    // slopty: the main column's session terminal and the right pane's inspector of it.
+    // The main column's session terminal and the right pane's inspector of it.
     session_terminal: Entity<TerminalPanel>,
     /// The appearance the window was last given for the ground it shows
     /// (`docs/decisions/layout.md`, "The window wears its ground's appearance").
     window_ground: crate::window_appearance::WindowGround,
-    /// slopty: the session a note's tap last landed on, and when: its terminal wears one accent
+    /// The session a note's tap last landed on, and when: its terminal wears one accent
     /// border fade ([`landing_opacity`]).
     landed: Option<(String, std::time::Instant)>,
     inspector: Entity<crate::inspector::Inspector>,
-    // slopty: the selected session and the terminal it was last seen in, which the selection
+    // The selected session and the terminal it was last seen in, which the selection
     // follows to the session that terminal is next (`follow_session_terminal`).
     followed_terminal: Option<(String, Option<String>)>,
-    // slopty: the New session… picker, while it is up.
+    // The New session… picker, while it is up.
     new_session: Option<new_session::NewSessionPicker>,
-    // slopty: a session just started or resumed, until its terminal shows, and since when.
+    // A session just started or resumed, until its terminal shows, and since when.
     starting: Option<(String, std::time::Instant)>,
-    /// slopty: the redraw that ends "Starting…" once its time is up.
+    /// The redraw that ends "Starting…" once its time is up.
     _starting_redraw: Option<Task<()>>,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
     /// (user request), session-transient. `archived_shown` pages the
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
-    // slopty: how many rows a paged sidebar group shows before "Show more", by its collapse key
+    // How many rows a paged sidebar group shows before "Show more", by its collapse key
     // (`sidebar_status`); a group not named shows its first page.
     pub(super) sidebar_group_shown: std::collections::HashMap<String, usize>,
     /// Ephemeral shut sidebar groups, by collapse key (`sidebar_status`).
@@ -1073,18 +1051,18 @@ pub struct Shell {
     /// The focused pane changed (a switch, a summon, a close) and takes the keyboard on the next
     /// frame, once it is laid out.
     pane_keyboard_pending: bool,
-    /// slopty: the views each session had beside it when the app last ran, until it is shown
+    /// The views each session had beside it when the app last ran, until it is shown
     /// again (`kept_tabs`).
     unrestored_tabs: std::collections::BTreeMap<String, crate::settings::SavedTabs>,
-    // slopty: the views closed last, newest last, each with its session (`closed_tabs`).
+    // The views closed last, newest last, each with its session (`closed_tabs`).
     closed_tabs: Vec<(String, crate::settings::SavedSurface)>,
-    // slopty: the chat archived last and its Undo toast (`chrome_keys`).
+    // The chat archived last and its Undo toast (`chrome_keys`).
     last_archive: Option<(String, u64)>,
-    // slopty: the Open in menu (`open_in`).
+    // The Open in menu (`open_in`).
     open_in: popover::Popup<open_in::OpenInMenu>,
-    // slopty: Claude Code's past sessions (`past_sessions`).
+    // Claude Code's past sessions (`past_sessions`).
     past_sessions: past_sessions::PastSessions,
-    // slopty: the inbox (`inbox`).
+    // The inbox (`inbox`).
     inbox: inbox::Inbox,
     /// Host-owned project Actions cached per (device, space).
     project_actions: crate::project_actions::ProjectActionsController,
@@ -1125,14 +1103,12 @@ pub struct Shell {
     settings_return_route: Route,
     /// Route history behind the titlebar back/forward buttons (§ nav history).
     nav: NavHistory,
-    // slopty: no pull-request pages.
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
-    // slopty: no agent accounts: Slopty never touches a credential.
     harnesses_page: Option<Entity<HarnessesPage>>,
     shortcuts_sub: Option<Subscription>,
     notifications_sub: Option<Subscription>,
@@ -1147,7 +1123,7 @@ pub struct Shell {
     chat_copy_left: bool,
     /// The chat title being edited in place on its row.
     chat_rename: Option<ChatRename>,
-    // slopty: the keyboard of the remove-project dialog; sessions are archived, never deleted.
+    // The keyboard of the remove-project dialog; sessions are archived, never deleted.
     delete_space_focus: crate::surface_chrome::ModalFocus,
     /// Keyboard of the New/Edit section dialog, given back to what had it on close.
     section_focus: crate::surface_chrome::ModalFocus,
@@ -1155,7 +1131,6 @@ pub struct Shell {
     project_action_focus: crate::surface_chrome::ModalFocus,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
     /// RPC task is retained separately so rerenders do not cancel it.
-    // slopty: no Discard changes (ruled out).
     /// Space-row context menu (dropdown rows): (space id, window position).
     space_menu: popover::Popup<(String, Point<Pixels>)>,
     rename_space_dialog: Option<RenameSpaceDialog>,
@@ -1167,13 +1142,13 @@ pub struct Shell {
     /// The New project palette's collapsed-breadcrumbs (`…`) menu.
     project_crumb_menu: popover::Popup<()>,
     command_palette: Option<command_palette::CommandPalette>,
-    /// slopty: the session picker or Go to Directory, while up (`picker`).
+    /// The session picker or Go to Directory, while up (`picker`).
     picker: Option<picker::Picker>,
     /// The focus whose workspace search index was last warmed (see `search_warm`).
     search_warm: Option<search_warm::SearchWarm>,
     /// Per chat, the files opened in editor tabs, most recent first.
     recent_files: std::collections::HashMap<String, std::collections::VecDeque<String>>,
-    // slopty: the changed file the inspector asked for, shown on the next frame (it needs the
+    // The changed file the inspector asked for, shown on the next frame (it needs the
     // window).
     pending_change: Option<String>,
     /// The sidebar's space-filter dropdown.
@@ -1183,14 +1158,14 @@ pub struct Shell {
     project_icons: project_icon::ProjectIcons,
     /// Hovered row whose status is replaced by the archive control.
     chat_status_hover: Option<String>,
-    /// slopty: the time the sidebar's rows say how long ago they moved by: taken when the state
+    /// The time the sidebar's rows say how long ago they moved by: taken when the state
     /// moves and on [`Self::sidebar_clock_tick`], never as a row is built, so a sidebar built
     /// again (from scratch, or for a hover) says what the one shown says.
     sidebar_clock: chrono::DateTime<Utc>,
-    /// slopty: when the list next reads differently of time alone (a row folding into Inactive,
+    /// When the list next reads differently of time alone (a row folding into Inactive,
     /// a session going quiet).
     sidebar_clock_next: std::cell::Cell<Option<chrono::DateTime<Utc>>>,
-    /// slopty: the clock's next tick, at that time.
+    /// The clock's next tick, at that time.
     sidebar_clock_tick: Option<(chrono::DateTime<Utc>, Task<()>)>,
     /// Set by an archive-pill click until the pointer next moves. gpui only
     /// re-evaluates `on_hover` on mouse movement, so the row that slides up
@@ -1203,12 +1178,9 @@ pub struct Shell {
     sidebar_scroll: gpui::ScrollHandle,
     /// `settings.last_space_id` applied once after the first spaces frame.
     space_boot_applied: bool,
-    // slopty: no agent-update island; agents update themselves on their machines.
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
-    // slopty: no self-updater.
-    // slopty: no accounts, sync or sign-in.
     mutate_task: Option<Task<()>>,
     /// Kept for the failed-gate "Retry" action.
     boot: EngineBootConfig,
@@ -1219,16 +1191,15 @@ pub struct Shell {
     settings_base: UiSettings,
     /// The panel key of the chat currently shown ("" = new-chat canvas).
     active_chat: String,
-    /// slopty: the chat whose panes the active one shows (`AppState::panel_owner`), with the
+    /// The chat whose panes the active one shows (`AppState::panel_owner`), with the
     /// chat it was found for: its agent, for a subagent of a call ([`Self::active_owner`]).
     active_owner: Option<(String, String)>,
-    // slopty: appshots removed.
     /// Last rendered sidebar order (key + estimated height) — the FLIP baseline
     /// for the §1.6 resort glide.
     sidebar_prev_order: Vec<(String, f32)>,
-    /// slopty: the sidebar's rows as keyboard stops (`spaces::SidebarKeys`).
+    /// The sidebar's rows as keyboard stops (`spaces::SidebarKeys`).
     sidebar_keys: spaces::SidebarKeys,
-    /// slopty: whether the outlet last drew Settings, and how often it has changed between
+    /// Whether the outlet last drew Settings, and how often it has changed between
     /// Settings and the chats since launch (`route_outlet`).
     route_shown: Option<(bool, u64)>,
     /// Per-key paint offsets of the resort in flight, keyed elements restart on
@@ -1308,7 +1279,7 @@ pub struct Shell {
     activation_sub: Option<Subscription>,
     /// Redraw scheduled for the next clock-driven change (see [`shell_clock_wake`]).
     clock: ClockRedraw,
-    /// slopty: the dispatcher, whose clock the shell's motion reads between frames.
+    /// The dispatcher, whose clock the shell's motion reads between frames.
     executor: gpui::BackgroundExecutor,
     _state_observation: Subscription,
     _inspector_events: Subscription,
@@ -1319,22 +1290,22 @@ pub struct Shell {
 
 impl Shell {
     pub fn new(state: Entity<AppState>, boot: EngineBootConfig, cx: &mut Context<Self>) -> Self {
-        motion::run_on(cx.background_executor().clone()); // slopty: hover flips on the dispatcher's clock
+        motion::run_on(cx.background_executor().clone()); // hover flips on the dispatcher's clock
         let observation = cx.observe(&state, |this: &mut Shell, state, cx| {
-            this.sidebar_clock = crate::clock::utc(cx); // slopty: the list's clock moves with the state
+            this.sidebar_clock = crate::clock::utc(cx); // the list's clock moves with the state
             this.on_state_changed(&state, cx);
-            // slopty: a result arriving in the chat being looked at is seen as it arrives, here
+            // A result arriving in the chat being looked at is seen as it arrives, here
             // where every view watching the state hears it, before the frame that shows it.
             if this.was_window_active {
                 this.mark_open_chat_seen(cx);
             }
             cx.notify();
         });
-        // slopty: a settings file that could not be read was moved aside; say so once.
+        // A settings file that could not be read was moved aside; say so once.
         cx.defer(|cx| {
             settings::announce_set_aside(cx);
         });
-        // slopty: a page a card moves into the pane becomes a tab (M).
+        // A page a card moves into the pane becomes a tab (M).
         cx.observe_global::<crate::page::PagePaneAsk>(Self::on_page_pane_ask).detach();
         // A reopened window reuses AppState, so the engine may already be
         // ready. Only show the boot splash while it is actually connecting.
@@ -1344,12 +1315,11 @@ impl Shell {
         };
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
-        // slopty: voice removed.
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
         });
-        // slopty: the session's terminal in the main column, its inspector in the right pane.
+        // The session's terminal in the main column, its inspector in the right pane.
         let session_terminal = cx.new(|cx| TerminalPanel::new_session(state.clone(), cx));
         // The titlebar row and the column wear the shown terminal's ground.
         let session_terminal_events =
@@ -1361,7 +1331,6 @@ impl Shell {
         let data_dir = boot.data_dir.clone();
         let mut settings = settings::current(cx);
         state.update(cx, |state, cx| state.watch_clock_transitions(cx));
-        // slopty: appshots removed.
         // Bind the customizable shortcuts from the persisted keymap.
         apply_keymap(cx, &settings.keymap);
         // Dev/testing knob: `SLOPTY_OPEN_ROUTE=settings[/<section>]` boots
@@ -1371,7 +1340,6 @@ impl Shell {
         // remembered like any other link to a section.
         let open_route = std::env::var("SLOPTY_OPEN_ROUTE").ok();
         let route = match open_route.as_deref() {
-            // slopty: no pull-request pages.
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(route, settings.settings_section) {
                     Some(section) => {
@@ -1400,7 +1368,6 @@ impl Shell {
         // real auth state (display-only — for styling passes).
         let debug_dialog = std::env::var("SLOPTY_OPEN_DIALOG").ok();
         let debug_gate = match std::env::var("SLOPTY_FORCE_GATE").ok().as_deref() {
-            // slopty: no accounts, sync or sign-in.
             Some("failed") => Some(GatePhase::Failed(
                 "Couldn\u{2019}t reach the Slopty engine on port 27901. Restart Slopty.".into(),
             )),
@@ -1408,7 +1375,6 @@ impl Shell {
         };
         let nav = NavHistory::new(match route {
             Route::Chat => NavEntry::Chat(String::new()),
-            // slopty: no pull-request pages.
             Route::Settings(section) => NavEntry::Settings(section),
         });
         // Parent notifications carry presentation changes (session status,
@@ -1425,7 +1391,6 @@ impl Shell {
             state,
             sidebar_pane,
             transcript,
-            // slopty: voice removed.
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             archived_open: true,
@@ -1478,14 +1443,12 @@ impl Shell {
             settings_restore_pending: false,
             settings_return_route: Route::Chat,
             nav,
-            // slopty: no pull-request pages.
             devices_page: None,
             archived_page: None,
             appearance_page: None,
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
-            // slopty: no agent accounts: Slopty never touches a credential.
             harnesses_page: None,
             shortcuts_sub: None,
             notifications_sub: None,
@@ -1499,7 +1462,6 @@ impl Shell {
             delete_space_focus: crate::surface_chrome::ModalFocus::new(cx),
             section_focus: crate::surface_chrome::ModalFocus::new(cx),
             project_action_focus: crate::surface_chrome::ModalFocus::new(cx),
-            // slopty: no Discard changes (ruled out).
             space_menu: popover::Popup::default(),
             rename_space_dialog: None,
             delete_space_confirm: None,
@@ -1523,8 +1485,6 @@ impl Shell {
             space_boot_applied: false,
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
-            // slopty: no self-updater.
-            // slopty: no accounts, sync or sign-in.
             mutate_task: None,
             boot,
             data_dir,
@@ -1532,7 +1492,6 @@ impl Shell {
             settings,
             active_chat: String::new(),
             active_owner: None,
-            // slopty: appshots removed.
             sidebar_prev_order: Vec::new(),
             sidebar_keys: spaces::SidebarKeys::default(), // slopty
             route_shown: None, // slopty
@@ -1583,11 +1542,10 @@ impl Shell {
         }
     }
 
-    // slopty: appshots removed.
 
     // ---- splash ----
 
-    /// slopty: a session is its terminal: when the terminal the selected session was shown in
+    /// A session is its terminal: when the terminal the selected session was shown in
     /// becomes another session's (an agent started in a plain terminal, `/clear` or `/resume`
     /// in an agent's, the agent left it), the selection follows the terminal. A session chosen
     /// once it ended stays chosen.
@@ -1619,14 +1577,12 @@ impl Shell {
     }
 
     fn on_state_changed(&mut self, state: &Entity<AppState>, cx: &mut Context<Self>) {
-        // slopty: voice removed.
         self.follow_session_terminal(cx);
         self.prune_file_explorers(cx);
         self.sync_search_warm(cx);
         if let Some(notice) = state.update(cx, |state, _| state.take_deep_link_notice()) {
             self.show_notice(crate::toast::ToastKind::Info, notice, cx);
         }
-        // slopty: no accounts, sync or sign-in.
         // Capture knob: the add-space palette needs only the device registry.
         if self.debug_dialog.as_deref() == Some("add-space") && !state.read(cx).devices.is_empty() {
             self.debug_dialog = None;
@@ -1665,7 +1621,6 @@ impl Shell {
                 let filter = self.settings.space_filter.clone().filter(&exists);
                 let target = match filter {
                     Some(filter) => Some(filter),
-                    // slopty: no composer's remembered project before it.
                     None if !state.read(cx).no_project => {
                         self.settings.last_space_id.clone().filter(&exists)
                     }
@@ -1692,13 +1647,13 @@ impl Shell {
         if state.read(cx).spaces_synced
             && let Some(filter) = self.settings.space_filter.clone()
             && state.read(cx).space_row(&filter).is_none()
-            // slopty: not while a machine is out of reach: its projects are missing, not gone.
+            // Not while a machine is out of reach: its projects are missing, not gone.
             && spaces::every_device_reached(state.read(cx), crate::clock::utc(cx))
         {
             self.settings.space_filter = None;
             self.schedule_save(cx);
         }
-        // slopty: heal a machine filter naming a machine no longer known (removed, possibly
+        // Heal a machine filter naming a machine no longer known (removed, possibly
         // elsewhere): every machine again, rather than an empty list. A machine out of reach is
         // still known, so its filter stands (`spaces::Shell::sidebar_filter`).
         if !state.read(cx).devices.is_empty()
@@ -1710,10 +1665,9 @@ impl Shell {
         }
         // Chat switch: the destination's panes show as it left them, at once.
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
-        // slopty: the panes a chat shows are its owner's: a subagent's are its agent's, and one
+        // The panes a chat shows are its owner's: a subagent's are its agent's, and one
         // whose agent's row came only now moves to them.
         let owner = state.read(cx).panel_owner(&selected);
-        // slopty: appshots removed.
         if selected != self.active_chat || owner != self.active_owner() {
             self.suspend_file_images(cx);
             self.active_owner = Some((selected.clone(), owner));
@@ -1771,7 +1725,7 @@ impl Shell {
         if !fit.sidebar {
             0.0
         } else if self.settings.sidebar_collapsed {
-            // slopty: put away, the sidebar leaves its rail of one mark per project
+            // Put away, the sidebar leaves its rail of one mark per project
             // (`sidebar::Shell::render_sidebar_rail`).
             sidebar::SIDEBAR_RAIL_WIDTH
         } else {
@@ -1795,12 +1749,12 @@ impl Shell {
         if self.active_chat.is_empty() {
             crate::state::canvas_panel_key(self.state.read(cx).selected_space.as_deref())
         } else {
-            // slopty: a subagent shows its agent's panes.
+            // A subagent shows its agent's panes.
             self.active_owner().to_owned()
         }
     }
 
-    /// slopty: the chat whose panes the active chat shows: its agent's, for a subagent of a call.
+    /// The chat whose panes the active chat shows: its agent's, for a subagent of a call.
     fn active_owner(&self) -> &str {
         match &self.active_owner {
             Some((chat, owner)) if *chat == self.active_chat => owner,
@@ -1809,7 +1763,7 @@ impl Shell {
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        // slopty: on a phone the sidebar button goes back to Sessions.
+        // On a phone the sidebar button goes back to Sessions.
         if self.compact_back(cx) {
             return;
         }
@@ -1825,14 +1779,14 @@ impl Shell {
         cx.notify();
     }
 
-    /// slopty: what a press in the inspector asks.
+    /// What a press in the inspector asks.
     fn on_inspector_event(
         &mut self,
         _: Entity<crate::inspector::Inspector>,
         event: &crate::inspector::InspectorEvent,
         cx: &mut Context<Self>,
     ) {
-        // slopty: a subagent drills in inside the inspector itself (`inspector.md`, "A long or
+        // A subagent drills in inside the inspector itself (`inspector.md`, "A long or
         // nested run drills in, inside the inspector"): the selection, the terminal and the
         // keyboard stay where they are.
         let crate::inspector::InspectorEvent::OpenChange { path } = event;
@@ -1990,7 +1944,6 @@ impl Shell {
                 .clone()
                 .map(crate::browser::BrowserContext::for_profile)
                 .unwrap_or_default();
-            // slopty: no pull-request pages.
             self.browser_profile = browser_profile;
         }
     }
@@ -2221,7 +2174,7 @@ impl Shell {
     /// as a host file; the first known root that owns the path wins. A chat
     /// root opens the file in that chat's context; a project root and a host
     /// file open by absolute path through the linking chat.
-    // slopty: and Slopty's views' (`live::open_file`).
+    // Slopty's views' links come here too (`live::open_file`).
     pub(crate) fn open_workspace_file_link(
         &mut self,
         chat_id: &str,
@@ -2307,7 +2260,6 @@ impl Shell {
         cx.notify();
     }
 
-    // slopty: no History surface (ruled out).
 
     fn register_diff_surface(
         &mut self,
@@ -2322,11 +2274,9 @@ impl Shell {
                 &changes,
                 window,
                 |this: &mut Self, _, event, window, cx| match event {
-                    // slopty: no History surface (ruled out).
                     ChangesEvent::OpenFile(path) => {
                         this.add_file_surface(path.clone(), window, cx);
                     }
-                    // slopty: no Discard changes (ruled out).
                 },
             );
         self.diffs.insert(id, changes);
@@ -2456,7 +2406,6 @@ impl Shell {
     /// store owns the single debounce task and the only production writer.
     fn schedule_save(&mut self, cx: &mut Context<Self>) {
         self.settings.appearance = crate::appearance::mode(cx);
-        // slopty: no History surface (ruled out).
         self.settings.theme_selection = crate::appearance::themes(cx);
         self.settings.accent = crate::appearance::accent(cx);
         self.settings.surface = crate::appearance::surface(cx);
@@ -2482,8 +2431,8 @@ impl Shell {
 
     // ---- routes / settings ----
 
-    // slopty: the app's first frame rises in as zeron's does; each move between Settings and the
-    // chats after it fades the new page in, with no slide (a section within Settings does not).
+    // The app's first frame rises in; each move between Settings and the chats after it fades the
+    // new page in, with no slide (a section within Settings does not).
     fn route_outlet(&mut self, frame: gpui::Div) -> AnyElement {
         let settings = matches!(self.route, Route::Settings(_));
         let (was, changes) = self.route_shown.unwrap_or((settings, 0));
@@ -2497,13 +2446,13 @@ impl Shell {
         }
     }
 
-    fn set_route(&mut self, route: Route, _cx: &mut Context<Self>) { // slopty: no pull-request pages.
+    fn set_route(&mut self, route: Route, _cx: &mut Context<Self>) {
         self.command_palette = None;
         self.route = route;
     }
 
     /// Close the user menu through the exit animation (no-op when closed).
-    /// slopty: the open chat's unseen result marked seen. Never from a render: a change to
+    /// The open chat's unseen result marked seen. Never from a render: a change to
     /// the state while a frame draws reaches none of the views that watch it.
     fn mark_open_chat_seen(&mut self, cx: &mut Context<Self>) {
         let unseen = self.state.read(cx).selected_chat_row().filter(|chat| chat.unseen()).map(|chat| chat.id.clone());
@@ -2541,7 +2490,7 @@ impl Shell {
         crate::toast::show(cx, kind, message);
     }
 
-    // slopty: the words for the sidebar's notice and the toast; the raw reason behind Copy error.
+    // The words for the sidebar's notice and the toast; the raw reason behind Copy error.
     pub(super) fn show_error_detail(
         &mut self,
         message: impl Into<SharedString>,
@@ -2650,7 +2599,7 @@ impl Shell {
         let exit_entity = entity.clone();
         let mut row = popover::menu_row_nav(theme, open, false, format!("chat-menu-copy-{chat_id}"))
             .id("chat-menu-copy")
-            // slopty: a named menu item that says whether its submenu is open.
+            // A named menu item that says whether its submenu is open.
             .role(gpui::Role::MenuItem)
             .aria_label("Copy")
             .aria_expanded(open)
@@ -2893,7 +2842,7 @@ impl Shell {
         cx.notify();
     }
 
-    // slopty: the first run's way in: Settings → Devices with its Add device dialog open.
+    // The first run's way in: Settings → Devices with its Add device dialog open.
     fn open_add_device(&mut self, cx: &mut Context<Self>) {
         self.open_settings(SettingsSection::Devices, cx);
         let state = self.state.clone();
@@ -2901,7 +2850,7 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device(cx));
     }
 
-    // slopty: the app's menu (Add a machine, Connect to a server): Settings → Devices with Add
+    // The app's menu (Add a machine, Connect to a server): Settings → Devices with Add
     // device open on that choice.
     pub fn open_add_device_on(
         &mut self,
@@ -2914,7 +2863,7 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device_on(choice, cx));
     }
 
-    // slopty: a link that names a server: Add device on "A server", the address filled in.
+    // A link that names a server: Add device on "A server", the address filled in.
     pub fn open_add_device_with_server(&mut self, address: String, cx: &mut Context<Self>) {
         self.open_settings(SettingsSection::Devices, cx);
         let state = self.state.clone();
@@ -2922,7 +2871,7 @@ impl Shell {
         page.update(cx, |page, cx| page.open_add_device_with_server(address, cx));
     }
 
-    // slopty: the app's menu (Settings…): Settings where they were left.
+    // The app's menu (Settings…): Settings where they were left.
     pub fn open_settings_from_menu(&mut self, cx: &mut Context<Self>) {
         self.open_last_settings(cx);
     }
@@ -2950,7 +2899,6 @@ impl Shell {
     /// first: the account menu, a sync prompt, then the routed page's dialog
     /// or login flow. Returns whether one did; only then does Settings stay.
     fn dismiss_settings_escape_surface(&mut self, cx: &mut Context<Self>) -> bool {
-        // slopty: no accounts, sync or sign-in.
         if self.user_menu.is_open() {
             self.close_user_menu(cx);
             return true;
@@ -2961,8 +2909,8 @@ impl Shell {
         let Route::Settings(section) = self.route else {
             return false;
         };
-        // slopty: no agent accounts: Slopty never touches a credential. Appearance's one dialog
-        // (the background adjustment) takes its own Escape; Archived has none.
+        // Appearance's one dialog (the background adjustment) takes its own Escape; Archived has
+        // none.
         section == SettingsSection::Devices
             && self
                 .devices_page
@@ -2970,7 +2918,6 @@ impl Shell {
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx)))
     }
 
-    // slopty: no pull-request pages.
     fn close_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_focus_pending = false;
         self.settings_restore_pending = true;
@@ -3009,16 +2956,15 @@ impl Shell {
         match entry {
             NavEntry::Chat(chat_id) => {
                 self.set_route(Route::Chat, cx);
-                self.focus_composer_on_landing(cx); // slopty: not on touch
+                self.focus_composer_on_landing(cx); // not on touch
                 let target = (!chat_id.is_empty()).then_some(chat_id);
-                // slopty: a chat archived or deleted since it was left is not opened again as
+                // A chat archived or deleted since it was left is not opened again as
                 // an empty page: the way back lands on the new chat's canvas instead.
                 let target = target.filter(|id| self.state.read(cx).chat_listed(id));
                 if self.state.read(cx).selected_chat != target {
                     self.state.update(cx, |s, cx| s.select_chat(target, cx));
                 }
             }
-            // slopty: no pull-request pages.
             NavEntry::Settings(section) => {
                 if !matches!(self.route, Route::Settings(_)) {
                     self.settings_return_route = self.route;
@@ -3060,7 +3006,6 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            // slopty: no agent accounts: Slopty never touches a credential.
             SettingsSection::Appearance => {
                 self.ensure_appearance_page(cx);
                 match &self.appearance_page {
@@ -3127,7 +3072,7 @@ impl Shell {
                     let page = cx.new(|cx| {
                         NotificationsPage::new(self.settings.notifications_enabled, cx)
                     });
-                    // slopty: keep the one switch whenever the page flips it.
+                    // Keep the one switch whenever the page flips it.
                     self.notifications_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &NotificationsEvent, cx| {
@@ -3144,18 +3089,16 @@ impl Shell {
                     None => Empty.into_any_element(),
                 }
             }
-            // slopty: voice removed.
-            SettingsSection::Shortcuts => { // slopty: appshots removed.
+            SettingsSection::Shortcuts => {
                 if self.shortcuts_page.is_none() {
                     let state = self.state.clone();
                     let keymap = self.settings.keymap.clone();
-                    // slopty: appshots removed.
                     let page = cx.new(|cx| ShortcutsPage::new(state, keymap, cx));
                     // Persist + re-apply shortcut preferences whenever the page changes them.
                     self.shortcuts_sub = Some(cx.subscribe(
                         &page,
                         |this: &mut Shell, _, event: &ShortcutsEvent, cx| {
-                            let ShortcutsEvent::KeymapChanged(keymap) = event; // slopty: appshots removed.
+                            let ShortcutsEvent::KeymapChanged(keymap) = event;
                             this.settings.keymap = keymap.clone();
                             apply_keymap(cx, &this.settings.keymap);
                             this.schedule_save(cx);
@@ -3218,7 +3161,7 @@ impl Shell {
         else {
             return;
         };
-        // slopty: TUI-first: no side chats, so a title is edited only on its sidebar row, which
+        // TUI-first: no side chats, so a title is edited only on its sidebar row, which
         // must be on screen first: a field on a hidden row would take keystrokes unseen. The
         // sidebar explains its own refusals.
         if !self.reveal_sidebar_chat(&chat_id, cx) {
@@ -3262,7 +3205,7 @@ impl Shell {
         if !rename.focus_pending {
             return;
         }
-        // slopty: the claim waits for a frame that drew the field, asking again after each frame
+        // The claim waits for a frame that drew the field, asking again after each frame
         // while the row is being revealed. A field a card is still opening onto (a side chat
         // paged out of a closed card) is in no frame yet: focused then, the frame's focus
         // recovery hands the keyboard to the composer without the field ever losing it, so the
@@ -3321,7 +3264,7 @@ impl Shell {
         workspace_profile_key(
             state.workspace_scope,
             state.auth.as_ref(),
-            None, // slopty: Slopty's server is the only backend.
+            None,
         )
     }
 
@@ -3351,7 +3294,7 @@ impl Shell {
             serde_json::json!({ "op": "setChatArchived", "chatId": chat_id, "archived": archived }),
             cx,
         );
-        // slopty: an archive can be undone from its toast, or with ⌘Z while it is up.
+        // An archive can be undone from its toast, or with ⌘Z while it is up.
         if archived {
             self.offer_undo_archive(chat_id, cx);
         }
@@ -3378,11 +3321,10 @@ impl Shell {
     /// recorder intercepts the keys it records before they can dispatch.
     pub(super) fn overlay_owns_keyboard(&self) -> bool {
         self.command_palette.is_some()
-            // slopty: voice removed.
             || self.add_space.is_some()
-            || self.picker_open() // slopty: the session picker or Go to Directory
-            || self.inbox.is_open() // slopty: the inbox
-            || self.new_session.is_some() // slopty: New session…
+            || self.picker_open() // the session picker or Go to Directory
+            || self.inbox.is_open()
+            || self.new_session.is_some()
     }
 
     /// Track held modifiers for sidebar jump hints and the queue's submit hint.
@@ -3392,7 +3334,7 @@ impl Shell {
     }
 
     fn update_jump_hints(&mut self, mods: &gpui::Modifiers, cx: &mut Context<Self>) {
-        let primary = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌘ too
+        let primary = if crate::keys::MOD_IS_COMMAND { // an iPad's ⌘ too
             mods.platform
         } else {
             mods.control
@@ -3412,26 +3354,23 @@ impl Shell {
         }
     }
 
-    // slopty: no Discard changes (ruled out).
 
-    // slopty: no accounts, sync or sign-in.
     // ---- org gate ----
 
-    // slopty: no accounts, sync or sign-in.
     // ---- render pieces ----
 
     fn motion_time(&self) -> std::time::Instant {
-        // slopty: the dispatcher's clock, which a frame's moment is read from and a test moves.
+        // The dispatcher's clock, which a frame's moment is read from and a test moves.
         self.executor.now()
     }
 
-    /// slopty: the moment the shell's motion stands at: the frame's while one is drawn, the
+    /// The moment the shell's motion stands at: the frame's while one is drawn, the
     /// dispatcher's clock between frames.
     pub(super) fn now(&self) -> std::time::Instant {
         self.render_time.unwrap_or_else(|| self.motion_time())
     }
 
-    /// slopty: [`Self::motion_time`] while a frame is drawn: the frame's moment.
+    /// [`Self::motion_time`] while a frame is drawn: the frame's moment.
     fn frame_motion_time(&self, cx: &App) -> std::time::Instant {
         cx.frame_time()
     }
@@ -3647,7 +3586,7 @@ impl Shell {
             .flex()
             .flex_row()
             .items_center()
-            .pt(px(titlebar_top_pad())) // slopty: a finger's presses inside the window
+            .pt(px(titlebar_top_pad())) // a finger's presses inside the window
             .px(px(TITLEBAR_CLUSTER_PAD))
             .children(self.titlebar_spacer(TITLEBAR_CLUSTER_PAD))
             // Left-side Linux captions (GNOME `close:…` layouts): the
@@ -3667,16 +3606,16 @@ impl Shell {
                         !self.settings.sidebar_collapsed,
                         motion::GLYPH_STATE,
                         self.reduced_motion.get(),
-                        cx.frame_time(), // slopty: the frame's moment
+                        cx.frame_time(),
                     ),
                     false,
-                    14.0, // slopty: a 24 control holds a 14 glyph
+                    14.0, // a 24 control holds a 14 glyph
                     ink.text_muted,
                 ),
                 &ink,
                 cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
             )
-            // slopty: what it does now, and its key.
+            // What it does now, and its key.
             .action_hint(
                 if self.settings.sidebar_collapsed { "Show sidebar" } else { "Hide sidebar" },
                 Keys::Action(Box::new(ToggleSidebar)),
@@ -4128,7 +4067,7 @@ impl Shell {
                             .role(gpui::Role::Button)
                             .aria_label("Back")
                             .tab_index(0)
-                            // slopty: the shell's ring, paint only (M8).
+                            // The shell's ring, paint only (M8).
                             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
@@ -4154,7 +4093,6 @@ impl Shell {
                     // carries the titlebar clearance inside the scroll.
                     .flex()
                     .flex_col()
-                    // slopty: voice removed.
                     .child(div().flex_1().min_h_0().child(outlet)),
             )
             .child(
@@ -4177,7 +4115,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let section_icon = |item: SettingsSection| match item {
-            SettingsSection::Devices => icons::LAPTOP, // slopty: as the server menu's Devices
+            SettingsSection::Devices => icons::LAPTOP, // as the server menu's Devices
             SettingsSection::Harnesses => icons::WIDGET,
             SettingsSection::Appearance => icons::TUNING,
             SettingsSection::Files => icons::FOLDER,
@@ -4267,7 +4205,7 @@ impl Shell {
                                             cx.stop_propagation();
                                         },
                                     ))
-                                    // slopty: the shell's ring inside the row, paint only (M8).
+                                    // The shell's ring inside the row, paint only (M8).
                                     .map(|el| crate::surface_chrome::focus_ring_inset(el, &theme))
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -4286,7 +4224,6 @@ impl Shell {
         .into_any_element()
     }
 
-    // slopty: no accounts, sync or sign-in.
 
     /// The changes with the keyboard.
     fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
@@ -4302,11 +4239,10 @@ impl Shell {
         // Modals and context menus sit above the rest of the shell. Preserve
         // their existing behavior: only surfaces that already have a Cancel
         // path close here; the others remain explicit blockers.
-        // slopty: no accounts, sync or sign-in; sessions are archived, never deleted.
         if self.delete_space_confirm.is_some() {
             return true;
         }
-        // slopty: Escape puts an open context menu away, as every system menu does, instead of
+        // Escape puts an open context menu away, as every system menu does, instead of
         // taking the key and leaving the menu up; one still fading out keeps the key.
         if self.chat_menu.is_open() {
             self.close_chat_menu(cx);
@@ -4335,8 +4271,6 @@ impl Shell {
             cx.notify();
             return true;
         }
-        // slopty: no Discard changes (ruled out).
-        // slopty: no self-updater.
         // The folded-breadcrumbs menu floats over the palette; it closes first.
         if self.add_space.is_some() && self.project_crumb_menu.is_open() {
             self.close_project_crumb_menu(cx);
@@ -4368,7 +4302,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // slopty: voice removed.
         if event.keystroke.key == "escape" && self.command_palette.is_some() {
             self.close_command_palette(window, cx);
             cx.stop_propagation();
@@ -4404,7 +4337,7 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
-        // slopty: Esc a view took no use of puts the keyboard back in the session's terminal
+        // Esc a view took no use of puts the keyboard back in the session's terminal
         // (`docs/decisions/layout.md`, "No permanent right column"); the view stays.
         if event.keystroke.key == "escape"
             && modifiers == gpui::Modifiers::default()
@@ -4436,7 +4369,7 @@ impl Shell {
                     .chats
                     .iter()
                     .any(|chat| chat.id == chat_id && chat.parent_chat_id.is_some());
-            // slopty: a row names its key where the key would do the same, on the open chat
+            // A row names its key where the key would do the same, on the open chat
             // and the tab in front (M16).
             let is_open = matches!(self.route, Route::Chat)
                 && self.state.read(cx).selected_chat.as_deref() == Some(chat_id.as_str());
@@ -4467,7 +4400,7 @@ impl Shell {
                 let rename = popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
                     .id("chat-menu-rename")
                     .debug_selector(|| "chat-menu-rename".into())
-                    // slopty: every row of the menu is a named menu item, as the tab rows are.
+                    // Every row of the menu is a named menu item, as the tab rows are.
                     .role(gpui::Role::MenuItem)
                     .aria_label("Rename")
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -4476,7 +4409,6 @@ impl Shell {
                     .child(icon(icons::PEN).size(px(16.0)).text_color(theme.text_muted))
                     .child(SharedString::from("Rename"));
                 let menu = menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_RENAME, rename, cx));
-                // slopty: no Delete: a session's record is its agent's own (archive hides it).
                 if is_side_chat {
                     menu
                 } else {
@@ -4496,7 +4428,7 @@ impl Shell {
                             .child(div().flex_1().child(SharedString::from("Archive")))
                             .children(archive_keys.map(|keys| popover::kbd_hint(&theme, &keys)));
                     let copy = self.render_chat_copy_trigger(&chat_id, copy_open, &theme, cx);
-                    // slopty: the chat's folder in the person's editor (`open_in`).
+                    // The chat's folder in the person's editor (`open_in`).
                     let open_in = (Self::offers_open_in()
                         && !self.open_in_choices(&chat_id, cx).is_empty())
                     .then(|| {
@@ -4525,15 +4457,15 @@ impl Shell {
                 chat_menu_closing,
             ));
         }
-        overlays.extend(self.render_open_in_menu(cx)); // slopty: `open_in`
+        overlays.extend(self.render_open_in_menu(cx));
 
         overlays.extend(self.render_space_overlays(viewport, window, cx));
         if let Some(overlay) = self.render_command_palette(viewport, window, cx) {
             overlays.push(overlay);
         }
-        overlays.extend(self.render_picker(viewport, window, cx)); // slopty: `picker`
+        overlays.extend(self.render_picker(viewport, window, cx));
         overlays.extend(self.render_new_session_picker(viewport, window, cx)); // slopty
-        overlays.extend(self.render_inbox(window, cx)); // slopty: the inbox under the eye
+        overlays.extend(self.render_inbox(window, cx));
         if let Some(overlay) = self.render_add_space_overlay(viewport, window, cx) {
             overlays.push(overlay);
         }
@@ -4541,10 +4473,7 @@ impl Shell {
             overlays.push(overlay);
         }
 
-        // slopty: no Discard changes (ruled out).
 
-        // slopty: no accounts, sync or sign-in.
-        // slopty: no self-updater.
 
         overlays
     }
@@ -4579,7 +4508,7 @@ impl Shell {
         let clear = highlight.opacity(0.0);
         let release_key = fade_key.clone();
         let release_out_key = fade_key.clone();
-        // slopty: a splitter a screen reader names (T3's `role="separator"`).
+        // A splitter a screen reader names (T3's `role="separator"`).
         let name = match kind {
             PaneResizeKind::Sidebar => "Resize sidebar",
         };
@@ -4595,7 +4524,7 @@ impl Shell {
             .flex_none()
             .occlude()
             .cursor_col_resize()
-            // slopty: the resize cursor holds for the whole drag, past the handle and the clamp.
+            // The resize cursor holds for the whole drag, past the handle and the clamp.
             .when(self.pane_resize_dragging == Some(kind), |el| {
                 el.child(drag_cursor(gpui::CursorStyle::ResizeColumn))
             })
@@ -4658,7 +4587,7 @@ impl Shell {
             )
     }
 
-    /// slopty: the main column is the selected session's view: its terminal, full height and
+    /// The main column is the selected session's view: its terminal, full height and
     /// width with nothing over it, and the panes split or summoned beside it
     /// (`docs/decisions/layout.md`, "One session per view, splits on demand"). With no session
     /// selected it offers to start one; with nowhere to work yet, the first step.
@@ -4695,7 +4624,7 @@ impl Shell {
             // Onboarding (first boot / after the destructive wipe): no folders
             // to work in yet — one clear affordance.
             let _ = faint;
-            // slopty: with no device yet there is nowhere for a project: add one first.
+            // With no device yet there is nowhere for a project: add one first.
             let no_devices = step == spaces::FirstStep::AddDevice;
             let action = step.action();
             let (headline, line) = if no_devices {
@@ -4715,7 +4644,7 @@ impl Shell {
                         .flex()
                         .flex_col()
                         .items_center()
-                        // slopty: the glyph of what fills the canvas, as Archived's empty page
+                        // The glyph of what fills the canvas, as Archived's empty page
                         // says its own, where the logo's dots read as the app's spinner.
                         .child(
                             icon(step.glyph())
@@ -4725,13 +4654,13 @@ impl Shell {
                         .child(
                             div()
                                 .id("onboarding-headline")
-                                .role(gpui::Role::Heading) // slopty: read as the canvas's title
+                                .role(gpui::Role::Heading)
                                 .aria_label(headline)
                                 .mt(px(16.0))
                                 .text_size(crate::typography::ui_rems(16.0))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.text)
-                                .child(SharedString::from(headline)), // slopty: devices first.
+                                .child(SharedString::from(headline)),
                         )
                         .child(
                             div()
@@ -4741,13 +4670,13 @@ impl Shell {
                                 .mt(px(6.0))
                                 .text_size(crate::typography::ui_rems(13.0))
                                 .text_color(theme.text_muted.opacity(0.7))
-                                .child(SharedString::from(line)), // slopty: devices first.
+                                .child(SharedString::from(line)),
                         )
                         .child(
                             popover::named_button(
-                                popover::btn_primary(&theme_owned, action) // slopty: devices first.
+                                popover::btn_primary(&theme_owned, action)
                                     .id(if no_devices { "onboarding-add-device" } else { "onboarding-add-space" }),
-                                action, // slopty: named, as the canvas's one action
+                                action, // named, as the canvas's one action
                             )
                                 .mt(px(20.0))
                                 .on_click(cx.listener(move |this, _, _, cx| step.take(this, cx))),
@@ -4783,7 +4712,7 @@ impl Shell {
             .into_any_element()
     }
 
-    /// slopty: a note's tap landed on `chat`: its terminal wears one accent border fade.
+    /// A note's tap landed on `chat`: its terminal wears one accent border fade.
     ///
     /// Ghostty presents the surface a notification lands on so, without its repeating glow
     /// (`docs/decisions/layout.md`, "Attention is an inbox and a jump, never a feed").
@@ -4806,7 +4735,7 @@ impl Shell {
         opacity
     }
 
-    /// slopty: the main column for a session with no terminal: one starting shows that it
+    /// The main column for a session with no terminal: one starting shows that it
     /// starts; one that ended says so and offers to resume it in a new terminal (its record
     /// stays in the inspector).
     fn render_session_ended(&mut self, chat: &str, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
@@ -4884,14 +4813,14 @@ impl Shell {
             .into_any_element()
     }
 
-    /// slopty: whether session `chat` was just started or resumed here and its terminal has
+    /// Whether session `chat` was just started or resumed here and its terminal has
     /// not shown yet; the main column is drawn again as the wait runs out.
     fn session_starting(&self, chat: &str, cx: &App) -> bool {
         let Some((id, since)) = self.starting.as_ref() else { return false };
         id == chat && crate::clock::now(cx).saturating_duration_since(*since) < STARTS_WITHIN
     }
 
-    /// slopty: session `chat` was just started or resumed: its main column says "Starting…"
+    /// Session `chat` was just started or resumed: its main column says "Starting…"
     /// until its terminal shows, for [`STARTS_WITHIN`] at most.
     pub(super) fn mark_starting(&mut self, chat: String, cx: &mut Context<Self>) {
         self.starting = Some((chat, crate::clock::now(cx)));
@@ -4901,7 +4830,7 @@ impl Shell {
         }));
     }
 
-    /// slopty: the main column with no session selected: one quiet offer to start one, with
+    /// The main column with no session selected: one quiet offer to start one, with
     /// its key, and the history to resume from.
     fn render_no_session(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -4956,9 +4885,8 @@ impl Shell {
 
 
 
-    // slopty: no accounts, sync or sign-in.
 
-    fn render_gate_card(&mut self, error: &str, cx: &mut Context<Self>) -> AnyElement { // slopty: no accounts, sync or sign-in.
+    fn render_gate_card(&mut self, error: &str, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         // Backend unreachable: quiet centered copy (slopty Gate `Failed`),
         // plus a Retry affordance (the native engine doesn't self-redial).
@@ -5005,14 +4933,13 @@ impl Shell {
                     // className="animate-in">`): every gate swap replays the
                     // 0.5s entrance instead of mutating one animated element.
                     .child(motion::fade_in(
-                        "gate-card-failed", // slopty: no accounts, sync or sign-in.
+                        "gate-card-failed",
                         div().child(content),
                     )),
             )
             .into_any_element()
     }
 
-    // slopty: no accounts, sync or sign-in.
 }
 
 /// The sign-in gate's faint grid backdrop (slopty styles.css `.bg-grid`):
@@ -5106,21 +5033,21 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
 
 /// A size-6 icon button for the titlebar strip (slopty window-controls.tsx:
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
-// slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
+// The caller names it with `action_hint` (its tooltip, key and accessible name).
 fn window_control_button(
     id: impl Into<SharedString>,
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
-    // slopty: a 24 control holds a 14 glyph (M48).
+    // A 24 control holds a 14 glyph (M48).
     let glyph = icon(icon_path).size(px(14.0)).text_color(theme.text_muted);
     window_control_button_with(id, glyph, theme, on_click)
 }
 
 /// [`window_control_button`] around a caller-drawn glyph (the morphing
 /// sidebar glyph).
-/// slopty: the titlebar row's top padding: [`Theme::TITLEBAR_TOP_PAD`], and on a touch screen
+/// The titlebar row's top padding: [`Theme::TITLEBAR_TOP_PAD`], and on a touch screen
 /// enough more that its 24 pt controls' 44 pt presses start inside the window.
 pub(crate) fn titlebar_top_pad() -> f32 {
     let center = (Theme::TITLEBAR_HEIGHT + Theme::TITLEBAR_TOP_PAD) * 0.5;
@@ -5136,7 +5063,7 @@ fn window_control_button_with(
 ) -> gpui::Stateful<gpui::Div> {
     let id: SharedString = id.into();
     let fade_key = format!("window-control-{id}");
-    // slopty: on a touch screen the control takes presses over a finger's 44 pt, centred on the
+    // On a touch screen the control takes presses over a finger's 44 pt, centred on the
     // 24 it draws, which keeps its wash and glyph (#23).
     let reach = crate::surface_chrome::touch_reach(24.0);
     let group = SharedString::from(format!("window-control-press-{id}"));
@@ -5188,14 +5115,14 @@ fn window_control_button_with(
             on_click(event, window, cx)
         })
         .child(drawn)
-        // slopty: a button for VoiceOver (and the simulator's e2e taps), reached by Tab, pressed
+        // A button for VoiceOver (and the simulator's e2e taps), reached by Tab, pressed
         // with a darker wash, its ring a hairline that never resizes it.
         .role(gpui::Role::Button)
         .tab_index(0)
         .map(|el| crate::surface_chrome::focus_ring_within(el, theme, reach))
 }
 
-// slopty: what a pressed chrome button shows under the pointer (Zed's `active_background`).
+// What a pressed chrome button shows under the pointer (Zed's `active_background`).
 fn theme_pressed() -> gpui::Hsla {
     crate::theme::wash(0.16)
 }
@@ -5312,7 +5239,7 @@ fn linux_caption_button(
 
 /// A size-7 icon button for the main-panel header (slopty __root.tsx:
 /// `grid size-7 place-items-center rounded-md text-muted-foreground`).
-// slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
+// The caller names it with `action_hint` (its tooltip, key and accessible name).
 fn header_icon_button(
     id: &'static str,
     icon_path: &'static str,
@@ -5326,7 +5253,7 @@ fn header_icon_button(
 
 /// [`header_icon_button`] around a caller-drawn glyph (the morphing sidebar
 /// glyph).
-// slopty: `on` washes what it draws for a pane it shows, as an open menu's trigger is.
+// `on` washes what it draws for a pane it shows, as an open menu's trigger is.
 fn header_icon_button_with(
     id: &'static str,
     glyph: impl IntoElement,
@@ -5335,7 +5262,7 @@ fn header_icon_button_with(
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = format!("header-icon-{id}");
-    // slopty: on a touch screen it takes presses over a finger's 44 pt around the 28 it draws.
+    // On a touch screen it takes presses over a finger's 44 pt around the 28 it draws.
     let reach = crate::surface_chrome::touch_reach(28.0);
     let group = SharedString::from(format!("header-icon-press-{id}"));
     let drawn = div()
@@ -5346,7 +5273,7 @@ fn header_icon_button_with(
         .justify_center()
         .rounded(px(6.0))
         // slopty __root.tsx header buttons: `transition-colors`.
-        // slopty: the theme's one table of wash steps, as every icon toggle's
+        // The theme's one table of wash steps, as every icon toggle's
         // (`surface_chrome::icon_button_frame`): a latched button under the pointer still
         // answers, a step past its latch.
         .bg({
@@ -5381,7 +5308,7 @@ fn header_icon_button_with(
             cx.stop_propagation();
             on_click(event, window, cx)
         })
-        // slopty: a button reached by Tab, its ring a hairline that never resizes it, pressed
+        // A button reached by Tab, its ring a hairline that never resizes it, pressed
         // with a darker wash.
         .role(gpui::Role::Button)
         .tab_index(0)
@@ -5391,8 +5318,8 @@ fn header_icon_button_with(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        motion::begin_hover_frame(cx.frame_time()); // slopty: the frame's fades at its moment
-        popover::return_focus(window, cx); // slopty: a closed menu gives the keyboard back
+        motion::begin_hover_frame(cx.frame_time()); // the frame's fades at its moment
+        popover::return_focus(window, cx); // a closed menu gives the keyboard back
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
         // view's notifications.
@@ -5400,7 +5327,7 @@ impl Render for Shell {
         let wake = shell_clock_wake(self.state.read(cx), now);
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
-        // slopty: the panes a chat has beside its terminal are kept across launches.
+        // The panes a chat has beside its terminal are kept across launches.
         self.restore_tabs(window, cx);
         self.keep_tabs(cx);
         let active_files_key = self.panel_key(cx);
@@ -5415,13 +5342,12 @@ impl Render for Shell {
         for files in hidden_explorers {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
-        // slopty: voice removed.
         if let Some(path) = self.pending_change.take() {
             self.show_change_at(&path, window, cx);
         }
         self.focus_rename_chat(window, cx);
 
-        // slopty: the frame's moment, so a frame drawn again stands where this one did.
+        // The frame's moment, so a frame drawn again stands where this one did.
         self.render_time = Some(self.frame_motion_time(cx));
         if self.all_file_edits_flushed(cx)
             && let Some(action) = self.pending_exit.take()
@@ -5438,8 +5364,6 @@ impl Render for Shell {
                                     window.remove_window();
                                 }
                             }
-                            // slopty: no accounts, sync or sign-in.
-                            // slopty: no self-updater.
                             PendingExit::Quit => unreachable!(),
                         })
                         .ok();
@@ -5459,7 +5383,6 @@ impl Render for Shell {
         // The shell frost sits over native desktop blur on macOS and Windows.
         // Content surfaces add their own backgrounds over this shared tint.
         let (frost, text, font) = (theme.glass(), theme.text, theme.font_sans.clone());
-        // slopty: no accounts, sync or sign-in.
         let gate = self
             .debug_gate
             .clone()
@@ -5474,11 +5397,11 @@ impl Render for Shell {
         if !matches!(gate, GatePhase::Ready)
             || matches!(self.route, Route::Settings(_))
             || self.sidebar_target() <= 0.0
-            || self.settings.sidebar_collapsed // slopty: the rail has no rows
+            || self.settings.sidebar_collapsed // the rail has no rows
         {
             self.dismiss_session_card(cx);
         }
-        // slopty: a page draws while its pane is laid out: in the shown session's view, through
+        // A page draws while its pane is laid out: in the shown session's view, through
         // a zoom only the pane zoomed, and on a phone only the page in front.
         let laid_views = self.laid_views(matches!(gate, GatePhase::Ready), cx);
         // Native clipping follows the GPUI layout. Drags only transfer pointer ownership; the
@@ -5527,7 +5450,7 @@ impl Render for Shell {
             self.button_layout_sub =
                 Some(cx.observe_button_layout_changed(window, |_, _, cx| cx.notify()));
         }
-        agent_ui::serve(window, cx); // slopty: this window takes agents' asks (`agent_ui`)
+        agent_ui::serve(window, cx); // this window takes agents' asks (`agent_ui`)
 
         if self.activation_sub.is_none() {
             self.activation_sub = Some(cx.observe_window_activation(
@@ -5536,8 +5459,6 @@ impl Render for Shell {
                     motion::window_activation_changed(window.is_window_active(), cx);
                     // The titlebar's title dims while the window is not the key one.
                     cx.notify();
-                    // slopty: no self-updater.
-                    // slopty: voice removed.
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
                         this.set_jump_hints(false, cx);
@@ -5599,7 +5520,7 @@ impl Render for Shell {
             })
             .text_color(text)
             .font_family(font)
-            // slopty: every text under the window draws a prompt's symbols (`symbol_fallbacks`).
+            // Every text under the window draws a prompt's symbols (`symbol_fallbacks`).
             .map(|mut el| {
                 el.text_style().font_fallbacks = Some(crate::typography::symbol_fallbacks());
                 el
@@ -5634,7 +5555,6 @@ impl Render for Shell {
                     this.toggle_sidebar(cx)
                 }
             }))
-            // slopty: no pull-request pages.
             // New session works from anywhere — `open_new_session` routes back
             // to chat itself, so Settings is not a dead spot.
             .on_action(cx.listener(|this, _: &NewSession, _, cx| this.open_new_session(None, cx)))
@@ -5647,7 +5567,7 @@ impl Render for Shell {
             .on_action(cx.listener(|this, _: &PrevSession, _, cx| {
                 this.cycle_navigation(false, cx)
             }))
-            // slopty: each view's key summons it beside the session, and again puts the keyboard
+            // Each view's key summons it beside the session, and again puts the keyboard
             // back in the terminal (`docs/decisions/layout.md`, "No permanent right column").
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
@@ -5674,7 +5594,7 @@ impl Render for Shell {
             // this matched binding beats its key handler to the dispatch —
             // forward the slot instead of eating it.
             .on_action(cx.listener(|this, jump: &JumpSession, _, cx| {
-                // slopty: the session picker marks its first nine with the same keys.
+                // The session picker marks its first nine with the same keys.
                 if this.picker_open() {
                     this.pick_digit(jump.0, cx);
                 } else if !this.overlay_owns_keyboard() {
@@ -5697,12 +5617,11 @@ impl Render for Shell {
                     this.open_add_space(cx);
                 }
             }));
-        let root = self.chrome_actions(root, cx); // slopty: `chrome_keys`
-        let root = self.picker_actions(root, cx); // slopty: `picker`
+        let root = self.chrome_actions(root, cx);
+        let root = self.picker_actions(root, cx);
 
         // The ground the window shows, a session's, for the window to wear its appearance.
         let mut shown_ground = None;
-        // slopty: no accounts, sync or sign-in.
         let root = match &gate {
             GatePhase::Ready => 'ready: {
                 // Focus is a sync signal: on the rising edge of window
@@ -5711,17 +5630,17 @@ impl Render for Shell {
                 // nothing delivered; 2026-08-04 incident) then heals within
                 // seconds of the user looking at the app rather than waiting
                 // out the background probe cadence.
-                // slopty: whether the person looks, as the OS says or the e2e socket holds.
+                // Whether the person looks, as the OS says or the e2e socket holds.
                 let window_active = crate::presence::looking(window, cx);
                 if window_active && !self.was_window_active {
                     self.state.update(cx, |s, cx| s.probe_sync(cx));
                 }
                 if window_active != self.was_window_active {
-                    // slopty: the invariants' watch reads whether anybody looks.
+                    // The invariants' watch reads whether anybody looks.
                     self.state.update(cx, |s, _| s.window_active = window_active);
                 }
                 self.was_window_active = window_active;
-                // slopty: what the person looks at, which the app's notes keep quiet for
+                // What the person looks at, which the app's notes keep quiet for
                 // (`presence::OnScreen`).
                 let on_screen = self.state.read(cx).selected_chat.clone();
                 crate::presence::show(on_screen.filter(|_| window_active), cx);
@@ -5729,7 +5648,7 @@ impl Render for Shell {
                 // badge "completed" until you leave and return — mark it seen
                 // live while the window is active (idempotent guard inside;
                 // one extra frame settles it).
-                // slopty: marked after this frame, never while it draws: a change to the state
+                // Marked after this frame, never while it draws: a change to the state
                 // while a frame draws reaches none of the views watching it (the sidebar went
                 // on drawing "Done" from its last build); a result arriving while the window
                 // is active is marked as it arrives (`Shell::new`'s state observer), so this
@@ -5744,7 +5663,6 @@ impl Render for Shell {
                 // for the return trip.
                 if let Route::Settings(section) = self.route {
                     let settings_page = self.render_settings_page(section, window, cx);
-                    // slopty: voice removed.
                     let overlays = self.render_overlays(window.viewport_size(), window, cx);
                     let border_color = Theme::of(cx).border;
                     let sidebar_tone =
@@ -5763,20 +5681,19 @@ impl Render for Shell {
                         .size_full()
                         .relative()
                         .child(settings_page)
-                        // slopty: voice removed.
                         .child(drag)
                         .children(overlays);
                     let frame = self.compact_frame(page, false, window, cx);
                     break 'ready root
                         .child(sidebar_tone)
-                        // slopty: clear of a phone's or tablet's edges.
+                        // Clear of a phone's or tablet's edges.
                         .child(self.route_outlet(frame));
                 }
-                // slopty: the phone's Sessions page in place of the columns.
+                // A phone shows its Sessions page rather than the columns.
                 if let Some(page) = self.render_compact_sessions(window, cx) {
                     break 'ready root.child(page);
                 }
-                // slopty: a phone's page for a view summoned beside the session, over it.
+                // A phone's page for a view summoned beside the session, over it.
                 if let Some(page) = self.render_compact_side(window, cx) {
                     break 'ready root.child(page);
                 }
@@ -5784,7 +5701,7 @@ impl Render for Shell {
                 // A collapsed or fit-hidden sidebar has no seam: the window's
                 // own left edge sits there, and a press must resize the window
                 // rather than drag the sidebar open.
-                // slopty: the rail is no seam to drag.
+                // The rail is no seam to drag.
                 let sidebar_handle = (!self.settings.sidebar_collapsed && self.sidebar_now() > 0.5).then(|| {
                     self.resize_handle(
                         "sidebar-resize",
@@ -5794,7 +5711,7 @@ impl Render for Shell {
                         cx,
                     )
                 });
-                // slopty: the session's view: its terminal and every pane split or summoned
+                // The session's view: its terminal and every pane split or summoned
                 // beside it (`pane_frame`).
                 let main = self.render_main(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
@@ -5823,8 +5740,8 @@ impl Render for Shell {
                             .map(|handle| handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))),
                     );
                 let title_bar = self.render_session_title_bar(window, cx);
-                let compact_nav = self.render_compact_nav_bar(cx); // slopty: the phone's
-                // slopty: a phone's inspector, a sheet over the session.
+                let compact_nav = self.render_compact_nav_bar(cx);
+                // A phone's inspector, a sheet over the session.
                 let compact_inspector = self.render_compact_inspector(window, cx);
                 // Sidebar tone: a slightly lighter column behind the sidebar.
                 // Its width rides the same tween as the sidebar, so the tone
@@ -5848,7 +5765,7 @@ impl Render for Shell {
                             .child(sidebar_seam)
                             .child(card),
                     )
-                    // slopty: a phone's navigation bar stands in for the titlebar, its title
+                    // A phone's navigation bar stands in for the titlebar, its title
                     // and its sidebar and history cluster.
                     .when(compact_nav.is_none(), |el| {
                         el.child(
@@ -5857,11 +5774,9 @@ impl Render for Shell {
                                 .top_0()
                                 .left_0()
                                 .right_0()
-                                // slopty: voice removed.
                                 .child(title_bar),
                         )
                     })
-                    // slopty: voice removed.
                     .child(match compact_nav {
                         Some(bar) => div()
                             .absolute()
@@ -5882,18 +5797,18 @@ impl Render for Shell {
                 shown_ground = session.then(|| self.shown_ground(cx));
                 let frame = self.compact_frame(page, session, window, cx);
                 root.child(sidebar_tone)
-                    // slopty: clear of a phone's or tablet's edges.
+                    // Clear of a phone's or tablet's edges.
                     .child(self.route_outlet(frame))
             }
             GatePhase::Loading => root, // splash overlay covers boot
-            GatePhase::Failed(error) => { // slopty: no accounts, sync or sign-in.
+            GatePhase::Failed(error) => {
                 let card = self.render_gate_card(error, cx);
                 root.child(card)
             }
         };
         self.window_ground.follow(shown_ground, window, cx);
         // Toasts float over every phase and route.
-        // slopty: never over a session's terminal (`toast_place`).
+        // Never over a session's terminal (`toast_place`).
         let place = self.toast_place(window, cx);
         let root = root.children(crate::toast::render_toaster(place, window, cx));
 
@@ -5901,7 +5816,7 @@ impl Render for Shell {
         // scheduling `with_animation` would have requested). Hover color fades
         // ride the same clock; their once-per-frame tick lives here (this is
         // the window's root render — it runs exactly once per frame).
-        // slopty: the sidebar is a cached view, drawn from its last frame when only the shell is
+        // The sidebar is a cached view, drawn from its last frame when only the shell is
         // drawn again: its hovered row reads no fade then, and the tick would drop the hover of
         // the row the pointer rests on, so the next sidebar frame painted it unlit under the
         // pointer while the frame shown kept its wash. The shell holds that row's hover read.
@@ -5932,7 +5847,7 @@ impl Render for Shell {
         // the native `Drag` control area, on Linux the explicit
         // `start_window_move` strip (the control-area hit-test is inert
         // there); macOS drags gate windows natively.
-        let root = if matches!(gate, GatePhase::Ready) // slopty: no accounts, sync or sign-in.
+        let root = if matches!(gate, GatePhase::Ready)
             || cfg!(target_os = "macos")
         {
             root
@@ -5998,9 +5913,9 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             parent_chat_id: None,
-            subagent: false, // slopty: subagents
+            subagent: false,
             in_parent: false,
-            draft: None, // slopty: new field.
+            draft: None,
         }
     }
 
@@ -6172,8 +6087,8 @@ mod tests {
             started_at: Some(updated_at),
             updated_at,
             running_subagents: 0,
-            status_since: None, // slopty: new field.
-            waiting_on: None, // slopty: new field.
+            status_since: None,
+            waiting_on: None,
         }
     }
 
@@ -6286,7 +6201,6 @@ mod tests {
         assert!(probe.read_with(cx, |probe, _| probe.clock.task.is_none()));
     }
 
-    // slopty: no accounts, sync or sign-in.
 
     #[test]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
@@ -6294,18 +6208,12 @@ mod tests {
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
     }
 
-    // slopty: no accounts, sync or sign-in.
 
-    // slopty: `signed_out_synced_runtime_stops_and_reboots_local` is cut with the embedded
-    // engine it boots.
 
-    // slopty: the engine crate is not taken.
 
-    // slopty: no accounts, sync or sign-in.
 
-    // slopty: no accounts, sync or sign-in.
 
-    // slopty: a remote window's chip matches its picker row's glyph.
+    // A remote window's chip matches its picker row's glyph.
     #[test]
     fn a_remote_window_chip_wears_its_kind() {
         assert_eq!(screen_chip_glyph(Some("window:42")), icons::WINDOW_RESTORE);
@@ -6454,7 +6362,6 @@ mod tests {
         assert_eq!(nav.back(), Some(chat("a")));
     }
 
-    // slopty: no pull-request pages.
     #[test]
     fn sidebar_disclosure_motion_lands_exactly_on_its_target() {
         let now = std::time::Instant::now();
@@ -6475,14 +6382,12 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
         let boot = EngineBootConfig {
             data_dir: dir.path().into(),
-            // slopty: Slopty's server is the only backend.
             default_harness: slopty_view_proto::HarnessId::MOCK,
         };
         for (connection, expected) in [
@@ -6507,14 +6412,12 @@ mod exit_regressions {
         }
     }
 
-    // slopty: appshots removed.
 
     #[gpui::test]
     fn pane_geometry_uses_one_animation_time_per_frame(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -6525,7 +6428,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -6554,7 +6456,7 @@ mod exit_regressions {
                 assert!(width > 0. && width < 520.);
                 assert_eq!(shell.eval_tween(tween, 0.), width);
                 shell.settings.sidebar_collapsed = true;
-                // slopty: put away, the sidebar keeps its rail, so its closing tween ends there.
+                // Put away, the sidebar keeps its rail, so its closing tween ends there.
                 let closing = tween.map(|tween| WidthTween {
                     to: sidebar::SIDEBAR_RAIL_WIDTH,
                     ..tween
@@ -6581,7 +6483,6 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -6590,7 +6491,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -6629,7 +6529,6 @@ mod exit_regressions {
                         settings.pause_animations_in_background = pause_in_background;
                         settings.window_geometry = geometry;
                         settings.open_web_links_in_slopty = open_links_in_slopty;
-                        // slopty: no pull-request pages.
                         settings.terminal_font_family = terminal_family.clone();
                         settings.terminal_font_size = terminal_size;
                         settings.code_font_family = code_family.clone();
@@ -6643,7 +6542,6 @@ mod exit_regressions {
                         shell.schedule_save(cx);
                         let current = settings::current(cx);
                         assert_eq!(current.pause_animations_in_background, pause_in_background);
-                        // slopty: no pull-request pages.
                         assert_eq!(current.window_geometry, geometry);
                         assert_eq!(current.open_web_links_in_slopty, open_links_in_slopty);
                         assert_eq!(current.terminal_font_family, terminal_family);
@@ -6654,7 +6552,6 @@ mod exit_regressions {
                     }
                     settings::flush(cx);
                     let loaded = settings::UiSettings::load(dir.path());
-                    // slopty: no pull-request pages.
                     assert_eq!(loaded.window_geometry, geometry);
                     assert_eq!(loaded.pause_animations_in_background, pause_in_background);
                     assert_eq!(loaded.open_web_links_in_slopty, open_links_in_slopty);
@@ -6678,7 +6575,6 @@ mod exit_regressions {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -6687,7 +6583,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -6724,7 +6619,6 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -6735,7 +6629,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -6764,7 +6657,6 @@ mod exit_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -6775,7 +6667,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -6786,7 +6677,6 @@ mod exit_regressions {
                 // Voice, transcript and diff controls save straight to the
                 // store. None of them is known to the Shell.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
-                    // slopty: voice and dictation removed; no compact mode or fitted fences.
                     settings.diff_split = true;
                     settings.diff_wrap = true;
                 });
@@ -6802,12 +6692,12 @@ mod exit_regressions {
                 // An outside change to a field the Shell also holds still wins
                 // once the Shell has nothing newer of its own.
                 settings::update(SavePolicy::Immediate, cx, |settings| {
-                    settings.diff_split = false; // slopty: voice, dictation and compact mode removed.
+                    settings.diff_split = false;
                     settings.sidebar_width = 320.0;
                 });
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
-                assert!(!saved.diff_split); // slopty: voice, dictation and compact mode removed.
+                assert!(!saved.diff_split);
                 assert_eq!(saved.sidebar_width, 320.0);
                 assert_eq!(shell.settings.sidebar_width, 320.0);
             })
@@ -6842,7 +6732,6 @@ mod exit_regressions {
                     state,
                     EngineBootConfig {
                         data_dir: dir.path().into(),
-                        // slopty: Slopty's server is the only backend.
                         default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
@@ -6916,7 +6805,7 @@ mod exit_regressions {
         .unwrap();
     }
 
-    /// slopty: landing on a session (opening it, the way back) gives its terminal the keyboard
+    /// Landing on a session (opening it, the way back) gives its terminal the keyboard
     /// once; a settings visit does not, and nothing reclaims it after a click away.
     #[gpui::test]
     fn session_navigation_focuses_the_terminal_once(cx: &mut TestAppContext) {
@@ -6972,7 +6861,7 @@ mod exit_regressions {
         }
     }
 
-    /// slopty: New session opens its picker on the project asked for, else the open session's.
+    /// New session opens its picker on the project asked for, else the open session's.
     #[gpui::test]
     fn new_session_opens_its_picker_on_the_project(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -7038,7 +6927,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7147,7 +7035,6 @@ mod exit_regressions {
         std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
         std::fs::write(&outside, "# Informe\n").unwrap();
         cx.update(|cx| {
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -7159,7 +7046,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7274,7 +7160,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7367,7 +7252,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7383,12 +7267,10 @@ mod exit_regressions {
                 // Selecting the identity happens before navigation, without requiring a render.
                 shell.add_browser_surface(None, window, cx);
                 let original = shell.browser_profile.clone().unwrap();
-                // slopty: no pull-request pages.
                 shell.active_chat = "another-chat".into();
                 shell.add_browser_surface(None, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
                 assert_eq!(shell.browser_profile.as_ref(), Some(&original));
-                // slopty: no pull-request pages.
                 shell.state.update(cx, |state, _| {
                     state.local_device_id = Some("device-b".into())
                 });
@@ -7396,21 +7278,18 @@ mod exit_regressions {
                 assert!(shell.browsers.is_empty());
                 assert!(shell.browser_subs.is_empty());
                 assert_ne!(shell.browser_profile.as_ref(), Some(&original));
-                // slopty: no pull-request pages.
                 shell.state.update(cx, |state, _| {
                     state.local_device_id = Some("device-a".into())
                 });
                 shell.sync_browser_profile(cx);
                 assert_eq!(shell.browser_profile.as_ref(), Some(&original));
                 shell.add_browser_surface(None, window, cx);
-                // slopty: no pull-request pages.
                 shell
                     .state
                     .update(cx, |state, _| state.workspace_scope = None);
                 shell.sync_browser_profile(cx);
                 assert!(shell.browser_profile.is_none());
                 assert!(shell.browsers.is_empty());
-                // slopty: no pull-request pages.
             })
             .unwrap();
     }
@@ -7432,7 +7311,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7492,7 +7370,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7532,7 +7409,6 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7578,8 +7454,6 @@ mod exit_regressions {
             window
                 .update(cx, |shell, _, cx| {
                     assert!(matches!(shell.pending_exit, Some(PendingExit::CloseWindow)));
-                    // slopty: no accounts, sync or sign-in.
-                    // slopty: no self-updater.
                     shell.cancel_file_close(RightSurface::File(0), cx);
                     assert!(shell.pending_exit.is_none());
                 })
@@ -7588,7 +7462,7 @@ mod exit_regressions {
     }
 }
 
-/// slopty: a note's landing: one 0.4 s accent border fade on its session's terminal.
+/// A note's landing: one 0.4 s accent border fade on its session's terminal.
 const LANDING: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE_OUT);
 
 /// The landing border's opacity `elapsed` after the tap: full at once, faded out by
@@ -7602,7 +7476,7 @@ fn landing_opacity(elapsed: Duration) -> Option<f32> {
 mod landing_tests {
     use std::time::Duration;
 
-    /// slopty: the landing border is full at the tap, fades, and is gone by 0.4 s.
+    /// The landing border is full at the tap, fades, and is gone by 0.4 s.
     #[test]
     fn the_landing_border_fades_once_in_four_tenths_of_a_second() {
         assert_eq!(super::landing_opacity(Duration::ZERO), Some(1.0));
@@ -7783,7 +7657,6 @@ mod shortcut_focus_regressions {
     }
 }
 
-// slopty: appshots removed.
 
 #[cfg(test)]
 mod settings_modal_regressions {
@@ -7859,7 +7732,6 @@ mod settings_modal_regressions {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(settings::UiSettings::default(), dir.path(), cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -7870,7 +7742,6 @@ mod settings_modal_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -7895,7 +7766,6 @@ mod settings_modal_regressions {
                 assert_eq!(shell.route, Route::Chat);
                 assert_eq!(shell.nav.current().clone(), history);
                 assert!(shell.settings_restore_pending);
-                // slopty: no pull-request pages.
             })
             .unwrap();
     }
@@ -7907,7 +7777,6 @@ mod settings_modal_regressions {
     ) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
-            // slopty: no History surface (ruled out).
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
@@ -7920,7 +7789,6 @@ mod settings_modal_regressions {
             state,
             EngineBootConfig {
                 data_dir: dir.into(),
-                // slopty: Slopty's server is the only backend.
                 default_harness: slopty_view_proto::HarnessId::MOCK,
             },
             cx,
@@ -7946,7 +7814,6 @@ mod settings_modal_regressions {
             ("settings/providers", SettingsSection::Harnesses),
             ("settings/harnesses", SettingsSection::Harnesses),
             ("settings/files", SettingsSection::Files),
-            // slopty: voice and appshots removed.
             ("settings/archived", SettingsSection::Archived),
         ] {
             assert_eq!(
@@ -8013,7 +7880,7 @@ mod settings_modal_regressions {
             press(&keymap.prev_session),
             (Route::Chat, Some("newer".into()))
         );
-        // slopty: ⌘N opens the New session picker over the session on screen.
+        // ⌘N opens the New session picker over the session on screen.
         assert_eq!(press(&keymap.new_session), (Route::Chat, Some("newer".into())));
         assert!(window.read_with(cx, |shell, _| shell.new_session.is_some()).unwrap());
     }
@@ -8025,7 +7892,7 @@ mod settings_modal_regressions {
     fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        // slopty: the keymap bound as the app binds it at start.
+        // The keymap bound as the app binds it at start.
         cx.update(|cx| apply_keymap(cx, &KeymapConfig::default()));
         let window = cx.add_window(|_, cx| {
             let shell = test_shell(dir.path(), cx);
@@ -8180,14 +8047,12 @@ mod settings_modal_regressions {
                 shell.toggle_settings(cx);
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Appearance));
                 shell.close_settings(cx);
-                // slopty: appshots removed.
             })
             .unwrap();
     }
 
-    // slopty: voice removed.
 
-    // slopty: the first run, with no device to put a project on, lands on Devices with its Add
+    // The first run, with no device to put a project on, lands on Devices with its Add
     // device dialog open.
     #[gpui::test]
     fn the_first_run_without_a_device_opens_add_device(cx: &mut TestAppContext) {
@@ -8226,7 +8091,7 @@ mod settings_modal_regressions {
 
         // The Add device dialog closes before Settings does.
         let devices = shell.read_with(cx, |shell, _| shell.devices_page.clone().unwrap());
-        devices.update(cx, |page, cx| page.open_add_device(cx)); // slopty: Add device, no Rename.
+        devices.update(cx, |page, cx| page.open_add_device(cx));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_keystrokes("escape");
@@ -8263,4 +8128,3 @@ mod settings_modal_regressions {
     }
 }
 
-// slopty: no pull-request pages.

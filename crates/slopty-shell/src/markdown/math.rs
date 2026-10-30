@@ -59,7 +59,7 @@ const NBSP: char = '\u{00A0}';
 /// grows the formula, not the gap around it.
 const DISPLAY_PAD_Y: f32 = 6.0;
 
-// slopty: formulas set in one look, the prose's (the Amp study's P8): always typeset, in Fira
+// Formulas set in one look, the prose's (the Amp study's P8): always typeset, in Fira
 // Math beside the sans body, at the size of the text around them. Source slopty_math can't
 // render shows as code: inline code for `$tex$`, a `math` code block for display math.
 /// The face every formula is set in.
@@ -77,7 +77,7 @@ pub struct MathSlot {
     pub formula: Arc<Formula>,
     pub display: bool,
     pub scale: f32,
-    /// slopty: its TeX, what its math node reads to assistive technologies.
+    /// Its TeX, what its math node reads to assistive technologies.
     pub tex: SharedString,
 }
 
@@ -450,7 +450,7 @@ pub(crate) fn display_flat(
             formula,
             display: true,
             scale,
-            tex: tex.to_owned().into(), // slopty: its math node's label
+            tex: tex.to_owned().into(),
         }],
     })
 }
@@ -716,7 +716,7 @@ impl gpui::IntoElement for MathGlyphs {
 /// One formula placed for paint: its baseline origin, font size and color.
 type Placed = (Arc<Formula>, Point<Pixels>, Pixels, Hsla);
 
-/// slopty: a formula's math node, labelled with its TeX and laid over what it paints: its
+/// A formula's math node, labelled with its TeX and laid over what it paints: its
 /// glyphs are paint, which assistive technologies cannot read.
 fn math_node(
     id: SharedString,
@@ -745,7 +745,7 @@ fn math_node(
 
 impl Element for MathGlyphs {
     type RequestLayoutState = ();
-    type PrepaintState = (Vec<Placed>, Vec<AnyElement>); // slopty: and their math nodes
+    type PrepaintState = (Vec<Placed>, Vec<AnyElement>);
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone().into())
@@ -775,7 +775,7 @@ impl Element for MathGlyphs {
         cx: &mut App,
     ) -> (Vec<Placed>, Vec<AnyElement>) {
         self.child.prepaint(window, cx);
-        let mut nodes = Vec::with_capacity(self.slots.len()); // slopty: math nodes
+        let mut nodes = Vec::with_capacity(self.slots.len());
         let font_size = window.text_style().font_size.to_pixels(window.rem_size());
         let line_height = self.layout.line_height();
         let mut placed = Vec::with_capacity(self.slots.len());
@@ -831,7 +831,7 @@ impl Element for MathGlyphs {
             };
             let x = rect.origin.x + px(slack - scale * span.start);
             placed.push((formula.clone(), point(x, baseline), math_size, *color));
-            // slopty: its math node, over what it paints.
+            // Its math node, over what it paints.
             let id = SharedString::from(format!("{}-node-{}", self.id, slot.range.start));
             if let Some(laid) = placed.last() {
                 nodes.push(math_node(id, slot, laid, window, cx));
@@ -855,7 +855,7 @@ impl Element for MathGlyphs {
             paint_formula(formula, *origin, *font_size, *color, window, cx);
         }
         for node in nodes {
-            node.paint(window, cx); // slopty: math nodes
+            node.paint(window, cx);
         }
     }
 }

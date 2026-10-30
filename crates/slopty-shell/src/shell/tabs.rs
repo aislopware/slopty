@@ -42,13 +42,11 @@ impl Shell {
     }
 
     fn navigation_overlay_open(&self) -> bool {
-        self.overlay_owns_keyboard() // slopty: no accounts, sync or sign-in.
+        self.overlay_owns_keyboard()
             || self.delete_space_confirm.is_some()
             || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
-            // slopty: no Discard changes (ruled out).
             || self.chat_menu.get().is_some()
-            // slopty: no pull-request pages.
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
@@ -56,19 +54,19 @@ impl Shell {
             || self.pending_exit.is_some()
     }
 
-    /// slopty: navigation gives the session's terminal the keyboard once it renders.
+    /// Navigation gives the session's terminal the keyboard once it renders.
     pub(super) fn focus_composer(&mut self, cx: &mut Context<Self>) {
         self.session_terminal.update(cx, |panel, cx| panel.request_focus(cx));
     }
 
-    /// slopty: the session's terminal takes the keyboard now (Esc from a view, a pane closing),
+    /// The session's terminal takes the keyboard now (Esc from a view, a pane closing),
     /// and keeps it once its view renders.
     pub(super) fn focus_session_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.session_terminal.read(cx).focus_handle(), cx);
         self.focus_composer(cx);
     }
 
-    /// slopty: landing on a session (opening it, the boot's landing, back and forward) gives
+    /// Landing on a session (opening it, the boot's landing, back and forward) gives
     /// its terminal the keyboard, but not on a touch screen, where it would raise the software
     /// keyboard over the session: there it comes when the person taps it
     /// ([`super::touch_screen`]).
@@ -103,7 +101,7 @@ impl Shell {
     /// Boot landing: the most recently active visible chat once the first
     /// chats frame has synced (manual selection wins; no chats → the
     /// new-session canvas shows).
-    // slopty: once, at the first synced frame, chat or no chat: a chat arriving later (from the
+    // Once, at the first synced frame, chat or no chat: a chat arriving later (from the
     // CLI or another device) never opens by itself.
     pub(super) fn boot_select_chat(&mut self, cx: &mut Context<Self>) {
         let first = {
@@ -119,7 +117,7 @@ impl Shell {
         };
         self.state.update(cx, |s, _| s.auto_selected = true);
         if let Some(first) = first {
-            self.focus_composer_on_landing(cx); // slopty: not on touch
+            self.focus_composer_on_landing(cx); // not on touch
             self.state
                 .update(cx, |s, cx| s.select_chat(Some(first), cx));
         }
@@ -128,16 +126,15 @@ impl Shell {
     /// Open a session from the sidebar: select it, the main area follows.
     pub(crate) fn open_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
         self.command_palette = None;
-        // slopty: voice removed.
         self.set_route(Route::Chat, cx);
-        self.focus_composer_on_landing(cx); // slopty: not on touch
+        self.focus_composer_on_landing(cx); // not on touch
         self.nav.push(NavEntry::Chat(chat_id.clone()));
         self.state
             .update(cx, |s, cx| s.select_chat(Some(chat_id), cx));
         cx.notify();
     }
 
-    /// slopty: `+` in the titlebar, the sidebar's and ⌘N: New session…, which starts an agent's
+    /// `+` in the titlebar, the sidebar's and ⌘N: New session…, which starts an agent's
     /// TUI or a terminal in a project at once (`new_session`). `project` (a project's own `+`)
     /// is offered first. The open session stays until the new one opens.
     pub(super) fn open_new_session(&mut self, project: Option<String>, cx: &mut Context<Self>) {
@@ -167,7 +164,7 @@ impl Shell {
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
         let row_left = self.titlebar_row_left();
         let row_gap = 8.0;
-        // slopty: room at the edge for the outermost control's press on a touch screen (#23).
+        // Room at the edge for the outermost control's press on a touch screen (#23).
         let right_pad = self
             .titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)
             .max(crate::surface_chrome::touch_reach(24.0));
@@ -211,7 +208,7 @@ impl Shell {
             .size_full()
             .flex()
             .items_center()
-            .pt(px(super::titlebar_top_pad())) // slopty: a finger's presses inside the window
+            .pt(px(super::titlebar_top_pad())) // a finger's presses inside the window
             .gap(px(row_gap))
             .pl(px(row_left))
             .pr(px(right_pad))
@@ -257,7 +254,7 @@ impl Shell {
                 mark,
             )
         };
-        // slopty: a title the agent gives rises in over the old (Amp's), on the house's roll.
+        // A title the agent gives rises in over the old (Amp's), on the house's roll.
         let rolling_title = crate::roll_text::rolling(
             format!("titlebar-title-{chat_id}"),
             title.clone(),
@@ -307,7 +304,7 @@ impl Shell {
                     cx.notify();
                 }),
             )
-            // slopty: a cut title shows whole in a tooltip.
+            // A cut title shows whole in a tooltip.
             .child(
                 div()
                     .min_w_0()

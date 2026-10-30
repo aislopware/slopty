@@ -25,11 +25,11 @@ pub(crate) fn input() -> Div {
         .flex()
         .items_center()
         .gap(px(Theme::SPACE_SNUG))
-        // slopty: on the type ladder, and with the font-size setting (M28).
+        // On the type ladder, and with the font-size setting (M28).
         .text_size(crate::typography::ui_rems(12.0))
 }
 
-// slopty: one icon button for every pane toolbar and strip (Claude desktop's ghost button, T3's
+// One icon button for every pane toolbar and strip (Claude desktop's ghost button, T3's
 // `variant="ghost"`): five recipes had drawn the same 24 px control side by side.
 /// The pane's icon button: 24 square, r 6, a 14 glyph in `text_muted`, its hover wash faded in
 /// and its press a step deeper; Tab reaches it and the ring shows it. The caller names it
@@ -129,7 +129,7 @@ pub(crate) fn toolbar(theme: &Theme) -> Div {
         })
 }
 
-// slopty: one keyboard ring for every control (M8): 2 px of the accent drawn 2 px clear of the
+// One keyboard ring for every control (M8): 2 px of the accent drawn 2 px clear of the
 // control, as Claude desktop's `outline: 2px solid; outline-offset: 2px`. It is paint only, so
 // focus never moves a control or its neighbours, and a control at rest holds no edge for it.
 /// The ring's thickness.
@@ -166,7 +166,7 @@ pub fn focus_ring_inset<E: InteractiveElement + Styled>(el: E, theme: &Theme) ->
     el.focus_visible(move |style| style.outline_ring(ring))
 }
 
-// slopty: a pane's clickable control is a keyboard stop (M8). A pointer press leaves the
+// A pane's clickable control is a keyboard stop (M8). A pointer press leaves the
 // keyboard where it was, as a Mac's buttons do, so clicking a pane's button never takes the
 // keyboard from the editor or the composer.
 /// Makes the clickable `el` a keyboard stop: Tab reaches it, Enter or Space presses it, and
@@ -217,7 +217,7 @@ pub(crate) fn tab_frame(
         } else {
             theme.text_muted
         })
-        // slopty: a ring that never widens the chip (`focus_ring`).
+        // A ring that never widens the chip (`focus_ring`).
         .map(|el| focus_ring(el, theme))
         .when(selected, |el| el.bg(crate::theme::selected_wash()))
 }
@@ -229,11 +229,11 @@ pub(crate) fn tab(
 ) -> gpui::Stateful<Div> {
     tab_frame(id, selected, theme)
         .when(!selected, |el| el.hover(|style| style.bg(crate::theme::hover_wash())))
-        // slopty: pressed reads a step deeper (M22).
+        // Pressed reads a step deeper (M22).
         .active(|style| style.bg(crate::theme::pressed_wash()))
 }
 
-// slopty: a pane's tabs fit their titles (T3's content-sized chips), so "Working tree" reads
+// A pane's tabs fit their titles (T3's content-sized chips), so "Working tree" reads
 // whole beside an empty strip. One width per strip, the widest title's, keeps the drag maths
 // (drop-index quantisation, slide offsets) uniform.
 /// The narrowest a pane tab draws.
@@ -292,7 +292,7 @@ pub(crate) fn tab_widths<'a>(
     TabWidths { chip, cut: widths.into_iter().map(|width| width > room).collect() }
 }
 
-// slopty: a strip keeps its chips' width after a close by pointer, so the next ✕ stays under the
+// A strip keeps its chips' width after a close by pointer, so the next ✕ stays under the
 // pointer (opencode's TUI and every browser): until the pointer leaves the strip or five seconds
 // pass, then the chips ease to their new width over `TAB_SLIDE`.
 /// How long a strip holds its width after a close with the pointer still over it.
@@ -386,18 +386,18 @@ pub(crate) fn tab_chip(
         width,
         close_hint,
     } = chip;
-    // slopty: each ✕ is named for its tab, so a screen reader tells them apart (T3's
+    // Each ✕ is named for its tab, so a screen reader tells them apart (T3's
     // `Close ${title}`); its tooltip keeps the action's words and key.
     let close_name: gpui::SharedString = format!("Close {title}").into();
     let selector: gpui::SharedString = format!("{id}-{ix}").into();
     let close_fade = format!("{close_id}-{ix}-fade");
-    // slopty: the ✕ fades in with the tab's hover, the unsaved dot out (M23).
+    // The ✕ fades in with the tab's hover, the unsaved dot out (M23).
     let tab_fade = format!("{id}-{ix}-reveal");
     let shown = crate::motion::hover_t(&tab_fade);
-    // slopty: on a touch screen the ✕ is there at rest (opencode's `(hover: hover)` gate); an
+    // On a touch screen the ✕ is there at rest (opencode's `(hover: hover)` gate); an
     // inactive tab with unsaved edits keeps its dot there instead.
     let revealed = if dirty && !active { shown } else { crate::motion::revealed_by_hover(&tab_fade) };
-    // slopty: the hover wash fades with the same hover as the ✕ (M23 remainder).
+    // The hover wash fades with the same hover as the ✕ (M23 remainder).
     let rest = if active { crate::theme::selected_wash() } else { crate::theme::wash(0.0) };
     let hover = if active { rest } else { crate::theme::hover_wash() };
     tab_frame((id, ix), active, theme)
@@ -408,7 +408,7 @@ pub(crate) fn tab_chip(
         .h(px(TAB_CHIP_HEIGHT))
         .w(px(width))
         .flex_none()
-        // slopty: 4 from the edge; the ring is drawn inside it, as the strip clips.
+        // 4 from the edge; the ring is drawn inside it, as the strip clips.
         .px(px(4.0))
         .map(|el| focus_ring_inset(el, theme))
         .rounded(px(CONTROL_RADIUS))
@@ -446,7 +446,7 @@ pub(crate) fn tab_chip(
                 .child(title),
         )
         .child({
-            // slopty: the press reaches past the 18 pt slot it draws, to 24 pt under a pointer
+            // The press reaches past the 18 pt slot it draws, to 24 pt under a pointer
             // and 44 tall on a touch screen (M25); its margins give the extra back, so the
             // tab's layout is the slot's.
             let (hit_w, hit_h) = close_hit_size(crate::shell::touch_screen());
@@ -492,7 +492,7 @@ pub(crate) fn tab_chip(
                         .debug_selector(move || format!("{close_id}-{ix}"))
                         .flex_none()
                         .size(px(CLOSE_SLOT))
-                        // slopty: r 6 and a faded wash, as the strip's other controls; the tab in
+                        // R 6 and a faded wash, as the strip's other controls; the tab in
                         // front names ⌘W, which closes it.
                         .rounded(px(CONTROL_RADIUS))
                         .relative()
@@ -531,7 +531,7 @@ pub(crate) fn tab_chip(
         })
 }
 
-// slopty: a modal takes the keyboard as it opens and gives it back as it closes, so Escape and
+// A modal takes the keyboard as it opens and gives it back as it closes, so Escape and
 // Tab are the dialog's and the page behind it never holds the keyboard under it.
 /// The keyboard of one modal dialog: its card tracks [`Self::handle`], and its owner calls
 /// [`Self::sync`] each render with whether the dialog shows.
@@ -594,26 +594,26 @@ pub(crate) fn modal_card(
         })
 }
 
-// slopty: a small control takes presses past what it draws (M25).
+// A small control takes presses past what it draws (M25).
 /// The least a pointer's press target measures, either way.
 pub(crate) const POINTER_TARGET: f32 = 24.0;
 /// The least a finger's press target measures, either way.
 pub(crate) const TOUCH_TARGET: f32 = 44.0;
 
-/// slopty: how far past each edge a control drawn `drawn` pt takes presses: nothing under a
+/// How far past each edge a control drawn `drawn` pt takes presses: nothing under a
 /// pointer, and on a touch screen what brings it to [`TOUCH_TARGET`] (#23). The control's hit
 /// area reaches that far, its negative margins giving it back, while what it draws stays.
 pub(crate) fn touch_reach(drawn: f32) -> f32 {
     if crate::shell::touch_screen() { ((TOUCH_TARGET - drawn) / 2.0).max(0.0) } else { 0.0 }
 }
 
-/// slopty: a text row's height drawn `drawn` pt tall: on a touch screen at least
+/// A text row's height drawn `drawn` pt tall: on a touch screen at least
 /// [`TOUCH_TARGET`], a finger's row, where reaching past it would take its neighbours' presses.
 pub(crate) fn touch_row_height(drawn: f32) -> f32 {
     if crate::shell::touch_screen() { drawn.max(TOUCH_TARGET) } else { drawn }
 }
 
-/// slopty: [`focus_ring`] for a hit area reaching `reach` past the control it draws
+/// [`focus_ring`] for a hit area reaching `reach` past the control it draws
 /// ([`touch_reach`]): the ring stands around the control, not around the hit area.
 pub(crate) fn focus_ring_within<E: InteractiveElement + Styled>(el: E, theme: &Theme, reach: f32) -> E {
     let ring = ring(theme, RING_OFFSET - reach);
@@ -666,7 +666,7 @@ pub(crate) fn tab_ghost(title: gpui::SharedString, width: f32, theme: &Theme) ->
 
 /// A chip's leading glyph, quieter on inactive tabs.
 pub(crate) fn tab_chip_icon(path: &'static str, active: bool, theme: &Theme) -> gpui::AnyElement {
-    // slopty: a tab's leading glyph is 14, as the file icons beside it (M48, item 21).
+    // A tab's leading glyph is 14, as the file icons beside it (M48, item 21).
     crate::icons::icon(path)
         .size(px(ICON_SIZE))
         .text_color(if active {
@@ -708,7 +708,7 @@ pub(crate) fn tab_strip_region(
         .flex()
         .items_center()
         .child(strip)
-        // slopty: the lag above lasts one frame, never the window's rest.
+        // The lag above lasts one frame, never the window's rest.
         .child(strip_fades_follow(scroll.clone(), (fade_left, fade_right)))
         .when(fade_left && !glass, |el| el.child(edge(90.0).left_0()))
         .when(fade_right && !glass, |el| el.child(edge(270.0).right_0()));
@@ -729,7 +729,7 @@ fn strip_fades(scroll: &gpui::ScrollHandle) -> (bool, bool) {
     (scrolled > 1.0, scrolled < max_scroll - 1.0)
 }
 
-/// slopty: nothing drawn. Laid out after the strip, it reads the strip's scroll as this frame
+/// Nothing drawn. Laid out after the strip, it reads the strip's scroll as this frame
 /// left it (a tab opened, closed or scrolled to), and when that calls for other fades than the
 /// ones `drawn`, it asks for the next frame, which draws them: a window at rest never keeps a
 /// fade over a tab that no longer hides.
@@ -1033,7 +1033,7 @@ mod tests {
         }
     }
 
-    /// slopty: the strip fades the side that hides tabs from its last frame's scroll, and the
+    /// The strip fades the side that hides tabs from its last frame's scroll, and the
     /// frame that changes what hides asks for the next: tabs coming to overflow it, then going,
     /// leave a window at rest as the same state draws from scratch.
     #[gpui::test]
@@ -1075,7 +1075,7 @@ mod tests {
 
     #[gpui::test]
     fn a_tabs_close_fades_with_its_hover(cx: &mut gpui::TestAppContext) {
-        crate::motion::forget_for_test(); // slopty: no hover from the last seed
+        crate::motion::forget_for_test(); // no hover from the last seed
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             cx.set_reduce_motion(true);

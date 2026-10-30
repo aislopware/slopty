@@ -49,7 +49,7 @@ fn shape_count(
         len: label.len(),
         font: gpui::Font {
             family: family.clone(),
-            // slopty: a count that ticks keeps its width (tabular figures).
+            // A count that ticks keeps its width (tabular figures).
             features: crate::typography::tabular(),
             fallbacks: None,
             weight,
@@ -127,7 +127,7 @@ impl RenderOnce for CountBadge {
             window,
             self.count,
             &self.family,
-            gpui::FontWeight::MEDIUM, // slopty: the chrome's two weights (opencode; item 23).
+            gpui::FontWeight::MEDIUM, // the chrome's two weights (opencode; item 23).
             gpui::white(),
             font_size,
         );

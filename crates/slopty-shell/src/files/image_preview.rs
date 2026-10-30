@@ -219,7 +219,7 @@ impl Render for ImagePreview {
                     .child(format!("Couldn't show this image · {error}")),
             );
         } else {
-            // slopty: a fast image never flashes "Loading image…" (M30).
+            // A fast image never flashes "Loading image…" (M30).
             root = root.child(crate::loaders::pending(
                 gpui::SharedString::from(format!("image-{}", self.generation)),
                 "Loading image…",

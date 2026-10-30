@@ -8,7 +8,7 @@
 //! Per-device because CLI installs are — a viewer retargets the settings page at
 //! another device and edits THAT device's set over the forwarded RPCs.
 
-// slopty: an excerpt — the descriptor the interface reads. The registry
+// An excerpt — the descriptor the interface reads. The registry
 // itself, its harness slots and prefs file are the engine's, which is Slopty's.
 
 use serde::{Deserialize, Serialize};

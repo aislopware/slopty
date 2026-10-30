@@ -40,10 +40,10 @@ const STEP_SCALE: f32 = 0.05;
 const MOVE: Duration = Duration::from_millis(400);
 const EXIT: Duration = Duration::from_millis(200);
 const SWIPE_THRESHOLD: f32 = 45.0;
-// slopty: a toast's button, and at most the line of words it sits on, which it overhangs.
+// A toast's button, and at most the line of words it sits on, which it overhangs.
 const ACTION_HEIGHT: f32 = 24.0;
 const LINE_HEIGHT: f32 = 16.0;
-// slopty: the content's side padding, its lead's width, and the gap after the lead.
+// The content's side padding, its lead's width, and the gap after the lead.
 const PAD_X: f32 = 14.0;
 const LEAD: f32 = 16.0;
 const LEAD_GAP: f32 = 10.0;
@@ -101,7 +101,7 @@ impl Glide {
     }
 }
 
-// slopty: a toast may carry one action, sonner's `action` (a page a worker's shell asked to
+// A toast may carry one action, sonner's `action` (a page a worker's shell asked to
 // open, held back until the person opens it).
 /// What a toast's button says and does.
 #[derive(Clone)]
@@ -114,11 +114,11 @@ struct Toast {
     id: u64,
     kind: ToastKind,
     message: SharedString,
-    // slopty: what went wrong in the words of what failed, behind Copy error, never shown (M31).
+    // What went wrong in the words of what failed, behind Copy error, never shown (M31).
     detail: Option<SharedString>,
-    // slopty: its button, if any.
+    // Its button, if any.
     action: Option<Action>,
-    // slopty: something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
+    // Something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
     progress: Option<Option<f32>>,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
@@ -127,7 +127,7 @@ struct Toast {
     closing: Option<Instant>,
     /// Natural height, measured each paint.
     height: f32,
-    // slopty: words too long for one line beside the button put it on a row of its own.
+    // Words too long for one line beside the button put it on a row of its own.
     /// Its button stands under its words, which take more than a line beside it.
     action_below: bool,
     bottom: Option<Glide>,
@@ -181,7 +181,7 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
     push_for(cx, kind, message, None, DURATION);
 }
 
-// slopty: with an action and a duration of its own; the toast's id, to take it down early.
+// With an action and a duration of its own; the toast's id, to take it down early.
 fn push_for(
     cx: &mut App,
     kind: ToastKind,
@@ -249,7 +249,7 @@ pub fn error(cx: &mut App, message: impl Into<SharedString>) {
     push(cx, ToastKind::Error, message.into());
 }
 
-// slopty: the words say what failed and what to do next; the raw reason rides behind Copy error.
+// The words say what failed and what to do next; the raw reason rides behind Copy error.
 /// A failure toast whose Copy error also copies `detail`, what failed said in its own words.
 pub fn error_with_detail(
     cx: &mut App,
@@ -263,7 +263,7 @@ pub fn error_with_detail(
     }
 }
 
-// slopty: what the toaster says now, for the tests.
+// What the toaster says now, for the tests.
 #[cfg(test)]
 pub(crate) fn said(cx: &App) -> Vec<SharedString> {
     cx.try_global::<ToastStore>().map(|store| store.toasts.iter().map(|toast| toast.message.clone()).collect()).unwrap_or_default()
@@ -279,7 +279,7 @@ pub fn info(cx: &mut App, message: impl Into<SharedString>) {
     push(cx, ToastKind::Info, message.into());
 }
 
-// slopty: a notice that waits on a choice: its button runs `run` and takes it down. It lasts
+// A notice that waits on a choice: its button runs `run` and takes it down. It lasts
 // `lasts`, the countdown paused as every toast's is. Its id takes it down early ([`withdraw`]).
 /// A neutral notice with one button.
 pub fn offer(
@@ -293,7 +293,7 @@ pub fn offer(
     push_for(cx, ToastKind::Info, message.into(), Some(action), lasts)
 }
 
-// slopty: a toast that moves in place: its words and progress change, it keeps its spot and
+// A toast that moves in place: its words and progress change, it keeps its spot and
 // its countdown (a transfer's bytes, a clone's phase).
 /// Change toast `id`'s words and progress in place; `progress` is how far, 0 to 1, or `None`
 /// for under way with no measure. A toast already gone is left gone.
@@ -325,7 +325,7 @@ pub fn update(cx: &mut App, id: u64, message: impl Into<SharedString>, progress:
     cx.refresh_windows();
 }
 
-// slopty: a neutral notice for something under way (a slow call, a clone), with a spinner; its
+// A neutral notice for something under way (a slow call, a clone), with a spinner; its
 // id moves it ([`update`]) or takes it down ([`withdraw`]).
 /// A neutral notice with a spinner, lasting `lasts`.
 pub fn working(cx: &mut App, message: impl Into<SharedString>, lasts: Duration) -> Option<u64> {
@@ -338,7 +338,7 @@ pub fn working(cx: &mut App, message: impl Into<SharedString>, lasts: Duration) 
     Some(id)
 }
 
-// slopty: a notice that waits on a choice and shows how far it is ([`update`] moves it).
+// A notice that waits on a choice and shows how far it is ([`update`] moves it).
 /// [`offer`] with a progress lead: `progress` as in [`update`].
 pub fn offer_progress(
     cx: &mut App,
@@ -357,14 +357,14 @@ pub fn offer_progress(
     Some(id)
 }
 
-// slopty: whether toast `id` is still up, so a caller keeping ids lets go of the rest.
+// Whether toast `id` is still up, so a caller keeping ids lets go of the rest.
 /// Whether toast `id` is up and not on its way out.
 pub fn showing(cx: &App, id: u64) -> bool {
     cx.try_global::<ToastStore>()
         .is_some_and(|store| store.toasts.iter().any(|t| t.id == id && t.closing.is_none()))
 }
 
-// slopty: what was offered is no longer there to take.
+// What was offered is no longer there to take.
 /// Take toast `id` down, if it is still up.
 pub fn withdraw(cx: &mut App, id: u64) {
     dismiss(id, cx);
@@ -381,7 +381,7 @@ pub fn take_error<M: Into<SharedString>>(slot: &mut Option<M>, cx: &mut App) {
     }
 }
 
-// slopty: the app's tests start from no toasts.
+// The app's tests start from no toasts.
 /// Take every toast down at once.
 pub fn clear(cx: &mut App) {
     if cx.has_global::<ToastStore>() {
@@ -390,7 +390,7 @@ pub fn clear(cx: &mut App) {
 }
 
 /// The live toasts' messages, oldest first.
-// slopty: the app's tests read them too.
+// The app's tests read them too.
 pub fn messages(cx: &App) -> Vec<SharedString> {
     cx.try_global::<ToastStore>()
         .map(|store| {
@@ -404,7 +404,7 @@ pub fn messages(cx: &App) -> Vec<SharedString> {
         .unwrap_or_default()
 }
 
-/// slopty: `text` with every hyphen that joins two letters or digits made non-breaking (U+2011),
+/// `text` with every hyphen that joins two letters or digits made non-breaking (U+2011),
 /// so a machine's or a file's name ("e2e-worker") wraps whole; a dash between words, or before
 /// a flag ("-rf"), is left as it is.
 pub(crate) fn names_kept_whole(text: &str) -> String {
@@ -421,8 +421,8 @@ pub(crate) fn names_kept_whole(text: &str) -> String {
         .collect()
 }
 
-// slopty: the app's tests read each toast's kind too.
-// slopty: the raw reasons behind Copy error, for the tests of what pushes them.
+// The app's tests read each toast's kind too.
+// The raw reasons behind Copy error, for the tests of what pushes them.
 /// The live toasts' details, oldest first.
 #[cfg(test)]
 pub(crate) fn details(cx: &App) -> Vec<Option<SharedString>> {
@@ -462,13 +462,13 @@ fn copy_error(id: u64, cx: &mut App) {
     else {
         return;
     };
-    // slopty: the words, then what failed said in its own.
+    // The words, then what failed said in its own.
     let words = match &toast.detail {
         Some(detail) => format!("{}\n{detail}", toast.message),
         None => toast.message.to_string(),
     };
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
-    // slopty: the house's copy span: the check for a while, then the copy glyph again.
+    // The house's copy span: the check for a while, then the copy glyph again.
     crate::motion::copy_feedback(copy_key(id), cx);
     cx.refresh_windows();
 }
@@ -555,7 +555,7 @@ fn schedule_wake(window: &Window, cx: &mut App) {
     cx.global_mut::<ToastStore>().wake = wake;
 }
 
-// slopty: a toast under way leads with its progress, not its kind.
+// A toast under way leads with its progress, not its kind.
 fn lead(kind: ToastKind, progress: Option<Option<f32>>, id: u64, theme: &Theme) -> AnyElement {
     match progress {
         Some(Some(fraction)) => {
@@ -620,10 +620,10 @@ fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// slopty: how far over the chrome a toast stands that `lift` holds above the window's floor.
+/// How far over the chrome a toast stands that `lift` holds above the window's floor.
 const LIFT_GAP: f32 = 8.0;
 
-/// slopty: where the toaster stands. A session's TUI draws its prompt box and status line in
+/// Where the toaster stands. A session's TUI draws its prompt box and status line in
 /// the window's bottom-right corner, so the stack keeps off the terminal (`docs/decisions/ui.md`,
 /// "Toasts keep off the terminal").
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -646,7 +646,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
     let active = window.is_window_active();
     let theme = Theme::of(cx).for_popup();
     let from_top = matches!(place, ToastPlace::Top { .. });
-    // slopty: which errors are in their "Copied" span, read before the store is borrowed.
+    // Which errors are in their "Copied" span, read before the store is borrowed.
     let copied_ids: Vec<u64> = cx
         .try_global::<ToastStore>()
         .map(|store| {
@@ -788,7 +788,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
         let progress = toast.progress;
         let copied = copied_ids.contains(&id);
         let below = toast.action_below;
-        // slopty: its button, after the words: sonner's small action (24 tall, 12 px, a quiet
+        // Its button, after the words: sonner's small action (24 tall, 12 px, a quiet
         // fill), its overhang taken back so the toast keeps the height of its line.
         let action = toast.action.clone().map(|action| {
             let label = action.label.clone();
@@ -798,14 +798,14 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                 label.clone(),
             )
             .id(("toast-action", id as usize))
-            // slopty: the button says its name to assistive tech, not only on screen.
+            // The button says its name to assistive tech, not only on screen.
             .role(gpui::Role::Button)
             .aria_label(label.clone())
             .debug_selector(move || format!("toast-action-{label}"))
             .flex_none()
             .min_h(px(ACTION_HEIGHT))
             .h(px(ACTION_HEIGHT))
-            // slopty: beside the words it overhangs their first line; under them it stands whole.
+            // Beside the words it overhangs their first line; under them it stands whole.
             .when(!below, |action| action.my(px(-(ACTION_HEIGHT - LINE_HEIGHT) / 2.0)))
             .px(px(8.0))
             .py(px(0.0))
@@ -816,7 +816,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                 dismiss(id, cx);
             })
         });
-        // slopty: everything sits on the words' first line (opencode's toast): the lead in a cell
+        // Everything sits on the words' first line (opencode's toast): the lead in a cell
         // of that line's height, the buttons overhanging it, and a button whose words would
         // wrap beside it on its own row under them, from where the words start.
         let has_action = action.is_some();
@@ -843,9 +843,9 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                     .items_center()
                     .child(lead(kind, progress, id, &theme)),
             )
-            // slopty: an error clamps at four lines and shows whole while the stack is hovered.
+            // An error clamps at four lines and shows whole while the stack is hovered.
             .child({
-                // slopty: a hyphenated name ("e2e-worker") never breaks across two lines.
+                // A hyphenated name ("e2e-worker") never breaks across two lines.
                 let words = div().flex_1().min_w_0().child(SharedString::from(names_kept_whole(&message)));
                 if kind == ToastKind::Error && !expanded { words.line_clamp(4) } else { words }
             })
@@ -904,7 +904,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                             {
                                 toast.height = height;
                             }
-                            // slopty: a refresh asked while the frame draws is dropped, and the
+                            // A refresh asked while the frame draws is dropped, and the
                             // retained stack then kept its first guess (52 tall, 16 px low): lay
                             // it out again on the next frame instead.
                             window.on_next_frame(|window, _| window.refresh());
@@ -918,20 +918,20 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
         let card = div()
             .size_full()
             .rounded(px(crate::popover::CARD_RADIUS))
-            // slopty: Amp's floating elevation, as every float's (`Theme::elevation`).
+            // Amp's floating elevation, as every float's (`Theme::elevation`).
             .shadow(theme.elevation(crate::theme::Elevation::Floating))
             .bg(crate::popover::surface_bg(&theme))
             .overflow_hidden()
             .child(content);
         let toast_el = div()
             .id(("toast", id as usize))
-            .debug_selector(move || format!("toast-{id}")) // slopty: for the tests
+            .debug_selector(move || format!("toast-{id}"))
             .role(match kind {
                 ToastKind::Error => gpui::Role::Alert,
                 _ => gpui::Role::Status,
             })
             .aria_label(message);
-        // slopty: how far a toast under way is, as its value ("42%").
+        // How far a toast under way is, as its value ("42%").
         let toast_el = match progress.flatten() {
             Some(fraction) => toast_el.aria_value(format!("{}%", (fraction * 100.0).round())),
             None => toast_el,
@@ -940,7 +940,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
             .absolute()
             .left(px(inset + swipe.max(0.0)))
             .right(px(inset - swipe.max(0.0)))
-            // slopty: hung from the top, the stack mirrors: the same rise is a drop from above.
+            // Hung from the top, the stack mirrors: the same rise is a drop from above.
             .map(|el| if from_top { el.top(px(y)) } else { el.bottom(px(y)) })
             .h(px(clip_height.max(0.0)))
             .opacity(opacity)
@@ -987,7 +987,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                 crate::frost::MENU_BLUR,
                 card,
             ))
-            // slopty: a pointer closes a toast too, not only a swipe: sonner's close button at
+            // A pointer closes a toast too, not only a swipe: sonner's close button at
             // its top-left corner, shown while the stack is hovered (which holds every
             // countdown, so a toast the person means to close never waits for its time).
             .children((expanded && !closing && !hidden).then(|| close_button(id, &theme)));
@@ -1019,7 +1019,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
     )
 }
 
-/// slopty: the stack's width and where its top-left corner stands for `place`, in a window
+/// The stack's width and where its top-left corner stands for `place`, in a window
 /// `viewport` big, the stack `height` tall.
 fn stand(place: ToastPlace, viewport: gpui::Size<gpui::Pixels>, height: f32) -> (f32, gpui::Point<gpui::Pixels>) {
     let (window_width, window_height) = (f32::from(viewport.width), f32::from(viewport.height));
@@ -1040,7 +1040,7 @@ fn stand(place: ToastPlace, viewport: gpui::Size<gpui::Pixels>, height: f32) -> 
     }
 }
 
-// slopty: sonner's close button (20 round, at the corner, half over the edge), in the house's
+// Sonner's close button (20 round, at the corner, half over the edge), in the house's
 // icon control.
 /// The button that closes toast `id` at once.
 fn close_button(id: u64, theme: &Theme) -> gpui::AnyElement {
@@ -1083,8 +1083,8 @@ fn copy_key(id: u64) -> String {
     format!("toast-copy-{id}")
 }
 
-// slopty: an error's words are one click from the clipboard (zeron's icon control, 24/6/14).
-/// slopty: how wide `text` lies on one line at `size` in the window's current face.
+// An error's words are one click from the clipboard (an icon control, 24/6/14).
+/// How wide `text` lies on one line at `size` in the window's current face.
 fn line_width(text: &str, size: gpui::Rems, window: &Window) -> f32 {
     let style = window.text_style();
     let line = window.text_system().shape_line(
@@ -1096,14 +1096,14 @@ fn line_width(text: &str, size: gpui::Rems, window: &Window) -> f32 {
     f32::from(line.width())
 }
 
-/// slopty: how wide toast `id`'s button is, its words and its padding.
+/// How wide toast `id`'s button is, its words and its padding.
 fn action_label_width(id: u64, window: &Window, cx: &App) -> Option<f32> {
     let store = cx.try_global::<ToastStore>()?;
     let action = store.toasts.iter().find(|toast| toast.id == id)?.action.as_ref()?;
     Some(line_width(&action.label, crate::typography::ui_rems(12.0), window) + ACTION_PAD * 2.0)
 }
 
-/// slopty: whether a toast `content` wide puts its button (`button` wide) under words `words`
+/// Whether a toast `content` wide puts its button (`button` wide) under words `words`
 /// wide: when beside it, with the lead and a copy button, they would not fit on one line.
 fn action_goes_below(words: f32, content: f32, button: f32, copy: bool) -> bool {
     let copy = if copy { 24.0 + LEAD_GAP } else { 0.0 };
@@ -1131,7 +1131,7 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
         .hover_fade(fade.clone())
         .cursor_pointer()
         .text_color(theme.text_muted)
-        // slopty: a copy answers with its check drawn in, never swapped (`CopyGlyph`).
+        // A copy answers with its check drawn in, never swapped (`CopyGlyph`).
         .child(crate::loaders::copy_glyph::CopyGlyph::new(copy_key(id), 12.0, theme.text_muted))
         .tooltip(crate::settings::widgets::text_tooltip(label))
         .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
@@ -1169,7 +1169,7 @@ fn release_swipe(id: u64, cx: &mut App) {
 mod tests {
     use super::*;
 
-    /// slopty: a hyphenated name wraps whole; a flag's dash and a dash between words do not join.
+    /// A hyphenated name wraps whole; a flag's dash and a dash between words do not join.
     #[test]
     fn a_hyphenated_name_is_kept_whole() {
         assert_eq!(names_kept_whole("from e2e-worker's shell"), "from e2e\u{2011}worker's shell");
@@ -1252,7 +1252,7 @@ mod tests {
         cx.update(|_, cx| assert_eq!(messages(cx), ["Couldn't save"]));
     }
 
-    // slopty: a pointer closes a toast by its button, shown while the stack is hovered.
+    // A pointer closes a toast by its button, shown while the stack is hovered.
     #[gpui::test]
     fn a_hovered_toast_closes_by_its_button(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1275,7 +1275,7 @@ mod tests {
         cx.update(|_, cx| assert!(messages(cx).is_empty(), "{:?}", messages(cx)));
     }
 
-    // slopty: an error's raw reason is never shown, and Copy error copies it after the words.
+    // An error's raw reason is never shown, and Copy error copies it after the words.
     #[gpui::test]
     fn copy_error_copies_the_detail_behind_the_words(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| cx.set_global(Theme::dark()));
@@ -1294,7 +1294,7 @@ mod tests {
         );
     }
 
-    // slopty: an offer's button runs once and takes it down; withdrawn, it goes untaken; it
+    // An offer's button runs once and takes it down; withdrawn, it goes untaken; it
     // stays past a plain toast's four seconds.
     #[gpui::test]
     fn an_offer_waits_for_its_button(cx: &mut gpui::TestAppContext) {
@@ -1328,7 +1328,7 @@ mod tests {
         cx.update(|_, cx| assert!(messages(cx).is_empty(), "withdrawn"));
     }
 
-    // slopty: an update moves a toast's words and progress where it stands: same id, same
+    // An update moves a toast's words and progress where it stands: same id, same
     // place in the stack, its countdown untouched; a gone toast stays gone.
     #[gpui::test]
     fn an_update_keeps_its_place(cx: &mut gpui::TestAppContext) {
@@ -1373,7 +1373,7 @@ mod tests {
         });
     }
 
-    // slopty: an error toast copies its words; other kinds offer no copy.
+    // An error toast copies its words; other kinds offer no copy.
     #[gpui::test]
     fn an_error_toast_copies_its_words(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1404,7 +1404,7 @@ mod tests {
         });
     }
 
-    // slopty: a toast with a button is as tall as one without, its button sonner's 24.
+    // A toast with a button is as tall as one without, its button sonner's 24.
     #[gpui::test]
     fn an_offer_keeps_the_height_of_its_line(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
@@ -1428,7 +1428,7 @@ mod tests {
         assert!((f32::from(button.size.height) - ACTION_HEIGHT).abs() < 0.5, "{button:?}");
     }
 
-    /// slopty: a toast lines up on its words' first line: a short offer keeps its button on
+    /// A toast lines up on its words' first line: a short offer keeps its button on
     /// that line, and words that would wrap beside the button put it on a row under them,
     /// starting where the words start.
     #[gpui::test]
@@ -1495,7 +1495,7 @@ mod tests {
         })
     }
 
-    // slopty: a toast whose words take two lines comes in front of shorter ones: the collapsed
+    // A toast whose words take two lines comes in front of shorter ones: the collapsed
     // stack behind it takes its height in the frames the window shows, as from scratch.
     #[gpui::test]
     fn a_taller_front_toast_raises_the_stack_as_from_scratch(cx: &mut gpui::TestAppContext) {

@@ -149,21 +149,21 @@ impl InputHighlighter for SloptyInputHighlighter {
     }
 }
 
-// slopty: the Add device dialog's fields wear it too.
+// The Add device dialog's fields wear it too.
 pub(crate) fn editor_style(theme: &Theme) -> InputEditorStyle {
     InputEditorStyle {
         foreground: theme.text.opacity(0.93),
         muted_foreground: theme.text_faint,
         background: gpui::transparent_black(),
         border: theme.border,
-        // slopty: one selection colour for every text surface (M40).
+        // One selection colour for every text surface (M40).
         selection: theme.selection,
         caret: theme.caret,
         highlight_styles: Arc::new(SloptyHighlightStyleResolver {
             palette: theme.syntax.clone(),
         }),
         editor_active_line: Some(crate::theme::wash(0.025)),
-        // slopty: the caret's line number reads a step brighter than the rest, as in Claude
+        // The caret's line number reads a step brighter than the rest, as in Claude
         // desktop's and T3 Code's editors.
         editor_active_line_number: Some(theme.text_muted),
         editor_gutter_background: Some(gpui::transparent_black()),

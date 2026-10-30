@@ -62,7 +62,7 @@ impl FilesSettingsPage {
         cx.notify();
     }
 
-    // slopty: a row whose value is not its default offers "Reset", and only then (M10).
+    // A row whose value is not its default offers "Reset", and only then (M10).
     fn reset(
         &self,
         id: &'static str,
@@ -289,7 +289,7 @@ impl Render for FilesSettingsPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: one page head (`widgets::page_head`).
+                                // One page head (`widgets::page_head`).
                                 .child(widgets::page_head(
                                     &theme,
                                     "Files",
@@ -312,7 +312,7 @@ mod tests {
 
     use super::*;
 
-    // slopty: a row offers "Reset" only while its value is not the default, and Reset puts the
+    // A row offers "Reset" only while its value is not the default, and Reset puts the
     // default back (M10).
     #[gpui::test]
     fn a_row_offers_reset_only_off_its_default(cx: &mut TestAppContext) {

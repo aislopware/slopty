@@ -76,7 +76,6 @@ impl FilesSurface {
         mut frame: WorkspaceFileChanges,
         cx: &mut Context<Self>,
     ) {
-        // slopty: no unwrap.
         if let Some(intent) = self.pending_mutation.as_ref() {
             // Defer affected events; unrelated changes still flow through. Keep
             // sequence accounting on the live stream, not the deferred fragments.

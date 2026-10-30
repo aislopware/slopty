@@ -1,8 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! Settings → Archived (feature-inventory §1.5): archived sessions across
 //! devices, with Unarchive (Mutate setChatArchived false).
-//! slopty: no Delete all: a session's record is its agent's own, so Slopty archives and never
-//! deletes.
+//! A session's record is its agent's own, so Slopty archives and never deletes.
 
 use gpui::{
     AnyElement, Context, Entity, SharedString, Subscription, Task, Window, div, prelude::*, px,
@@ -36,11 +35,11 @@ pub struct ArchivedPage {
     busy: Option<String>,
     page: usize,
     task: Option<Task<()>>,
-    /// slopty: the moment the rows say how long ago they moved by: taken as the state moves and
+    /// The moment the rows say how long ago they moved by: taken as the state moves and
     /// on [`Self::clock_tick`], never as the page is built, so a page built again (from scratch,
     /// or for a hover) says what the one shown says.
     clock: chrono::DateTime<chrono::Utc>,
-    /// slopty: the clock taken again when the soonest row's time next reads differently.
+    /// The clock taken again when the soonest row's time next reads differently.
     clock_tick: Option<Task<()>>,
     _observe: Subscription,
 }
@@ -66,7 +65,7 @@ impl ArchivedPage {
         page
     }
 
-    /// slopty: take the clock now, and again when the soonest archived chat's time next reads
+    /// Take the clock now, and again when the soonest archived chat's time next reads
     /// differently ([`crate::state::time_ago_changes`]), drawing the page then.
     fn take_clock(&mut self, cx: &mut Context<Self>) {
         self.clock = crate::clock::utc(cx);
@@ -135,7 +134,7 @@ impl Render for ArchivedPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
-        // slopty: the page's own clock, which a tick moves and draws ([`Self::take_clock`]).
+        // The page's own clock, which a tick moves and draws ([`Self::take_clock`]).
         let now = self.clock;
         let (rows, device_names, count): (
             Vec<Chat>,
@@ -180,7 +179,7 @@ impl Render for ArchivedPage {
                     device_names.get(&chat.device_id).cloned().map(Into::into);
                 let at = chat.last_message_at.unwrap_or(chat.created_at);
                 let time_ago: SharedString = crate::state::format_time_ago(at, now).into();
-                // slopty: where it ran as the app says it everywhere ("project @ device"), then
+                // Where it ran as the app says it everywhere ("project @ device"), then
                 // its branch, as one meta line.
                 let place: Option<SharedString> = place_of(&chat, device.as_deref()).map(Into::into);
                 let branch: Option<SharedString> = chat
@@ -191,7 +190,7 @@ impl Render for ArchivedPage {
                     .map(|branch| SharedString::from(branch.to_owned()));
                 let is_busy = busy.as_deref() == Some(chat.id.as_str());
                 let chat_id = chat.id.clone();
-                // slopty: a card's row like every other page's: its tile, its title and meta, its
+                // A card's row like every other page's: its tile, its title and meta, its
                 // time and Unarchive.
                 let meta: Vec<AnyElement> = place
                     .into_iter()
@@ -209,7 +208,7 @@ impl Render for ArchivedPage {
                             .child(widgets::row_title(&theme, title).truncate())
                             .when(!meta.is_empty(), |el| el.child(widgets::meta_line(&theme, meta))),
                     )
-                    // slopty: tabular figures, and the full date on hover (M39).
+                    // Tabular figures, and the full date on hover (M39).
                     .child(
                         div()
                             .id(("archived-time", ix))
@@ -227,7 +226,7 @@ impl Render for ArchivedPage {
                             .flex_none()
                             .tab_index(0)
                             .role(gpui::Role::Button)
-                            .aria_label("Unarchive") // slopty: named in the accessibility tree.
+                            .aria_label("Unarchive") // named in the accessibility tree.
                             .aria_disabled(is_busy)
                             .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -348,7 +347,7 @@ impl Render for ArchivedPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: one page head (`widgets::page_head`), no action: a
+                                // One page head (`widgets::page_head`), no action: a
                                 // session is never deleted here.
                                 .child(widgets::page_head(
                                     &theme,
@@ -367,7 +366,7 @@ impl Render for ArchivedPage {
     }
 }
 
-// slopty: where an archived chat ran, as the app says it everywhere: "project @ device".
+// Where an archived chat ran, as the app says it everywhere: "project @ device".
 /// Where `chat` ran, on the machine named `device`: "project @ device", the project or the
 /// machine alone, or nothing.
 fn place_of(chat: &slopty_view_proto::Chat, device: Option<&str>) -> Option<String> {
@@ -385,7 +384,7 @@ fn place_of(chat: &slopty_view_proto::Chat, device: Option<&str>) -> Option<Stri
     }
 }
 
-// slopty: when a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
+// When a relative time was, in full, for its tooltip: "Oct 16, 14:05", with the year when
 // it is not this one (M39).
 pub(crate) fn absolute_time(then: chrono::DateTime<chrono::Utc>, now: chrono::DateTime<chrono::Utc>) -> String {
     absolute_time_in(then, &chrono::Local, now)
@@ -431,16 +430,16 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
-            subagent: false, // slopty: subagents
+            subagent: false,
             in_parent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
-            draft: None, // slopty: new field.
+            draft: None,
         }
     }
 
-    // slopty: a row's "now" becomes "1m" as its minute turns, by the page's own clock, which
+    // A row's "now" becomes "1m" as its minute turns, by the page's own clock, which
     // stands still between its ticks however often the page is built.
     #[gpui::test]
     fn the_rows_times_move_on_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
@@ -469,7 +468,7 @@ mod tests {
         assert_eq!((says(cx), drawn.get()), ("1m".to_owned(), 1), "the minute turned, and the page drew");
     }
 
-    // slopty: an archived chat says where it ran as the sidebar and the palette do, "project @
+    // An archived chat says where it ran as the sidebar and the palette do, "project @
     // device", never the machine first with its own separators.
     #[test]
     fn an_archived_chat_says_where_it_ran_as_the_app_does() {
@@ -516,7 +515,7 @@ mod tests {
         use chrono::{DateTime, Utc};
         let at = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
         let now = at("2026-10-17T09:00:00Z");
-        // slopty: the time of day as the system's clock says it, 12 or 24 hour.
+        // The time of day as the system's clock says it, 12 or 24 hour.
         let (afternoon, morning) = if crate::transcript::clock_format() == "%H:%M" {
             ("14:05", "07:30")
         } else {

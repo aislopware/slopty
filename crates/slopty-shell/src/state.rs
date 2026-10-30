@@ -28,14 +28,13 @@ use gpui::{App, Context, Entity, Task};
 use gpui_tokio::Tokio;
 use serde::de::DeserializeOwned;
 
-mod slow_calls; // slopty: a call that runs long says so
+mod slow_calls; // a call that runs long says so
 use slopty_view_doc::{SessionMessageEntry, TranscriptDesync, TranscriptFrame};
-// slopty: the embedded engine is cut; its service comes in through the boot config.
 use slopty_view_proto::{
     AuthState, ChangeRequestSummary, Chat, ChatIndicator, CheckoutChangeRequestStatus, Device,
     EngineInfo, HarnessId, Session, Space, WorkspaceScope,
 };
-use slopty_view_rpc::{RpcClient, RpcError, RpcService, memory_client, methods}; // slopty: no `connect_ws`, `RpcReply`
+use slopty_view_rpc::{RpcClient, RpcError, RpcService, memory_client, methods};
 
 use crate::change_requests::{
     ChangeRequestClientState, ChangeRequestWatchKey, desired_watch_targets, watch_params,
@@ -49,7 +48,7 @@ const TRANSCRIPT_CACHE_BYTES: usize = 64 * 1024 * 1024;
 struct CachedTranscript {
     prepared: Option<Arc<crate::transcript::PreparedTranscript>>,
     chat_id: String,
-    entries: Vec<SessionMessageEntry>, // slopty: no context usage
+    entries: Vec<SessionMessageEntry>,
     bytes: usize,
 }
 
@@ -93,12 +92,11 @@ impl Drop for WatchPreparation {
 pub struct EngineBootConfig {
     /// Data directory for the embedded engine (`~/.slopty`).
     pub data_dir: PathBuf,
-    // slopty: Slopty's server is the only backend.
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
 }
 
-/// slopty: the engine itself. Slopty's server is the only backend; the interface reaches it
+/// The engine itself. Slopty's server is the only backend; the interface reaches it
 /// through this service (`slopty-ui`), in process, with slopty's envelopes and dispatch. Set
 /// before [`AppState::bootstrap`] runs.
 pub struct EngineService(pub Arc<dyn RpcService>);
@@ -121,22 +119,18 @@ pub enum EngineMode {
 trait EngineBackend: Send + Sync {
     fn client(&self) -> &RpcClient;
     fn mode(&self) -> EngineMode;
-    // slopty: the embedded engine and voice media are cut.
     /// Graceful teardown (drains runs / flushes docs for the in-process engine).
     async fn shutdown(&self);
 }
 
-// slopty: upstream's embedded engine (`InProcessEngine`, its sign-in deferral `DeferredEngineRpc`)
-// and its daemon over localhost WebSocket (`RemoteEngine`) are cut. One backend remains: the
-// boot config's service behind an in-memory RPC loop. The service owns its connection to
-// Slopty's server, so there is nothing to drain here.
+// One backend: the boot config's service behind an in-memory RPC loop. The service owns its
+// connection to Slopty's server, so there is nothing to drain here.
 struct ServiceEngine {
     client: RpcClient,
 }
 
 #[async_trait]
 impl EngineBackend for ServiceEngine {
-    // slopty: the embedded engine and voice media are cut.
     fn client(&self) -> &RpcClient {
         &self.client
     }
@@ -146,15 +140,13 @@ impl EngineBackend for ServiceEngine {
     async fn shutdown(&self) {}
 }
 
-// slopty: the embedded engine and voice media are cut.
 /// Cheaply clonable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {
     inner: Arc<dyn EngineBackend>,
     engine_info: EngineInfo,
-    // slopty: what the service's slow-call watch says, taken once by the state that attaches it.
+    // What the service's slow-call watch says, taken once by the state that attaches it.
     slow_calls: Arc<std::sync::Mutex<Option<futures::channel::mpsc::UnboundedReceiver<slow_calls::SlowCall>>>>,
-    // slopty: the embedded engine and voice media are cut.
 }
 
 impl EngineHandle {
@@ -162,14 +154,14 @@ impl EngineHandle {
         Arc::ptr_eq(&self.inner, &other.inner)
     }
 
-    /// slopty: attach to the boot config's service; the daemon probe and the embedded engine
+    /// Attach to the boot config's service; the daemon probe and the embedded engine
     /// are cut. Must run on the tokio runtime (`Tokio::spawn`), where the RPC loop spawns.
     pub async fn bootstrap(
         _config: EngineBootConfig,
         service: Option<Arc<dyn RpcService>>,
     ) -> anyhow::Result<EngineHandle> {
         let service = service.ok_or_else(|| anyhow::anyhow!("no engine service is installed"))?;
-        // slopty: every call passes the slow-call watch.
+        // Every call passes the slow-call watch.
         let (service, slow) = slow_calls::SlowCallWatch::wrap(service, slow_calls::SLOW_AFTER);
         let client = memory_client(service.clone());
         let engine_info = query_engine_info(&client).await?;
@@ -179,14 +171,13 @@ impl EngineHandle {
             }),
             engine_info,
             slow_calls: Arc::new(std::sync::Mutex::new(Some(slow))),
-            // slopty: the embedded engine and voice media are cut.
         })
     }
 
     #[cfg(test)]
     pub(crate) fn from_test_client(client: RpcClient) -> Self {
         Self {
-            // slopty: the cut `RemoteEngine` held test clients; the service engine does now.
+            // The service engine holds the test clients.
             inner: Arc::new(ServiceEngine {
                 client,
             }),
@@ -196,8 +187,7 @@ impl EngineHandle {
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
             },
-            slow_calls: Arc::default(), // slopty: no watch on a test client
-            // slopty: the embedded engine and voice media are cut.
+            slow_calls: Arc::default(), // no watch on a test client
         }
     }
 
@@ -209,13 +199,11 @@ impl EngineHandle {
         self.inner.mode()
     }
 
-    // slopty: the embedded engine and voice media are cut.
 
     pub fn engine_info(&self) -> &EngineInfo {
         &self.engine_info
     }
 
-    // slopty: the embedded engine and voice media are cut.
 
     pub async fn shutdown(&self) {
         self.inner.shutdown().await;
@@ -264,7 +252,7 @@ pub use slopty_view_proto::view::{
     parse_auth_state, project_label, running_subagents, sort_active, sort_chats, sort_spaces, sort_tabs,
 };
 
-/// slopty: when `format_time_ago(then, …)`, read at `now`, next says something else: the next
+/// When `format_time_ago(then, …)`, read at `now`, next says something else: the next
 /// whole minute, hour, day, week, month or year of its age. `None` past what it can say.
 pub fn time_ago_changes(
     then: chrono::DateTime<chrono::Utc>,
@@ -290,7 +278,7 @@ pub fn time_ago_changes(
     then.checked_add_signed(chrono::Duration::seconds(next))
 }
 
-// slopty: a row's time reads the same up to its next change and differently from it on.
+// A row's time reads the same up to its next change and differently from it on.
 #[cfg(test)]
 mod time_ago_tests {
     use super::{format_time_ago, time_ago_changes};
@@ -323,7 +311,6 @@ fn session_presence(session: &Session, now: DateTime<Utc>) -> (Indicator, u32) {
     )
 }
 
-// slopty: no accounts, sync or sign-in.
 // ---------------------------------------------------------------------------
 // AppState entity
 // ---------------------------------------------------------------------------
@@ -351,7 +338,7 @@ pub(crate) fn clock_now() -> DateTime<Utc> {
     if let Some(now) = TEST_CLOCK.with(std::cell::Cell::get) {
         return now;
     }
-    // slopty: the date at now on the dispatcher's clock (`crate::clock`).
+    // The date at now on the dispatcher's clock (`crate::clock`).
     crate::clock::utc_at(crate::clock::event_now())
 }
 
@@ -418,7 +405,7 @@ pub struct AppState {
     /// Sorted (see [`sort_chats`]); includes archived rows — views filter.
     pub chats: Vec<Chat>,
     pub sessions: Vec<Session>,
-    /// slopty: the terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`): an
+    /// The terminal each session is, by chat (`calls::WATCH_SESSION_TERMINALS`): an
     /// agent's session by the one its TUI runs in now, a plain terminal by its own. A chat with
     /// none has ended.
     pub session_terminals: std::collections::BTreeMap<String, String>,
@@ -451,13 +438,13 @@ pub struct AppState {
     pending_deep_link: Option<crate::links::ConversationDeepLink>,
     deep_link_notice: Option<String>,
     /// Joined transcript of the selected chat (continuations folded engine-side).
-    pub transcript: Vec<SessionMessageEntry>, // slopty: no context usage or plan windows
+    pub transcript: Vec<SessionMessageEntry>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
     /// empty transcript is otherwise indistinguishable from the pre-replay
     /// gap after selection.
     pub transcript_replayed: bool,
-    /// slopty: whether the shell's window is the active one, as the shell last drew it
+    /// Whether the shell's window is the active one, as the shell last drew it
     /// (`invariants`: an open chat reads unread only while nobody looks).
     pub window_active: bool,
     transcript_baselines: HashMap<String, Arc<slopty_view_doc::TranscriptBaseline>>,
@@ -594,7 +581,7 @@ impl AppState {
         }
     }
 
-    /// slopty: the chat whose panes `chat` shows. A subagent runs inside its agent's session (its
+    /// The chat whose panes `chat` shows. A subagent runs inside its agent's session (its
     /// terminal, its checkout), so it shows that agent's panes, as zeron's subagent tabs live in
     /// their agent's pane: the subagent rows of one agent and the agent itself are one session.
     pub fn panel_owner(&self, chat: &str) -> String {
@@ -699,7 +686,7 @@ impl AppState {
         changed
     }
 
-    /// slopty: the terminal each session is now.
+    /// The terminal each session is now.
     pub fn apply_session_terminals(
         &mut self,
         terminals: std::collections::BTreeMap<String, String>,
@@ -711,7 +698,7 @@ impl AppState {
         true
     }
 
-    /// slopty: the terminal session `chat` is now: its own agent's (a subagent's is its
+    /// The terminal session `chat` is now: its own agent's (a subagent's is its
     /// agent's, `panel_owner`), or the plain terminal it is. `None` once it ended.
     pub fn session_terminal(&self, chat: &str) -> Option<&str> {
         self.session_terminals.get(&self.panel_owner(chat)).map(String::as_str)
@@ -1145,7 +1132,6 @@ impl AppState {
             .filter(|c| !c.archived && c.is_top_level())
     }
 
-    // slopty: no composer, so no remembered target of its to restore.
 
     fn current_canvas_target(&self) -> CanvasTarget {
         CanvasTarget {
@@ -1442,11 +1428,11 @@ impl AppState {
     /// Staleness-checked status dot for a chat row. A send in flight reads as
     /// Working (see [`Self::display_status_for`]).
     pub fn indicator_for(&self, chat_id: &str, now: DateTime<Utc>) -> Indicator {
-        let now = self.announced(now); // slopty: no flip before the state says it
+        let now = self.announced(now); // no flip before the state says it
         effective_indicator(self.session_for(chat_id), now)
     }
 
-    /// slopty: `now` held short of the next clock transition until this state has announced it
+    /// `now` held short of the next clock transition until this state has announced it
     /// (its timer ran and notified): a frame can begin past a deadline before the timer that
     /// announces it runs, and a view drawn then must read what a view it did not draw again
     /// still shows, a turn's Stop going stale with its lease included. Between frames and once
@@ -1561,7 +1547,7 @@ impl AppState {
         });
     }
 
-    /// slopty: whether `chat_id` may be opened: it is listed, or the list has not arrived yet
+    /// Whether `chat_id` may be opened: it is listed, or the list has not arrived yet
     /// (a note tapped at launch, a chat just started), so nothing says it is gone.
     pub fn chat_listed(&self, chat_id: &str) -> bool {
         !self.chats_synced || self.chats.iter().any(|chat| chat.id == chat_id)
@@ -1588,7 +1574,7 @@ impl AppState {
     }
 
     pub fn gate(&self) -> GatePhase {
-        gate_phase(&self.connection) // slopty: no accounts, sync or sign-in.
+        gate_phase(&self.connection)
     }
 
     pub fn engine(&self) -> Option<&EngineHandle> {
@@ -1658,7 +1644,7 @@ impl AppState {
             s.data_dir = Some(data_dir);
             cx.notify();
         });
-        // slopty: the service comes from the `EngineService` global.
+        // The service comes from the `EngineService` global.
         let service = cx.try_global::<EngineService>().map(|service| service.0.clone());
         let boot = Tokio::spawn(cx, EngineHandle::bootstrap(config, service));
         cx.spawn(async move |cx| {
@@ -1691,7 +1677,7 @@ impl AppState {
         self.local_device_id = Some(engine_info.device_id.clone());
         self.link_roots_revision = self.link_roots_revision.wrapping_add(1);
         self.engine = Some(handle.clone());
-        // slopty: a call that runs long says so in a toast, until it answers.
+        // A call that runs long says so in a toast, until it answers.
         let slow = handle.slow_calls.lock().ok().and_then(|mut slow| slow.take());
         if let Some(mut slow) = slow {
             cx.spawn(async move |this, cx| {
@@ -1707,7 +1693,6 @@ impl AppState {
             .detach();
         }
         let mut watch_tasks = Vec::with_capacity(10);
-        // slopty: the embedded engine and voice media are cut.
         watch_tasks.extend([
             spawn_watch(
                 cx,
@@ -1716,7 +1701,7 @@ impl AppState {
                 AppState::apply_sessions,
             ),
             spawn_chats_watch(cx, handle.clone()),
-            // slopty: the terminal each session is.
+            // The terminal each session is.
             spawn_watch(
                 cx,
                 handle.clone(),
@@ -2013,7 +1998,7 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        // slopty: seen through the message it shows, on that message's own clock (its
+        // Seen through the message it shows, on that message's own clock (its
         // worker's), as the worker marks it by turn: never this device's time, which no
         // message's time may be compared with.
         chat.last_seen_at = chat.last_message_at;
@@ -2059,7 +2044,6 @@ impl AppState {
     }
 }
 
-// slopty: the embedded engine and voice media are cut.
 
 /// Chats watch. Boot selection is the shell's job (it lands on the first
 /// restored open tab, device-local state this entity can't see); this task
@@ -2498,7 +2482,7 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
     use gpui::AppContext;
-    use slopty_view_rpc::RpcReply; // slopty: the engine section no longer needs it
+    use slopty_view_rpc::RpcReply;
     // `SessionStatus` is only needed to build the fixtures below — the module
     // itself derives everything through `slopty_view_proto::view`.
     use slopty_view_proto::{SessionStatus, UserProfile};
@@ -2529,10 +2513,9 @@ mod tests {
 
         assert_eq!(info.device_id, "legacy-device");
         assert_eq!(info.workspace_scope, WorkspaceScope::Synced);
-        // slopty: no accounts, sync or sign-in.
     }
 
-    // slopty: the tests of the embedded engine, its daemon probe, IPC listener and sign-in
+    // The tests of the embedded engine, its daemon probe, IPC listener and sign-in
     // deferral are cut with them.
 
     fn chat(id: &str, created_min: i64, last_msg_min: Option<i64>) -> Chat {
@@ -2555,12 +2538,12 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
-            subagent: false, // slopty: subagents
+            subagent: false,
             in_parent: false,
             space_id: None,
             last_seen_at: None,
             room_gen: None,
-            draft: None, // slopty: new field.
+            draft: None,
         }
     }
 
@@ -2595,8 +2578,8 @@ mod tests {
             status,
             started_at: None,
             updated_at: now - TimeDelta::seconds(updated_secs_ago),
-            status_since: None, // slopty: new field.
-            waiting_on: None, // slopty: new field.
+            status_since: None,
+            waiting_on: None,
         }
     }
 
@@ -2613,7 +2596,7 @@ mod tests {
         }
     }
 
-    /// slopty: a chat whose worker's clock runs ahead of this device's is seen once looked at,
+    /// A chat whose worker's clock runs ahead of this device's is seen once looked at,
     /// not left "Done" while it is open.
     #[gpui::test]
     fn a_chat_from_a_clock_ahead_is_seen_once_looked_at(cx: &mut gpui::TestAppContext) {
@@ -2827,7 +2810,7 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
             actions: Vec::new(),
-            ssh_host: None, // slopty: new field.
+            ssh_host: None,
             turned_away: None,
         }
     }
@@ -2844,8 +2827,8 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
-            status_since: None, // slopty: new field.
-            waiting_on: None, // slopty: new field.
+            status_since: None,
+            waiting_on: None,
         };
         assert!(state.apply_sessions_at(vec![row.clone()], now));
         row.updated_at = now + TimeDelta::seconds(30);
@@ -2878,8 +2861,8 @@ mod tests {
             status: SessionStatus::Working,
             started_at: Some(now),
             updated_at: now,
-            status_since: None, // slopty: new field.
-            waiting_on: None, // slopty: new field.
+            status_since: None,
+            waiting_on: None,
         }];
         let mut row = device("host", "Host");
         row.last_seen_at = Some(now);
@@ -3797,7 +3780,6 @@ mod tests {
 
     #[test]
     fn gate_phases() {
-        // slopty: no accounts, sync or sign-in.
         assert_eq!(gate_phase(&ConnectionStatus::Connecting), GatePhase::Loading);
         assert_eq!(
             gate_phase(&ConnectionStatus::Failed("boom".into())),
@@ -3952,7 +3934,6 @@ mod tests {
         }
     }
 
-    // slopty: no accounts, sync or sign-in.
 
     #[test]
     fn version_triple_parses_and_gates_device_features() {
@@ -3977,7 +3958,7 @@ mod tests {
             cursor_sdk_version: None,
             capabilities: Vec::new(),
             actions: Vec::new(),
-            ssh_host: None, // slopty: new field.
+            ssh_host: None,
             turned_away: None,
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
@@ -4003,7 +3984,7 @@ mod tests {
                 cursor_sdk_version: None,
                 capabilities: vec![slopty_view_proto::capabilities::MESSAGE_QUEUE_V1.into()],
                 actions: Vec::new(),
-                ssh_host: None, // slopty: new field.
+                ssh_host: None,
                 turned_away: None,
             },
             Device {
@@ -4016,7 +3997,7 @@ mod tests {
                 cursor_sdk_version: None,
                 capabilities: Vec::new(),
                 actions: Vec::new(),
-                ssh_host: None, // slopty: new field.
+                ssh_host: None,
                 turned_away: None,
             },
         ];
@@ -4027,7 +4008,6 @@ mod tests {
 
 }
 
-// slopty: appshots and pull-request fixtures removed.
 
 #[cfg(feature = "project-palette-fixture")]
 impl AppState {

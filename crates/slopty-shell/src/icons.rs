@@ -129,14 +129,14 @@ icon_assets![
     // Hand-drawn fold-all chevrons, drawn as a family with EXPAND_ARROWS
     // (same stroke, caps, 90° joints) — Solar has no unfold-less either.
     (FOLD_VERTICAL, "fold-vertical"),
-    // slopty: its outward twin, on a diff's "N unchanged lines" row: the lines it shows.
+    // Its outward twin, on a diff's "N unchanged lines" row: the lines it shows.
     (UNFOLD_VERTICAL, "unfold-vertical"),
     // The changes pane's unified/split toggle: a rounded frame halved by a
     // centre rule (Solar Linear weight).
     (SPLIT_COLUMNS, "split-columns"),
     // Long-line wrapping toggle shared by changes and agent Markdown fences.
     (WRAP_TEXT, "wrap-text"),
-    // slopty: drawn in the Solar Linear frame (24 box, 1.5 stroke, round caps): the diff's
+    // Drawn in the Solar Linear frame (24 box, 1.5 stroke, round caps): the diff's
     // ignore-whitespace toggle, and the Changes surface's own glyph (a page with + and −).
     (PILCROW, "pilcrow"),
     (FILE_DIFF, "file-diff"),
@@ -211,7 +211,7 @@ icon_assets![
     (STOP, "stop"),
     (CHECK, "check"),
     (COPY, "copy"),
-    // slopty: Solar Linear's lock, for a remote Mac that is locked and its password pill.
+    // Solar Linear's lock, for a remote Mac that is locked and its password pill.
     (LOCK, "lock-keyhole-minimalistic"),
     // Project Action icon family (Solar Linear-compatible strokes).
     (ACTION_PLAY, "action-play"),
@@ -411,7 +411,7 @@ mod tests {
         }
     }
 
-    /// slopty: every stroked control icon draws one weight, 1.75 in 24 units (scaled to its own
+    /// Every stroked control icon draws one weight, 1.75 in 24 units (scaled to its own
     /// view box), with round caps and joins (Amp forces the same; Amp item 15), so no glyph reads
     /// heavier or lighter than its neighbours.
     #[test]

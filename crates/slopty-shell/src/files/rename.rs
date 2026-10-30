@@ -93,7 +93,7 @@ impl FilesSurface {
         let Some(origin) = self.interaction_origin(cx) else {
             return;
         };
-        // slopty: no unwrap: an entry gone meanwhile is nothing to rename.
+        // An entry gone meanwhile is nothing to rename.
         let Some(entry) = self.tree.node(&path).map(|node| node.entry.clone()) else {
             return;
         };
@@ -171,7 +171,6 @@ impl FilesSurface {
             cx.notify();
             return;
         }
-        // slopty: no unwrap.
         if let Some(rename) = self.tree_rename.as_mut() {
             rename.submitted = true;
         }
@@ -364,7 +363,7 @@ impl FilesSurface {
                             .id("tree-delete-cancel")
                             .role(gpui::Role::Button)
                             .aria_label("Cancel")
-                            // slopty: the dialog's own keys move the shell's ring (M8).
+                            // The dialog's own keys move the shell's ring (M8).
                             .when(!dialog.confirm_focused, |el| {
                                 el.outline_ring(crate::surface_chrome::ring(
                                     &theme,

@@ -58,7 +58,7 @@ pub(super) fn path_is_outside(path: &str) -> bool {
     path.starts_with('/')
 }
 
-// slopty: the files surface's own keys, bound in its key context: Finder's ⇧⌘. for hidden files,
+// The files surface's own keys, bound in its key context: Finder's ⇧⌘. for hidden files,
 // VS Code's ⇧⌘V (Markdown preview) and ⌥Z (word wrap), and in the tree Zed's ⌘⌫ (delete, with its
 // confirm) and ⌥⌘C (copy path). Raw F2 (rename) and fn-⌫ (delete) stay.
 gpui::actions!(
@@ -66,7 +66,7 @@ gpui::actions!(
     [ToggleHiddenFiles, ToggleMarkdownPreview, ToggleWordWrap, CopyPath, DeleteSelection]
 );
 
-// slopty: the files speak of the chat's folder and name its machine, never "workspace".
+// The files speak of the chat's folder and name its machine, never "workspace".
 /// What a chat with no folder shows instead of its files.
 pub(super) const NO_FOLDER: &str = "This chat has no folder to show.";
 
@@ -164,7 +164,7 @@ pub(super) fn toolbar_button(
     toolbar_button_frame(id, None, theme).hint(label)
 }
 
-// slopty: the pane's one icon button (`surface_chrome::icon_button_frame`'s look): a faded
+// The pane's one icon button (`surface_chrome::icon_button_frame`'s look): a faded
 // hover, a deeper press, a latched toggle that still answers hover; a keyboard stop whose press
 // leaves the keyboard where it was (M8). `toggled` is a toggle's state, `None` for a plain button.
 /// On a touch screen the button takes a finger's [`TOUCH_TARGET`] around the 24 it draws, as
@@ -220,7 +220,7 @@ fn toolbar_button_frame(
     crate::surface_chrome::focus_ring_within(frame, theme, reach)
 }
 
-// slopty: a failure says what failed in the person's words, then the way on: "Try again" and the
+// A failure says what failed in the person's words, then the way on: "Try again" and the
 // raw reason behind "Copy error" (M31).
 /// A centred failure: its title, the reason in quieter words, "Try again" and "Copy error".
 pub(crate) fn failure_state(
@@ -284,7 +284,7 @@ pub(crate) fn failure_state(
                             ));
                             crate::motion::copy_feedback(key.clone(), cx);
                         })
-                        // slopty: the check drawn in as the copy lands (design-inspiration item 12).
+                        // The check drawn in as the copy lands (design-inspiration item 12).
                         .child(crate::loaders::copy_glyph::CopyGlyph::new(
                             key_for_glyph,
                             12.0,
@@ -311,7 +311,7 @@ pub(super) fn state_button(
 ) -> gpui::Stateful<gpui::Div> {
     use crate::surface_chrome::CONTROL_RADIUS;
     let reach = crate::surface_chrome::touch_reach(STATE_BUTTON_HEIGHT);
-    // slopty: on the ladder (r 6, 12 pt), its hover faded in and its press a step deeper.
+    // On the ladder (r 6, 12 pt), its hover faded in and its press a step deeper.
     let fade = format!("{id}-fade");
     let press = SharedString::from(format!("{id}-press"));
     // What it draws: the bordered box behind its words.
@@ -347,7 +347,7 @@ pub(super) fn state_button(
         .rounded(px(CONTROL_RADIUS + reach))
         .hover_fade(fade)
         .cursor_pointer()
-        // slopty: a keyboard stop (M8), its ring around the box rather than the press.
+        // A keyboard stop (M8), its ring around the box rather than the press.
         .tab_index(0)
         .on_mouse_down(gpui::MouseButton::Left, |_, window, _| window.prevent_default())
         .flex()
@@ -710,7 +710,7 @@ impl FilesSurface {
                 Some(DirectoryLoadState::Unloaded | DirectoryLoadState::Loading { .. })
             )
         {
-            // slopty: the tree's focus waits here while its folder loads, so the
+            // The tree's focus waits here while its folder loads, so the
             // explorer opened by Cmd-E keeps it rather than losing it to the window.
             div()
                 .flex_1()
@@ -782,7 +782,7 @@ impl FilesSurface {
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
                                 .aria_label("Refresh the files now")
-                                // slopty: a keyboard stop with the shell's ring (M8).
+                                // A keyboard stop with the shell's ring (M8).
                                 .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .text_color(theme.text_muted)
                                 .bg(crate::motion::hover_blend(
@@ -951,7 +951,7 @@ impl FilesSurface {
             tree_list_rows: Vec::new(),
             tree_list_generation: 0,
             tree_bar: crate::popover::MenuScrollbarState::default(),
-            // slopty: the tree is one keyboard stop; its arrows walk the rows (M8).
+            // The tree is one keyboard stop; its arrows walk the rows (M8).
             tree_focus: cx.focus_handle().tab_stop(true),
             search,
             search_restore_tree_focus: false,
@@ -1516,7 +1516,7 @@ impl FilesSurface {
                     .debug_selector(|| "files-search".into())
                     .overflow_hidden()
                     .cursor_text()
-                    // slopty: the field's hover deepens its wash, faded in.
+                    // The field's hover deepens its wash, faded in.
                     .bg(crate::motion::hover_blend(
                         "files-search-field",
                         crate::theme::ink(0.035),
@@ -1689,7 +1689,7 @@ mod explorer_tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    // slopty: on a touch screen the explorer's eye and its failure's "Try again" take a finger's
+    // On a touch screen the explorer's eye and its failure's "Try again" take a finger's
     // 44 pt press around what they draw, as the pane header's controls do: the eye inside the
     // header, which grows to the press, and clear of the search field. A press past what each
     // draws, inside its reach, still acts.
@@ -1730,7 +1730,7 @@ mod explorer_tests {
         crate::shell::force_touch(false);
     }
 
-    // slopty: a failure's "Try again" and "Copy error" take a finger's press each, side by side.
+    // A failure's "Try again" and "Copy error" take a finger's press each, side by side.
     #[gpui::test]
     fn on_touch_a_failures_buttons_take_presses_side_by_side(cx: &mut TestAppContext) {
         use crate::surface_chrome::TOUCH_TARGET;
@@ -1757,7 +1757,7 @@ mod explorer_tests {
         crate::shell::force_touch(false);
     }
 
-    // slopty: under a pointer the controls are the size they draw, and the header the band it was.
+    // Under a pointer the controls are the size they draw, and the header keeps its band.
     #[gpui::test]
     fn under_a_pointer_the_explorers_controls_keep_the_size_they_draw(cx: &mut TestAppContext) {
         let (files, cx) = bare_explorer(cx, false);
@@ -1771,7 +1771,7 @@ mod explorer_tests {
         assert_eq!(retry.size.height, px(STATE_BUTTON_HEIGHT));
     }
 
-    // slopty: Finder's ⇧⌘. shows hidden files, and the eye's tooltip names it.
+    // Finder's ⇧⌘. shows hidden files, and the eye's tooltip names it.
     #[gpui::test]
     fn the_hidden_files_key_toggles_and_its_button_names_it(cx: &mut TestAppContext) {
         use crate::settings::platform_combo;

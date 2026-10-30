@@ -2,9 +2,9 @@
 //! AppKit boundary for the browser. Wry owns the native child and its UI
 //! delegate; our navigation delegate supplies browser policy and state. All
 //! callbacks enqueue events, never re-enter GPUI. No page-to-engine IPC.
-// slopty: one page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
+// One page-to-shell message only, the page's own favicon (`FAVICON_SCRIPT`).
 use super::model::{PageState, Presentation, allowed_navigation};
-use gpui::{App, Window}; // slopty: no `Bounds`/`Pixels`; gpui-fast places the page
+use gpui::{App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{
@@ -22,7 +22,7 @@ use objc2_web_kit::{
 use std::{
     cell::{Cell, RefCell},
     mem::ManuallyDrop,
-    ptr::NonNull, // slopty: the page goes to gpui-fast's native host
+    ptr::NonNull, // the page goes to gpui-fast's native host
     rc::Rc,
 };
 use wry::{WebView, WebViewBuilderExtMacos, WebViewExtMacOS};
@@ -89,7 +89,7 @@ impl BrowserData {
         let configuration = unsafe { objc2_web_kit::WKWebViewConfiguration::new(mtm) };
         unsafe {
             configuration.setWebsiteDataStore(data.store.as_ref().unwrap());
-            // slopty: WebKit's bare user agent names no browser, and sites (Google's among them)
+            // WebKit's bare user agent names no browser, and sites (Google's among them)
             // serve it their pages for old browsers; it says what Safari says.
             configuration
                 .setApplicationNameForUserAgent(Some(&NSString::from_str(&safari_user_agent())));
@@ -223,7 +223,7 @@ pub(super) enum NativeEvent {
     Finished,
     NewTab(String),
     Key(gpui::Keystroke),
-    // slopty: the icon itself, read inside the page as a PNG `data:` URL (no HTTP client of
+    // The icon itself, read inside the page as a PNG `data:` URL (no HTTP client of
     // the shell's own), for the page at `page`.
     Favicon { page: String, data: String },
 }
@@ -319,9 +319,8 @@ impl Observer {
     }
 }
 
-// slopty: gpui-fast natives under one layer (docs/composition.md). Upstream's clip view, which
-// cut the page to GPUI's paint mask and passed drags back to GPUI, is cut: the native host
-// cuts the hole, clips and routes hits and focus.
+// gpui-fast natives under one layer (docs/composition.md): the native host cuts the hole, clips
+// and routes hits and focus.
 
 pub(super) struct NativePage(Rc<RefCell<Host>>);
 
@@ -330,7 +329,7 @@ pub(super) struct Host {
     data: BrowserData,
     view: Retained<WKWebView>,
     observer: Retained<Observer>,
-    // slopty: gpui-fast's native host replaces the clip view, its mask and its parent.
+    // gpui-fast's native host, which places, clips and routes the page.
     native: gpui::composition::NativeHost,
     background_color: Option<Retained<NSColor>>,
     monitor: Option<Retained<AnyObject>>,
@@ -344,7 +343,7 @@ pub(super) struct Host {
 }
 
 impl NativePage {
-    // slopty: gpui-fast natives under one layer (docs/composition.md): the host needs the
+    // gpui-fast natives under one layer (docs/composition.md): the host needs the
     // window mutably and the app.
     pub fn new(
         window: &mut Window,
@@ -354,7 +353,7 @@ impl NativePage {
     ) -> Result<Self, String> {
         let mtm = MainThreadMarker::new().ok_or("Browser must be created on the main thread")?;
         let new_tab = tx.clone();
-        // slopty: the page's favicon, posted by `FAVICON_SCRIPT`; anything else is dropped.
+        // The page's favicon, posted by `FAVICON_SCRIPT`; anything else is dropped.
         let favicon = tx.clone();
         let web = wry::WebViewBuilder::new()
             .with_webview_configuration(data.configuration(mtm))
@@ -375,7 +374,7 @@ impl NativePage {
             .build_as_child(window)
             .map_err(|e| e.to_string())?;
         let view = Retained::into_super(web.webview());
-        // slopty: gpui-fast natives under one layer (docs/composition.md).
+        // gpui-fast natives under one layer (docs/composition.md).
         let native = window
             .create_native_host(
                 gpui::composition::NativeHostOptions {
@@ -588,7 +587,7 @@ impl NativePage {
             }
         }
     }
-    // slopty: the page reads its own icon in its own session and cookies, draws it to a
+    // The page reads its own icon in its own session and cookies, draws it to a
     // 64 px canvas and posts it as a PNG `data:` URL (zeron fetched the link with reqwest).
     pub fn discover_favicon(&self) {
         let host = self.0.borrow();
@@ -603,7 +602,7 @@ impl NativePage {
     }
 }
 
-// slopty: finds the icon link (else `/favicon.ico`), fetches it as the page would, decodes it
+// Finds the icon link (else `/favicon.ico`), fetches it as the page would, decodes it
 // in WebKit (ICO and SVG included), and posts it once; then again whenever the page changes its
 // icon link. Failures (no icon, CORS, CSP) post nothing and the tab keeps the globe. Where the
 // canvas cannot be read back (`data:,`, as in a virtual Mac's web view), the icon's own bytes go
@@ -823,7 +822,7 @@ fn receives_wheel(view: &NSView, event: &NSEvent, mtm: MainThreadMarker) -> bool
 }
 
 impl Host {
-    /// slopty: the page's own background under freshly exposed tiles, all that is left to sync:
+    /// The page's own background under freshly exposed tiles, all that is left to sync:
     /// gpui-fast places, clips and orders the page (docs/composition.md).
     pub fn sync(&mut self) {
         // WebKit may fill newly exposed tiles a frame after a viewport change.
@@ -845,7 +844,7 @@ impl Host {
         }
         self.update_visibility();
     }
-    /// slopty: the host the page is placed by.
+    /// The host the page is placed by.
     pub fn native_host(&self) -> gpui::composition::NativeHost {
         self.native.clone()
     }
@@ -856,7 +855,7 @@ impl Host {
         }
     }
     fn update_visibility(&self) {
-        // slopty: where it shows is gpui-fast's to say; here only whether it does.
+        // Where it shows is gpui-fast's to say; here only whether it does.
         let visible = self.presentation != Presentation::Hidden
             && self.observer.ivars().error.borrow().is_none();
         if !visible || self.presentation == Presentation::Passthrough {
@@ -871,7 +870,7 @@ impl Host {
     }
     fn present(&mut self, presentation: Presentation) {
         self.presentation = presentation;
-        // slopty: drags pass to GPUI through the native host's hit routing.
+        // Drags pass to GPUI through the native host's hit routing.
         self.update_visibility();
     }
 }
@@ -895,7 +894,7 @@ impl Drop for Host {
         }
         self.wheel.stop();
         self.view.removeFromSuperview();
-        // slopty: the native host takes its container away with its last clone.
+        // The native host takes its container away with its last clone.
     }
 }
 

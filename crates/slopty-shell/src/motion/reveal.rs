@@ -1,4 +1,4 @@
-//! slopty: two small motions every surface shares: a copy control's "Copied" span, and a section
+//! Two small motions every surface shares: a copy control's "Copied" span, and a section
 //! that grows into its height instead of arriving at it in one frame
 //! (`.research/micro-details-2026-10-16.md`, M3 and M5).
 
@@ -87,7 +87,7 @@ pub struct RevealHeight {
 }
 
 impl RevealHeight {
-    /// slopty: moves as the one fold groups, cards and trays share ([`fold_frame`];
+    /// Moves as the one fold groups, cards and trays share ([`fold_frame`];
     /// design-inspiration item 7): the height opens first and the contents fade in and rise
     /// after it; closing, the contents are gone before the height lands.
     pub fn fold(mut self) -> Self {
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(height(cx), 0.0);
     }
 
-    /// slopty: a fold opens its height first and fades its contents in after, risen; closing,
+    /// A fold opens its height first and fades its contents in after, risen; closing,
     /// the contents are gone before the height lands.
     #[test]
     fn a_fold_opens_its_height_before_its_contents() {

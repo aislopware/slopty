@@ -19,14 +19,14 @@ fn button(
 ) -> gpui::Stateful<gpui::Div> {
     // Match Files/History chrome, including focus-preserving mouse-down and
     // tooltips. Disabled controls have neither a pointer cursor nor a handler.
-    // slopty: the tooltip names the key the browser binds (⌘[ ⌘] ⇧⌘R), resolved in its context.
+    // The tooltip names the key the browser binds (⌘[ ⌘] ⇧⌘R), resolved in its context.
     match action {
         Some(action) => {
             crate::files::toolbar_button_keyed(id, label, action, focus.clone(), theme, cx)
         }
         None => crate::files::toolbar_button(id, label, theme),
     }
-        // slopty: a control that cannot act is no keyboard stop (M8).
+        // A control that cannot act is no keyboard stop (M8).
         .when(!enabled, |el| {
             el.cursor_default()
                 .tab_stop(false)
@@ -140,7 +140,7 @@ impl BrowserSurface {
                     .child(subtitle),
             );
         for service in &snapshot.services {
-            let url = super::preview_url(service, snapshot.proxy_port); // slopty: forwards
+            let url = super::preview_url(service, snapshot.proxy_port);
             let row_url = url.clone();
             let border_strong = theme.border_strong;
             let label = if snapshot.remote {
@@ -163,7 +163,7 @@ impl BrowserSurface {
                     .flex()
                     .items_center()
                     .gap(px(10.0))
-                    // slopty: the row's wash fades in with the pointer, as the pane's rows do
+                    // The row's wash fades in with the pointer, as the pane's rows do
                     // (M23); its border still steps at once.
                     .when(!available, |el| el.bg(crate::theme::ink(0.02)))
                     .when(available, |el| {
@@ -235,7 +235,7 @@ impl BrowserSurface {
                             .role(gpui::Role::Button)
                             .aria_label(format!("Open {} preview", service.name))
                             .when(available, |el| {
-                                // slopty: the row's keyboard stop; the row itself is the
+                                // The row's keyboard stop; the row itself is the
                                 // pointer's larger target for the same press (M8).
                                 let fade = format!("open-preview-{}-fade", service.id);
                                 el.cursor_pointer()
@@ -298,7 +298,7 @@ impl BrowserSurface {
                 .role(gpui::Role::Button)
                 .aria_label("Enter a website address")
                 .rounded(px(4.0))
-                // slopty: a keyboard stop with the shell's ring (M8).
+                // A keyboard stop with the shell's ring (M8).
                 .map(|el| surface_chrome::key_stop(el, theme))
                 .on_click(cx.listener(|this, _, window, cx| this.focus_address(window, cx)))
                 .child("Or enter a website address"),
@@ -406,7 +406,7 @@ impl BrowserSurface {
                             } else {
                                 "Enter an address"
                             })
-                            // slopty: the hover fades a control step over the raised fill (M23).
+                            // The hover fades a control step over the raised fill (M23).
                             .bg(crate::motion::hover_blend(
                                 "browser-empty-action-fade",
                                 theme.surface_raised,
@@ -417,7 +417,7 @@ impl BrowserSurface {
                                 let pressed = theme.surface_raised.blend(crate::theme::pressed_wash());
                                 move |style| style.bg(pressed)
                             })
-                            // slopty: a keyboard stop with the shell's ring (M8).
+                            // A keyboard stop with the shell's ring (M8).
                             .map(|el| surface_chrome::key_stop(el, theme))
                             .flex()
                             .items_center()
@@ -659,7 +659,7 @@ impl Render for BrowserSurface {
                     .child(self.address.clone()),
             )
             .when(focused || self.address_edited, |el| {
-                // slopty: an 18 px mark in a 24 px target (M25); its tooltip names ⏎, which the
+                // An 18 px mark in a 24 px target (M25); its tooltip names ⏎, which the
                 // address field takes.
                 el.child(
                     div()
@@ -673,7 +673,7 @@ impl Render for BrowserSurface {
                         .cursor_pointer()
                         .role(gpui::Role::Button)
                         .hover_fade("browser-go-fade")
-                        // slopty: a keyboard stop with the shell's ring (M8).
+                        // A keyboard stop with the shell's ring (M8).
                         .map(|el| surface_chrome::key_stop(el, &theme))
                         .on_click(cx.listener(|this, _, w, cx| this.submit(w, cx)))
                         .action_hint(
@@ -688,7 +688,7 @@ impl Render for BrowserSurface {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                // slopty: the mark's wash fades in with the pointer over the
+                                // The mark's wash fades in with the pointer over the
                                 // whole button (M23).
                                 .bg(crate::motion::hover_blend(
                                     "browser-go-fade",
@@ -735,7 +735,7 @@ impl Render for BrowserSurface {
             if self.page.error.is_some() {
                 body.child(self.empty_body(&theme, cx))
             } else {
-                // slopty: gpui-fast natives under one layer (docs/composition.md): the
+                // gpui-fast natives under one layer (docs/composition.md): the
                 // element places the page, cuts its hole under the Files panel and routes
                 // hits and focus, so no present-time sync is needed.
                 let native = native.handle();
@@ -782,7 +782,7 @@ impl Render for BrowserSurface {
                         // Keep the previous frame at its original scale while
                         // WebKit reflows; clipping never stretches the page.
                         let viewport=gpui::Bounds::new(bounds.origin,gpui::size(px(dimensions.width.0 as f32/image_scale),px(dimensions.height.0 as f32/image_scale)));
-                        let _=window.paint_image(viewport,viewport,gpui::Corners::default(),image.clone(),0,false); // slopty: gpui-fast takes the image's bounds too
+                        let _=window.paint_image(viewport,viewport,gpui::Corners::default(),image.clone(),0,false); // gpui-fast takes the image's bounds too
                     }
                 }).absolute().inset_0())
                 .on_mouse_down(MouseButton::Left,cx.listener(|this,event: &gpui::MouseDownEvent,w,cx| {

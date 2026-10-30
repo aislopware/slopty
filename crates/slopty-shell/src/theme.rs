@@ -769,7 +769,7 @@ impl TerminalColors {
         }
     }
 
-    /// slopty: these colours selecting in `selection`.
+    /// These colours selecting in `selection`.
     fn selecting(self, selection: Hsla) -> Self {
         Self { selection, ..self }
     }
@@ -837,7 +837,7 @@ impl Theme {
     pub const PANEL_RADIUS: f32 = 10.0;
     /// Small control radius (buttons, chips).
     pub const CONTROL_RADIUS: f32 = 6.0;
-    /// slopty: the smallest radius, for marks inside a control (a key hint, a pill's inner
+    /// The smallest radius, for marks inside a control (a key hint, a pill's inner
     /// button). The ladder is 4 / 6 / 10 / 12 (`popover::CARD_RADIUS`) / 16.
     pub const RADIUS_SM: f32 = 4.0;
     /// Base spacing steps. slopty: 2 and 6 are steps too, so a hairline nudge and the most used
@@ -910,7 +910,7 @@ impl Theme {
         self.glass().a < 1.0
     }
 
-    /// slopty: the ground a session's column stands on: its terminal's own background, under
+    /// The ground a session's column stands on: its terminal's own background, under
     /// the title strip above it, the side pane and its Files column beside it, a phone's side
     /// page and the bands a phone or a tablet keeps clear at the screen's edges, parted by
     /// hairlines rather than by near-blacks (`docs/decisions/ui.md`, "One ground per session").
@@ -924,7 +924,7 @@ impl Theme {
     }
 
     /// Shared background for the editor host and the adjacent Files column.
-    /// slopty: the session's one ground, so the side pane and its Files column stand on the
+    /// The session's one ground, so the side pane and its Files column stand on the
     /// terminal's background beside it.
     pub fn panel_bg(&self) -> Hsla {
         self.session_ground()
@@ -1063,7 +1063,7 @@ impl Theme {
         }
     }
 
-    /// slopty: the edge and depth of a surface floating at `level` (opencode's ring and lit top
+    /// The edge and depth of a surface floating at `level` (opencode's ring and lit top
     /// edge, Amp's long shadows; `docs/decisions/ui.md`): in place of a 1 px border,
     ///
     /// - a 0.5 px ring inside the edge (one device pixel at 2×), Amp's white 14 % on dark and
@@ -1528,7 +1528,7 @@ impl Theme {
         theme.diff_add = model_color(colors.diff_add);
         theme.diff_del = model_color(colors.diff_delete);
         theme.terminal = TerminalColors::from_variant(variant);
-        // slopty: a built-in theme's terminal selects in the app's selection colour; an imported
+        // A built-in theme's terminal selects in the app's selection colour; an imported
         // terminal theme keeps the one it chose (M40).
         if is_curated_builtin {
             theme.terminal.selection = theme.selection;
@@ -1563,7 +1563,7 @@ impl Theme {
             .with_code_font_size(crate::typography::code_font_size(cx))
             .with_terminal_font_size(crate::typography::terminal_font_size(cx));
         sync_gpui_base_scrollbar(&next, cx);
-        cx.set_text_smoothing(text_smoothing_for(next.appearance)); // slopty: dark weights
+        cx.set_text_smoothing(text_smoothing_for(next.appearance));
         cx.set_global(next);
         // An accent-only swap leaves CURRENT_APPEARANCE unchanged, but cached
         // resolved colors still need to be discarded for the next frame.
@@ -1632,7 +1632,7 @@ impl Theme {
         });
         set_current_appearance(appearance);
         sync_gpui_base_scrollbar(&next, cx);
-        cx.set_text_smoothing(text_smoothing_for(next.appearance)); // slopty: dark weights
+        cx.set_text_smoothing(text_smoothing_for(next.appearance));
         cx.set_global(next);
         if changed || force_generation {
             bump_style_generation();
@@ -1660,7 +1660,7 @@ impl Theme {
     }
 }
 
-// slopty: weight compensation in dark, as Claude desktop lightens its weights there. On macOS,
+// Weight compensation in dark, as Claude desktop lightens its weights there. On macOS,
 // font smoothing dilates a glyph by its colour's luminance, so light text on a dark plane paints
 // about a weight heavier than the same text dark on light. Dark sets every glyph at the weight
 // the design names (antialiased, never dilated, the web's `-webkit-font-smoothing:
@@ -1684,7 +1684,7 @@ fn scrollbar_thumb_colors(theme: &Theme) -> (Hsla, Hsla, Hsla) {
 
 fn sync_gpui_base_scrollbar(theme: &Theme, cx: &mut App) {
     let (normal, hover, active) = scrollbar_thumb_colors(theme);
-    // slopty: gpui-kit's scrollbar theme takes its styles through a builder.
+    // gpui-kit's scrollbar theme takes its styles through a builder.
     let scrollbar = &mut gpui_base::Theme::global_mut(cx).scrollbar;
     *scrollbar = std::mem::take(scrollbar).with_styles(
         gpui_base::ScrollbarStyles::default()
@@ -1730,7 +1730,7 @@ pub fn neutral(lightness: f32) -> Hsla {
     hsla(0.0, 0.0, v, 1.0)
 }
 
-// slopty: one dimming for every control that cannot act now (the menus' and search steps' 0.38).
+// One dimming for every control that cannot act now (the menus' and search steps' 0.38).
 /// How far a disabled control fades, everywhere; pair it with `cursor_default`.
 pub const DISABLED_OPACITY: f32 = 0.38;
 
@@ -1787,7 +1787,7 @@ fn wash_for(appearance: Appearance, alpha: f32) -> Hsla {
     }
 }
 
-// slopty: the interactive washes as dark/light pairs (Claude desktop's alpha-1 and alpha-2). A
+// The interactive washes as dark/light pairs (Claude desktop's alpha-1 and alpha-2). A
 // raw `wash(N)` keeps its dark alpha on white, where it reads about twice as heavy, so the light
 // steps are the ones `glass_selected_bg` already settled on: a pane reads as light as the
 // sidebar beside it.
@@ -2078,12 +2078,12 @@ pub fn flatten(fg: Hsla, bg: Hsla) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
-// slopty: a spinner on a light surface must read at a glance. Pale tints (the sunrise rows, an
+// A spinner on a light surface must read at a glance. Pale tints (the sunrise rows, an
 // accent's light glyph row, `text_muted`) take a deeper tone of their own hue, as the light theme
 // already does for its other roles, until they clear 3:1, WCAG's bar for non-text UI.
 
 /// The minimum contrast a spinner's lit cell keeps against the surface under it.
-/// slopty: how high a surface floats over the window ([`Theme::elevation`]).
+/// How high a surface floats over the window ([`Theme::elevation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Elevation {
     /// A tooltip or hover card: a lighter ring and a short shadow.
@@ -2092,7 +2092,7 @@ pub enum Elevation {
     Floating,
 }
 
-/// slopty: the ring a floating surface draws inside its edge: one device pixel at 2×.
+/// The ring a floating surface draws inside its edge: one device pixel at 2×.
 pub const ELEVATION_RING: f32 = 0.5;
 
 pub const SPINNER_CONTRAST: f32 = 3.0;
@@ -2189,7 +2189,7 @@ mod tests {
         assert_eq!(rgb, [10, 10, 10]);
     }
 
-    // slopty: dark sets text at its own weight; light keeps the platform's smoothing, and an
+    // Dark sets text at its own weight; light keeps the platform's smoothing, and an
     // appearance switch carries the policy with it.
     #[gpui::test]
     fn dark_text_is_set_at_its_own_weight(cx: &mut gpui::TestAppContext) {
@@ -2469,7 +2469,7 @@ mod tests {
                 assert!(contrast_ratio(theme.busy, theme.bg) >= 3.0);
                 assert_eq!(theme.code_text, theme.accent);
                 assert_eq!(theme.busy, theme.accent);
-                // slopty: one selection colour, the terminal's included (M40).
+                // One selection colour, the terminal's included (M40).
                 assert_eq!(theme.terminal.selection, theme.selection);
                 assert_eq!(theme.glyph.mid, theme.accent);
                 assert_ne!(theme.glyph.light, theme.glyph.mid);

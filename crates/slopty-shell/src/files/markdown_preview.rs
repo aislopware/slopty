@@ -983,7 +983,7 @@ impl MarkdownPreview {
                 let image_allowed = self.image_allowed.clone();
                 let diagram_allowed = self.diagram_allowed.clone();
                 opts.media = Some(render::MediaUi {
-                    chart: None, // slopty: a chart fence is the transcript's (M)
+                    chart: None, // a chart fence is the transcript's (M)
                     diagram: Some(Rc::new(move |code, id, theme| {
                         let state = diagrams.get(code);
                         let allowed = diagram_allowed.contains(code);
@@ -1098,7 +1098,7 @@ impl MarkdownPreview {
                                     .child(text)
                                     .when(external, |el| {
                                         let link = image_link.clone();
-                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        // A keyboard stop with the shell's ring (M8).
                                         el.cursor_pointer()
                                             .role(gpui::Role::Link)
                                             .map(|el| crate::surface_chrome::key_stop(el, theme))
@@ -1119,7 +1119,6 @@ impl MarkdownPreview {
                 });
                 opts.link = Some(link.clone());
                 opts.copy = Some(self.copy_ui_for(&opts.row_key, cx));
-                // slopty: no notes on blocks; the preview is read-only toward the agent.
                 Some(
                     div()
                         .w_full()
@@ -1207,7 +1206,7 @@ impl Render for MarkdownPreview {
                 }
             }))
             .child(render::selection_surface_reset(self.scope.clone()))
-            // slopty: one loading voice; the truncation is information, not a warning (M30, M34).
+            // One loading voice; the truncation is information, not a warning (M30, M34).
             .when(self.loading, |el| {
                 el.child(
                     div()

@@ -15,7 +15,7 @@
 //!   reflow already-painted text; the canonical parse settles honestly on
 //!   completion.
 
-// slopty: find in a thread, the paint half.
+// Find in a thread, the paint half.
 pub mod find;
 pub(crate) mod inline_code_links;
 mod link_destination;
@@ -32,7 +32,7 @@ pub use parser::{
     Block, BlockTree, IncrementalParser, InlineRun, InlineStyle, parse_full, parse_message,
 };
 
-pub(crate) mod ansi; // slopty: terminal output in its colours.
-pub(crate) mod chat_links; // slopty: links to chats as live chips.
+pub(crate) mod ansi; // terminal output in its colours.
+pub(crate) mod chat_links; // links to chats as live chips.
 pub mod mermaid;
 pub(crate) mod mermaid_cache;

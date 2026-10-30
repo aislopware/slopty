@@ -9,10 +9,9 @@ use gpui::{
     px,
 };
 
-use crate::popover; // slopty: appshots removed.
+use crate::popover;
 
 use crate::settings::widgets;
-// slopty: the pull-request destination's row is gone
 use crate::settings::{
     KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke,
     key_equivalents,
@@ -61,11 +60,9 @@ pub fn record_key(
 pub enum ShortcutsEvent {
     /// The keymap changed — persist + re-apply.
     KeymapChanged(KeymapConfig),
-    // slopty: appshots removed.
 }
 
 pub struct ShortcutsPage {
-    // slopty: appshots removed.
     scroll: crate::settings::widgets::PageScroll,
     /// Working copy (kept in sync with the shell via change events).
     keymap: KeymapConfig,
@@ -76,9 +73,6 @@ pub struct ShortcutsPage {
     /// conflicts never persist; they're refused at record time, as in slopty.
     conflict_notice: Option<SharedString>,
     focus: FocusHandle,
-    // slopty: appshots removed; no send-key choice, since the GUI sends nothing.
-    // slopty: no pull-request pages.
-    // slopty: no thread naming: an agent's thread is titled by the agent.
     _state: Entity<AppState>,
 }
 
@@ -88,7 +82,6 @@ impl ShortcutsPage {
     pub fn new(
         state: Entity<AppState>,
         keymap: KeymapConfig,
-        // slopty: appshots removed.
         cx: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -99,18 +92,13 @@ impl ShortcutsPage {
             recording_interceptor: None,
             conflict_notice: None,
             focus: cx.focus_handle(),
-            // slopty: appshots removed.
-            // slopty: no pull-request pages.
-            // slopty: no thread naming.
             _state: state,
         }
     }
 
-    // slopty: dictation and appshots removed.
 
     fn start_recording(&mut self, id: ShortcutId, window: &mut Window, cx: &mut Context<Self>) {
         self.recording = Some(id);
-        // slopty: appshots removed.
         let page = cx.entity().downgrade();
         // Bound actions run before Div key listeners. Intercept first so a
         // conflicting chord is recorded/refused instead of running its action.
@@ -134,7 +122,6 @@ impl ShortcutsPage {
         self.recording = None;
         self.recording_blur = None;
         self.recording_interceptor = None;
-        // slopty: appshots removed.
     }
 
     fn commit(&mut self, cx: &mut Context<Self>) {
@@ -142,7 +129,6 @@ impl ShortcutsPage {
         cx.notify();
     }
 
-    // slopty: dictation and appshots removed.
 
     fn record_keystroke(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some(recording) = self.recording else {
@@ -252,7 +238,6 @@ impl ShortcutsPage {
         }
     }
 
-    // slopty: dictation and appshots removed.
 
     /// The shared rail under the id of whichever page is showing.
     fn render_scrollbar(
@@ -260,7 +245,6 @@ impl ShortcutsPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        // slopty: appshots removed.
         popover::rail(self, "shortcuts-page-scrollbar", theme, cx)
     }
 }
@@ -275,11 +259,8 @@ impl popover::ScrollRailHost for ShortcutsPage {
     }
 }
 
-// slopty: dictation and appshots removed.
 
-// slopty: dictation and appshots removed.
 
-// slopty: dictation and appshots removed.
 
 /// Reset (when customized) plus the click-to-record combo chip; recording
 /// inverts it to the accent wash. Shared by Settings → Shortcuts and the
@@ -299,7 +280,7 @@ fn binding_control(
     let chip_text: SharedString = if is_recording {
         "Press keys…".into()
     } else {
-        // slopty: the glyphs every other place writes a key in ("⇧⌘A").
+        // The glyphs every other place writes a key in ("⇧⌘A").
         crate::keys::combo_text(&combo)
     };
     div()
@@ -347,7 +328,7 @@ fn binding_control(
                 .cursor_pointer()
                 .map(|el| {
                     if is_recording {
-                        // slopty: recording draws its edge inside the chip, so the chip never grows.
+                        // Recording draws its edge inside the chip, so the chip never grows.
                         el.bg(accent.opacity(0.16))
                             .outline_ring(gpui::Outline {
                                 color: accent.opacity(0.55),
@@ -376,9 +357,7 @@ fn binding_control(
 /// persist; they're refused at record time, naming the owner (slopty
 /// settings.shortcuts.tsx: "… is already assigned to …"). Pure.
 fn refusal(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<SharedString> {
-    // slopty: appshots removed; no key is held for a composer, since the GUI sends nothing.
     conflict_owner(keymap, id, combo).map(|owner| {
-        // slopty: dictation and appshots removed.
         format!(
             "{} is already assigned to {}.",
             crate::keys::combo_text(combo),
@@ -392,7 +371,7 @@ fn refusal(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<SharedS
 pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Option<ShortcutId> {
     ShortcutId::ALL
         .into_iter()
-        .find(|&other| other != id && keymap.get(other) == combo) // slopty: appshots removed.
+        .find(|&other| other != id && keymap.get(other) == combo)
 }
 
 /// The page's sections, in display order. [`group`] is a total match, so every
@@ -400,9 +379,9 @@ pub fn conflict_owner(keymap: &KeymapConfig, id: ShortcutId, combo: &str) -> Opt
 /// extends the match and appears on the page by construction
 /// (`every_shortcut_lands_in_a_rendered_group` holds the other half: its group
 /// name must be listed here).
-// slopty: the keys used most lead; the one-key groups fold into one "Other" card at the foot.
-const GROUP_ORDER: [&str; 4] = [ // slopty: dictation and appshots removed.
-    "Sessions", // slopty: one word for them, as everywhere
+// The keys used most lead; the one-key groups fold into one "Other" card at the foot.
+const GROUP_ORDER: [&str; 4] = [
+    "Sessions", // one word for them, as everywhere
     "Views",
     "Jump to session",
     "Other",
@@ -411,26 +390,25 @@ const GROUP_ORDER: [&str; 4] = [ // slopty: dictation and appshots removed.
 /// The section a shortcut's row renders under.
 fn group(id: ShortcutId) -> &'static str {
     match id {
-        // slopty: appshots and the wallpaper shuffle removed; one-key groups fold into "Other".
         ShortcutId::SaveFile | ShortcutId::BrowserReload => "Other",
         ShortcutId::ToggleSidebar
         | ShortcutId::ToggleChanges
         | ShortcutId::ToggleFiles
-        | ShortcutId::ReopenClosedTab => "Views", // slopty: the sidebar and the views beside a session
-        // slopty: dictation removed; a new project is how a session starts somewhere new.
+        | ShortcutId::ReopenClosedTab => "Views", // the sidebar and the views beside a session
+        // A new project is how a session starts somewhere new.
         ShortcutId::NewProject
         | ShortcutId::NewSession
         | ShortcutId::NextSession
         | ShortcutId::PrevSession
         | ShortcutId::ArchiveSession
-        | ShortcutId::NextNeedsYou // slopty: the next one waiting on the person
-        | ShortcutId::Inbox => "Sessions", // slopty: everything waiting, behind the eye
+        | ShortcutId::NextNeedsYou // the next one waiting on the person
+        | ShortcutId::Inbox => "Sessions", // everything waiting, behind the eye
         ShortcutId::JumpSession(_) => "Jump to session",
     }
 }
 
 impl Render for ShortcutsPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement { // slopty: appshots removed.
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Feature pages (Voice) rebind their shortcut through the store. Read
         // it back so a later commit here never republishes an older keymap.
         if self.recording.is_none()
@@ -438,7 +416,6 @@ impl Render for ShortcutsPage {
         {
             self.keymap.clone_from(&store.current.keymap);
         }
-        // slopty: appshots removed.
         let theme = Theme::of(cx).for_settings_surface();
         let recording = self.recording;
         let customized = self.keymap != KeymapConfig::default();
@@ -449,7 +426,6 @@ impl Render for ShortcutsPage {
         // own top margin is zeroed.
         let mut groups: Vec<gpui::AnyElement> = Vec::new();
         for name in GROUP_ORDER {
-            // slopty: dictation and appshots removed.
             let mut card = widgets::section_card(&theme).mt_0();
             let ids = ShortcutId::ALL.into_iter().filter(|&id| group(id) == name);
             for (gx, id) in ids.enumerate() {
@@ -484,7 +460,7 @@ impl Render for ShortcutsPage {
                     .track_focus(&self.focus)
                     .child(
                         widgets::page_column()
-                            // slopty: one page head (`widgets::page_head`), titled as the nav
+                            // One page head (`widgets::page_head`), titled as the nav
                             // names the page (`SettingsSection::label`).
                             .child(widgets::page_head(
                                 &theme,
@@ -493,7 +469,7 @@ impl Render for ShortcutsPage {
                                 "Click a binding, then press the new key combination.",
                                 Some(
                                     {
-                                        // slopty: dimmed when nothing differs or while recording.
+                                        // Dimmed when nothing differs or while recording.
                                         let enabled = customized && recording.is_none();
                                         widgets::restore_defaults(
                                             &theme,
@@ -541,9 +517,7 @@ impl Render for ShortcutsPage {
 mod tests {
     use super::*;
 
-    // slopty: dictation and appshots removed.
 
-    // slopty: dictation and appshots removed.
 
     #[gpui::test]
     fn recorder_refuses_bound_actions_before_they_can_run(cx: &mut gpui::TestAppContext) {
@@ -566,13 +540,12 @@ mod tests {
             ShortcutsPage::new(
                 state,
                 KeymapConfig::default(),
-                // slopty: appshots removed.
                 cx,
             )
         });
         window
             .update(cx, |page, window, cx| {
-                page.start_recording(ShortcutId::SaveFile, window, cx) // slopty: appshots removed.
+                page.start_recording(ShortcutId::SaveFile, window, cx)
             })
             .unwrap();
         cx.simulate_keystrokes(window.into(), &crate::settings::platform_combo("mod-n"));
@@ -586,7 +559,7 @@ mod tests {
                         .contains("New session")
                 );
                 assert_eq!(
-                    page.keymap.save_file, // slopty: appshots removed.
+                    page.keymap.save_file,
                     ShortcutId::SaveFile.default_combo()
                 );
                 assert!(page.recording.is_none());
@@ -620,7 +593,7 @@ mod tests {
             RecordOutcome::Set("mod-alt-shift-k".into())
         );
         // Apple-only: elsewhere ctrl IS the primary and records as "mod".
-        #[cfg(target_vendor = "apple")] // slopty: an iPad's ⌘ too
+        #[cfg(target_vendor = "apple")] // an iPad's ⌘ too
         assert_eq!(
             record_key("tab", true, false, true, false, &us),
             RecordOutcome::Set("ctrl-shift-tab".into())
@@ -697,7 +670,7 @@ mod tests {
         }
     }
 
-    // slopty: the page leads with the keys used most, and no card holds a lone key but the
+    // The page leads with the keys used most, and no card holds a lone key but the
     // "Other" card at its foot.
     #[test]
     fn the_page_leads_with_sessions_and_gathers_lone_keys_at_the_foot() {
@@ -736,6 +709,5 @@ mod tests {
         );
     }
 
-    // slopty: dictation and appshots removed.
 
 }

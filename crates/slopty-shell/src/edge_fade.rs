@@ -13,8 +13,8 @@ use gpui::{
     IntoElement, LayoutId, Pixels, ScrollHandle, Window, WindowId, px,
 };
 
-// slopty: zui's `EdgeFade` scope, which this module was written against; gpui-fast's
-// `with_edge_fade` takes the bounds and a per-edge width, so `paint` maps one onto the other.
+// The fade's scope, which `paint` maps onto gpui-fast's `with_edge_fade` (the bounds and a
+// per-edge width).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct EdgeFade {
     bounds: Bounds<Pixels>,
@@ -30,7 +30,7 @@ struct EdgeFade {
 }
 
 impl EdgeFade {
-    // slopty: the gpui-fast fade this scope draws.
+    // The gpui-fast fade this scope draws.
     fn fast(&self) -> gpui::EdgeFade {
         let width = |on: bool, band: Option<Pixels>| {
             if on { band.unwrap_or(self.band) } else { px(0.0) }
@@ -119,9 +119,9 @@ pub struct EdgeFaded {
     scroll_x: Option<ScrollHandle>,
     smooth_overflow_x: bool,
     grow_x: bool,
-    /// slopty: how much content lies past the top and the bottom ([`Self::fade_scroll_y_with`]).
+    /// How much content lies past the top and the bottom ([`Self::fade_scroll_y_with`]).
     hidden_y: Option<Box<dyn Fn(&App) -> (f32, f32)>>,
-    clear_right: f32, // slopty: see `clear_right`
+    clear_right: f32,
     child: AnyElement,
 }
 
@@ -190,7 +190,7 @@ impl EdgeFaded {
         self
     }
 
-    /// slopty: [`Self::fade_scroll_x`] for the vertical edges: each ramp is as tall as the
+    /// [`Self::fade_scroll_x`] for the vertical edges: each ramp is as tall as the
     /// content hidden past it, up to its band, so a list scrolled by 4 px dims 4 px at its top
     /// rather than snapping a whole band on (HextaUI's scroll area; design-inspiration item 4).
     pub fn fade_scroll_y(self, handle: &ScrollHandle) -> Self {
@@ -201,7 +201,7 @@ impl EdgeFaded {
         })
     }
 
-    /// slopty: [`Self::fade_scroll_y`] for a scroller without a [`ScrollHandle`] (a list):
+    /// [`Self::fade_scroll_y`] for a scroller without a [`ScrollHandle`] (a list):
     /// `hidden` says how much content lies past the top and the bottom, read at paint time.
     pub fn fade_scroll_y_with(mut self, hidden: impl Fn(&App) -> (f32, f32) + 'static) -> Self {
         self.hidden_y = Some(Box::new(hidden));
@@ -226,7 +226,7 @@ impl EdgeFaded {
         self
     }
 
-    /// slopty: [`Self::inset_top`], for the BOTTOM edge: content between the inset edge and
+    /// [`Self::inset_top`], for the BOTTOM edge: content between the inset edge and
     /// the wrapper's real bottom paints fully transparent (the transcript under the composer's
     /// footer).
     pub fn inset_bottom(mut self, px: f32) -> Self {
@@ -239,7 +239,7 @@ impl EdgeFaded {
         self
     }
 
-    /// slopty: keep the last `px` of the child clear, fading out over [`CLEAR_BAND`] before it,
+    /// Keep the last `px` of the child clear, fading out over [`CLEAR_BAND`] before it,
     /// so something laid over the right end (a row's hover pill) reads alone without the child
     /// re-laying out under it.
     pub fn clear_right(mut self, px: f32) -> Self {
@@ -270,7 +270,7 @@ impl Element for EdgeFaded {
         (self.child.request_layout(window, cx), ())
     }
 
-    // slopty: gpui-fast notes an edge fade in prepaint as well as in paint, so the fade is
+    // gpui-fast notes an edge fade in prepaint as well as in paint, so the fade is
     // worked out for both phases (`fade`), and each runs the child inside it.
     fn prepaint(
         &mut self,
@@ -317,14 +317,14 @@ impl Element for EdgeFaded {
             .0
             .borrow_mut()
             .push((window.window_handle().window_id(), fade));
-        window.with_edge_fade(fade.bounds, fade.fast(), |window| self.child.paint(window, cx)); // slopty: gpui-fast's form
+        window.with_edge_fade(fade.bounds, fade.fast(), |window| self.child.paint(window, cx));
         cx.global::<PaintFades>().0.borrow_mut().pop();
     }
 }
 
 impl EdgeFaded {
-    /// slopty: the fade this element draws its child in at `bounds` now, if any: what upstream's
-    /// `paint` worked out, shared with `prepaint`.
+    /// The fade this element draws its child in at `bounds` now, if any, shared by `paint` and
+    /// `prepaint`.
     fn fade(&self, bounds: Bounds<Pixels>, window: &Window, cx: &App) -> Option<EdgeFade> {
         let (mut top, mut bottom) = (self.top, self.bottom);
         if let Some(scroll) = &self.scroll_y {
@@ -338,7 +338,7 @@ impl EdgeFaded {
             top &= overflow_top;
             bottom &= overflow_bottom;
         }
-        // slopty: a ramp that grows with what is hidden past its edge.
+        // A ramp that grows with what is hidden past its edge.
         let (mut band_top, mut band_bottom) = (self.band_top, self.band_bottom);
         if let Some(hidden) = &self.hidden_y {
             let (hidden_top, hidden_bottom) = hidden(cx);
@@ -350,7 +350,7 @@ impl EdgeFaded {
         let (mut left, mut right) = (self.left, self.right);
         let mut outset_right = 0.0;
         let (mut band_left, mut band_right) = (None, None);
-        // slopty: a cleared end fades whether or not the label overflows; it applies after the
+        // A cleared end fades whether or not the label overflows; it applies after the
         // overflow fade below, which it replaces.
         if let Some(scroll) = &self.scroll_x
             && self.grow_x
@@ -409,7 +409,7 @@ impl EdgeFaded {
     }
 }
 
-/// slopty: the ramp before a [`EdgeFaded::clear_right`] end.
+/// The ramp before a [`EdgeFaded::clear_right`] end.
 pub const CLEAR_BAND: f32 = 16.0;
 
 fn label_fade_outset(overflow: f32, band: f32) -> f32 {
@@ -507,7 +507,7 @@ mod tests {
         );
     }
 
-    /// slopty: a growing vertical fade's ramp is as tall as what is hidden past its edge, up to
+    /// A growing vertical fade's ramp is as tall as what is hidden past its edge, up to
     /// the band, and off with nothing hidden (design-inspiration item 4).
     #[gpui::test]
     fn a_vertical_ramp_grows_with_the_content_hidden_past_it(cx: &mut gpui::TestAppContext) {
@@ -633,7 +633,7 @@ mod tests {
                     .unwrap();
                 observed.borrow_mut().clear();
                 cx.update_window(handle.into(), |_, window, cx| {
-                    window.refresh(); // slopty: gpui-fast keeps a frame nothing invalidated
+                    window.refresh(); // gpui-fast keeps a frame nothing invalidated
                     window.draw(cx).clear(cx);
                     assert!(active_fade(window, cx).is_none(), "paint scope leaked");
                 })

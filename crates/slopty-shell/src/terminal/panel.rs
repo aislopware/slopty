@@ -4,7 +4,7 @@
 //! shows each chat's session terminal as the chat is shown; a shell's panel opens one terminal
 //! for the chat it was opened in and shows it while that chat is shown.
 //!
-//! slopty: data path per tab: `OpenTerminal` names a session of Slopty's, and the
+//! Data path per tab: `OpenTerminal` names a session of Slopty's, and the
 //! body is Slopty's own terminal view of it ([`crate::live`]), which owns the
 //! session's link, prediction, latency path, copy mode and scrollback. The
 //! panel hands the view the look ([`crate::live::TerminalLook`]).
@@ -65,16 +65,16 @@ struct TerminalTab {
     title: SharedString,
     terminal_id: Option<String>,
     target_device_id: Option<String>,
-    // slopty: what Slopty's view says of itself: its OSC title, why it failed to open.
+    // What Slopty's view says of itself: its OSC title, why it failed to open.
     shown_title: Option<SharedString>,
     failure: Option<SharedString>,
     exited: Option<i32>,
-    /// slopty: how far the program says it has got (`OSC 9;4`), drawn on the tab.
+    /// How far the program says it has got (`OSC 9;4`), drawn on the tab.
     progress: Option<live::Progress>,
     /// The background its program paints with (OSC 11, else the theme's), which the titlebar
     /// row wears while this tab is the session's shown terminal.
     ground: Option<gpui::Hsla>,
-    /// slopty: hears the view's title and end.
+    /// Hears the view's title and end.
     _watch: Option<Subscription>,
     /// The open; dropping it cancels it.
     _run: Option<Task<()>>,
@@ -90,36 +90,36 @@ pub struct TerminalPanel {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
     focus_pending: bool,
-    /// slopty: the terminal view the body drew last, asked whether the person has words in it
+    /// The terminal view the body drew last, asked whether the person has words in it
     /// unsent ([`Self::drafting`]).
     drawn: Option<gpui::AnyView>,
     chats: HashMap<String, ChatTabs>,
-    /// slopty: the main column's panel: each chat's one terminal, the session itself (its
+    /// The main column's panel: each chat's one terminal, the session itself (its
     /// agent's TUI, or a plain shell), opened as the chat is shown (`docs/decisions/ui.md`,
     /// "A session is its terminal").
     session: bool,
-    /// slopty: in the session panel, the terminal each chat's tab was opened on: a chat whose
+    /// In the session panel, the terminal each chat's tab was opened on: a chat whose
     /// session moved to another terminal (`/clear`, `/resume`) gets a tab of that one.
     session_asked: HashMap<String, String>,
     /// Whether the pane is dimmed (a split's pane without the keyboard), and what the shown
     /// view was last told of it, by its entity.
     dimmed: bool,
     told_dim: Option<(gpui::EntityId, bool)>,
-    /// slopty: how much narrower and shorter than the body the shown terminal fits its grid
+    /// How much narrower and shorter than the body the shown terminal fits its grid
     /// while the panes around the panel glide, and the view it holds ([`live::hold_fit`]).
     fit_hold: Size<Pixels>,
     held_view: Option<gpui::EntityId>,
     tab_seq: u64,
     last_selected: Option<String>,
-    /// slopty: the grid a terminal view draws in the body, as last drawn, and the size and look
+    /// The grid a terminal view draws in the body, as last drawn, and the size and look
     /// it was measured for.
     fitted: Option<(Size<Pixels>, TerminalLook, (u16, u16))>,
-    /// slopty: sessions waiting for the body's first draw to open at its grid.
+    /// Sessions waiting for the body's first draw to open at its grid.
     awaiting_fit: Vec<oneshot::Sender<(u16, u16)>>,
     _observe: Subscription,
 }
 
-/// slopty: what an open asks for: a fresh shell, a terminal shown when the app last ran, or
+/// What an open asks for: a fresh shell, a terminal shown when the app last ran, or
 /// the terminal a session is (`AppState::session_terminal`).
 enum Open {
     Fresh,
@@ -127,11 +127,11 @@ enum Open {
     Session(String),
 }
 
-/// slopty: the grid a session opens at when the panel's body is not drawn: the view fits it
+/// The grid a session opens at when the panel's body is not drawn: the view fits it
 /// once it is.
 const UNFITTED: (u16, u16) = (80, 24);
 
-/// slopty: how long an open waits for the body's first draw before it opens at [`UNFITTED`].
+/// How long an open waits for the body's first draw before it opens at [`UNFITTED`].
 const FIT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl TerminalPanel {
@@ -157,7 +157,7 @@ impl TerminalPanel {
         }
     }
 
-    /// slopty: the grid a session opened in `panel` starts at: what a terminal view draws in
+    /// The grid a session opened in `panel` starts at: what a terminal view draws in
     /// its body, waiting for the body's first draw, so the shell never starts wider than it is
     /// shown. One told wider pads its first prompt past the grid's edge, and zsh's partial-line
     /// mark is left on a line of its own. A body not drawn within [`FIT_WAIT`] (a panel not
@@ -183,8 +183,8 @@ impl TerminalPanel {
         }
     }
 
-    /// slopty: the body was laid out at `size`: the grid a view draws there, for the sessions
-    /// opened here. A width the right pane passes through in its tween is not one.
+    /// The body was laid out at `size`: the grid a view draws there, for the sessions opened
+    /// here, less what a glide under way holds back ([`Self::hold_fit`]).
     fn measured(&mut self, size: Size<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let size = Size {
             width: (size.width - self.fit_hold.width).max(Pixels::ZERO),
@@ -213,7 +213,7 @@ impl TerminalPanel {
         panel
     }
 
-    /// slopty: the main column's panel (see the `session` field): each chat shown gets its
+    /// The main column's panel (see the `session` field): each chat shown gets its
     /// session's terminal.
     pub fn new_session(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut panel = Self::new(state, cx);
@@ -247,7 +247,7 @@ impl TerminalPanel {
         }
     }
 
-    /// slopty: the terminal a shell's pane streams, once it is attached, whichever session is
+    /// The terminal a shell's pane streams, once it is attached, whichever session is
     /// shown: what the pane opens again on the next launch, and what an agent hears it is.
     pub fn pane_terminal_id(&self) -> Option<&str> {
         self.chats.values().flat_map(|chat| chat.tabs.iter()).find_map(|tab| tab.terminal_id.as_deref())
@@ -264,7 +264,7 @@ impl TerminalPanel {
         self.focus_handle.clone()
     }
 
-    /// slopty: whether the terminal shown holds words the person typed and has not sent.
+    /// Whether the terminal shown holds words the person typed and has not sent.
     pub fn drafting(&self, cx: &App) -> bool {
         self.drawn.as_ref().is_some_and(|view| live::drafting(view, cx))
     }
@@ -275,13 +275,13 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    /// slopty: what [`Self::hold_fit`] holds the grid by (tests).
+    /// What [`Self::hold_fit`] holds the grid by (tests).
     #[cfg(test)]
     pub(crate) const fn fit_hold(&self) -> Size<Pixels> {
         self.fit_hold
     }
 
-    /// slopty: the shell's hold on the shown terminal's grid while the panes around the panel
+    /// The shell's hold on the shown terminal's grid while the panes around the panel
     /// glide: `by` narrower and shorter than the body, zero once they rest ([`live::hold_fit`]).
     pub fn hold_fit(&mut self, by: Size<Pixels>, cx: &mut Context<Self>) {
         if self.fit_hold == by {
@@ -414,7 +414,7 @@ impl TerminalPanel {
         self.state.read(cx).panel_session_key()
     }
 
-    /// slopty: the session panel's chat `chat` shows the terminal its session is now, once it
+    /// The session panel's chat `chat` shows the terminal its session is now, once it
     /// has one (an ended session has none, and its tab stays as it was until the shell stops
     /// showing it).
     fn sync_session_tab(&mut self, chat: &str, cx: &mut Context<Self>) {
@@ -473,7 +473,7 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    /// slopty: a tab of the selected chat on terminal `id` again, which it showed when the app
+    /// A tab of the selected chat on terminal `id` again, which it showed when the app
     /// last ran. A terminal that has ended takes its tab with it.
     pub fn reopen_tab_for_selected(&mut self, id: String, cx: &mut Context<Self>) -> Option<u64> {
         let chat = self.selected_chat(cx);
@@ -490,20 +490,20 @@ impl TerminalPanel {
         Some(key)
     }
 
-    /// slopty: the name of the machine chat `chat`'s terminals open on.
+    /// The name of the machine chat `chat`'s terminals open on.
     fn connecting_to(&self, chat: &str, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
         let device = self.chat_target(chat, cx).or_else(|| state.local_device_id.clone())?;
         state.device_name(&device).map(str::to_owned)
     }
 
-    /// slopty: how far tab `key`'s program says it has got, for the right pane's chip.
+    /// How far tab `key`'s program says it has got, for the right pane's chip.
     pub fn tab_progress(&self, key: u64, cx: &App) -> Option<live::Progress> {
         let chat = self.selected_chat(cx);
         self.chats.get(&chat)?.tabs.iter().find(|tab| tab.key == key)?.progress
     }
 
-    /// slopty: the session tab `key` of chat `chat` shows, once it is attached.
+    /// The session tab `key` of chat `chat` shows, once it is attached.
     pub fn terminal_id(&self, chat: &str, key: u64) -> Option<&str> {
         let tabs = self.chats.get(chat)?;
         tabs.tabs.iter().find(|tab| tab.key == key)?.terminal_id.as_deref()
@@ -524,13 +524,13 @@ impl TerminalPanel {
         open: Open,
         cx: &mut Context<Self>,
     ) -> Task<()> {
-        // slopty: a session's terminal is the agent's, never the tab's to end.
+        // A session's terminal is the agent's, never the tab's to end.
         let own = matches!(open, Open::Session(_));
         cx.spawn(async move |this, cx| {
             let session = match existing_session {
                 Some(session) => session,
                 None => {
-                    // slopty: a session shown before keeps its grid; a new one starts at the
+                    // A session shown before keeps its grid; a new one starts at the
                     // body's.
                     let (cols, rows) = if matches!(open, Open::Fresh) {
                         Self::grid(&this, cx).await
@@ -565,10 +565,10 @@ impl TerminalPanel {
                         .await
                     {
                         Ok(session) => session,
-                        // slopty: a terminal shown before that has ended goes with its tab.
+                        // A terminal shown before that has ended goes with its tab.
                         Err(_) if again => {
                             let _ = this.update(cx, |panel, cx| {
-                                // slopty: a session's terminal is asked for again as it next moves.
+                                // A session's terminal is asked for again as it next moves.
                                 if own {
                                     panel.session_asked.remove(&chat);
                                 }
@@ -617,7 +617,7 @@ impl TerminalPanel {
         })
     }
 
-    /// slopty: the tab shows the session `id`'s view from now on, and hears its
+    /// The tab shows the session `id`'s view from now on, and hears its
     /// title and end.
     fn attach_view(
         &mut self,
@@ -637,7 +637,7 @@ impl TerminalPanel {
         true
     }
 
-    /// slopty: tab `key` hears the session `id`'s view say something new of itself (its title,
+    /// Tab `key` hears the session `id`'s view say something new of itself (its title,
     /// its end, its progress). `false` while the view is not there yet.
     fn watch_view(&mut self, chat: &str, key: u64, id: &str, cx: &mut Context<Self>) -> bool {
         let panel = cx.weak_entity();
@@ -656,7 +656,7 @@ impl TerminalPanel {
         watching
     }
 
-    /// slopty: a session's view can arrive after its tab took the session (the worker opens it
+    /// A session's view can arrive after its tab took the session (the worker opens it
     /// on its own time): a tab not yet heard from starts hearing once its view is there, and reads
     /// it once after the frame, or a progress report its program sent never reached the tab.
     fn watch_arrived_views(&mut self, chat: &str, cx: &mut Context<Self>) {
@@ -682,7 +682,7 @@ impl TerminalPanel {
         }
     }
 
-    /// slopty: read again what the tab's view says of itself.
+    /// Read again what the tab's view says of itself.
     fn refresh_view(&mut self, chat: &str, key: u64, cx: &mut Context<Self>) {
         let Some(id) = self.tab_mut(chat, key).and_then(|tab| tab.terminal_id.clone()) else {
             return;
@@ -743,7 +743,7 @@ impl Render for TerminalPanel {
         let theme = Theme::of(cx).clone();
         let chat = self.selected_chat(cx);
         self.watch_arrived_views(&chat, cx);
-        // slopty: the body is Slopty's view of the active tab's session.
+        // The body is Slopty's view of the active tab's session.
         let (id, failure) = self
             .active_tab(cx)
             .map(|tab| (tab.terminal_id.clone(), tab.failure.clone()))
@@ -751,7 +751,7 @@ impl Render for TerminalPanel {
         let look = TerminalLook::of(cx);
         let hosted = id.and_then(|id| live::terminal(&id, &look, cx));
         self.drawn = hosted.as_ref().map(|hosted| hosted.view.clone()); // slopty
-        // slopty: the hold follows the view shown, and lets go of one no longer shown.
+        // The hold follows the view shown, and lets go of one no longer shown.
         let shown = hosted.as_ref().map(|hosted| hosted.view.entity_id());
         if let Some(was) = self.held_view.filter(|was| Some(*was) != shown) {
             live::hold_fit(was, Size::default(), cx);
@@ -777,7 +777,7 @@ impl Render for TerminalPanel {
         {
             window.focus(&hosted.focus, cx);
         }
-        // slopty: what a drop of files on the terminal does, as its view says.
+        // What a drop of files on the terminal does, as its view says.
         let drop = hosted.as_ref().and_then(|hosted| hosted.drop.clone());
         let progress = self.active_tab(cx).and_then(|tab| tab.progress.map(|progress| (tab.key, progress)));
         // A figureless report sweeps on the loaders' 30 Hz clock, which parks once it goes.
@@ -795,7 +795,7 @@ impl Render for TerminalPanel {
                 .text_color(theme.terminal.ansi[1])
                 .child(failure)
                 .into_any_element(),
-            // slopty: on its way, zeron's loading anatomy names the machine it opens on.
+            // On its way, the loading state names the machine it opens on.
             (None, None) => {
                 let caption = self.connecting_to(&chat, cx).map_or_else(
                     || "Connecting…".to_owned(),
@@ -830,7 +830,7 @@ impl Render for TerminalPanel {
                         }
                     })
                     .child(body)
-                    // slopty: the body's grid, for the sessions opened here.
+                    // The body's grid, for the sessions opened here.
                     .child(
                         gpui::canvas(
                             move |bounds, window, cx| {
@@ -850,7 +850,7 @@ impl Render for TerminalPanel {
     }
 }
 
-/// slopty: a running program's progress (`OSC 9;4`) as Ghostty draws it where there is no tab
+/// A running program's progress (`OSC 9;4`) as Ghostty draws it where there is no tab
 /// (`SurfaceProgressBar`): a 2 pt bar along the pane's top edge in the accent, in the danger hue
 /// on a failure and the warning's on a pause, a figureless pause or failure full. With no figure
 /// at all a quarter-wide segment crosses a faint track and back, 1.2 s each way on an ease-in-out,
@@ -892,9 +892,8 @@ fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -
     crate::motion::fade_quick(("terminal-progress-in", key), bar).into_any_element()
 }
 
-/// slopty: the hint while files are carried over a terminal, zeron's attachment overlay
-/// (`shell/chat_dropzone.rs`) in the view's own words: the drop is the view's, so the overlay only
-/// shows, under no pointer.
+/// The hint while files are carried over a terminal, in the view's own words: the drop is the
+/// view's, so the overlay only shows, under no pointer.
 fn drop_overlay(words: SharedString, theme: &Theme) -> gpui::AnyElement {
     div()
         .id("terminal-drop-overlay")
@@ -925,7 +924,7 @@ mod tests {
     }
 }
 
-// slopty: a running program's progress (`OSC 9;4`) reaches its tab: the tab reads it
+// A running program's progress (`OSC 9;4`) reaches its tab: the tab reads it
 // again each time its view says something new of itself, and lets it go when the report ends.
 #[cfg(test)]
 mod progress_tests {

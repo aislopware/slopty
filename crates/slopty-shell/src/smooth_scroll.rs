@@ -132,7 +132,7 @@ fn now(cx: &App) -> Instant {
     if let Some(now) = tests::CLOCK.get() {
         return now;
     }
-    crate::clock::now(cx) // slopty: the shell's one clock
+    crate::clock::now(cx)
 }
 
 /// One glide of wheel notches into slices of lines. A window root feeds it
@@ -474,7 +474,7 @@ fn frame(root: Rc<RefCell<Root>>, window: &mut Window, cx: &mut App) {
                 delta: ScrollDelta::Lines(slice),
                 modifiers: window.modifiers(),
                 touch_phase: TouchPhase::Moved,
-                ..Default::default() // slopty: no momentum, a pointer's
+                ..Default::default() // no momentum, a pointer's
             }),
             cx,
         );

@@ -1,5 +1,4 @@
-// slopty: Slopty's own tests (not in zeron).
-//! slopty: a model-based fuzzer over the whole shell in a headless window.
+//! A model-based fuzzer over the whole shell in a headless window.
 //!
 //! A seed picks a screen (the self-test's Mac window, a narrow one, an iPhone at 3 ×, an iPad)
 //! and a sequence of steps a person and the engine take: sessions opened and switched, a

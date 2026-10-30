@@ -279,7 +279,7 @@ impl FileTreeModel {
                     self.remove_subtree(&child);
                 }
             }
-            // slopty: no panic on a path that went meanwhile.
+            // A path gone meanwhile does nothing.
             if let Some(node) = self.nodes.get_mut(&directory) {
                 node.children.retain(|path| incoming.contains(path));
             }
@@ -545,7 +545,7 @@ impl FileTreeModel {
         if !self.nodes.contains_key(old) {
             return false;
         }
-        // slopty: the root has no parent and cannot move; no panic for it.
+        // The root has no parent and cannot move; no panic for it.
         let (Some(old_parent), Some(new_parent)) = (parent_path(old), parent_path(new)) else {
             return false;
         };
@@ -594,7 +594,6 @@ impl FileTreeModel {
                 node.load = DirectoryLoadState::Unloaded;
                 let mut children = std::mem::take(&mut node.children);
                 children.sort_by(|a, b| compare_paths(&self.nodes, a, b));
-                // slopty: no unwrap; the node was just there.
                 if let Some(node) = self.nodes.get_mut(parent) {
                     node.children = children;
                 }
@@ -833,7 +832,7 @@ fn root_entry() -> WorkspaceEntry {
 }
 
 fn compare_paths(nodes: &HashMap<String, TreeNode>, left: &str, right: &str) -> std::cmp::Ordering {
-    // slopty: a child not (yet) in the map sorts by its path instead of panicking.
+    // A child not (yet) in the map sorts by its path instead of panicking.
     let (Some(left), Some(right)) = (nodes.get(left), nodes.get(right)) else {
         return left.cmp(right);
     };

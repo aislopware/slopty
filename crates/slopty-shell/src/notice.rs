@@ -59,7 +59,7 @@ pub fn notice_chip(
             .py(px(8.0))
     };
     let chip = if tile {
-        // slopty: chrome follows the font-size setting.
+        // Chrome follows the font-size setting.
         frame(10.0).text_size(crate::typography::ui_rems(12.0))
     } else {
         frame(12.0)
@@ -104,8 +104,8 @@ pub fn notice_chip(
             )
             .child(div().flex_1())
             .child({
-                // slopty: the copy swaps to a check for the house's span and says "Copied",
-                // keeping its size; a 24 px target drawn as before (its pad taken back).
+                // The copy swaps to a check for the house's span and says "Copied", keeping its
+                // size: a 24 px target, its pad taken back.
                 let key = copy_key(&copy_message);
                 let hover = SharedString::from(format!("{key}-hover"));
                 let tip_key = key.clone();
@@ -124,7 +124,7 @@ pub fn notice_chip(
                     .cursor_pointer()
                     .bg(crate::motion::hover_blend(&hover, gpui::transparent_black(), accent.opacity(0.12)))
                     .hover_fade(hover)
-                    // slopty: a tab stop with the shell's ring.
+                    // A tab stop with the shell's ring.
                     .tab_index(0)
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
                     // The composer chip dismisses on click; copying must
@@ -153,7 +153,7 @@ pub fn notice_chip(
     )
 }
 
-/// slopty: the copy span's key for a notice's words.
+/// The copy span's key for a notice's words.
 fn copy_key(message: &str) -> String {
     use std::hash::{Hash as _, Hasher as _};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -161,7 +161,7 @@ fn copy_key(message: &str) -> String {
     format!("notice-copy-{:x}", hasher.finish())
 }
 
-/// slopty: a copy control's glyph, the check while its span runs.
+/// A copy control's glyph, the check while its span runs.
 #[derive(IntoElement)]
 struct CopyGlyph {
     key: SharedString,

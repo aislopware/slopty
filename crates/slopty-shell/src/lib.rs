@@ -13,10 +13,10 @@
 //! - [`shell`] — sidebar + main panel + right-pane scaffold + gate;
 //! - [`loaders`] — slopty pulse loader, gradient spinner, boot splash.
 
-// slopty: tests read the wall clock as they please; the shell itself only through `clock`.
+// Tests read the wall clock as they please; the shell itself only through `clock`.
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
-// slopty: voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts,
+// Voice, dictation, the orb, appshots, the updater, sign-in, sync, agent accounts,
 // the pull-request pages and agent visuals are not taken (docs/decisions/ui.md).
 pub mod app_menus;
 pub mod appearance;
@@ -25,7 +25,7 @@ pub mod browser;
 pub mod change_requests;
 pub mod catalog;
 pub mod changes;
-pub mod clock; // slopty: the frame's moment, the shell's one clock
+pub mod clock; // the frame's moment, the shell's one clock
 pub mod composer;
 pub mod edge_fade;
 pub mod file_icons;
@@ -33,25 +33,24 @@ pub mod files;
 pub mod frost;
 mod glass;
 mod haptics;
-// slopty: no History surface (ruled out).
 pub mod icons;
-pub mod inspector; // slopty: the read-only inspector of an agent session, in the right pane
-pub mod keys; // slopty: how a key reads in tooltips, menus, the palette and the a11y tree
+pub mod inspector; // the read-only inspector of an agent session, in the right pane
+pub mod keys; // how a key reads in tooltips, menus, the palette and the a11y tree
 pub(crate) mod image_media;
 pub(crate) mod image_viewer;
 pub mod links;
-mod lit; // slopty: the person's message as a faintly lit surface
-pub mod live; // slopty: Slopty's terminals and remote screens in the shell's chrome
+mod lit; // the person's message as a faintly lit surface
+pub mod live; // Slopty's terminals and remote screens in the shell's chrome
 pub mod loaders;
 pub mod markdown;
 pub mod motion;
 mod notice;
-pub mod invariants; // slopty: what the shell's state must hold, checked as it runs
+pub mod invariants; // what the shell's state must hold, checked as it runs
 pub mod overscroll;
-pub mod page; // slopty: a page an agent shows inline, as its card
+pub mod page; // a page an agent shows inline, as its card
 pub mod pickers;
 pub mod popover;
-pub mod presence; // slopty: whether the person looks at the window
+pub mod presence; // whether the person looks at the window
 pub mod project_actions;
 pub mod rail;
 mod roll_text;
@@ -69,12 +68,12 @@ pub mod toast;
 pub mod transcript;
 pub mod typography;
 pub mod visuals;
-pub mod window_appearance; // slopty: a window wears its terminal's ground's appearance
+pub mod window_appearance; // a window wears its terminal's ground's appearance
 mod workspace_links;
 
 use std::path::PathBuf;
 
-use futures::StreamExt as _; // slopty: `FutureExt` went with the appshot service
+use futures::StreamExt as _;
 use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 
 pub use state::EngineBootConfig;
@@ -82,19 +81,18 @@ pub use slopty_view_proto::HarnessId;
 
 /// Everything the headed binary passes in (config/env resolution lives in
 /// `apps/slopty`, not here).
-// slopty: no `Debug`; the service it carries has none.
+// No `Debug`; the service it carries has none.
 #[derive(Clone)]
 pub struct UiConfig {
     /// Data directory — engine stores + `ui-settings.json`.
     pub data_dir: PathBuf,
-    // slopty: Slopty's server is the only backend.
     /// Harness for doc-command runs until per-chat config lands (M4).
     pub default_harness: HarnessId,
     /// Conversation URL passed by the OS on a cold launch.
     pub initial_url: Option<String>,
-    /// slopty: the engine: Slopty's server through the `RpcService` in `slopty-ui`.
+    /// The engine: Slopty's server through the `RpcService` in `slopty-ui`.
     pub service: std::sync::Arc<dyn slopty_view_rpc::RpcService>,
-    /// slopty: whether the app comes forward once its window is open; a self-test's never does.
+    /// Whether the app comes forward once its window is open; a self-test's never does.
     pub activate: bool,
 }
 
@@ -102,7 +100,6 @@ impl UiConfig {
     fn boot(&self) -> EngineBootConfig {
         EngineBootConfig {
             data_dir: self.data_dir.clone(),
-            // slopty: Slopty's server is the only backend.
             default_harness: self.default_harness,
         }
     }
@@ -117,7 +114,7 @@ struct ReopenState {
 
 impl gpui::Global for ReopenState {}
 
-// slopty: one name for the device the app runs on, wherever the app speaks of it.
+// One name for the device the app runs on, wherever the app speaks of it.
 /// This device, as the app's words name it: "this Mac", "this device" on an iPhone or iPad,
 /// "this computer" elsewhere.
 pub const THIS_DEVICE: &str = if cfg!(target_os = "macos") {
@@ -136,9 +133,8 @@ pub fn run_app(config: UiConfig) {
     // default runtime has only two workers, insufficient for a desktop engine.
     let runtime = tokio::runtime::Runtime::new().expect("desktop Tokio runtime");
     let runtime_handle = runtime.handle().clone();
-    // slopty: no HTTP client of the shell's own; images by URL are not fetched.
     let app = gpui_platform::application().with_assets(icons::Assets);
-    let (url_tx, url_rx) = futures::channel::mpsc::unbounded::<String>(); // slopty: `start` reads it
+    let (url_tx, url_rx) = futures::channel::mpsc::unbounded::<String>();
     let callback_tx = url_tx.clone();
     app.on_open_urls(move |urls| {
         for url in urls {
@@ -165,10 +161,10 @@ pub fn run_app(config: UiConfig) {
     });
 }
 
-/// slopty: the application [`run_app`] makes, with the shell's assets and its Dock-icon reopen,
+/// The application [`run_app`] makes, with the shell's assets and its Dock-icon reopen,
 /// for a host that runs it itself and then calls [`start`].
 pub fn application(runtime_handle: tokio::runtime::Handle) -> gpui::Application {
-    // slopty: no HTTP client of the shell's own; images by URL are not fetched.
+    // Nothing in the shell runs on the handle: it has no HTTP client of its own.
     let _ = runtime_handle;
     let app = gpui_platform::application().with_assets(icons::Assets);
     app.on_reopen(|cx| {
@@ -182,7 +178,7 @@ pub fn application(runtime_handle: tokio::runtime::Handle) -> gpui::Application 
     app
 }
 
-/// slopty: what [`run_app`] does once the app runs, apart from the Tokio bridge, so a host app
+/// What [`run_app`] does once the app runs, apart from the Tokio bridge, so a host app
 /// that made its own application and runtime starts the interface in it: settings, typography,
 /// theme, motion, the engine bootstrap, the main window and the menus.
 pub fn start(
@@ -215,16 +211,14 @@ pub fn start(
             ui_settings.surface,
             cx,
         );
-        // slopty: no History surface (ruled out).
         motion::init(
-            // slopty: the OS's reduced motion alone; the override setting is gone (P12).
+            // The OS's reduced motion alone (P12).
             motion::ReduceMotion::System,
             ui_settings.pause_animations_in_background,
             cx,
         );
         composer::init(cx);
         app_menus::init(cx);
-        // slopty: no self-updater; Slopty updates through its own builds.
         cx.register_url_scheme("slopty").detach();
 
         let state = cx.new(|cx| {
@@ -264,7 +258,7 @@ pub fn start(
             state: state.clone(),
             boot: config.boot(),
         });
-        let window = open_main_window(state, config.boot(), cx); // slopty: returned
+        let window = open_main_window(state, config.boot(), cx);
         // Native menu bar — macOS gets the standard app menu (About/Services/
         // Hide/Quit ⌘Q), Edit clipboard verbs routed to the focused input, and
         // a Window menu (⌘M/⌘W). Without this, `NSApp.mainMenu` stays nil: no
@@ -285,14 +279,14 @@ pub fn start(
         })
         .detach();
         if config.activate {
-            cx.activate(true); // slopty: as the host asks
+            cx.activate(true); // as the host asks
         }
         window
     }
 }
 
 /// Bring Slopty forward, reopening the main window first if ⌘W closed it.
-// slopty: public, for the host's Dock click and notes.
+// Public, for the host's Dock click and notes.
 pub fn activate_main_window(cx: &mut App) {
     cx.activate(true);
     if cx.windows().is_empty()
@@ -303,7 +297,7 @@ pub fn activate_main_window(cx: &mut App) {
     }
 }
 
-/// slopty: bring Slopty forward on the chat `chat_id`, as a clicked banner does: the host's
+/// Bring Slopty forward on the chat `chat_id`, as a clicked banner does: the host's
 /// own notes open their chats this way.
 pub fn open_chat(chat_id: String, cx: &mut App) {
     let Some(state) = cx.try_global::<ReopenState>().map(|reopen| reopen.state.clone()) else {
@@ -316,7 +310,7 @@ pub fn open_chat(chat_id: String, cx: &mut App) {
 /// closed it. slopty: harness-update banners are gone, so every target is a chat.
 fn open_notification_target(target: String, state: &gpui::Entity<state::AppState>, cx: &mut App) {
     activate_main_window(cx);
-    // slopty: a note of a chat archived or deleted since brings Slopty forward and opens nothing,
+    // A note of a chat archived or deleted since brings Slopty forward and opens nothing,
     // rather than an empty page in that chat's name.
     if !state.read(cx).chat_listed(&target) {
         return;
@@ -330,7 +324,7 @@ fn open_notification_target(target: String, state: &gpui::Entity<state::AppState
             let _ = shell.update(cx, |shell, window, cx| {
                 window.activate_window();
                 shell.open_chat(target.clone(), cx);
-                shell.present_landing(target, cx); // slopty: one accent fade where it lands
+                shell.present_landing(target, cx); // one accent fade where it lands
             });
         }
         None => state.update(cx, |state, cx| state.select_chat(Some(target), cx)),
@@ -468,7 +462,7 @@ fn open_main_window(
             },
             move |window, cx| {
                 window.set_rem_size(px(typography::font_size(cx).pixels()));
-                // slopty: a tooltip sits centred under the control it names, never under the
+                // A tooltip sits centred under the control it names, never under the
                 // pointer (`docs/decisions/ui.md`, "Tooltips name the action and its key").
                 window.set_tooltip_placement(gpui::TooltipPlacement::Below);
                 // The theme takes the app's appearance from the window as it opens, which
@@ -480,7 +474,7 @@ fn open_main_window(
                     shell::Shell::new(state, boot, cx)
                 });
                 save_main_window_geometry(window, cx);
-                // slopty: a file link Slopty's views ask for (a path ⌘-clicked in a shell) opens
+                // A file link Slopty's views ask for (a path ⌘-clicked in a shell) opens
                 // as a transcript's does.
                 let (opener, here) = (shell.downgrade(), window.window_handle());
                 live::serve_files(cx, move |chat, target, cx| {
@@ -527,4 +521,3 @@ fn open_main_window(
     handle
 }
 
-// slopty: the appshot service, its capture and delivery are cut with appshots.

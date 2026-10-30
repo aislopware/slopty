@@ -698,7 +698,7 @@ mod tests {
                 delta: ScrollDelta::Pixels(point(px(0.0), px(y))),
                 modifiers: Modifiers::default(),
                 touch_phase: phase,
-                momentum_phase: None, // slopty: gpui-fast
+                momentum_phase: None,
                 source: gpui::ScrollSource::Pointer,
             });
             cx.update(|window, cx| window.draw(cx).clear(cx));

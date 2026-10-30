@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! The transcript's jump to a row, gliding (zeron's MessageRail without its rail: slopty).
 //!
-//! slopty: TUI-first, the transcript is the inspector's timeline, a side pane narrower than
+//! TUI-first, the transcript is the inspector's timeline, a side pane narrower than
 //! the 48rem the rail of prompt ticks needed, so the rail went (`docs/decisions/ui.md`, "A
 //! session is its terminal, its inspector beside it"). What stays is the jump it made, which
 //! find and the held group's press take: a glide to a row on one eased timeline, landing marked.
@@ -18,7 +18,7 @@ pub fn landing_inset(row: usize) -> f32 {
     if row == 0 { 0.0 } else { crate::transcript::OWN_SEND_TOP_INSET_PX }
 }
 
-/// slopty: a jump's glide under way, stepped once a display frame (#13).
+/// A jump's glide under way, stepped once a display frame (#13).
 pub(crate) struct Glide {
     /// The row it lands on, and how far under the viewport's top.
     target: usize,
@@ -33,11 +33,11 @@ pub(crate) struct Glide {
     steps: usize,
 }
 
-/// slopty: the most frames a glide takes before it lands exactly: [`motion::SCROLL_GLIDE`] at
+/// The most frames a glide takes before it lands exactly: [`motion::SCROLL_GLIDE`] at
 /// 120 Hz and room to spare, at the motion's own speed ([`glide_max_steps`]).
 const GLIDE_MAX_STEPS: usize = 240;
 
-/// slopty: [`GLIDE_MAX_STEPS`] stretched by [`motion::speed_scale`], so a slowed motion glides
+/// [`GLIDE_MAX_STEPS`] stretched by [`motion::speed_scale`], so a slowed motion glides
 /// its whole length rather than jumping at the bound.
 fn glide_max_steps() -> usize {
     (GLIDE_MAX_STEPS as f32 * motion::speed_scale().max(1.0)).ceil() as usize
@@ -127,12 +127,12 @@ impl Transcript {
     ///   measurement correcting the estimate just re-enters the timeline;
     /// - once the target row is measured the glide is pixel-exact.
     ///
-    /// slopty: it steps once a display frame ([`Transcript::step_glide`], from the render's
+    /// It steps once a display frame ([`Transcript::step_glide`], from the render's
     /// next-frame callback, as the stick spring does), not on a 16 ms timer, so a 120 Hz
     /// display glides at 120 Hz (#13).
     pub fn glide_to_row(&mut self, target: usize, flash: bool, cx: &mut Context<Self>) {
         self.begin_scroll_navigation();
-        // slopty: the prompt lands below the titlebar the transcript fades under, where a sent
+        // The prompt lands below the titlebar the transcript fades under, where a sent
         // one is parked, not behind it; the first row carries its own titlebar gap.
         let land = landing_inset(target);
         if motion::reduced_motion(cx) {

@@ -14,7 +14,7 @@ use crate::theme::Theme;
 
 pub(super) type FileEditorState = EditorState;
 
-// slopty: the editor's gutter breathes as Zed's and VS Code's do: its numbers 12 from the pane's
+// The editor's gutter breathes as Zed's and VS Code's do: its numbers 12 from the pane's
 // edge and 16 clear of the code (gpui-kit's 6 put them against it).
 /// The space between a line number and its code.
 pub(super) const LINE_NUMBER_GAP: f32 = 16.0;

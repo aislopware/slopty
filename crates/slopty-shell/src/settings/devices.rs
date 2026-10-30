@@ -2,9 +2,9 @@
 //! Settings → Devices (feature-inventory §1.5): the device registry — name,
 //! platform, last-seen, an Online/Offline badge, a "This device" badge, click-to-copy id,
 //! and an Add device dialog (AddDevice).
-// slopty: no Rename: a machine is named by its own name. Add device is Slopty's own dialog
-// (`add_device`): this Mac, a machine over ssh, or the server. The page shows the server this
-// app follows, with a way to change it.
+// A machine is named by its own name. Add device is Slopty's own dialog (`add_device`): this
+// Mac, a machine over ssh, or the server. The page shows the server this app follows, with a way
+// to change it.
 
 use crate::motion::HoverFade as _;
 use chrono::{DateTime, Utc};
@@ -13,7 +13,7 @@ use gpui::{
     prelude::*, px,
 };
 
-// slopty: one name for what the server menu, this page and the dialog offer.
+// One name for what the server menu, this page and the dialog offer.
 /// What a phone or an iPad joining the server is called, wherever it is offered.
 pub(crate) const INVITE: &str = "Connect a phone or iPad";
 
@@ -52,7 +52,7 @@ pub fn format_last_seen(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) ->
     }
 }
 
-/// slopty: when a machine last seen at `last_seen`, read at `now`, next reads differently: its
+/// When a machine last seen at `last_seen`, read at `now`, next reads differently: its
 /// "Online" ends past the window, and "Last seen" moves on by the minute, the hour or the day
 /// it says. `None` for a machine never seen.
 pub fn presence_changes(last_seen: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
@@ -84,31 +84,29 @@ pub fn devices_subtitle(scope: Option<WorkspaceScope>) -> &'static str {
     }
 }
 
-// slopty: Add device in place of Rename.
 /// What the page says it lists.
 const DEVICES_SUBTITLE: &str = "The machines Slopty works on, each with its own agents, files and terminals.";
 
 pub struct DevicesPage {
     state: Entity<AppState>,
     scroll: widgets::PageScroll,
-    // slopty: Add device in place of Rename.
     add: Option<(Entity<AddDeviceDialog>, Subscription)>,
     /// Open the dialog on this choice at the next draw, which has the window its fields need.
     add_wanted: Option<Choice>,
     /// The server address a link named, for the dialog's field when it opens.
     add_server: Option<String>,
     error: Option<SharedString>,
-    // slopty: the action call under way.
+    // The action call under way.
     action_task: Option<Task<()>>,
-    // slopty: the server's code is up ("Connect a phone").
+    // The server's code is up ("Connect a phone").
     inviting: bool,
-    // slopty: the code's dialog holds the keyboard while it shows.
+    // The code's dialog holds the keyboard while it shows.
     invite_focus: crate::surface_chrome::ModalFocus,
-    /// slopty: the moment presence is read at: taken as the state moves and on
+    /// The moment presence is read at: taken as the state moves and on
     /// [`Self::clock_tick`], never as the page is built, so a machine that stops answering
     /// turns from Online to Last seen without anything else moving.
     clock: DateTime<Utc>,
-    /// slopty: the clock taken again when the soonest machine's presence next reads differently.
+    /// The clock taken again when the soonest machine's presence next reads differently.
     clock_tick: Option<Task<()>>,
     _observe: Subscription,
 }
@@ -142,7 +140,7 @@ impl DevicesPage {
         page
     }
 
-    /// slopty: take the clock now, and again when the soonest other machine's presence next
+    /// Take the clock now, and again when the soonest other machine's presence next
     /// reads differently ([`presence_changes`]), drawing the page then.
     fn take_clock(&mut self, cx: &mut Context<Self>) {
         self.clock = crate::clock::utc(cx);
@@ -168,13 +166,12 @@ impl DevicesPage {
         });
     }
 
-    // slopty: Add device in place of Rename.
     /// Open Settings → Devices' Add device dialog (the first run's "Add a device").
     pub fn open_add_device(&mut self, cx: &mut Context<Self>) {
         self.open_add_device_on(Choice::ThisMac, cx);
     }
 
-    // slopty: the sidebar's server menu opens the server's code straight.
+    // The sidebar's server menu opens the server's code straight.
     /// Show the server's code for a phone or iPad to scan, while the server offers one.
     pub fn open_invite(&mut self, cx: &mut Context<Self>) {
         self.inviting = true;
@@ -220,7 +217,7 @@ impl DevicesPage {
     /// Escape that reached Settings unclaimed closes the Add device dialog first,
     /// so it never closes Settings under the dialog. Returns whether it did.
     pub(crate) fn dismiss_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
-        // slopty: the server's code closes the same way.
+        // The server's code closes the same way.
         if self.add.take().is_none() && !std::mem::take(&mut self.inviting) {
             return false;
         }
@@ -228,7 +225,7 @@ impl DevicesPage {
         true
     }
 
-    // slopty: a copy keeps the button's size and words: its glyph turns to a check and its
+    // A copy keeps the button's size and words: its glyph turns to a check and its
     // tooltip says "Copied" for the shared span (M5).
     fn copy_id(&mut self, device_id: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(device_id.clone()));
@@ -236,7 +233,7 @@ impl DevicesPage {
         cx.notify();
     }
 
-    // slopty: a machine's (or the server's, `"server"`) action, run by the app; it says how
+    // A machine's (or the server's, `"server"`) action, run by the app; it says how
     // that went in a toast, and a call that does not reach it is said here.
     fn run_action(&mut self, device_id: String, action: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
@@ -284,7 +281,7 @@ pub fn platform_label(platform: &str) -> &str {
     }
 }
 
-// slopty: a machine row's tile, by what it runs.
+// A machine row's tile, by what it runs.
 /// The glyph that leads a machine's row: a laptop for a Mac (Slopty's own kind), a phone or
 /// tablet for a handheld, a server for Linux or a machine that has not said.
 pub fn platform_icon(platform: &str) -> &'static str {
@@ -296,7 +293,7 @@ pub fn platform_icon(platform: &str) -> &'static str {
     }
 }
 
-// slopty: the confirmed removal reads as destructive; asking first and the rest stay quiet.
+// The confirmed removal reads as destructive; asking first and the rest stay quiet.
 /// The tone of a machine action's button, by its id.
 fn action_tone(id: &str) -> widgets::ActionTone {
     match id {
@@ -318,8 +315,8 @@ impl Render for DevicesPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::toast::take_error(&mut self.error, cx);
         let theme = Theme::of(cx).for_settings_surface();
-        let now = self.clock; // slopty: the page's clock
-        // slopty: every machine is listed, whatever the scope; Add device in place of Rename.
+        let now = self.clock;
+        // Every machine is listed, whatever the scope.
         let (devices, local_id) = {
             let state = self.state.read(cx);
             (state.devices.clone(), state.local_device_id.clone())
@@ -333,7 +330,7 @@ impl Render for DevicesPage {
             .as_ref()
             .map(|(dialog, _)| popover::modal_top("add-device-dialog", viewport, dialog.clone().into_any_element()));
         let server = self.state.read(cx).connectivity.server.clone();
-        // slopty: the server's code, while it is up and the app still offers one.
+        // The server's code, while it is up and the app still offers one.
         let invite = server.as_ref().and_then(|server| server.invite.clone());
         self.invite_focus.sync(invite.is_some() && self.inviting, window, cx);
         let invite_focus = self.invite_focus.handle().clone();
@@ -373,7 +370,7 @@ impl Render for DevicesPage {
                                     crate::toast::success(cx, "Link copied");
                                 }))
                         }))
-                        // slopty: a dialog commits with the solid button, as Add device does.
+                        // A dialog commits with the solid button, as Add device does.
                         .child(
                             widgets::text_action(&theme, widgets::ActionTone::Solid, "Done")
                                 .id("invite-done")
@@ -400,7 +397,7 @@ impl Render for DevicesPage {
             let is_local = local_id.as_deref() == Some(device.id.as_str());
             let id_copied = crate::motion::copied(&copied_key(&device.id), cx);
             let copy_id = device.id.clone();
-            // slopty: a machine whose worker has not said what it runs shows no platform.
+            // A machine whose worker has not said what it runs shows no platform.
             let mut meta: Vec<AnyElement> = (!device.platform.is_empty())
                 .then(|| {
                     div()
@@ -434,7 +431,7 @@ impl Render for DevicesPage {
                         .into_any_element()
                 });
             }
-            // slopty: what the app offers to do to the machine, before Copy ID.
+            // What the app offers to do to the machine, before Copy ID.
             let actions = device.actions.iter().enumerate().map(|(n, action)| {
                 let (id, run) = (device.id.clone(), action.id.clone());
                 widgets::text_action(&theme, action_tone(&action.id), action.label.clone())
@@ -448,7 +445,7 @@ impl Render for DevicesPage {
                     }))
             });
             widgets::card_row(&theme, first)
-                // slopty: every row leads with its tile, so the blocks share one text edge.
+                // Every row leads with its tile, so the blocks share one text edge.
                 .child(widgets::row_tile(&theme, platform_icon(&device.platform)))
                 .child(
                     div()
@@ -465,7 +462,7 @@ impl Render for DevicesPage {
                         .gap(px(4.0))
                         .children(actions)
                         .child(
-                            // slopty: a row's action is its words alone, as its neighbours'.
+                            // A row's action is its words alone, as its neighbours'.
                             widgets::action_button(&theme, widgets::ActionTone::Quiet)
                                 .child(SharedString::from(if id_copied { "Copied" } else { "Copy ID" }))
                             .id(("device-id", ix))
@@ -480,7 +477,7 @@ impl Render for DevicesPage {
                                     this.copy_id(copy_id.clone(), cx);
                                 },
                             )),
-                        ), // slopty: no Rename.
+                        ),
                 )
                 .into_any_element()
         };
@@ -491,13 +488,13 @@ impl Render for DevicesPage {
             }
             block
         });
-        // slopty: the other machines, then Add device as the block's last row.
+        // The other machines, then Add device as the block's last row.
         let mut others_block = widgets::section_card(&theme).mt(px(8.0));
         let first_add = others.is_empty();
         for (n, (ix, device)) in others.into_iter().enumerate() {
             others_block = others_block.child(device_row(ix, device, n == 0));
         }
-        // slopty: the row is the button, its words saying what it adds; a second "Add device"
+        // The row is the button, its words saying what it adds; a second "Add device"
         // beside them said it twice.
         let others_block = others_block.child(
             div()
@@ -531,7 +528,7 @@ impl Render for DevicesPage {
                         ),
                 ),
         );
-        // slopty: the server this app follows, and a way to change it.
+        // The server this app follows, and a way to change it.
         let server_actions = server.as_ref().map(|server| server.actions.clone()).unwrap_or_default();
         let server_block = {
             let (title, meta, action) = match &server {
@@ -578,7 +575,7 @@ impl Render for DevicesPage {
                                 this.run_action("server".to_owned(), run.clone(), cx);
                             }))
                     }))
-                    // slopty: the code a phone or iPad scans, where this device shows one.
+                    // The code a phone or iPad scans, where this device shows one.
                     .when(invite.is_some(), |row| {
                         row.child(
                             widgets::text_action(&theme, widgets::ActionTone::Quiet, INVITE)
@@ -617,7 +614,7 @@ impl Render for DevicesPage {
                 el.child(widgets::section_label(&theme, "This device").mt(px(28.0)))
                     .child(block)
             })
-            // slopty: Slopty lists every machine its server knows.
+            // Slopty lists every machine its server knows.
             .child(widgets::section_label(&theme, "Other devices").mt(px(28.0)))
             .child(others_block);
 
@@ -639,7 +636,7 @@ impl Render for DevicesPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: Slopty's machines, not a synced registry; one page head.
+                                // Slopty's machines, not a synced registry; one page head.
                                 .child(widgets::page_head(&theme, "Devices", None, DEVICES_SUBTITLE, None))
                                 .child(card),
                         ),
@@ -657,7 +654,7 @@ mod tests {
     use super::*;
     use chrono::TimeDelta;
 
-    // slopty: Copy ID keeps its words; its glyph shows the check for the shared span (M5).
+    // Copy ID keeps its words; its glyph shows the check for the shared span (M5).
     #[gpui::test]
     fn copying_an_id_marks_it_copied_for_the_span(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext as _;
@@ -786,7 +783,7 @@ mod tests {
         assert!(device_online(Some(now + TimeDelta::seconds(30)), now));
     }
 
-    // slopty: a machine that stops answering turns from Online to "Last seen" past the window,
+    // A machine that stops answering turns from Online to "Last seen" past the window,
     // by the page's own clock, which then moves on as the words do.
     #[gpui::test]
     fn a_silent_machine_goes_offline_by_the_page_s_own_clock(cx: &mut gpui::TestAppContext) {
@@ -869,7 +866,7 @@ mod tests {
         );
     }
 
-    // slopty: one tile per machine row, by platform; an unknown platform still gets one.
+    // One tile per machine row, by platform; an unknown platform still gets one.
     #[test]
     fn every_machine_row_has_a_tile_by_platform() {
         assert_eq!(platform_icon("macos"), crate::icons::LAPTOP);
@@ -879,7 +876,7 @@ mod tests {
         assert_eq!(platform_icon(""), crate::icons::REMOTE_SERVER, "not said yet");
     }
 
-    // slopty: only the confirmed removal is red; asking first is quiet.
+    // Only the confirmed removal is red; asking first is quiet.
     #[test]
     fn only_remove_now_is_destructive() {
         assert!(matches!(action_tone("remove"), widgets::ActionTone::Danger));

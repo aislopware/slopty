@@ -3,7 +3,7 @@
 //! navigation (the add-space flow), the agents' brand marks and which agents show, and the
 //! reasoning levels' names.
 //!
-//! slopty: TUI-first (`docs/decisions/agents.md`), the composer's pickers (project, branch,
+//! TUI-first (`docs/decisions/agents.md`), the composer's pickers (project, branch,
 //! agent and model, traits) are gone: an agent's TUI picks its own model and reasoning.
 
 use slopty_view_proto::{FolderListing, HarnessId, ReasoningLevel};
@@ -503,7 +503,7 @@ pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gp
         // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
         HarnessId::OPENCODE => (crate::icons::OPENCODE_MARK, None),
         HarnessId::ANTIGRAVITY => (crate::icons::ANTIGRAVITY_MARK, None),
-        // slopty: any other agent (an ACP agent by its registry's name) wears the agent mark.
+        // Any other agent (an ACP agent by its registry's name) wears the agent mark.
         _ => (crate::icons::BOT, None),
     }
 }
@@ -692,7 +692,7 @@ mod tests {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
         assert_eq!(&"Documents"[3..], "uments");
-        assert_eq!(completion_prefix_len("slopty", "slopty"), Some(6)); // slopty: the renamed name is one longer.
+        assert_eq!(completion_prefix_len("slopty", "slopty"), Some(6)); // the renamed name is one longer.
         assert_eq!(completion_prefix_len("slopty", ""), Some(0));
         assert_eq!(completion_prefix_len("slopty", "dev"), None);
         // Longer than the name → not a prefix.

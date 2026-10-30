@@ -204,7 +204,7 @@ impl FilesSurface {
             .flex()
             .flex_col()
             .track_focus(&self.tree_focus)
-            // slopty: the tree's own keys (⌥⌘C copy path, ⌘⌫ delete), shown in its menu.
+            // The tree's own keys (⌥⌘C copy path, ⌘⌫ delete), shown in its menu.
             .key_context(super::TREE_KEY_CONTEXT)
             .on_action(cx.listener(|this, _: &super::CopyPath, window, cx| {
                 if this.tree_rename.is_none() {
@@ -356,7 +356,7 @@ impl FilesSurface {
                     .when(node.entry.ignored && decoration.is_none(), |element| {
                         element.opacity(0.52)
                     })
-                    // slopty: the pane's wash steps, each lighter on white, and a faded hover.
+                    // The pane's wash steps, each lighter on white, and a faded hover.
                     .when(selected, |element| {
                         element.bg(match (focused, distinct_cursor) {
                             (true, true) => crate::theme::selected_hover_wash(),
@@ -447,7 +447,7 @@ impl FilesSurface {
                     }))
                     .into_any_element()
             }
-            // slopty: a folder that opens fast never flashes "Loading…" (M30).
+            // A folder that opens fast never flashes "Loading…" (M30).
             VisibleRowKind::Loading { directory } => div()
                 .id(("files-tree-loading", index))
                 .h(px(TREE_ROW_HEIGHT))
@@ -479,7 +479,7 @@ impl FilesSurface {
                 .items_center()
                 .gap(px(6.0))
                 .cursor_pointer()
-                // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                // A keyboard stop with the shell's ring, inside the tree (M8).
                 .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
                 .bg(crate::motion::hover_blend(
                     &format!("tree-error-{index}"),
@@ -525,7 +525,7 @@ impl FilesSurface {
                 .flex()
                 .items_center()
                 .cursor_pointer()
-                // slopty: a keyboard stop with the shell's ring, inside the tree (M8).
+                // A keyboard stop with the shell's ring, inside the tree (M8).
                 .map(|el| crate::surface_chrome::key_stop_inset(el, &theme))
                 .role(gpui::Role::Button)
                 .bg(crate::motion::hover_blend(

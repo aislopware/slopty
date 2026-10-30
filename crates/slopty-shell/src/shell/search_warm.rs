@@ -72,7 +72,6 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
         });
         cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
@@ -80,7 +79,6 @@ mod tests {
                 state,
                 crate::EngineBootConfig {
                     data_dir: path.into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,

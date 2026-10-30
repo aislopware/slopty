@@ -39,7 +39,7 @@ impl MutationIntent {
 
 impl FilesSurface {
     pub(crate) fn interaction_origin(&self, cx: &gpui::App) -> Option<WorkspaceInteractionOrigin> {
-        // slopty: no unwrap: no context is no origin.
+        // No context is no origin.
         let context = self.request_context.clone()?;
         self.is_current_target(cx)
             .then(|| WorkspaceInteractionOrigin {
@@ -87,7 +87,7 @@ impl FilesSurface {
     }
 
     pub(crate) fn prepare_mutation(&mut self, intent: MutationIntent, cx: &mut Context<Self>) {
-        // slopty: the intent is read before it is kept, with no unwrap.
+        // The intent is read before it is kept.
         for (path, document) in &mut self.preview.documents {
             if intent.affects(path) {
                 document.autosave_task = None;
@@ -112,7 +112,6 @@ impl FilesSurface {
         let paths = self.preview.documents.keys().cloned().collect::<Vec<_>>();
         for path in paths {
             if self.mutation_blocks_path(&path) {
-                // slopty: no unwrap.
                 if let Some(document) = self.preview.documents.get_mut(&path) {
                     document.autosave_task = None;
                 }
@@ -191,7 +190,6 @@ impl FilesSurface {
                 destination,
             });
         }
-        // slopty: no unwrap.
         if intents.len() > 1 {
             cx.emit(FilesEvent::MutateMany(intents));
         } else if let Some(intent) = intents.pop() {

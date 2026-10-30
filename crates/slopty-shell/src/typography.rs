@@ -123,7 +123,7 @@ pub const fn ui_rems(pixels_at_default: f32) -> Rems {
     rems(pixels_at_default / 16.0)
 }
 
-/// slopty: the interface's type ladder, each size at the 16 px baseline for [`ui_rems`]
+/// The interface's type ladder, each size at the 16 px baseline for [`ui_rems`]
 /// (Claude desktop's compact scale: caption 11, footnote 12, body 13, heading 14, title 20).
 /// Chrome takes its sizes from here; code, diffs and the terminal keep their own settings.
 pub mod ladder {
@@ -141,7 +141,7 @@ pub mod ladder {
     pub const DISPLAY: f32 = 20.0;
 }
 
-/// slopty: the faces text falls back to before the platform's own cascade: the bundled symbol
+/// The faces text falls back to before the platform's own cascade: the bundled symbol
 /// face (`slopty_kit::fonts::SYMBOLS_FAMILY`, registered at launch), so a prompt's powerline,
 /// devicon and box-drawing glyphs draw wherever the shell sets text, not as empty boxes. It
 /// holds only those code points, so it never takes a letter from the text's own face.
@@ -153,7 +153,7 @@ pub fn symbol_fallbacks() -> gpui::FontFallbacks {
 /// depend on the kit).
 pub const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 
-// slopty: tracking without hair spaces (M47; `docs/decisions/ui.md`, "Letter spacing is laid
+// Tracking without hair spaces (M47; `docs/decisions/ui.md`, "Letter spacing is laid
 // out, not shaped"). Geist has no U+200A, so the hair spaces zeron sets between a heading's
 // letters come from SF's, 105/2048 = 0.05 em: half the 0.1 em they stand for, through a font
 // fallback. Here each letter is its own run, the tracking the gap between them.
@@ -178,7 +178,7 @@ pub fn tracked_caps(label: &str, size: f32, em: f32) -> gpui::Div {
         .children(tracked_letters(label))
 }
 
-// slopty: figures that tick or line up (a timer, a count, a percentage) keep one width.
+// Figures that tick or line up (a timer, a count, a percentage) keep one width.
 /// Tabular figures (OpenType `tnum`): a number that changes or sits over another does not shift.
 pub fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_owned(), 1)]))

@@ -108,7 +108,7 @@ impl FilesSurface {
     pub(super) fn render_tree_root_target(&self, cx: &mut Context<Self>) -> AnyElement {
         let theme = crate::theme::Theme::of(cx);
         let active = self.tree_drag.destination.as_deref() == Some("");
-        // slopty: the root row names the folder itself ("slopty"), as a Finder sidebar does.
+        // The root row names the folder itself ("slopty"), as a Finder sidebar does.
         let folder = self.folder_name();
         let label: gpui::SharedString = if self.tree_drag.payload.is_some() {
             format!("Move to {folder}").into()

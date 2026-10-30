@@ -1,4 +1,4 @@
-//! slopty: a page shown in the right pane (Slopty's own; not in zeron).
+//! A page an agent showed, in a pane beside the session.
 //!
 //! A card's "Open in pane" moves its page into a tab of the chat's right pane: the same web
 //! view, laid out to fill the pane, its document and state kept (`slopty.MovePage`); the card
@@ -255,7 +255,6 @@ impl Render for PagePaneView {
             live::page_act(&self.page, PageAct::Engage, cx);
         }
         let body: AnyElement = match hosted.as_ref() {
-            // slopty: why, and Try again.
             Some(live::HostedPage { failed: Some(why), .. }) => {
                 super::failed_body(&format!("{}-pane", self.page), why.clone(), true, &self.page, &theme)
             }
@@ -278,7 +277,7 @@ impl Render for PagePaneView {
                     .object_fit(ObjectFit::Contain)
                     .into_any_element()
             }
-            // slopty: the surfaces' loading anatomy.
+            // The surfaces' loading anatomy.
             Some(live::HostedPage { waiting: Some(machine), .. }) => {
                 live::chrome::loading(super::waiting_words(machine), &theme, cx.entity_id(), cx).into_any_element()
             }

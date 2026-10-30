@@ -187,7 +187,7 @@ impl IntoElement for RollText {
 }
 
 impl RollText {
-    // slopty: at the pulse's tick that drew it, so a frame between ticks shows it the same.
+    // At the pulse's tick that drew it, so a frame between ticks shows it the same.
     fn elapsed(&self, window: &Window, cx: &mut App) -> f32 {
         crate::motion::pulse_moment(window.current_view(), cx)
             .saturating_duration_since(self.roll.started)

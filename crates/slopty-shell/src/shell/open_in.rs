@@ -1,4 +1,4 @@
-//! slopty: a chat's folder in the person's own editor (T3 Code's "Open in"). A folder on this Mac
+//! A chat's folder in the person's own editor (T3 Code's "Open in"). A folder on this Mac
 //! opens with `open -a <app>`; a folder on another machine opens through the editor's SSH remote,
 //! at the address this Mac reaches it by (`Device::ssh_host`): VS Code and Cursor's
 //! `vscode-remote/ssh-remote+<host>` link, Zed's `zed://ssh/<host>`. Only the editors installed
@@ -282,7 +282,7 @@ impl Shell {
                     .child(SharedString::from(editor.app())),
             );
         }
-        // slopty: the menu is a node of its own, its rows its items.
+        // The menu is a node of its own, its rows its items.
         let card = popover::popover_card(&theme)
             .id("open-in-card")
             .role(gpui::Role::Menu)
@@ -312,13 +312,13 @@ impl Shell {
                     this.close_open_in(cx);
                     return;
                 }
-                // slopty: under the button, whether pressed or clicked, never at the pointer.
+                // Under the button, whether pressed or clicked, never at the pointer.
                 let at = under_button().unwrap_or_else(|| event.position());
                 this.open_open_in(chat_id.clone(), at, cx);
             }),
         )
         .role(gpui::Role::Button);
-        // slopty: its tooltip names the key, and goes while the menu is up rather than cover it.
+        // Its tooltip names the key, and goes while the menu is up rather than cover it.
         let button = if open {
             button.aria_label("Open in…")
         } else {

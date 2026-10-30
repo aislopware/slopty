@@ -166,13 +166,13 @@ impl Shell {
             }
             return;
         }
-        self.remember_closed_tab(&key, view, cx); // slopty: ⇧⌘T opens it again
+        self.remember_closed_tab(&key, view, cx); // ⇧⌘T opens it again
         self.drop_view(view, &key, cx);
     }
 
     /// A file's close went through (saved, or its edits let go): its pane closes.
     pub(super) fn complete_file_close(&mut self, view: RightSurface, key: &str, cx: &mut Context<Self>) {
-        self.remember_closed_tab(key, view, cx); // slopty: ⇧⌘T opens it again
+        self.remember_closed_tab(key, view, cx); // ⇧⌘T opens it again
         self.pending_file_closes.remove(&view);
         self.drop_view(view, key, cx);
     }
@@ -281,8 +281,8 @@ impl Shell {
                 .cloned()
                 .map_or_else(|| Empty.into_any_element(), IntoElement::into_any_element),
             RightSurface::Inspector => self.inspector.clone().into_any_element(),
-            RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
-            RightSurface::Page(id) => self.render_page_pane(id, cx), // slopty:
+            RightSurface::Screen(id) => self.render_screen_surface(id, cx),
+            RightSurface::Page(id) => self.render_page_pane(id, cx),
             RightSurface::Files => match self.files.get(&self.panel_key(cx)).cloned() {
                 Some(files) => {
                     files.update(cx, |files, cx| {
@@ -359,12 +359,12 @@ impl Shell {
                     .map_or_else(|| SharedString::from("File"), |path| workspace_file_title(path));
                 (icons::DOCUMENT, title)
             }
-            // slopty: the pane's name; its scope is the picker's.
+            // The pane's name; its scope is the picker's.
             RightSurface::Diff(id) => (
                 icons::FILE_DIFF,
                 self.diffs.get(&id).map_or_else(|| "Changes".into(), |changes| changes.read(cx).tab_title()),
             ),
-            // slopty: steps in time, as a trace reads; the eye is the inbox's.
+            // Steps in time, as a trace reads; the eye is the inbox's.
             RightSurface::Inspector => (icons::SORT_BY_TIME, "Inspector".into()),
             RightSurface::Browser(id) => (
                 icons::GLOBE,

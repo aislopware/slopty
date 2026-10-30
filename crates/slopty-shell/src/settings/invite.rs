@@ -1,4 +1,3 @@
-// slopty: Slopty's own, beside zeron's settings pages.
 //! The code a phone or iPad scans to connect to the server (Settings → Devices' "Connect a
 //! phone"): the link the app gives (`ServerInvite`) drawn as a QR code, with the address it
 //! carries and how to use it, or why there is none.

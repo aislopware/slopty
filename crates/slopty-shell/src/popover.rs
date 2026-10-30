@@ -80,7 +80,7 @@ pub struct Popup<T> {
     /// Whether the popup was still mounted when the current trigger press
     /// began — see [`Self::note_trigger_press`].
     pressed_while_open: bool,
-    // slopty: where the keyboard was before the menu took it, and the menu's own focus.
+    // Where the keyboard was before the menu took it, and the menu's own focus.
     return_focus: Option<(gpui::FocusHandle, gpui::FocusHandle)>,
 }
 
@@ -100,7 +100,7 @@ impl<T> Popup<T> {
         self.return_focus = None; // slopty
     }
 
-    /// slopty: [`Self::open`] for a menu that takes the keyboard into `menu_focus`: once it
+    /// [`Self::open`] for a menu that takes the keyboard into `menu_focus`: once it
     /// closes, the keyboard goes back where it was ([`return_focus`]), unless the closing
     /// press or the chosen row put it somewhere else.
     pub fn open_in(
@@ -164,7 +164,7 @@ impl<T> Popup<T> {
         match &mut self.inner {
             Some((_, closing @ None)) => {
                 *closing = Some(now);
-                // slopty: the keyboard goes back on the window's next frame.
+                // The keyboard goes back on the window's next frame.
                 if let Some(focus) = self.return_focus.take() {
                     RETURN_FOCUS.with_borrow_mut(|slot| *slot = Some(focus));
                 }
@@ -214,18 +214,18 @@ impl<T> Popup<T> {
 }
 
 thread_local! {
-    /// slopty: the focus a closing [`Popup::open_in`] menu hands back, and the menu's own.
+    /// The focus a closing [`Popup::open_in`] menu hands back, and the menu's own.
     static RETURN_FOCUS: std::cell::RefCell<Option<(gpui::FocusHandle, gpui::FocusHandle)>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// slopty: once `menu` closes, the keyboard goes back to `before` ([`return_focus`]): for a
+/// Once `menu` closes, the keyboard goes back to `before` ([`return_focus`]): for a
 /// surface that takes the keyboard without a [`Popup`].
 pub fn give_focus_back(before: gpui::FocusHandle, menu: gpui::FocusHandle) {
     RETURN_FOCUS.with_borrow_mut(|slot| *slot = Some((before, menu)));
 }
 
-/// slopty: give the keyboard back to where it was before a menu that just closed took it, when
+/// Give the keyboard back to where it was before a menu that just closed took it, when
 /// it is still on the menu or nowhere: what the window's root calls as it renders (M21).
 pub fn return_focus(window: &mut gpui::Window, cx: &mut gpui::App) {
     let Some((before, menu)) = RETURN_FOCUS.with_borrow_mut(Option::take) else {
@@ -381,7 +381,7 @@ pub fn surface_bg(theme: &Theme) -> gpui::Hsla {
 pub fn popover_card(theme: &Theme) -> gpui::Div {
     div()
         .rounded(px(CARD_RADIUS))
-        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // Amp's floating elevation: a ring inside the edge, and the long soft shadows
         // where the surface is opaque (`Theme::elevation`).
         .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .bg(surface_bg(theme))
@@ -443,7 +443,7 @@ pub fn completion_list(
 }
 
 /// All picker lists use the same paint-time, overflow-dependent edge fades.
-// slopty: each as tall as what lies past its edge, up to its band (`fade_scroll_y`).
+// Each as tall as what lies past its edge, up to its band (`fade_scroll_y`).
 pub fn faded_menu_list(
     scroll: &ScrollHandle,
     list: impl IntoElement,
@@ -509,7 +509,7 @@ fn pinned_layer(layer: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-/// slopty: a [`Popup`]'s exit phase at the moment of the frame drawing it
+/// A [`Popup`]'s exit phase at the moment of the frame drawing it
 /// ([`Popup::closing_at`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Closing {
@@ -586,7 +586,7 @@ fn menu_motion_from(
     from: f32,
 ) -> AnyElement {
     if let Some(t) = exit {
-        // slopty: a closing menu asks its view for every frame until its popup is reaped
+        // A closing menu asks its view for every frame until its popup is reaped
         // (`reap_popup`, a beat after the fade ends), not only for the fade's own span: a frame
         // between the two would draw the view's last build, the menu still faintly there, where
         // a build at that moment draws it gone.
@@ -940,7 +940,7 @@ pub fn modal_glass(
     modal_with(id, viewport, card, corner_radius, 0.35)
 }
 
-// slopty: a dialog whose body changes as it is used (the Add device tabs) keeps its top edge,
+// A dialog whose body changes as it is used (the Add device tabs) keeps its top edge,
 // as Claude desktop's and T3's do, so only its foot moves: where the palettes stand
 // (`shell::command_palette::palette_top`, opencode's `max(48px, (100vh − 480px) / 2)`).
 /// The tallest a top-pinned dialog or palette stands (opencode's command dialog's 480).
@@ -1082,7 +1082,7 @@ pub fn menu_heading(theme: &Theme, label: &str) -> gpui::Div {
         .pt(px(6.0))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text_muted)
-        // slopty: in sentence case, as Claude desktop's and opencode's menus head their
+        // In sentence case, as Claude desktop's and opencode's menus head their
         // groups, where zeron's tracked capitals shouted over the rows.
         .text_size(crate::typography::ui_rems(11.0))
         .child(SharedString::from(label.to_owned()))
@@ -1120,7 +1120,7 @@ pub fn palette_card(theme: &Theme, width: Pixels, corner_radius: f32) -> gpui::D
         .w(width)
         .rounded(px(corner_radius))
         .bg(surface_bg(theme))
-        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // Amp's floating elevation: a ring inside the edge, and the long soft shadows
         // where the surface is opaque (`Theme::elevation`).
         .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .overflow_hidden()
@@ -1242,7 +1242,7 @@ pub fn key_hint_pair(
 /// back to a mismatched face); the system font draws the platform's own.
 pub const KEY_GLYPH_FONT: &str = ".SystemUIFont";
 
-/// slopty: a menu row's fixed key, one its own handler takes rather than a binding to look up
+/// A menu row's fixed key, one its own handler takes rather than a binding to look up
 /// (F2 renames): the key at the row's end in [`kbd_hint`]'s voice, and the same key for
 /// assistive tech. A bound action's key is read from the keymap instead (`keys::for_action`).
 pub fn fixed_key(
@@ -1303,7 +1303,7 @@ pub fn search_row(theme: &Theme) -> gpui::Div {
         )
 }
 
-// slopty: one find bar for the transcript, the diff and the terminal: the search row's anatomy
+// One find bar for the transcript, the diff and the terminal: the search row's anatomy
 // on a frosted card, entering as a menu does (`.research/micro-details-2026-10-16.md` M19).
 
 /// A find card's width.
@@ -1474,7 +1474,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
         .p(px(20.0))
         .rounded(px(16.0))
         .bg(surface_bg(theme))
-        // slopty: Amp's floating elevation: a ring inside the edge, and the long soft shadows
+        // Amp's floating elevation: a ring inside the edge, and the long soft shadows
         // where the surface is opaque (`Theme::elevation`).
         .shadow(theme.elevation(crate::theme::Elevation::Floating))
         .flex()
@@ -1486,7 +1486,7 @@ pub fn dialog_card(theme: &Theme) -> gpui::Div {
 pub fn dialog_title(theme: &Theme, title: &str) -> gpui::Div {
     div()
         .text_size(crate::typography::ui_rems(15.0))
-        // slopty: medium, as every other title in the app is.
+        // Medium, as every other title in the app is.
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(theme.text)
         .child(SharedString::from(title.to_string()))
@@ -1540,7 +1540,7 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
 }
 
 /// Primary button (`btnPrimary`): white fill, near-black text.
-// slopty: the keyboard reaches it (Tab, then Enter or Space) and the shell's ring shows it; the
+// The keyboard reaches it (Tab, then Enter or Space) and the shell's ring shows it; the
 // caller gives it the id a keyboard stop needs, and names it ([`named_button`]).
 pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
     let button = div()
@@ -1558,7 +1558,7 @@ pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
     crate::surface_chrome::focus_ring(button, theme)
 }
 
-// slopty: a button a screen reader names by its words, which a press dims a step, as Claude
+// A button a screen reader names by its words, which a press dims a step, as Claude
 // desktop's and T3's answer the pointer.
 /// `button` (a [`btn_primary`] with its id) as a named button that shows a press.
 pub fn named_button(
@@ -1770,7 +1770,7 @@ impl gpui::Render for MenuScrollbarDragGhost {
 /// (it never hides under the pointer). [`schedule_scrollbar_hide`] wakes the
 /// view as the linger ends so the fade lands without any further input.
 ///
-/// slopty: the fade starts when that wake runs, not when the linger's time
+/// The fade starts when that wake runs, not when the linger's time
 /// passes: a frame can begin past the linger before the wake does, and a view
 /// it did not draw again must still show what a view drawn from scratch then
 /// shows. The fade itself is a GPUI animation, which draws the view on every
@@ -1784,11 +1784,11 @@ pub struct MenuScrollbarState {
     last_scroll_y: Option<f32>,
     /// When that change was seen.
     last_scroll_at: Option<Instant>,
-    /// slopty: the motion whose linger wake is in flight, one per motion.
+    /// The motion whose linger wake is in flight, one per motion.
     linger_armed: Option<Instant>,
-    /// slopty: when the fade began: the moment the linger's wake ran.
+    /// When the fade began: the moment the linger's wake ran.
     fade_from: Option<Instant>,
-    /// slopty: how many fades began, which keys each one's animation.
+    /// How many fades began, which keys each one's animation.
     fades: u64,
 }
 
@@ -1820,7 +1820,7 @@ impl MenuScrollbarState {
         }
     }
 
-    /// slopty: motion at `at`: the rail stands whole again and lingers from then.
+    /// Motion at `at`: the rail stands whole again and lingers from then.
     const fn moved_at(&mut self, at: Instant) {
         self.last_scroll_at = Some(at);
         self.fade_from = None;
@@ -1835,7 +1835,7 @@ impl MenuScrollbarState {
         self.fade_from = None;
     }
 
-    /// slopty: whether the rail stands after scroll motion at `now`: whole through the linger
+    /// Whether the rail stands after scroll motion at `now`: whole through the linger
     /// until its wake has run, then through the fade, which `reduced` motion skips.
     fn scroll_countdown_for(&self, now: Instant, reduced: bool) -> bool {
         self.last_scroll_at.is_some()
@@ -1864,20 +1864,20 @@ impl MenuScrollbarState {
     /// alone shows nothing, scrolling shows it even with the pointer
     /// elsewhere (touchpad momentum), and hover+scroll is the common case.
     ///
-    /// slopty: at `now`, the frame's moment (`cx.frame_time()`), so a frame drawn again from
+    /// At `now`, the frame's moment (`cx.frame_time()`), so a frame drawn again from
     /// scratch at that moment shows the rail as the frame shown did; under `reduced` motion
     /// (`cx.reduce_motion()`) the rail never fades, it goes.
     pub fn visible(&self, now: Instant, reduced: bool) -> bool {
         self.grab.is_some() || self.bar_hovered || self.scroll_countdown_for(now, reduced)
     }
 
-    /// slopty: the fade under way, by the number that keys its animation: none while a drag or
+    /// The fade under way, by the number that keys its animation: none while a drag or
     /// a track-hover holds the rail whole, or before the linger's wake has run.
     fn fading(&self) -> Option<u64> {
         (self.fade_from.is_some() && self.grab.is_none() && !self.bar_hovered).then_some(self.fades)
     }
 
-    /// slopty: the wake the linger of the motion last seen asks for, once per motion: that
+    /// The wake the linger of the motion last seen asks for, once per motion: that
     /// motion and how long its linger has left at `now`. `None` with no motion, a wake already
     /// in flight for it or its fade begun.
     fn arm_linger_wake(&mut self, now: Instant) -> Option<(Instant, Duration)> {
@@ -1890,7 +1890,7 @@ impl MenuScrollbarState {
         Some((motion, ends.saturating_duration_since(now)))
     }
 
-    /// slopty: the linger of `motion` ran out, its wake running at `now`: the fade begins then,
+    /// The linger of `motion` ran out, its wake running at `now`: the fade begins then,
     /// unless newer motion came or a drag or the pointer on the track holds the rail (letting
     /// go is motion of its own). Whether it began.
     fn linger_ended(&mut self, motion: Instant, now: Instant) -> bool {
@@ -2033,7 +2033,7 @@ impl MenuScrollbarState {
     /// onto this strip; reach for the raw element only when a surface needs
     /// different listeners. Either way `.id(...)` comes first (hover needs
     /// element state).
-    /// slopty: `now` and `reduced` as [`Self::visible`] takes them; drawn whole, [`rail`] fades it.
+    /// `now` and `reduced` as [`Self::visible`] takes them; drawn whole, [`rail`] fades it.
     pub fn render_rail(
         &self,
         theme: &Theme,
@@ -2104,7 +2104,7 @@ pub fn schedule_scrollbar_hide<T: 'static>(
     .detach();
 }
 
-/// slopty: `strip` fading out over [`MENU_SCROLLBAR_FADE_MS`] while `bar` fades, keyed by `id`
+/// `strip` fading out over [`MENU_SCROLLBAR_FADE_MS`] while `bar` fades, keyed by `id`
 /// and the fade's number: a GPUI animation, which draws the view each frame of it.
 pub fn fading_rail(strip: Stateful<Div>, bar: &MenuScrollbarState, id: &'static str) -> AnyElement {
     use gpui::AnimationExt as _;
@@ -2184,7 +2184,7 @@ pub fn rail<V: ScrollRailHost>(
 ) -> Option<AnyElement> {
     let metrics = host.rail_metrics()?;
     schedule_scrollbar_hide(host.rail_bar(), V::rail_bar, cx);
-    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion());
     let strip = host.rail_bar().render_rail(theme, metrics, now, reduced)?;
     Some(fading_rail(
         strip
@@ -2264,7 +2264,7 @@ pub fn rail_for<V: 'static>(
     bar.note_scroll(&scroll);
     let metrics = bar.metrics(&scroll)?;
     schedule_scrollbar_hide(bar, access.bar, cx);
-    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion());
     let strip = (access.bar)(host).render_rail(theme, metrics, now, reduced)?;
     Some(fading_rail(
         strip
@@ -2672,7 +2672,7 @@ mod tests {
         );
     }
 
-    /// slopty: the linger asks for one wake per motion, and the fade begins only as that wake
+    /// The linger asks for one wake per motion, and the fade begins only as that wake
     /// runs, however late: until then the rail stands whole at any moment past the linger, so
     /// a frame that begins before the wake runs draws it as a frame drawn from scratch does.
     #[test]
@@ -2697,7 +2697,7 @@ mod tests {
         assert_eq!(bar.arm_linger_wake(late + fade), None, "faded: nothing to wake");
     }
 
-    /// slopty: a wake for motion since superseded, or one that finds a drag holding the rail,
+    /// A wake for motion since superseded, or one that finds a drag holding the rail,
     /// begins no fade; the motion after each asks for its own wake.
     #[test]
     fn a_superseded_or_held_wake_begins_no_fade() {
@@ -2950,7 +2950,7 @@ mod adaptive_menu_tests {
     }
 }
 
-// slopty: the find card holds its size, and a focus ring never widens a control.
+// The find card holds its size, and a focus ring never widens a control.
 #[cfg(test)]
 mod find_card_tests {
     use gpui::{Context, Render, TestAppContext, Window};
@@ -3040,7 +3040,7 @@ mod return_focus_tests {
     }
 }
 
-// slopty: a menu row stands as zeron's does, whatever its keys draw in.
+// A menu row keeps one height, whatever its keys draw in.
 #[cfg(test)]
 mod menu_row_tests {
     use gpui::{Context, Render, TestAppContext, Window};

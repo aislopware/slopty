@@ -1,5 +1,3 @@
-// slopty: Slopty's own review aids over zeron's diff model (T3 Code's find in diff, whitespace
-// and file tree, drawn in zeron's components): the pure halves, kept apart from the copied pane.
 //! Find in a diff, the whitespace filter and the changed files as a tree.
 
 use std::ops::Range;

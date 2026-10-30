@@ -255,7 +255,7 @@ pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<Me
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
-/// slopty: a raster image's size from its first bytes (PNG's header, JPEG's frame, GIF's and
+/// A raster image's size from its first bytes (PNG's header, JPEG's frame, GIF's and
 /// WebP's), so a preview can take its final room before the pixels arrive. `None` when the
 /// bytes say no size.
 pub(crate) fn header_size(head: &[u8]) -> Option<(u32, u32)> {
@@ -318,7 +318,7 @@ fn decode_raster_image_bounded(
 mod tests {
     use super::*;
 
-    /// slopty: an image's first bytes say its shape, so its room is laid before it arrives; a
+    /// An image's first bytes say its shape, so its room is laid before it arrives; a
     /// head too short to say, or not an image, says nothing.
     #[test]
     fn a_head_says_the_images_shape() {

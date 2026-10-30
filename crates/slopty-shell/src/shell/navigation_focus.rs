@@ -63,7 +63,7 @@ impl Shell {
         if let Some(shell) = shell {
             (shell, self.unfocused.clone())
         } else if crate::shell::touch_screen() {
-            // slopty: on a touch screen the keyboard waits for a tap in the terminal
+            // On a touch screen the keyboard waits for a tap in the terminal
             // (`docs/decisions/ui.md`): focus recovered after a tap elsewhere, a sidebar row's,
             // goes where no software keyboard rises.
             (self.unfocused.clone(), self.unfocused.clone())

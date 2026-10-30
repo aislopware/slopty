@@ -3,7 +3,7 @@
 use crate::theme::Theme;
 use std::sync::Mutex;
 
-pub const ENGINE_VERSION: &str = "merman/0.9"; // slopty: merman draws the diagrams.
+pub const ENGINE_VERSION: &str = "merman/0.9"; // merman draws the diagrams.
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 // Bound inputs and serialize the engine's CPU work across previews; UI owners discard results
 // from superseded revisions.
@@ -76,7 +76,7 @@ impl Palette {
     }
 }
 
-// slopty: merman draws the diagrams (Mermaid 12, Zed's choice), measuring labels with the fonts
+// Merman draws the diagrams (Mermaid 12, Zed's choice), measuring labels with the fonts
 // usvg outlines them in, so no label overflows its box (`docs/decisions/ui.md`, "Mermaid through
 // merman").
 pub fn render(source: &str, palette: &Palette) -> Result<String, String> {
@@ -395,7 +395,7 @@ mod tests {
         assert!(render("flowchart TD\nA[Hola<br/>mundo] --> B[Fin]", &palette).is_ok());
     }
 
-    // slopty: merman's output, themed by Slopty.
+    // Merman's output, themed by Slopty.
     #[test]
     fn diagrams_take_slopty_style_and_keep_explicit_colors() {
         for theme in [Theme::light(), Theme::dark()] {

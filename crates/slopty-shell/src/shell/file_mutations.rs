@@ -252,7 +252,7 @@ mod tests {
                 let mut state = crate::files::test_support::state();
                 state.selected_chat = Some("chat".into());
                 state.no_project = true;
-                // slopty: the session runs in its terminal.
+                // The session runs in its terminal.
                 state.session_terminals = [("chat".to_owned(), "t1".to_owned())].into();
                 state
             });
@@ -262,7 +262,6 @@ mod tests {
                     state,
                     EngineBootConfig {
                         data_dir: directory.path().into(),
-                        // slopty: Slopty's server is the only backend.
                         default_harness: slopty_view_proto::HarnessId::MOCK,
                     },
                     cx,
@@ -286,7 +285,7 @@ mod tests {
         (shell, files, cx)
     }
 
-    /// slopty: a file dragged from the tree and let go over the session moves nothing (the session
+    /// A file dragged from the tree and let go over the session moves nothing (the session
     /// takes no drop); one that visits the session and ends on a folder moves it.
     #[gpui::test]
     fn a_tree_drag_moves_only_onto_a_folder(cx: &mut TestAppContext) {

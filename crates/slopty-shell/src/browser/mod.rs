@@ -217,7 +217,7 @@ impl BrowserSurface {
     pub fn title(&self) -> gpui::SharedString {
         self.page.label().into()
     }
-    /// slopty: the page shown, kept to show it again.
+    /// The page shown, kept to show it again.
     pub fn url(&self) -> Option<&str> {
         self.page.url.as_deref()
     }
@@ -366,7 +366,7 @@ impl BrowserSurface {
             } else {
                 #[cfg(any(target_os = "macos", windows))]
                 {
-                    // slopty: gpui-fast's native host takes the app too.
+                    // gpui-fast's native host takes the app too.
                     native::NativePage::new(window, &self.context.data, self.native_tx.clone(), cx)
                         .map(|mut native| {
                             native.present(self.presentation);
@@ -493,7 +493,7 @@ impl BrowserSurface {
                 if page.error.is_some() {
                     page.loading = false;
                 }
-                // slopty: a same-document move (history push, fragment) keeps its icon and
+                // A same-document move (history push, fragment) keeps its icon and
                 // asks the page again, as a page may change its icon with its route.
                 let same_document = page.url != self.page.url
                     && page.url.is_some()
@@ -548,8 +548,8 @@ impl BrowserSurface {
                     cx.notify();
                 }
             }
-            // slopty: the page drew its own icon (`macos::FAVICON_SCRIPT`); zeron fetched the
-            // link with reqwest. Decoded off the main thread, kept only for the page it is of.
+            // The page draws its own icon (`macos::FAVICON_SCRIPT`), decoded off the main thread
+            // and kept only for the page it is of.
             native::NativeEvent::Favicon { page, data } => {
                 if self.page.url.as_deref() != Some(&page) {
                     return;
@@ -825,7 +825,7 @@ mod tests {
     }
 }
 
-/// slopty: a preview's address. Slopty forwards each port to one of this client's own
+/// A preview's address. Slopty forwards each port to one of this client's own
 /// (`proxy_port` 0, the forward in the hostname) rather than serving them through one proxy.
 pub(crate) fn preview_url(service: &slopty_view_proto::PreviewService, proxy_port: u16) -> String {
     if proxy_port == 0 {
@@ -835,14 +835,14 @@ pub(crate) fn preview_url(service: &slopty_view_proto::PreviewService, proxy_por
     }
 }
 
-/// slopty: the most a favicon message may carry before it is even parsed.
+/// The most a favicon message may carry before it is even parsed.
 #[cfg(any(target_os = "macos", test))]
 const FAVICON_MESSAGE_MAX: usize = 512 * 1024;
-/// slopty: the side a page's icon is kept at (the tab chip draws it at 12 pt).
+/// The side a page's icon is kept at (the pane header draws it at 13 pt).
 #[cfg(any(target_os = "macos", test))]
 const FAVICON_SIDE: u32 = 32;
 
-/// slopty: the page and icon a `FAVICON_SCRIPT` message names; any other message, or one too
+/// The page and icon a `FAVICON_SCRIPT` message names; any other message, or one too
 /// large, is `None`.
 #[cfg(any(target_os = "macos", test))]
 fn favicon_message(body: &str) -> Option<(String, String)> {
@@ -855,7 +855,7 @@ fn favicon_message(body: &str) -> Option<(String, String)> {
     Some((page, data))
 }
 
-/// slopty: a page's icon as the PNG the tab chip shows, from a base64 `data:` URL: the PNG the
+/// A page's icon as the PNG the tab chip shows, from a base64 `data:` URL: the PNG the
 /// page's canvas makes or, where the canvas cannot be read back, the icon's own file, read by
 /// what its bytes are (PNG, ICO, JPEG, GIF, WebP, BMP), never by the type it claims. At most 256
 /// px a side, scaled down to [`FAVICON_SIDE`]. Anything else (an SVG, a link) is `None` and the
@@ -899,7 +899,7 @@ fn favicon_png(data: &str) -> Option<Vec<u8>> {
     Some(png.into_inner())
 }
 
-// slopty: the page's icon is taken only as a small picture, kept as a PNG, and anything else
+// The page's icon is taken only as a small picture, kept as a PNG, and anything else
 // leaves the globe.
 #[cfg(test)]
 mod favicon_tests {

@@ -1,4 +1,4 @@
-//! slopty: the panes beside each session kept across launches (`docs/decisions/layout.md`, "No
+//! The panes beside each session kept across launches (`docs/decisions/layout.md`, "No
 //! permanent right column"). A session's view comes back as it was when the app quit: its shells
 //! on the same terminals (they live on in their machine), its inspector, files, pages, changes and
 //! remote windows, and the pane that had the keyboard. Where each stood is not kept: the views
@@ -64,7 +64,7 @@ impl Shell {
             }
             Pane::View(RightSurface::Inspector) => SavedSurface::Inspector,
             Pane::View(RightSurface::Files) => SavedSurface::Files,
-            // slopty: an agent's page lives while it shows it.
+            // An agent's page lives while it shows it.
             Pane::View(RightSurface::Page(_)) => return None,
         })
     }

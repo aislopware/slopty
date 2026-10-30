@@ -50,7 +50,7 @@ pub fn field() -> Div {
 /// the selected wash when on and a hover wash when off.
 #[must_use]
 pub fn chip(id: impl Into<gpui::ElementId>, on: bool, theme: &Theme) -> gpui::Stateful<Div> {
-    // slopty: never narrower than tall, so a one-letter chip ("W") is a touch target on an iPad.
+    // Never narrower than tall, so a one-letter chip ("W") is a touch target on an iPad.
     crate::surface_chrome::tab(id, on, theme)
         .min_w(px(CONTROL_SIZE))
         .justify_center()
@@ -68,7 +68,7 @@ pub fn keep_keyboard<E: gpui::InteractiveElement>(el: E) -> E {
 /// ([`crate::surface_chrome::icon_button`]), `label` as its accessible name and its tooltip at
 /// the house delay. `id` is also its debug selector and keys its hover fade, so it is unique
 /// app-wide. A press leaves the keyboard where it was.
-// slopty: one recipe for every pane button; this one drew its own ink washes and showed its
+// One recipe for every pane button; this one drew its own ink washes and showed its
 // tooltip at gpui's 500 ms.
 #[must_use]
 pub fn icon_button(
@@ -121,7 +121,7 @@ pub fn button(
         .flex_none()
         .whitespace_nowrap()
         .map(|el| crate::surface_chrome::focus_ring(el, theme))
-        // slopty: pressed reads a step deeper (M22).
+        // Pressed reads a step deeper (M22).
         .map(|el| match tone {
             Tone::Ghost => el.active(|style| style.bg(crate::theme::pressed_wash())),
             Tone::Primary | Tone::Danger => el.active(|style| style.opacity(0.85)),
@@ -163,7 +163,7 @@ pub fn note(text: impl Into<SharedString>, theme: &Theme) -> Div {
         .child(text.into())
 }
 
-// slopty: one loading voice for every surface, and a quick load never flashes (the 150 ms grace,
+// One loading voice for every surface, and a quick load never flashes (the 150 ms grace,
 // `loaders::pending`; `docs/decisions/ui.md`, "A load waits 200 ms before it says so", now 150).
 /// A surface on its way, in its middle: [`crate::loaders::pending`]'s spinner and words, shown
 /// once the load has run its grace. `theme` and `view` are the caller's; the loader reads both
@@ -353,9 +353,8 @@ pub const TOOLTIP_TEXT_SIZE: f32 = crate::typography::ladder::LABEL;
 /// The widest a tooltip draws before its words wrap.
 pub const TOOLTIP_MAX_WIDTH: f32 = 240.0;
 
-// slopty: legible as Claude desktop's and T3's: 12 pt words in the primary ink (11 pt muted was
-// hard to read, worst over white frost), on the spacing ladder, 240 wide at most; zeron's frost
-// stays (an inverted chip would be a seam beside the frosted menus).
+// Legible as Claude desktop's and T3's: 12 pt words in the primary ink, on the spacing ladder,
+// 240 wide at most; frosted, since an inverted chip would be a seam beside the frosted menus.
 /// The chip every tooltip is: frosted, ringed, 12 pt in the primary ink at the font-size
 /// setting, entering with [`crate::motion::tooltip_in`] (none under reduced motion). It is one
 /// `Tooltip` node for assistive tech, `spoken` as its label and value (the words, then the key).
@@ -371,9 +370,9 @@ pub fn tooltip_frame(
         .aria_label(label)
         .max_w(px(TOOLTIP_MAX_WIDTH))
         .px(px(Theme::SPACE_SM))
-        .py(px(6.0)) // slopty: the border's pixel, now the ring draws inside the edge.
+        .py(px(6.0)) // the border's pixel, now the ring draws inside the edge.
         .rounded(px(TOOLTIP_RADIUS))
-        // slopty: a ring, the lit top edge on dark and a short shadow, not a 1 px border
+        // A ring, the lit top edge on dark and a short shadow, not a 1 px border
         // (opencode's and Amp's floats; `Theme::elevation`).
         .shadow(theme.elevation(crate::theme::Elevation::Raised))
         .bg(crate::popover::surface_bg(theme))
@@ -406,7 +405,7 @@ pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
                 .justify_center()
                 .rounded(px(2.0))
                 .bg(crate::theme::ink(0.10))
-                .shadow(vec![cap_lip(1.0)]) // slopty: the cap's lip (design-inspiration item 9).
+                .shadow(vec![cap_lip(1.0)]) // the cap's lip (design-inspiration item 9).
                 .whitespace_nowrap()
                 .font_family(crate::popover::KEY_GLYPH_FONT)
                 .text_size(crate::typography::ui_rems(11.0))
@@ -418,7 +417,7 @@ pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
 /// A key cap's height and least width.
 const KEY_CAP_SIZE: f32 = 14.0;
 
-// slopty: key caps press with the real key (HextaUI's `Kbd` with `useHeldKeys`; design-inspiration
+// Key caps press with the real key (HextaUI's `Kbd` with `useHeldKeys`; design-inspiration
 // item 9). A cap stands on a 1 px lip; while its key is down in the focused palette or picker it
 // sinks 1 px onto it, its fill deepening to `ink(0.16)` and the lip gone, over 100 ms. The palette
 // or picker's root records what is held ([`track_held_keys`]) and forgets it as it opens
@@ -542,7 +541,7 @@ fn key_caps(keys: &str) -> Vec<String> {
     caps
 }
 
-// slopty: a float's controls are touch targets on an iPad: none under 24 pt either way.
+// A float's controls are touch targets on an iPad: none under 24 pt either way.
 #[cfg(test)]
 mod tests {
     use gpui::{Render, div};

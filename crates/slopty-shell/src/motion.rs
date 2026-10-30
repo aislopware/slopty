@@ -63,24 +63,24 @@ const PULSE_TICK: Duration = Duration::from_millis(33);
 /// the view drops off, letting the clock park.
 const PULSE_LEASE: Duration = Duration::from_millis(300);
 
-// slopty: one process-wide epoch (`locked_phase`), so the clock's default is derived.
+// One process-wide epoch (`locked_phase`), so the clock's default is derived.
 #[derive(Default)]
 struct PulseClock {
-    // slopty: no epoch of its own: phases count from [`process_epoch`].
+    // No epoch of its own: phases count from [`process_epoch`].
     leases: HashMap<EntityId, PulseLease>,
     tick: u64,
     running: bool,
-    // slopty: the moment each leased view shows (`pulse_moment`), and when the last tick came.
+    // The moment each leased view shows (`pulse_moment`), and when the last tick came.
     shown: HashMap<EntityId, Shown>,
     ticked_at: Option<Instant>,
 }
 
-/// slopty: the moment a leased view shows, until a tick it is notified of draws it again.
+/// The moment a leased view shows, until a tick it is notified of draws it again.
 struct Shown {
     at: Instant,
     /// A tick notified the view since it last drew.
     due: bool,
-    /// slopty: the tick its pulse started on, kept while it stays leased: the start of the wait
+    /// The tick its pulse started on, kept while it stays leased: the start of the wait
     /// it shows, which paces it down ([`paced_phase`]).
     since: Instant,
 }
@@ -109,13 +109,13 @@ impl PulseLease {
 
 impl Global for PulseClock {}
 
-// slopty: one clock for every repeating status animation in the process (Claude desktop
+// One clock for every repeating status animation in the process (Claude desktop
 // re-anchors its infinite animations to `t mod period` of one clock), so every running dot in
 // every row and every window moves in unison, whenever it mounted and whichever window drew it.
 /// The instant every repeating animation's phase counts from, the same for the whole process.
 fn process_epoch() -> Instant {
     static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *EPOCH.get_or_init(crate::clock::stopwatch) // slopty: an origin, not a moment drawn
+    *EPOCH.get_or_init(crate::clock::stopwatch) // an origin, not a moment drawn
 }
 
 /// The phase `[0,1)` at `now` of a repeating animation lasting `period`, on the process's one
@@ -154,7 +154,7 @@ fn pulse_delta_every(spec: &MotionSpec, view: EntityId, stride: u64, cx: &mut Ap
 }
 
 fn pulse_phase(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
-    // slopty: on the process's one clock ([`locked_phase`]), not the clock's first use, slowing
+    // On the process's one clock ([`locked_phase`]), not the clock's first use, slowing
     // as the wait it shows grows long ([`paced_phase`]).
     let moment = pulse_moment(view, cx);
     let since = cx
@@ -164,7 +164,7 @@ fn pulse_phase(spec: &MotionSpec, view: EntityId, cx: &mut App) -> f32 {
     paced_phase(spec.total(), moment, since)
 }
 
-// slopty: a long wait paces down (opencode's working indicators; item 22): a pulse runs at full
+// A long wait paces down (opencode's working indicators; item 22): a pulse runs at full
 // pace as its wait starts and eases to 0.6 of it over the first minute, so a row left working for
 // an hour reads calm, not urgent. The pace is integrated, so the phase never jumps, and the slack
 // against the calm clock is taken up over the same minute, so every calm pulse is in step again.
@@ -202,7 +202,7 @@ pub fn paced_phase(period: Duration, now: Instant, since: Option<Instant>) -> f3
     phase
 }
 
-// slopty: what a pulse-driven view shows is the moment of the tick that drew it, not the frame's.
+// What a pulse-driven view shows is the moment of the tick that drew it, not the frame's.
 // The clock notifies it at 30 Hz (15 at stride 2) and it is drawn from its last paint in between,
 // so a frame drawn between ticks, or one drawn again from scratch, must show it as that tick did.
 /// The moment `view`, leased on the pulse ([`pulse_lease`]), shows: the tick's that it last drew
@@ -282,7 +282,7 @@ fn pulse_lease_every(view: EntityId, stride: u64, cx: &mut App) {
 }
 
 fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
-    let now = cx.background_executor().now(); // slopty: the executor's clock, a test's too
+    let now = cx.background_executor().now(); // the executor's clock, a test's too
     let clock = cx.default_global::<PulseClock>();
     clock
         .leases
@@ -294,7 +294,7 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
         .renew(now, stride);
     if !clock.running {
         clock.running = true;
-        // slopty: the clock's first tick is now.
+        // The clock's first tick is now.
         clock.ticked_at = Some(now);
         cx.spawn(async move |cx| {
             #[cfg(windows)]
@@ -329,7 +329,7 @@ fn schedule_pulse_every(view: EntityId, stride: u64, cx: &mut App) {
                     clock.leases.retain(|_, lease| lease.until > now);
                     if clock.leases.is_empty() {
                         clock.running = false;
-                        // slopty: parked, what reads the pulse's moment reads the frame's.
+                        // Parked, what reads the pulse's moment reads the frame's.
                         clock.ticked_at = None;
                         clock.shown.clear();
                         return true;
@@ -534,7 +534,7 @@ pub const FADE_QUICK: MotionSpec = MotionSpec::new(150, EASE);
 /// Wallpaper replacement: immediate attack with a short, soft landing.
 pub const WALLPAPER_CROSSFADE: MotionSpec =
     MotionSpec::new(180, CubicBezier::new(1.0 / 3.0, 1.0, 2.0 / 3.0, 1.0));
-/// slopty: how opaque a side pane's contents are `elapsed` into its width opening or closing
+/// How opaque a side pane's contents are `elapsed` into its width opening or closing
 /// ([`PANE_CONTENT_IN`], [`PANE_CONTENT_OUT`]); honours [`speed_scale`].
 pub fn pane_content_opacity(opening: bool, elapsed: Duration) -> f32 {
     let spec = if opening { PANE_CONTENT_IN } else { PANE_CONTENT_OUT };
@@ -555,14 +555,14 @@ pub const SPLASH_OUT: MotionSpec = MotionSpec::new(500, EASE).with_delay(150);
 /// Sidebar / pane width+height transitions: 200ms ease-out.
 pub const RESIZE: MotionSpec = MotionSpec::new(200, EASE_OUT);
 /// Panel columns: 240 ms on the quint ease-out, quick off the mark and long on the landing.
-/// slopty: opencode's side panel, one duration whatever the distance (item 12).
+/// Opencode's side panel, one duration whatever the distance (item 12).
 pub const PANEL_RESIZE: MotionSpec = MotionSpec::new(240, EASE_OUT_QUINT);
-/// slopty: a side pane's contents fade in a beat after its width starts to open (opencode's
+/// A side pane's contents fade in a beat after its width starts to open (opencode's
 /// 40 ms delay and 200 ms fade; item 12), so they never slide in half drawn.
 pub const PANE_CONTENT_IN: MotionSpec = MotionSpec::new(200, EASE).with_delay(40);
-/// slopty: and fade out over the first 160 ms of a close, gone before the width lands.
+/// Content fades out over the first 160 ms of a close, gone before the width lands.
 pub const PANE_CONTENT_OUT: MotionSpec = MotionSpec::new(160, EASE);
-// slopty: one fold for groups, cards and trays (Clanker's `Collapsible`; design-inspiration
+// One fold for groups, cards and trays (Clanker's `Collapsible`; design-inspiration
 // item 7). Opening, the height grows on [`FOLD_OPEN`] while the contents wait 80 ms and fade in on
 // [`FOLD_REVEAL`], rising [`FOLD_RISE`] (standing in for its 2 px blur), so they never arrive half
 // drawn; closing, they fade out on [`FOLD_HIDE`], gone before the height lands on [`FOLD_CLOSE`].
@@ -637,7 +637,7 @@ pub const HOVER_FADE: MotionSpec = MotionSpec::new(150, EASE_TAILWIND);
 pub const GLYPH_STATE: MotionSpec = MotionSpec::new(280, EASE_OUT_QUINT);
 /// CSS `cubic-bezier(0.2, 0, 0, 1)` — fast start, long soft landing.
 pub const EASE_OUT_SOFT: CubicBezier = CubicBezier::new(0.2, 0.0, 0.0, 1.0);
-// slopty: a tooltip enters as Claude desktop's does, quick and landing soft (`duration-snap`).
+// A tooltip enters as Claude desktop's does, quick and landing soft (`duration-snap`).
 /// Tooltip-in: 120ms over [`EASE_OUT_SOFT`].
 pub const TOOLTIP_IN: MotionSpec = MotionSpec::new(120, EASE_OUT_SOFT);
 /// Selection indicator glide between the segments of a pill nav: 260ms.
@@ -767,7 +767,7 @@ where
     element.with_animation(id, FADE_QUICK.animation(), |el, t| el.opacity(t))
 }
 
-/// slopty: a tooltip's entrance, a fade over [`TOOLTIP_IN`] (gpui has no div scale for the
+/// A tooltip's entrance, a fade over [`TOOLTIP_IN`] (gpui has no div scale for the
 /// reference's 0.98).
 pub fn tooltip_in<E>(id: impl Into<ElementId>, element: E) -> AnimationElement<E>
 where
@@ -1025,7 +1025,7 @@ impl IndicatorSlide {
 pub struct HoverFades {
     entries: HashMap<String, FadeEntry>,
     frame: u64,
-    /// slopty: how many elements laid out with a [`fade_driver`] stand behind each key, while
+    /// How many elements laid out with a [`fade_driver`] stand behind each key, while
     /// they are drawn: afresh, or again from the last frame, which reads no fade.
     mounted: HashMap<String, usize>,
 }
@@ -1078,13 +1078,13 @@ impl HoverFades {
         self.entries.get(key).is_some_and(|entry| !entry.settled(now, Self::duration()))
     }
 
-    /// slopty: an element with `key`'s [`fade_driver`] is laid out, and stays until
+    /// An element with `key`'s [`fade_driver`] is laid out, and stays until
     /// [`Self::unmount`]: the fades hold the key through frames that draw it from the last one.
     pub fn mount(&mut self, key: &str) {
         *self.mounted.entry(key.to_owned()).or_default() += 1;
     }
 
-    /// slopty: an element [`Self::mount`] told of is gone: once none stands behind `key`, its
+    /// An element [`Self::mount`] told of is gone: once none stands behind `key`, its
     /// leave will never come, and the fade lets it go.
     pub fn unmount(&mut self, key: &str) {
         let Some(count) = self.mounted.get_mut(key) else { return };
@@ -1095,7 +1095,7 @@ impl HoverFades {
         }
     }
 
-    /// slopty: whether `key` is held though no read of the last frame stamped it.
+    /// Whether `key` is held though no read of the last frame stamped it.
     #[cfg(test)]
     fn unread(&self, key: &str) -> bool {
         self.entries.get(key).is_some_and(|entry| entry.seen + 1 < self.frame)
@@ -1113,7 +1113,7 @@ impl HoverFades {
         self.entries.retain(|key, entry| {
             // Unread through the whole previous frame: the element unmounted
             // (its leave event will never come) — drop the entry.
-            // slopty: unless a mounted element holds it, drawn from its last frame, which reads
+            // Unless a mounted element holds it, drawn from its last frame, which reads
             // nothing ([`HoverFades::mount`]).
             if entry.seen + 1 < frame && !mounted.contains_key(key) {
                 return false;
@@ -1131,23 +1131,23 @@ impl HoverFades {
 
 thread_local! {
     static HOVER_FADES: RefCell<HoverFades> = RefCell::new(HoverFades::default());
-    /// slopty: the moment of the frame the fades were last ticked for ([`hover_fades_active`]),
+    /// The moment of the frame the fades were last ticked for ([`hover_fades_active`]),
     /// which every read of the frame stands at.
     static HOVER_FRAME: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
-/// slopty: the instant a hover flips at: the dispatcher's clock, which a test moves.
+/// The instant a hover flips at: the dispatcher's clock, which a test moves.
 fn hover_now() -> Instant {
     crate::clock::event_now()
 }
 
-/// slopty: the instant a fade is read at: the moment of the frame the shell ticked the fades
+/// The instant a fade is read at: the moment of the frame the shell ticked the fades
 /// for, so a frame drawn twice at one moment draws each fade alike; before any frame, now.
 fn hover_frame() -> Instant {
     HOVER_FRAME.get().unwrap_or_else(hover_now)
 }
 
-/// slopty: stamp this thread's hover flips on `executor`'s clock ([`crate::clock::run_on`]).
+/// Stamp this thread's hover flips on `executor`'s clock ([`crate::clock::run_on`]).
 pub(crate) fn run_on(executor: gpui::BackgroundExecutor) {
     crate::clock::run_on(executor);
 }
@@ -1157,19 +1157,19 @@ pub fn hover_t(key: &str) -> f32 {
     HOVER_FADES.with(|fades| fades.borrow_mut().value_at(key, hover_frame()))
 }
 
-/// slopty: how far a control that a hover reveals shows: on a touch screen, where nothing hovers,
+/// How far a control that a hover reveals shows: on a touch screen, where nothing hovers,
 /// it is there at rest (opencode gates every reveal on `(hover: hover)`); elsewhere it is `key`'s
 /// hover fade, as [`hover_t`].
 pub fn revealed_by_hover(key: &str) -> f32 {
     if cfg!(target_os = "ios") { 1.0 } else { hover_t(key) }
 }
 
-/// slopty: whether the fades hold `key`, hovered or fading.
+/// Whether the fades hold `key`, hovered or fading.
 pub fn hover_known(key: &str) -> bool {
     HOVER_FADES.with(|fades| fades.borrow().entries.contains_key(key))
 }
 
-/// slopty: whether the fades hold `key` though no read of the last frame stamped it: its
+/// Whether the fades hold `key` though no read of the last frame stamped it: its
 /// element was drawn from an earlier frame, or not at all.
 #[cfg(test)]
 pub(crate) fn hover_unread(key: &str) -> bool {
@@ -1185,7 +1185,7 @@ pub fn set_hover(key: &str, hovered: bool, reduced: bool) {
     });
 }
 
-/// slopty: an element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the
+/// An element's hover fade for `key`, read with [`hover_t`]/[`hover_blend`] in the
 /// same view: the pointer's flips set it ([`hover_listener`]), and while it runs, each frame the
 /// element is laid out in asks its own view for the next. The shell's frames keep coming while
 /// any fade runs, but a view the window draws from its last frame reads no fade: without its
@@ -1201,7 +1201,7 @@ pub trait HoverFade: StatefulInteractiveElement + ParentElement {
 
 impl<E: StatefulInteractiveElement + ParentElement> HoverFade for E {}
 
-/// slopty: the part of [`HoverFade`] that keeps `key`'s fade moving, for an element whose own
+/// The part of [`HoverFade`] that keeps `key`'s fade moving, for an element whose own
 /// hover listener calls [`hover_listener`]'s: nothing drawn, and while the fade runs, the view
 /// it is laid out in is asked for the next frame.
 ///
@@ -1229,7 +1229,7 @@ pub fn fade_driver(key: SharedString) -> impl IntoElement {
     .size_0()
 }
 
-/// slopty: an element with a [`fade_driver`], for as long as GPUI keeps its state: mounted in
+/// An element with a [`fade_driver`], for as long as GPUI keeps its state: mounted in
 /// the fades when made, unmounted when dropped.
 struct FadeMount(SharedString);
 
@@ -1267,7 +1267,7 @@ pub fn hover_listener(
     }
 }
 
-/// slopty: the frame's moment, which every hover read of the frame stands at: the shell sets
+/// The frame's moment, which every hover read of the frame stands at: the shell sets
 /// it as its render begins, before any element reads a fade.
 pub fn begin_hover_frame(now: Instant) {
     HOVER_FRAME.set(Some(now));
@@ -1419,7 +1419,7 @@ thread_local! {
     static STATE_MORPHS: RefCell<StateMorphs> = RefCell::new(StateMorphs::default());
 }
 
-/// slopty: forget every hover fade and state morph, as a new app starts with none. The stores
+/// Forget every hover fade and state morph, as a new app starts with none. The stores
 /// are this thread's, which keeps them across a `#[gpui::test]`'s seeds, so a test that reads
 /// them starts here and no seed inherits the hover the last one left (the nightly's GPUI seeds,
 /// 2026-10-29).
@@ -1431,7 +1431,7 @@ pub(crate) fn forget_for_test() {
 }
 
 /// Morph progress (0..1) of `key` toward `on` at `now`, the frame's moment (`cx.frame_time()`).
-// slopty: the frame's moment, not the wall clock's, so a frame drawn again from scratch at the
+// The frame's moment, not the wall clock's, so a frame drawn again from scratch at the
 // same moment stands the morph where it stood.
 pub fn state_t(key: &str, on: bool, spec: MotionSpec, reduced: bool, now: Instant) -> f32 {
     STATE_MORPHS.with(|morphs| morphs.borrow_mut().value_at(key, on, spec, reduced, now))
@@ -1473,7 +1473,7 @@ pub fn reduced_motion(cx: &App) -> bool {
     cx.reduce_motion()
 }
 
-/// slopty: the global reduced-motion flag as a view read it for its render pass, kept for the
+/// The global reduced-motion flag as a view read it for its render pass, kept for the
 /// code that runs without a `cx`. Only [`ReducedMotion::of`] makes one, from the flag: a view's
 /// copy is the flag's, so a test asks for reduced motion through [`set_reduced_motion`], never by
 /// writing the copy, which the next render would overwrite.
@@ -1523,7 +1523,7 @@ struct MotionState {
     pause_in_background: bool,
     system: bool,
     active: bool,
-    /// slopty: the flag as a holder fixed it ([`hold`]), over the person's setting, the OS's
+    /// The flag as a holder fixed it ([`hold`]), over the person's setting, the OS's
     /// and the window's activation.
     held: Option<bool>,
 }
@@ -1589,7 +1589,6 @@ pub fn set_preference(preference: ReduceMotion, cx: &mut App) {
         return;
     }
     state.preference = preference;
-    // slopty: no longer saved; the override setting is gone (P12).
     apply(cx);
 }
 
@@ -1607,7 +1606,7 @@ pub fn set_pause_in_background(enabled: bool, cx: &mut App) {
     });
 }
 
-/// slopty: fix the flag at `reduced` for good: the e2e socket asks for Reduce Motion so every
+/// Fix the flag at `reduced` for good: the e2e socket asks for Reduce Motion so every
 /// dump's frame can be judged, and neither the person's setting, the OS's nor the window
 /// becoming active (which reads the OS's again) may undo it.
 pub fn hold(reduced: bool, cx: &mut App) {
@@ -1665,7 +1664,7 @@ fn apply(cx: &mut App) {
 
 #[cfg(target_os = "macos")]
 fn refresh_system(cx: &mut App) {
-    // slopty: objc2; objc 0.2 is banned in the workspace (deny.toml).
+    // objc2; objc 0.2 is banned in the workspace (deny.toml).
     use objc2::runtime::{AnyObject, Bool};
     use objc2::{class, msg_send};
     let reduce = unsafe {
@@ -1712,7 +1711,7 @@ fn refresh_system(cx: &mut App) {
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 fn refresh_system(_cx: &mut App) {}
 
-// slopty: a line of text that is alive while its work runs (opencode's `text-shimmer`): a band of
+// A line of text that is alive while its work runs (opencode's `text-shimmer`): a band of
 // strong ink sweeps across faint glyphs. Its values are opencode's: 45 ms per glyph, a 1200 ms
 // cycle, a band 5.2 glyphs wide, linear and endless. The phase is the process's one clock
 // ([`locked_phase`]), so every shimmer on screen moves in step.
@@ -1759,7 +1758,7 @@ pub fn shimmer_text(
     gpui::StyledText::new(text).with_highlights(runs)
 }
 
-// slopty: the shimmer's crest passes through the accent hue (HextaUI's `text-shimmer`;
+// The shimmer's crest passes through the accent hue (HextaUI's `text-shimmer`;
 // design-inspiration item 6): faint to the accent over the band's first half, then the accent to
 // a crest of the accent mixed toward the text (55 % in the dark, 35 % on light), colour where the
 // crest was grey.
@@ -1881,7 +1880,7 @@ mod tests {
         assert_eq!(seen.last().copied(), Some(1.0), "the fade drawn to its end: {seen:?}");
     }
 
-    // slopty: two status animations mounted 300 ms apart, even in two apps (two windows' worth
+    // Two status animations mounted 300 ms apart, even in two apps (two windows' worth
     // of pulse clocks), report one phase at one frame time.
     #[test]
     fn status_animations_mounted_apart_move_in_unison() {
@@ -1998,7 +1997,7 @@ mod tests {
         });
     }
 
-    /// slopty: a held flag (the e2e socket's Reduce Motion) outlasts the window becoming active,
+    /// A held flag (the e2e socket's Reduce Motion) outlasts the window becoming active,
     /// which re-reads the OS's setting, and the person's own.
     #[gpui::test]
     fn a_held_reduce_motion_outlasts_activation_and_the_setting(cx: &mut gpui::TestAppContext) {
@@ -2430,7 +2429,7 @@ mod tests {
         assert_eq!(fades.value_at("menu-row", ms(64)), 0.0);
     }
 
-    /// slopty: a mounted element drawn from its last frame keeps its fade through frames that
+    /// A mounted element drawn from its last frame keeps its fade through frames that
     /// read none of it; once the last element behind the key is gone, the fade goes with it.
     #[test]
     fn hover_tick_keeps_a_mounted_entry_unread() {
@@ -2638,7 +2637,7 @@ mod tests {
 #[path = "motion/windows_pulse.rs"]
 mod windows_pulse;
 
-// slopty: the copy span and the growing section every surface shares.
+// The copy span and the growing section every surface shares.
 mod reveal;
 pub use reveal::{COPIED_FOR, RevealHeight, copied, copy_feedback, copy_icon, reveal_height};
 

@@ -113,7 +113,7 @@ impl SearchTreeModel {
                         best_score: result.score,
                         children: Vec::new(),
                     });
-                // slopty: no expect; an ancestor is inserted before its children.
+                // An ancestor is inserted before its children.
                 if let Some(parent) = parent.as_ref() {
                     if let Some(node) = self.nodes.get_mut(parent)
                         && !node.children.contains(&path)
@@ -201,7 +201,7 @@ fn sort_search_branch(path: &str, nodes: &mut HashMap<String, SearchTreeNode>) {
 
 fn sort_search_paths(paths: &mut [String], nodes: &HashMap<String, SearchTreeNode>) {
     paths.sort_by(|left, right| {
-        // slopty: a path with no node sorts by itself instead of panicking.
+        // A path with no node sorts by itself instead of panicking.
         let (Some(left), Some(right)) = (nodes.get(left), nodes.get(right)) else {
             return left.cmp(right);
         };
@@ -632,7 +632,7 @@ impl FilesSurface {
             .items_center()
             .gap(px(4.0))
             .cursor_pointer()
-            // slopty: the pane's wash steps, the hover faded in (M23).
+            // The pane's wash steps, the hover faded in (M23).
             .when(selected, |element| element.bg(crate::theme::selected_wash()))
             .when(!selected, |element| {
                 let fade = format!("files-search-row-{index}");

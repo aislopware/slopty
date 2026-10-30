@@ -17,8 +17,8 @@ use gpui::{
     Styled, Window, canvas, div, point, px,
 };
 
-pub mod status_mark; // slopty: the one mark a run's state morphs through
-pub mod copy_glyph; // slopty: a copy control's glyph, its check drawn as the copy lands
+pub mod status_mark; // the one mark a run's state morphs through
+pub mod copy_glyph; // a copy control's glyph, its check drawn as the copy lands
 
 use crate::motion::{self, GRADIENT_SPIN, PULSE_STAGGER, SPLASH_OUT, SLOPTY_PULSE};
 use crate::theme::{GlyphPalette, Theme};
@@ -42,7 +42,7 @@ pub fn slopty_mark_loader(
     cx: &mut App,
 ) -> impl IntoElement {
     let color = theme.text;
-    let floor = theme.spinner_floor(PULSE_FLOOR); // slopty: a light floor that keeps its shape
+    let floor = theme.spinner_floor(PULSE_FLOOR); // a light floor that keeps its shape
     let scale = height_px / 940.0;
     let cell = 100.0 * scale;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
@@ -87,7 +87,7 @@ pub fn slopty_loader(
     cx: &mut App,
 ) -> impl IntoElement {
     let color = theme.text;
-    let floor = theme.spinner_floor(PULSE_FLOOR); // slopty: a light floor that keeps its shape
+    let floor = theme.spinner_floor(PULSE_FLOOR); // a light floor that keeps its shape
     let slot = cell_px;
     let delta = motion::pulse_delta(&SLOPTY_PULSE, view, cx);
     div()
@@ -131,7 +131,7 @@ pub fn gradient_spinner(
     let center = (MATRIX_SIDE as f32 - 1.0) / 2.0;
     let max = MATRIX_SIDE as f32 - 1.0 + center;
     let pulse = motion::activity_pulse_slow(view, cx);
-    // slopty: on light, each sunrise row takes the deeper tone of its hue that reads on white,
+    // On light, each sunrise row takes the deeper tone of its hue that reads on white,
     // and the cells rest higher (`Theme::spinner_ink`, `Theme::spinner_floor`).
     let tints = gradient_tints(theme);
     let floor = theme.spinner_floor(GSPIN_DIM);
@@ -205,7 +205,7 @@ fn mini_spinner_tinted(
     _view: EntityId,
     cx: &mut App,
 ) -> impl IntoElement {
-    // slopty: legible on light (`Theme::spinner_ink`), its cells resting higher there; as given
+    // Legible on light (`Theme::spinner_ink`), its cells resting higher there; as given
     // where no theme is installed.
     let theme = cx.try_global::<Theme>();
     MiniSpinner {
@@ -343,7 +343,7 @@ struct PulseGlow {
 
 impl RenderOnce for PulseGlow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        // slopty: legible on light, as every spinner (`Theme::spinner_ink`).
+        // Legible on light, as every spinner (`Theme::spinner_ink`).
         let style = match cx.try_global::<Theme>() {
             Some(theme) => GlowStyle {
                 tint: theme.spinner_ink(self.style.tint),
@@ -504,7 +504,7 @@ const _: () = {
     assert!(GRADIENT_SPIN.duration_ms == 750);
 };
 
-// slopty: one loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
+// One loading voice for every surface (`.research/micro-details-2026-10-16.md` M30).
 
 /// How long a load runs before it says so: a fast one never flashes "Loading…" (HextaUI's
 /// `useDelayedLoading`, 150 ms; design-inspiration item 10).
@@ -538,7 +538,7 @@ impl Pending {
     }
 }
 
-// slopty: a loader that never flashes (HextaUI's `useDelayedLoading`; design-inspiration item 10):
+// A loader that never flashes (HextaUI's `useDelayedLoading`; design-inspiration item 10):
 // it waits [`PENDING_GRACE`] before it shows, and once shown stays [`PENDING_HOLD`] even if the
 // load lands meanwhile, so it never blinks on and off.
 /// Where a load stands for its place: [`delayed`].
@@ -632,7 +632,7 @@ impl RenderOnce for Pending {
         if !grace.read(cx).over {
             return row;
         }
-        // slopty: the theme as a live surface reads it, so a window with none set still draws.
+        // The theme as a live surface reads it, so a window with none set still draws.
         let theme = crate::live::chrome::theme(cx).clone();
         let view = window.current_view();
         row.role(gpui::Role::Status)
@@ -679,7 +679,7 @@ mod tests {
         }
     }
 
-    /// slopty: the spinner is notified on the pulse's ticks and drawn from its last paint in
+    /// The spinner is notified on the pulse's ticks and drawn from its last paint in
     /// between: a frame between ticks, and one drawn again from scratch then, show it as its tick
     /// drew it, and the next tick moves it on.
     #[gpui::test]

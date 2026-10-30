@@ -5,7 +5,7 @@
 use super::*;
 use crate::state::EngineHandle;
 
-// slopty: what the chats said is searched once typing pauses on two characters or more
+// What the chats said is searched once typing pauses on two characters or more
 // (`SearchChats`), below the title matches.
 /// Shorter queries match nearly every chat's words; they are not sent.
 pub(super) const MIN_CHAT_WORDS_CHARS: usize = 2;
@@ -14,7 +14,7 @@ pub(super) const CHAT_WORDS_DEBOUNCE: Duration = Duration::from_millis(200);
 /// How many matches one search asks for.
 pub(super) const CHAT_WORDS_LIMIT: usize = 50;
 
-// slopty: one place a chat's words matched (`SearchChats`): the chat, who said it, a line around
+// One place a chat's words matched (`SearchChats`): the chat, who said it, a line around
 // the match and the match's byte range in that line.
 /// A chat whose words match the query.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,7 +72,7 @@ impl ChatWordsMatch {
     }
 }
 
-// slopty: the chats' words search's request state: an answer to an older query is dropped, and
+// The chats' words search's request state: an answer to an older query is dropped, and
 // a failure (an older view model, a server that does not search) shows no matches.
 #[derive(Default)]
 pub(super) struct ChatWordsQuery {
@@ -149,7 +149,7 @@ impl ChatWordsQuery {
     }
 }
 
-// slopty: a chat words match's second line: who said it, then the words in `text_faint` with
+// A chat words match's second line: who said it, then the words in `text_faint` with
 // the match in `text`, one line, cut at the row's end.
 /// "Agent: …the words…", the match lit.
 pub(super) fn chat_words_line(who: &'static str, found: &ChatWordsMatch, theme: &Theme) -> gpui::Div {
@@ -225,7 +225,7 @@ impl Shell {
 pub(super) mod tests {
     use super::*;
 
-    // slopty: the chats' words: a match each, after the pause, from the answer's shape.
+    // The chats' words: a match each, after the pause, from the answer's shape.
     pub(in crate::shell) fn words(chat: &str, role: &str, excerpt: &str, start: usize, end: usize) -> serde_json::Value {
         serde_json::json!({
             "chatId": chat, "role": role, "excerpt": excerpt,

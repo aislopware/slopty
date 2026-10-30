@@ -23,7 +23,7 @@ impl Render for NavigationHost {
                 .child(div().track_focus(&shell.unfocused))
                 .on_action(cx.listener(|shell, _: &NextSession, _, cx| shell.cycle_navigation(true, cx)))
                 .on_action(cx.listener(|shell, _: &PrevSession, _, cx| shell.cycle_navigation(false, cx)))
-                // slopty: the window's own keys (`chrome_keys`), and the keys the root's own
+                // The window's own keys (`chrome_keys`), and the keys the root's own
                 // listeners take (Esc out of a view among them).
                 .map(|el| shell.chrome_actions(el, cx))
                 .capture_key_down(cx.listener(Shell::on_key_down_capture))
@@ -57,7 +57,6 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
@@ -78,7 +77,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                     })
                     .collect();
                 state.selected_chat = Some("parent".into());
-                // slopty: each session runs in its terminal, the main column.
+                // Each session runs in its terminal, the main column.
                 state.session_terminals =
                     [("parent", "t-parent"), ("other", "t-other")].map(|(c, t)| (c.into(), t.into())).into();
             });
@@ -108,7 +107,7 @@ fn draw(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
-/// slopty: the session's terminal, the main column's keyboard.
+/// The session's terminal, the main column's keyboard.
 fn session_focus(shell: &Entity<Shell>, cx: &App) -> FocusHandle {
     shell.read(cx).session_terminal.read(cx).focus_handle()
 }
@@ -217,7 +216,7 @@ fn a_dialog_or_a_picker_holds_the_session_keys_in_every_pane(cx: &mut TestAppCon
         assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
         shell.update(cx, |shell, _| shell.delete_space_confirm = None);
     }
-    // slopty: New session's picker, an overlay that owns the keyboard.
+    // New session's picker, an overlay that owns the keyboard.
     shell.update(cx, |shell, cx| shell.open_new_session_picker(None, cx));
     draw(cx);
     press(cx, true);
@@ -240,7 +239,7 @@ fn a_closed_view_hands_the_keyboard_to_its_neighbour(cx: &mut TestAppContext) {
     assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
 }
 
-// slopty: ⇧⌘T opens the view closed last again, docked beside its session with the keyboard.
+// ⇧⌘T opens the view closed last again, docked beside its session with the keyboard.
 #[gpui::test]
 fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
@@ -266,7 +265,7 @@ fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
     shell.read_with(cx, |shell, cx| assert_eq!(shell.panes_now(cx).views().len(), 2));
 }
 
-// slopty: ⌥⌘[ and ⌥⌘] walk the history.
+// ⌥⌘[ and ⌥⌘] walk the history.
 #[gpui::test]
 fn the_history_keys_walk_back_and_forward(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
@@ -336,7 +335,7 @@ fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppC
     clear_transcript_selection();
 }
 
-// slopty: an archive offers Undo; ⌘Z takes it while its toast is up, and only once.
+// An archive offers Undo; ⌘Z takes it while its toast is up, and only once.
 #[gpui::test]
 fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
@@ -374,7 +373,7 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     assert!(requests.try_recv().is_err());
 }
 
-/// slopty: whether the keyboard is in a Changes surface, whose context the diff's find keys are
+/// Whether the keyboard is in a Changes surface, whose context the diff's find keys are
 /// bound in.
 fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
     cx.update(|window, cx| {
@@ -384,7 +383,7 @@ fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
     })
 }
 
-/// slopty: a diff given the keyboard has the diff's own keys, so ⌘F finds in the diff and not in
+/// A diff given the keyboard has the diff's own keys, so ⌘F finds in the diff and not in
 /// the terminal: one summoned by Changes' key, and one the person clicks into.
 #[gpui::test]
 fn a_diff_given_the_keyboard_has_the_diffs_keys(cx: &mut TestAppContext) {
@@ -428,7 +427,7 @@ fn a_diff_given_the_keyboard_has_the_diffs_keys(cx: &mut TestAppContext) {
     );
 }
 
-/// slopty: a frame drawn while a key is dispatched, before its handlers (a key draws a dirty
+/// A frame drawn while a key is dispatched, before its handlers (a key draws a dirty
 /// window first), and the handler opening the diff's find: the shell's restore, deferred from
 /// that frame, leaves the find the keyboard the frame never saw it take.
 #[gpui::test]

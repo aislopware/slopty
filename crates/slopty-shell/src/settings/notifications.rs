@@ -63,7 +63,7 @@ impl Render for NotificationsPage {
         let theme = Theme::of(cx).for_settings_surface();
         let ring = crate::surface_chrome::ring(&theme, crate::surface_chrome::RING_OFFSET);
         let desktop = self.desktop;
-        // slopty: the switch is the stop, so its ring hugs the pill; the margin keeps the row's
+        // The switch is the stop, so its ring hugs the pill; the margin keeps the row's
         // 40 pt.
         let switch = widgets::toggle_switch(&theme, desktop, "notifications-desktop-toggle")
             .id("notifications-desktop-toggle")
@@ -116,7 +116,7 @@ impl Render for NotificationsPage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: one page head (`widgets::page_head`).
+                                // One page head (`widgets::page_head`).
                                 .child(widgets::page_head(
                                     &theme,
                                     "Notifications",

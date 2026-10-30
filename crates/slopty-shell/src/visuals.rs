@@ -41,7 +41,7 @@ pub struct VisualLayoutChanged;
 enum Load {
     Loading,
     Ready,
-    // slopty: what went wrong in the runtime's words, for "Copy error"; none when the visual's
+    // What went wrong in the runtime's words, for "Copy error"; none when the visual's
     // files never came.
     Failed(Option<SharedString>),
 }
@@ -80,7 +80,7 @@ struct Local {
     scenes: HashMap<SharedString, SceneCache>,
     shaders: HashMap<SharedString, ShaderCache>,
     draw_error: Option<String>,
-    // slopty: a canvas or scene whose draw failed (past its 60 ms budget, or an error) at a tree
+    // A canvas or scene whose draw failed (past its 60 ms budget, or an error) at a tree
     // generation is not drawn again, nor animated, until the tree renders anew: a runaway draw
     // costs the main thread one frame, not every frame.
     stopped: HashMap<SharedString, u64>,
@@ -263,7 +263,7 @@ impl VisualFrame {
         }
     }
 
-    // slopty: a frame running `script` as it came, as a test makes one; the transcript's reads
+    // A frame running `script` as it came, as a test makes one; the transcript's reads
     // through the view model are `slopty_ui`'s to test.
     #[cfg(test)]
     pub(crate) fn from_script(id: SharedString, script: &str, cx: &mut Context<Self>) -> Self {
@@ -357,7 +357,7 @@ impl VisualFrame {
         format!("{}:{path}", self.id).into()
     }
 
-    /// slopty: seconds since the visual started, at the moment of the frame drawing it.
+    /// Seconds since the visual started, at the moment of the frame drawing it.
     fn time(&self, now: Instant) -> f64 {
         now.saturating_duration_since(self.started).as_secs_f64()
     }
@@ -369,7 +369,7 @@ impl VisualFrame {
 /// that sit farthest from it, so no two series read alike whatever the
 /// accent. Solid, deeper on light and brighter on dark, so they hold on
 /// glass and opaque surfaces alike.
-pub(crate) fn chart_series(theme: &Theme) -> [Hsla; 6] { // slopty: pages chart with it (M)
+pub(crate) fn chart_series(theme: &Theme) -> [Hsla; 6] {
     // (hue in turns, light tone, dark tone): teal, amber, rose, violet, lime, sky.
     const FIXED: [(f32, u32, u32); 6] = [
         (0.486, 0x0d9488, 0x2dd4bf),
@@ -522,7 +522,7 @@ impl Render for VisualFrame {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
         let body = match (&self.load, self.tree.clone()) {
-            // slopty: "Couldn't …" in the house's voice; the runtime's words behind Copy error.
+            // "Couldn't …" in the house's voice; the runtime's words behind Copy error.
             (Load::Failed(None), _) => {
                 status_line("Couldn't load this visual.".into(), theme.text_muted)
             }
@@ -539,7 +539,7 @@ impl Render for VisualFrame {
                 let root = self.id.to_string();
                 self.node(&tree, &root, &theme, &palette, window, cx)
             }
-            // slopty: the house's pending line, after its grace.
+            // The house's pending line, after its grace.
             _ => crate::loaders::pending(format!("{}-load", self.id), "Loading visual…").into_any_element(),
         };
         let error = self
@@ -568,7 +568,7 @@ impl Render for VisualFrame {
     }
 }
 
-// slopty: a failure in words, its raw detail one click away, never printed raw in the chat.
+// A failure in words, its raw detail one click away, never printed raw in the chat.
 // `copied` says the detail was just copied (`motion::copied` of `id`).
 fn failure_line(
     id: SharedString,
@@ -595,7 +595,7 @@ fn failure_line(
                 .text_color(crate::motion::hover_blend(&hover, theme.text_muted, theme.text))
                 .cursor_pointer()
                 .hover_fade(hover.clone())
-                // slopty: a tab stop, its hover fading as the house's do.
+                // A tab stop, its hover fading as the house's do.
                 .tab_index(0)
                 .rounded(px(4.0))
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -640,7 +640,7 @@ impl Local {
             }
         });
         self.canvases.retain(|key, _| kept(key));
-        self.stopped.retain(|key, _| kept(key)); // slopty: a stopped draw.
+        self.stopped.retain(|key, _| kept(key));
         self.cameras.retain(|key, _| kept(key));
         images
     }
@@ -752,7 +752,7 @@ impl VisualFrame {
                 .id(self.element_id(path))
                 .role(gpui::Role::Button)
                 .aria_label(SharedString::from(label.clone()))
-                // slopty: a tab stop, Enter or Space pressing it.
+                // A tab stop, Enter or Space pressing it.
                 .tab_index(0)
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .child(label.clone())
@@ -768,7 +768,7 @@ impl VisualFrame {
                 on_change,
             } => {
                 let reduced = cx.reduce_motion();
-                // slopty: a tab list to assistive technology, its selected tab marked.
+                // A tab list to assistive technology, its selected tab marked.
                 let mut row = div()
                     .id(self.element_id(path))
                     .role(gpui::Role::TabList)
@@ -796,8 +796,8 @@ impl VisualFrame {
                         )
                         .cursor_pointer()
                         .role(gpui::Role::Tab)
-                        .aria_selected(selected) // slopty: the tab list.
-                        .tab_index(0) // slopty: each tab a tab stop.
+                        .aria_selected(selected)
+                        .tab_index(0)
                         .map(|el| crate::surface_chrome::focus_ring(el, theme))
                         .aria_label(SharedString::from(option.clone()))
                         .child(option.clone())
@@ -825,7 +825,7 @@ impl VisualFrame {
                     .role(gpui::Role::Switch)
                     .aria_label(SharedString::from(label.clone()))
                     .aria_toggled(if *value { gpui::Toggled::True } else { gpui::Toggled::False })
-                    // slopty: a tab stop, Space or Enter flipping it.
+                    // A tab stop, Space or Enter flipping it.
                     .tab_index(0)
                     .rounded(px(6.0))
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -879,7 +879,7 @@ impl VisualFrame {
                     .cursor_pointer()
                     .hover(|s| s.underline())
                     .role(gpui::Role::Link)
-                    // slopty: a tab stop, Enter opening it.
+                    // A tab stop, Enter opening it.
                     .tab_index(0)
                     .rounded(px(4.0))
                     .map(|el| crate::surface_chrome::focus_ring(el, theme))
@@ -951,7 +951,6 @@ impl VisualFrame {
         if stack.on_click.is_none() && !stack.hover {
             return el.into_any_element();
         }
-        // slopty: the house's faded hover.
         let fade = format!("{}-hover", self.element_id(path));
         let mut el = el
             .id(self.element_id(path))
@@ -962,7 +961,7 @@ impl VisualFrame {
             el = el
                 .cursor_pointer()
                 .role(gpui::Role::Button)
-                // slopty: a tab stop, Enter or Space pressing it.
+                // A tab stop, Enter or Space pressing it.
                 .tab_index(0)
                 .map(|el| crate::surface_chrome::focus_ring(el, theme))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1030,7 +1029,6 @@ impl VisualFrame {
             if r > 0 || !table.columns.is_empty() {
                 el = el.child(div().flex_none().h(px(1.0)).w_full().bg(table_hairline()));
             }
-            // slopty: the house's faded hover.
             let fade = format!("{}-hover", self.element_id(&format!("{path}.r{r}")));
             let mut row_el = div()
                 .id(self.element_id(&format!("{path}.r{r}")))
@@ -1180,7 +1178,7 @@ impl SliderSpec {
         value.clamp(self.min, self.max)
     }
 
-    /// slopty: the value a key moves to, as a native slider's keys move it: an arrow one step
+    /// The value a key moves to, as a native slider's keys move it: an arrow one step
     /// (a hundredth of the range without one), Page Up and Down ten, Home and End to the ends.
     fn value_by_key(&self, key: &str) -> Option<f64> {
         let step = if self.step > 0.0 { self.step } else { (self.max - self.min) / 100.0 };
@@ -1270,7 +1268,7 @@ impl VisualFrame {
                     .w_full()
                     .cursor_pointer()
                     .role(gpui::Role::Slider)
-                    // slopty: a tab stop its arrows, pages and ends move.
+                    // A tab stop its arrows, pages and ends move.
                     .aria_label(SharedString::from(spec.label.clone().unwrap_or_else(|| spec.shown.clone())))
                     .tab_index(0)
                     .rounded(px(6.0))
@@ -1442,7 +1440,6 @@ impl VisualFrame {
                     if let Some(cached) = fresh {
                         return Some(cached.commands.clone());
                     }
-                    // slopty: a stopped draw.
                     if state.stopped.get(&key) == Some(&generation) {
                         return None;
                     }
@@ -1475,7 +1472,7 @@ impl VisualFrame {
                         }
                         Err(error) => {
                             state.draw_error = Some(error.message);
-                            state.stopped.insert(key.clone(), generation); // slopty: a stopped draw.
+                            state.stopped.insert(key.clone(), generation);
                             None
                         }
                     }
@@ -1943,7 +1940,7 @@ impl VisualFrame {
                 },
                 move |bounds, image, window, _| {
                     if let Some(image) = image {
-                        // slopty: gpui-fast takes the image's bounds too.
+                        // gpui-fast takes the image's bounds too.
                         let _ = window.paint_image(
                             bounds,
                             bounds,
@@ -2010,7 +2007,6 @@ impl VisualFrame {
             canvas(
                 move |bounds, window, cx| {
                     let paint_palette = &render_palette;
-                    // slopty: a stopped draw.
                     if local.borrow().stopped.get(&key) == Some(&generation) {
                         return None;
                     }
@@ -2056,7 +2052,7 @@ impl VisualFrame {
                             }
                             Err(error) => {
                                 state.draw_error = Some(error.message);
-                                state.stopped.insert(key.clone(), generation); // slopty: a stopped draw.
+                                state.stopped.insert(key.clone(), generation);
                                 return None;
                             }
                         }
@@ -2200,7 +2196,7 @@ impl VisualFrame {
                     let Some((image, hovered)) = rendered else {
                         return;
                     };
-                    // slopty: gpui-fast takes the image's bounds too.
+                    // gpui-fast takes the image's bounds too.
                     let _ = window.paint_image(
                         bounds,
                         bounds,
@@ -2941,7 +2937,7 @@ mod tests {
         assert!(lo <= -3.0 && hi >= 7.0);
     }
 
-    // slopty: zeron's own `show_visual` example, judged by the accessibility tree and the quads
+    // The `show_visual` example, judged by the accessibility tree and the quads
     // the chart paints; and a draw past its budget, judged by the main thread's frame times.
 
     /// zeron's `show_visual` example: a tab per metric over a bar chart of the metric.
@@ -3055,7 +3051,7 @@ end
         frame.read_with(cx, |frame, _| assert!(frame.error.is_none()));
     }
 
-    /// slopty: a visual's controls are tab stops the keyboard presses: Tab walks to the p99
+    /// A visual's controls are tab stops the keyboard presses: Tab walks to the p99
     /// tab and Space chooses it, as a click does.
     #[gpui::test]
     fn a_visuals_tabs_answer_the_keyboard(cx: &mut gpui::TestAppContext) {
@@ -3103,7 +3099,7 @@ end
         frame.read_with(cx, |frame, _| assert!(frame.error.is_none()));
     }
 
-    /// slopty: a slider's keys move it as a native one's do, within its range.
+    /// A slider's keys move it as a native one's do, within its range.
     #[test]
     fn a_sliders_keys_move_it_by_steps() {
         let spec = SliderSpec {

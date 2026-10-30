@@ -123,7 +123,6 @@ impl FilesSurface {
                             break;
                         }
                     }
-                    // slopty: no unwrap.
                     if let Some(open) = self.tree_context_menu.open_mut() {
                         open.active = next;
                     }
@@ -159,7 +158,7 @@ impl FilesSurface {
         self.close_tree_context_menu(cx);
         match action {
             0 => self.copy_full_paths(&paths, &origin.context.cwd, window, cx),
-            // slopty: no index: a rename with no path does nothing.
+            // A rename with no path does nothing.
             1 => {
                 if let Some(path) = paths.first() {
                     self.begin_tree_rename(path.clone(), window, cx);
@@ -182,7 +181,7 @@ impl FilesSurface {
         self.copy_full_paths(&paths, &origin.context.cwd, window, cx);
     }
 
-    // slopty: a copy says it happened: the menu closes, so a toast confirms (M5).
+    // A copy says it happened: the menu closes, so a toast confirms (M5).
     fn copy_full_paths(
         &mut self,
         paths: &[String],
@@ -209,7 +208,7 @@ impl FilesSurface {
         let menu = self.tree_context_menu.get()?;
         let theme = theme.for_popup();
         let count = menu.paths.len();
-        // slopty: each row names its key, read from the keymap in the tree's context (M16, M41).
+        // Each row names its key, read from the keymap in the tree's context (M16, M41).
         let key_of = |action: &dyn gpui::Action| {
             crate::keys::for_action(action, Some(&self.tree_focus), window, cx)
         };
@@ -225,7 +224,6 @@ impl FilesSurface {
             .flex_col()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_tree_context_menu(cx)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
-        // slopty: no "Add to prompt": the pane is read-only toward the agent.
         for (index, (label, icon_path)) in [
             (
                 if count > 1 { "Copy full paths" } else { "Copy full path" }.to_string(),
@@ -393,7 +391,7 @@ mod tests {
         );
     }
 
-    // slopty: the tree's Mac keys (⌥⌘C, ⌘⌫) act, the menu names them, and a copy says so.
+    // The tree's Mac keys (⌥⌘C, ⌘⌫) act, the menu names them, and a copy says so.
     #[gpui::test]
     fn the_trees_keys_copy_and_delete_and_its_menu_names_them(cx: &mut TestAppContext) {
         use crate::settings::platform_combo;

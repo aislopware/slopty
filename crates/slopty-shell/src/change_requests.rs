@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{AnyElement, Context, Render, SharedString, Window, div, prelude::*, px};
-use slopty_view_proto::{ // slopty: no pull-request pages.
+use slopty_view_proto::{
     ChangeRequestState, ChangeRequestSummary, Chat,
     CheckoutChangeRequestStatus, Space,
 };
@@ -144,7 +144,6 @@ fn render_pull_request_badge(
     render_badge_model(id, model, summary.url, surface, query, device, theme)
 }
 
-// slopty: no pull-request pages.
 
 fn render_badge_model(
     id: SharedString,
@@ -152,7 +151,7 @@ fn render_badge_model(
     url: String,
     surface: ChangeRequestBadgeSurface,
     query: Option<&str>,
-    _device: Option<String>, // slopty: a pull request opens in the web browser.
+    _device: Option<String>, // a pull request opens in the web browser.
     theme: &Theme,
 ) -> AnyElement {
     let color = model.tone.color(theme);
@@ -181,13 +180,13 @@ fn render_badge_model(
         .role(gpui::Role::Link)
         .aria_label(accessible_label)
         .tab_index(0)
-        // slopty: the shared ring, outside the chip: focus moves nothing.
+        // The shared ring, outside the chip: focus moves nothing.
         .map(|el| crate::surface_chrome::focus_ring(el, theme))
         .cursor_pointer()
         .hover(move |style| style.bg(color.opacity(0.16)).text_color(color))
         .on_click(move |_, _, cx| {
             cx.stop_propagation();
-            cx.open_url(&url); // slopty: a pull request opens in the web browser.
+            cx.open_url(&url); // a pull request opens in the web browser.
         })
         // Sidebar rows spell the pull request out in their hover card.
         .when(
@@ -423,12 +422,12 @@ mod tests {
             harness_session_id: None,
             harness_session_cwd: None,
             parent_chat_id: None,
-            subagent: false, // slopty: subagents
+            subagent: false,
             in_parent: false,
             space_id: Some("space".into()),
             last_seen_at: None,
             room_gen: None,
-            draft: None, // slopty: new field.
+            draft: None,
         }
     }
 
@@ -746,7 +745,7 @@ mod tests {
         }
     }
 
-    /// slopty: a badge the keyboard reaches shows the shared ring outside itself: focus grows
+    /// A badge the keyboard reaches shows the shared ring outside itself: focus grows
     /// nothing, so what sits after it stays put.
     #[gpui::test]
     fn a_focused_badge_moves_nothing(cx: &mut gpui::TestAppContext) {

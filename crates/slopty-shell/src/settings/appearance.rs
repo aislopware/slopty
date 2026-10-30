@@ -100,7 +100,7 @@ impl FontKind {
         };
     }
 
-    // slopty: what each slot starts at, so its picker marks the default (M10).
+    // What each slot starts at, so its picker marks the default (M10).
     fn default_family(self) -> UiFontFamily {
         match self {
             Self::Ui => UiFontFamily::Geist,
@@ -210,7 +210,7 @@ pub struct AppearancePage {
 }
 
 impl AppearancePage {
-    // slopty: three presets in place of a pixel slider (Amp's; prune P9).
+    // Three presets, Amp's (prune P9).
     fn render_conversation_width(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         use crate::settings::ConversationWidth;
         let current = crate::settings::conversation_width(cx);
@@ -882,7 +882,7 @@ fn palette_preview(theme: &Theme) -> gpui::Div {
         .child(div().w_1_3().h_full().bg(theme.accent))
 }
 
-// slopty: a row's action reads as every settings row's (Quiet, its words alone), and is named
+// A row's action reads as every settings row's (Quiet, its words alone), and is named
 // by them for a screen reader.
 fn compact_action(
     theme: &Theme,
@@ -941,7 +941,7 @@ fn accent_swatch(
         .id(SharedString::from(format!("accent-{}", selection.label())))
         .aria_label(selection.label())
         .aria_selected(selected)
-        // slopty: no tooltip here; its caller's hint names the accent.
+        // No tooltip here; its caller's hint names the accent.
         .flex_none()
         .w(px(30.0))
         .h(px(34.0))
@@ -1260,7 +1260,7 @@ impl Render for AppearancePage {
                     selection_t,
                     preview(mode, &current_themes, current_accent, current_surface),
                 )
-                // slopty: the default card says so, on a line every card keeps (M10).
+                // The default card says so, on a line every card keeps (M10).
                 .child(
                     div()
                         .h(px(14.0))
@@ -1305,7 +1305,7 @@ impl Render for AppearancePage {
                 cx,
                 move |_, _, cx| appearance::set_theme(appearance_kind, default_id.clone(), cx),
             );
-            // slopty: the chosen theme's one line of voice sits under the row's name (Amp's).
+            // The chosen theme's one line of voice sits under the row's name (Amp's).
             let voice = ThemeRegistry::builtin()
                 .resolve(&current_themes, model_appearance(appearance_kind))
                 .description
@@ -1360,7 +1360,7 @@ impl Render for AppearancePage {
             .options(
                 SurfacePreference::ALL.into_iter().map(|surface| {
                     let option = widgets::SelectOption::new(surface_label(surface));
-                    // slopty: the default names what it resolves to ("Default · Frosted").
+                    // The default names what it resolves to ("Default · Frosted").
                     if surface == SurfacePreference::default() {
                         option.detail(format!(
                             "{} · {}",
@@ -1536,7 +1536,7 @@ impl Render for AppearancePage {
                         .tab_index(0)
                         .role(gpui::Role::Switch)
                         .aria_label("Smooth scrolling")
-                        .map(|el| crate::surface_chrome::focus_ring(el, &theme)) // slopty: as its neighbours'
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme))
                         .cursor_pointer()
                         .aria_toggled(if smooth_scrolling {
                             gpui::Toggled::True
@@ -1628,7 +1628,6 @@ impl Render for AppearancePage {
                     ),
             );
         }
-        // slopty: no maths rows: formulas have one typesetter, face and size.
         font_rows = font_rows.child(self.render_conversation_width(&theme, cx));
         let mut font_section = widgets::section(&theme, "Fonts and layout", font_rows);
         for kind in FontKind::ALL {
@@ -1668,7 +1667,7 @@ impl Render for AppearancePage {
                         .track_scroll(&self.scroll.scroll)
                         .child(
                             widgets::page_column()
-                                // slopty: one page head (`widgets::page_head`).
+                                // One page head (`widgets::page_head`).
                                 .child(widgets::page_head(
                                     &theme,
                                     "Appearance",
@@ -1713,7 +1712,7 @@ impl Render for AppearancePage {
 mod tests {
     use super::*;
 
-    // slopty: each font slot's picker marks Geist or Geist Mono and its ladder the default size.
+    // Each font slot's picker marks Geist or Geist Mono and its ladder the default size.
     #[test]
     fn each_font_slot_knows_its_default() {
         assert_eq!(FontKind::Ui.default_family(), UiFontFamily::Geist);
@@ -1754,7 +1753,7 @@ mod tests {
         );
     }
 
-    // slopty: each theme row reads the chosen theme's one line, and choosing another theme
+    // Each theme row reads the chosen theme's one line, and choosing another theme
     // changes it.
     #[gpui::test]
     fn a_theme_row_says_the_chosen_themes_line(cx: &mut gpui::TestAppContext) {
@@ -2048,7 +2047,7 @@ mod tests {
         });
     }
 
-    // slopty: choosing a preset from the row's menu takes and saves it, and its line follows.
+    // Choosing a preset from the row's menu takes and saves it, and its line follows.
     #[gpui::test]
     fn a_conversation_width_preset_is_chosen_from_its_menu(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

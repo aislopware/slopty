@@ -30,7 +30,7 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
                     .unwrap()
                 })
                 .collect();
-            // slopty: each session runs in its terminal, the main column.
+            // Each session runs in its terminal, the main column.
             state.session_terminals = [("a", "t-a"), ("b", "t-b")].map(|(c, t)| (c.into(), t.into())).into();
             state
         });
@@ -38,7 +38,6 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
             state,
             EngineBootConfig {
                 data_dir: dir.path().into(),
-                // slopty: Slopty's server is the only backend.
                 default_harness: slopty_view_proto::HarnessId::MOCK,
             },
             cx,
@@ -76,7 +75,7 @@ struct Frame {
 }
 
 fn draw(shell: &Entity<Shell>, cx: &mut VisualTestContext, millis: u64) -> Frame {
-    // slopty: the shell's motion reads the dispatcher's clock, which the test moves.
+    // The shell's motion reads the dispatcher's clock, which the test moves.
     cx.executor().advance_clock(Duration::from_millis(millis).mul_f32(motion::speed_scale()));
     shell.update(cx, |_, cx| cx.notify());
     cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -205,7 +204,7 @@ fn the_panes_fill_the_room_the_sidebar_leaves_through_its_glide(cx: &mut TestApp
     expect(draw(&shell, cx, 0), docked.widths);
 }
 
-/// slopty: a subagent of a call runs inside its agent's session, so its row shows that agent's
+/// A subagent of a call runs inside its agent's session, so its row shows that agent's
 /// panes as the agent left them, and ⌘I there summons the agent's inspector among them; an agent
 /// another agent started has panes of its own, its terminal alone until the person summons one.
 /// The panes are kept, its files among them, and come back in a new launch once its chat shows.

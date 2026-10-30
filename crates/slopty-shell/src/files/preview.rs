@@ -30,7 +30,7 @@ use crate::{
 };
 use crate::motion::HoverFade as _;
 
-// slopty: one code size for the pane (the diff's, the editor's and a read-only file's), the
+// One code size for the pane (the diff's, the editor's and a read-only file's), the
 // `code_font_size` setting on a 20 px line at its default: opening a file from its diff, or a
 // file that cannot be edited, no longer moves its text 1 or 1.5 px.
 const PREVIEW_LINE_HEIGHT: f32 = 20.0;
@@ -1700,7 +1700,7 @@ impl FilesSurface {
                                         .id("files-retry-close-save")
                                         .role(gpui::Role::Button)
                                         .rounded(px(4.0))
-                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        // A keyboard stop with the shell's ring (M8).
                                         .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                         .when(self.target_change_pending, |button| button.hidden())
                                         .ml_auto()
@@ -1717,7 +1717,7 @@ impl FilesSurface {
                                             .id("files-keep-open")
                                             .role(gpui::Role::Button)
                                             .rounded(px(4.0))
-                                            // slopty: a keyboard stop with the shell's ring (M8).
+                                            // A keyboard stop with the shell's ring (M8).
                                             .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                             .cursor_pointer()
                                             .text_color(theme.text_muted)
@@ -1732,7 +1732,7 @@ impl FilesSurface {
                                         .id("files-discard-close-changes")
                                         .role(gpui::Role::Button)
                                         .rounded(px(4.0))
-                                        // slopty: a keyboard stop with the shell's ring (M8).
+                                        // A keyboard stop with the shell's ring (M8).
                                         .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                         .cursor_pointer()
                                         .text_color(theme.danger_muted)
@@ -1783,7 +1783,7 @@ impl FilesSurface {
                                                     .id("files-keep-external-edits")
                                                     .role(gpui::Role::Button)
                                                     .rounded(px(4.0))
-                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    // A keyboard stop with the shell's ring (M8).
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
@@ -1797,7 +1797,7 @@ impl FilesSurface {
                                                     .id("files-reload-external")
                                                     .role(gpui::Role::Button)
                                                     .rounded(px(4.0))
-                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    // A keyboard stop with the shell's ring (M8).
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
@@ -1814,7 +1814,7 @@ impl FilesSurface {
                                                     .id("files-cancel-reload")
                                                     .role(gpui::Role::Button)
                                                     .rounded(px(4.0))
-                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    // A keyboard stop with the shell's ring (M8).
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text_muted)
@@ -1828,7 +1828,7 @@ impl FilesSurface {
                                                     .id("files-confirm-reload")
                                                     .role(gpui::Role::Button)
                                                     .rounded(px(4.0))
-                                                    // slopty: a keyboard stop with the shell's ring (M8).
+                                                    // A keyboard stop with the shell's ring (M8).
                                                     .map(|el| crate::surface_chrome::key_stop(el, &theme))
                                                     .cursor_pointer()
                                                     .text_color(theme.text)
@@ -2018,7 +2018,7 @@ impl FilesSurface {
                         .text_size(crate::typography::ui_rems(11.0))
                         .text_color(color)
                         .when(retry, |element| {
-                            // slopty: a control's hover, faded in, and its press (M23).
+                            // A control's hover, faded in, and its press (M23).
                             element
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
@@ -2030,13 +2030,13 @@ impl FilesSurface {
                                 ))
                                 .hover_fade("files-save-status-fade")
                                 .active(|style| style.bg(crate::theme::pressed_wash()))
-                                // slopty: a keyboard stop with the shell's ring (M8).
+                                // A keyboard stop with the shell's ring (M8).
                                 .map(|el| crate::surface_chrome::key_stop(el, theme))
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.save_active_document(cx)),
                                 )
                         })
-                        // slopty: the retry names its key (⌘S); the reason is the detail line.
+                        // The retry names its key (⌘S); the reason is the detail line.
                         .when_some(detail, |element, detail| {
                             if retry {
                                 element.tooltip(crate::settings::widgets::detail_tooltip(
@@ -2092,7 +2092,7 @@ impl FilesSurface {
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.toggle_word_wrap(window, cx)))
                 .child(
-                    // slopty: the set's wrap glyph, as the diff's wrap toggle wears.
+                    // The set's wrap glyph, as the diff's wrap toggle wears.
                     icon(icons::WRAP_TEXT)
                         .size(px(crate::surface_chrome::ICON_SIZE))
                         .text_color(if self.preview.word_wrap() {
@@ -2257,7 +2257,7 @@ impl FilesSurface {
         let Some(document) = self.preview.documents.get(path) else {
             return gpui::Empty.into_any_element();
         };
-        // slopty: one loading voice that never flashes, and a failed read that says what failed
+        // One loading voice that never flashes, and a failed read that says what failed
         // and offers the way on (M30, M31).
         if matches!(document.phase, DocumentPhase::Loading) {
             return div()
@@ -2519,7 +2519,7 @@ fn outside_read_only_row(theme: &Theme) -> AnyElement {
     )
 }
 
-// slopty: a note over a file (zeron's amber strip), with the info glyph.
+// A note over a file, an amber strip with the info glyph.
 pub(super) fn info_row(theme: &Theme, text: impl Into<SharedString>) -> AnyElement {
     div()
         .h(px(28.0))
@@ -2752,7 +2752,7 @@ mod tests {
         assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
     }
 
-    // slopty: one file, one size: the editor, a read-only file and the diff draw the same code
+    // One file, one size: the editor, a read-only file and the diff draw the same code
     // at the same size and line.
     #[test]
     fn the_pane_draws_code_at_one_size() {

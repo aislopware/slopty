@@ -1,6 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! A precise, bounded clock owned only while pulse animations are mounted.
-// slopty: an OS timer's pacing, on the wall clock it waits on: never a moment drawn.
+// An OS timer's pacing, on the wall clock it waits on: never a moment drawn.
 #![allow(clippy::disallowed_methods)]
 use futures::channel::oneshot;
 use std::{

@@ -1,5 +1,4 @@
-// slopty: Slopty's own tests (not in zeron).
-//! slopty: the app's chrome as a person and assistive tech meet it: the palettes, the chat menu
+//! The app's chrome as a person and assistive tech meet it: the palettes, the chat menu
 //! and the empty states (the sidebar's own are `sidebar`'s). Each test draws the whole shell in a
 //! headless window (`retention_tests::launch`) and judges by its accessibility tree
 //! (`retention_tests::tree`) and its laid-out bounds.
@@ -10,7 +9,7 @@ use gpui::{TestAppContext, VisualTestContext};
 use super::retention_tests::{DESKTOP, device, draw, find, launch, space, tree};
 use super::*;
 
-/// slopty: a title the agent gives a chat rises in over the old on its sidebar row and in the
+/// A title the agent gives a chat rises in over the old on its sidebar row and in the
 /// titlebar (Amp's), on the house's roll; under Reduce Motion it is simply there.
 #[gpui::test]
 fn a_chat_title_the_agent_gives_rolls_in(cx: &mut TestAppContext) {
@@ -372,7 +371,7 @@ mod session_card {
         assert!(inspect("c", cx), "an idle one keeps the same line");
     }
 
-    /// slopty: a toast never stands over the session's terminal, whose TUI keeps its prompt in
+    /// A toast never stands over the session's terminal, whose TUI keeps its prompt in
     /// the window's bottom-right corner: it rises in the sidebar's foot, above its bottom row,
     /// and with the sidebar put away it hangs at the top right under the title strip.
     #[gpui::test]

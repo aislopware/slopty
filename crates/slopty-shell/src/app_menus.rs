@@ -23,7 +23,6 @@ actions!(
     slopty,
     [
         About,
-        // slopty: no self-updater.
         Quit,
         Hide,
         HideOthers,
@@ -31,7 +30,7 @@ actions!(
         Minimize,
         Zoom,
         CloseWindow,
-        // slopty: ⌘W closes the tab, ⇧⌘W the window (`docs/decisions/ui.md`, "⌘W closes the tab").
+        // ⌘W closes the tab, ⇧⌘W the window (`docs/decisions/ui.md`, "⌘W closes the tab").
         CloseTab,
         AppearanceSystem,
         AppearanceLight,
@@ -47,7 +46,6 @@ pub fn init(cx: &mut App) {
     cx.on_action(quit);
     #[cfg(target_os = "macos")]
     cx.on_action(|_: &About, _| about_panel::show());
-    // slopty: no self-updater.
     // Application-menu verbs — gpui wraps NSApp `hide` / `hideOtherApplications`
     // / `unhideAllApplications` (zed registers the same trio in
     // crates/zed/src/zed.rs `init`).
@@ -109,7 +107,7 @@ fn close_window(_: &CloseWindow, cx: &mut App) {
     cx.defer(|cx| close_active_window(false, cx));
 }
 
-// slopty: ⌘W closes the focused pane of the session's view (a split shell, a view summoned beside
+// ⌘W closes the focused pane of the session's view (a split shell, a view summoned beside
 // it), and the window only when the session's own pane is all there is.
 fn close_tab(_: &CloseTab, cx: &mut App) {
     cx.defer(|cx| close_active_window(true, cx));
@@ -145,7 +143,7 @@ fn close_active_window(pane_first: bool, cx: &mut App) {
 /// the platform convention everywhere (Cmd+, on macOS, Ctrl+, elsewhere);
 /// window/application lifecycle shortcuts remain macOS-only.
 pub fn bind_keys(cx: &mut App) {
-    // slopty: Settings is ⌘, on every Apple keyboard, an iPad's too.
+    // Settings is ⌘, on every Apple keyboard, an iPad's too.
     cx.bind_keys(app_key_bindings(crate::keys::MOD_IS_COMMAND, cfg!(target_os = "macos")));
 }
 
@@ -153,7 +151,7 @@ pub fn bind_keys(cx: &mut App) {
 /// (no `App`), so unit tests can inspect it directly.
 fn app_key_bindings(command: bool, macos: bool) -> Vec<KeyBinding> {
     let mut bindings = vec![KeyBinding::new(
-        if command { "cmd-," } else { "ctrl-," }, // slopty: `command`, not `macos`
+        if command { "cmd-," } else { "ctrl-," }, // `command`, not `macos`
         shell::OpenSettings,
         None,
     )];
@@ -170,7 +168,7 @@ fn app_key_bindings(command: bool, macos: bool) -> Vec<KeyBinding> {
     bindings
 }
 
-/// slopty: a window command the menu bar and the command palette both offer, named once in
+/// A window command the menu bar and the command palette both offer, named once in
 /// sentence case; the menu bar writes it in Title Case ([`title_case`], the macOS rule) and macOS
 /// writes its key beside it, the palette its key from the keymap.
 #[derive(Clone, Copy)]
@@ -211,12 +209,12 @@ macro_rules! command {
     };
 }
 
-/// slopty: the File menu's view commands.
+/// The File menu's view commands.
 pub(crate) const TAB_COMMANDS: [WindowCommand; 1] = [
     command!("Reopen closed view", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab),
 ];
 
-/// slopty: the View menu: the sidebar, a session's panes and the views summoned beside it
+/// The View menu: the sidebar, a session's panes and the views summoned beside it
 /// (`docs/decisions/layout.md`, "One session per view, splits on demand").
 pub(crate) const VIEW_COMMANDS: [WindowCommand; 9] = [
     command!("Toggle sidebar", crate::icons::SPLIT_COLUMNS, shell::ToggleSidebar),
@@ -225,17 +223,17 @@ pub(crate) const VIEW_COMMANDS: [WindowCommand; 9] = [
     command!("Zoom pane", crate::icons::WINDOW_MAXIMIZE, shell::ZoomPane),
     command!("Changes", crate::icons::FILE_DIFF, shell::ToggleChanges),
     command!("Files", crate::icons::FOLDER_TREE, shell::ToggleFiles),
-    // slopty: steps in time, as a trace reads; the eye is the inbox's (`layout.md`).
+    // Steps in time, as a trace reads; the eye is the inbox's (`layout.md`).
     command!("Inspector", crate::icons::SORT_BY_TIME, shell::ToggleInspector),
     command!("Browser", crate::icons::GLOBE, shell::OpenBrowser),
     command!("Remote window", crate::icons::MONITOR, shell::OpenRemoteWindow),
 ];
 
-/// slopty: the Go menu's moves.
+/// The Go menu's moves.
 pub(crate) const GO_COMMANDS: [WindowCommand; 10] = [
     command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
     command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
-    // slopty: the session picker and Go to Directory (`shell::picker`).
+    // The session picker and Go to Directory (`shell::picker`).
     command!("Go to session\u{2026}", crate::icons::MAGNIFER, shell::OpenPicker),
     command!("Go to directory\u{2026}", crate::icons::FOLDER, shell::GoToDirectory),
     command!("Next pane", crate::icons::ALT_ARROW_RIGHT, shell::NextPane),
@@ -246,12 +244,12 @@ pub(crate) const GO_COMMANDS: [WindowCommand; 10] = [
     command!("Inbox", crate::icons::EYE, shell::Inbox),
 ];
 
-/// slopty: every command the palette offers from the menu bar's table.
+/// Every command the palette offers from the menu bar's table.
 pub(crate) fn window_commands() -> impl Iterator<Item = WindowCommand> {
     TAB_COMMANDS.into_iter().chain(VIEW_COMMANDS).chain(GO_COMMANDS)
 }
 
-/// slopty: a sentence-case name in Title Case: each word capitalised but the short joining
+/// A sentence-case name in Title Case: each word capitalised but the short joining
 /// ones after the first.
 pub(crate) fn title_case(label: &str) -> String {
     const MINOR: [&str; 9] = ["a", "an", "and", "in", "of", "on", "or", "the", "to"];
@@ -288,9 +286,8 @@ pub fn app_menus() -> Vec<Menu> {
     let mut app_items = vec![
         // The native AppKit about panel; no equivalent elsewhere yet.
         MenuItem::action("About Slopty", About).disabled(!macos),
-        // slopty: "Check for Updates…" is cut; Slopty updates through its own builds.
         MenuItem::separator(),
-        // slopty: it opens a window of its own, so its name ends in "…" (the macOS rule).
+        // It opens a window of its own, so its name ends in "…" (the macOS rule).
         MenuItem::action("Settings…", shell::OpenSettings),
         MenuItem::separator(),
     ];
@@ -306,7 +303,7 @@ pub fn app_menus() -> Vec<Menu> {
     }
     app_items.push(MenuItem::action("Quit Slopty", Quit));
 
-    // slopty: File, View and Go list the window's commands; macOS writes each one's key from the
+    // File, View and Go list the window's commands; macOS writes each one's key from the
     // keymap beside it, so a rebind shows in the menu too.
     let mut menus = vec![
         Menu::new("Slopty").items(app_items),
@@ -539,12 +536,12 @@ mod tests {
             Some(combo("cmd-,"))
         );
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
-        // slopty: ⌘W closes the focused pane, ⇧⌘W the window.
+        // ⌘W closes the focused pane, ⇧⌘W the window.
         assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
 
-        // slopty: an iPad's keyboard opens Settings with ⌘, and has no window verbs to bind.
+        // An iPad's keyboard opens Settings with ⌘, and has no window verbs to bind.
         let ipad = app_key_bindings(true, false);
         assert_eq!(find(&ipad, shell::OpenSettings.name()), Some(combo("cmd-,")));
         assert_eq!(find(&ipad, Quit.name()), None);
@@ -602,7 +599,7 @@ mod about_panel {
 #[cfg(target_os = "macos")]
 mod native_quit {
     use super::*;
-    // slopty: objc2; objc 0.2 is banned in the workspace (deny.toml).
+    // objc2; objc 0.2 is banned in the workspace (deny.toml).
     use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
     use objc2::{class, msg_send, sel};
     use std::cell::{Cell, RefCell};
@@ -633,7 +630,7 @@ mod native_quit {
         let app = cx.to_async();
         REQUEST.with_borrow_mut(|request| {
             *request = Some(Box::new(move || {
-                let app = app.clone(); // slopty: gpui-fast updates through `&AsyncApp`
+                let app = app.clone(); // gpui-fast updates through `&AsyncApp`
                 executor
                     .spawn(async move {
                         let _ = app.update(request_quit);

@@ -114,10 +114,10 @@ pub struct ScreenSurface {
     query: String,
     /// The picker's keyboard row, in the order shown.
     active: Option<usize>,
-    // slopty: what the wait said last, said on while its loader's hold runs out.
+    // What the wait said last, said on while its loader's hold runs out.
     waiting_caption: &'static str,
     scroll: ScrollHandle,
-    // slopty: the list's floating rail, as every scrolling list has (M26).
+    // The list's floating rail, as every scrolling list has (M26).
     rail: popover::MenuScrollbarState,
     _search_events: Subscription,
     _watch: Option<Subscription>,
@@ -210,7 +210,7 @@ impl ScreenSurface {
         extra
     }
 
-    // slopty: a failure names the machine (the house "Couldn't …" grammar).
+    // A failure names the machine (the house "Couldn't …" grammar).
     /// The chat's machine by its name: the target's, or this one's for a local chat.
     fn host(&self, cx: &App) -> String {
         let state = self.state.read(cx);
@@ -539,7 +539,7 @@ impl popover::ScrollRailHost for ScreenSurface {
 impl Render for ScreenSurface {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        // slopty: the wait's loader shows only past 150 ms and, once shown, stays 400 ms
+        // The wait's loader shows only past 150 ms and, once shown, stays 400 ms
         // (`loaders::delayed`), saying what it said last while it stays.
         let waiting = match &self.stage {
             Stage::Listing => Some("Looking for windows…"),

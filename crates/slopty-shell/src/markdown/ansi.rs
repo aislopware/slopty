@@ -1,4 +1,3 @@
-// slopty: Slopty's own file (not in zeron).
 //! Terminal output in a code fence, in its colours: a fence that carries ANSI SGR escapes (an
 //! ` ```ansi ` fence, or console output pasted with its escape bytes) draws each run in the
 //! colour its escapes chose, from the terminal theme, the way the terminal showed it. The escapes

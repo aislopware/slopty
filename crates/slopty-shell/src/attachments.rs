@@ -6,7 +6,7 @@
 //! pictures ride its plain text as a trailer of paths, which the view model writes) and
 //! `lib/transcript-attachment-cache.ts` (decoded-image cache keyed by `(deviceId, path)`).
 //!
-//! slopty: TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
+//! TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,7 +27,7 @@ use slopty_view_rpc::methods;
 pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
 /// state.ts `MAX_ATTACHMENT_READ_CHUNKS` — bounds the read-back loop.
 const MAX_READ_CHUNKS: usize = 1_000;
-/// slopty: how much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
+/// How much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
 const HEAD_B64: usize = 64 * 1024 / 3 * 4;
 
 // ---------------------------------------------------------------------------
@@ -71,7 +71,6 @@ pub(crate) fn with_attachments(text: &str, paths: &[String]) -> String {
 /// An attachment ref parsed back out of a user message's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserImageAttachment {
-    // slopty: appshots removed.
     pub id: String,
     pub path: String,
     pub name: String,
@@ -131,7 +130,7 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
             attachments: Vec::new(),
         };
     };
-    let body = content[..body_end].trim_end(); // slopty: appshots removed.
+    let body = content[..body_end].trim_end();
     let attachments: Vec<UserImageAttachment> = content[refs_start..]
         .lines()
         .filter_map(|line| {
@@ -140,7 +139,6 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
         })
         .enumerate()
         .map(|(index, path)| UserImageAttachment {
-            // slopty: appshots removed.
             id: format!("{index}:{path}"),
             name: name_from_path(&path),
             path,
@@ -211,7 +209,7 @@ pub(crate) async fn read_attachment_bytes(
         .await
 }
 
-/// slopty: [`read_attachment_bytes`], handing `head` the file's first bytes as soon as its first
+/// [`read_attachment_bytes`], handing `head` the file's first bytes as soon as its first
 /// chunk is in (a preview reads its size from them while the rest arrives).
 pub(crate) async fn read_attachment_bytes_with(
     engine: &EngineHandle,
@@ -408,7 +406,6 @@ struct ImageCache {
     pending_free: Vec<Arc<Image>>,
 }
 
-// slopty: from upstream's appshots.rs, which is not taken.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
     if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
@@ -490,7 +487,7 @@ fn cache() -> &'static Mutex<ImageCache> {
     CACHE.get_or_init(|| Mutex::new(ImageCache::default()))
 }
 
-/// slopty: empty the image cache and its eviction shield, as a new app starts with neither. Both
+/// Empty the image cache and its eviction shield, as a new app starts with neither. Both
 /// are the process's, which keeps them across a `#[gpui::test]`'s seeds: a load the last seed
 /// claimed read as this one's (the nightly's GPUI seeds, 2026-10-29).
 #[cfg(test)]
@@ -585,7 +582,7 @@ impl Drop for AttachmentLoadGuard {
             };
             *entry = CacheEntry::Error {
                 attempts: attempts.saturating_add(1),
-                at: crate::clock::stopwatch(), // slopty: a retry's wait, not a moment drawn
+                at: crate::clock::stopwatch(), // a retry's wait, not a moment drawn
             };
         }
     }
@@ -609,7 +606,7 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
         source.clone(),
         CacheEntry::Error {
             attempts,
-            at: crate::clock::stopwatch(), // slopty: a retry's wait, not a moment drawn
+            at: crate::clock::stopwatch(), // a retry's wait, not a moment drawn
         },
     );
 }
@@ -690,10 +687,10 @@ pub(crate) fn lightbox_with_size(
             window,
             cx,
         ),
-        // slopty: the house's pending line, shown only past its grace.
+        // The house's pending line, shown only past its grace.
         None => crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element(),
     };
-    // slopty: the caption goes under the picture as it is fitted (the viewer's own fit, never
+    // The caption goes under the picture as it is fitted (the viewer's own fit, never
     // past its natural size), not under the room it may be zoomed in, which a wide picture
     // leaves far below it.
     let fitted_h = natural_size.map_or(max_h, |natural| {
@@ -710,7 +707,7 @@ pub(crate) fn lightbox_with_size(
     let close_on_button = on_close.clone(); // slopty
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
-    // slopty: a close a screen reader and a finger reach (a phone has no Escape), clear of the
+    // A close a screen reader and a finger reach (a phone has no Escape), clear of the
     // system's edges.
     let safe = window.insets().safe_area;
     let close = div()
@@ -740,7 +737,7 @@ pub(crate) fn lightbox_with_size(
             .child(
                 div()
                     .id("attachment-lightbox")
-                    // slopty: a dialog named for its image, which VoiceOver can reach and close.
+                    // A dialog named for its image, which VoiceOver can reach and close.
                     .role(gpui::Role::Dialog)
                     .aria_label(preview.name.clone())
                     .occlude()
@@ -822,7 +819,7 @@ mod tests {
         }
     }
 
-    /// slopty: the lightbox is a dialog named for its image, with a Close a screen reader and a
+    /// The lightbox is a dialog named for its image, with a Close a screen reader and a
     /// finger reach, which closes it.
     #[gpui::test]
     fn the_lightbox_is_a_dialog_that_closes(cx: &mut gpui::TestAppContext) {
@@ -860,7 +857,7 @@ mod tests {
         assert!(closed.get(), "Close closes it");
     }
 
-    /// slopty: a wide picture's name sits just under it, not under the room it may be zoomed in.
+    /// A wide picture's name sits just under it, not under the room it may be zoomed in.
     #[gpui::test]
     fn the_lightbox_names_its_picture_just_under_it(cx: &mut gpui::TestAppContext) {
         struct Sized(PreviewImage, gpui::FocusHandle);
@@ -910,7 +907,6 @@ mod tests {
         assert_eq!(parsed.attachments.len(), 1);
     }
 
-    // slopty: appshots removed.
 
     #[test]
     fn plain_text_passes_through_unchanged() {

@@ -89,7 +89,7 @@ impl Shell {
         self.painted_sidebar = Some((fit, painted));
     }
 
-    /// slopty: how much narrower than the room the panes are laid out in the session's terminal
+    /// How much narrower than the room the panes are laid out in the session's terminal
     /// fits its grid while the sidebar glides: the room now, less the narrower of where the glide
     /// started and where it lands. So a glide reflows the TUI once, to that narrower grid, never
     /// once a frame: an opening sidebar glides over ground the terminal already gave up, and a
@@ -125,7 +125,7 @@ impl Shell {
     /// The width the sidebar lays its content out at: the fit's allowance, or what it had while
     /// the fit slides it out. Below the saved width when the window squeezes it.
     pub(super) fn sidebar_content_width(&self) -> f32 {
-        // slopty: on a phone's Sessions page the list is the page.
+        // On a phone's Sessions page the list is the page.
         if let Some(width) = self.compact_sidebar_width() {
             return width;
         }

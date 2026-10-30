@@ -2,9 +2,8 @@
 //! The shell's text field: a hand-rolled multiline text input (adapted from gpui's
 //! `examples/input.rs`) with IME, undo, word and line motion, drag selection and auto-grow.
 //!
-//! slopty: TUI-first (`docs/decisions/agents.md`), the GUI composer is gone, and with it the
-//! editor's chips, markdown-aware editing and `/` and `@` tokens: every text field in the shell
-//! is one of these, plain words, and the person writes to an agent in its own TUI.
+//! TUI-first (`docs/decisions/agents.md`): every text field in the shell is one of these, plain
+//! words, and the person writes to an agent in its own TUI.
 //!
 //! Pure decision logic (auto-grow math, caret and scroll math) lives in free functions with unit
 //! tests; the gpui element only feeds them measurements.
@@ -15,21 +14,20 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase,
     ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    GlobalElementId, KeyBinding, KeyDownEvent, LayoutId, // slopty: dictation removed.
+    GlobalElementId, KeyBinding, KeyDownEvent, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, Role,
     ScrollEvent, SharedString, Style, Task, TextRun, TextStyle, UTF16Selection, UnderlineStyle,
     Window, WrappedLine, actions, div, fill, point, prelude::*, px, relative, size,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-// slopty: appshots removed.
 use crate::theme::Theme;
 
 // ---------------------------------------------------------------------------
 // Constants + pure decision logic
 // ---------------------------------------------------------------------------
 
-/// slopty: the tallest a field's words grow before they scroll.
+/// The tallest a field's words grow before they scroll.
 const INPUT_MAX_HEIGHT: f32 = 240.0;
 
 /// Input text metrics: `text-[14px] leading-relaxed` = 14 × 1.625 = 22.75.
@@ -195,7 +193,6 @@ actions!(
         Undo,
         Redo,
         MentionTab,
-        // slopty: dictation removed.
     ]
 );
 
@@ -266,7 +263,7 @@ fn input_bindings(context: &'static str, cx: &App) -> Vec<KeyBinding> {
         bindings.push(crate::keys::binding(&format!("shift-{prefix}-z"), Redo, ctx, cx));
     }
     // Word-level editing: Option on Apple keyboards, Ctrl on Windows/Linux.
-    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌥ too
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -325,7 +322,7 @@ pub fn init(cx: &mut App) {
         Some(GENERIC_COMPOSER_CONTEXT),
     ));
 
-    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌥ too
+    let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // an iPad's ⌥ too
         "alt"
     } else {
         "ctrl"
@@ -414,7 +411,6 @@ pub enum ComposerInputEvent {
     MentionDismiss,
 }
 
-// slopty: dictation removed.
 
 /// Shaping inputs excluding mutable viewport and selection geometry.
 #[derive(Clone, PartialEq)]
@@ -447,7 +443,7 @@ pub struct ComposerInput {
     content: String,
     pub(crate) read_only: bool,
     placeholder: SharedString,
-    /// slopty: what assistive tech calls the field when its placeholder is not its name (a form
+    /// What assistive tech calls the field when its placeholder is not its name (a form
     /// field whose label shows above it); none names it by its placeholder.
     name: Option<SharedString>,
     selected_range: Range<usize>,
@@ -504,7 +500,7 @@ pub struct ComposerInput {
     /// after the input has been measured in the new mode).
     layout_epoch: u64,
     display_is_placeholder: bool,
-    // slopty: the phase is state the driver flips, never read off the wall clock as it paints,
+    // The phase is state the driver flips, never read off the wall clock as it paints,
     // so a frame drawn again shows the caret as the frame it replaces did.
     /// Whether the caret shows in this half-period of its blink: on again at every keystroke
     /// and caret move, so the caret is solid while typing and blinks at [`CARET_BLINK_MS`]
@@ -513,7 +509,6 @@ pub struct ComposerInput {
     /// Half-period driver that flips [`Self::caret_on`], alive only while the input is
     /// focused; restarted with each reset, so its half-periods start there.
     blink_task: Option<Task<()>>,
-    // slopty: dictation removed.
     // -- undo history --
     undo_stack: Vec<EditSnapshot>,
     redo_stack: Vec<EditSnapshot>,
@@ -587,7 +582,6 @@ impl ComposerInput {
             display_is_placeholder: true,
             caret_on: true,
             blink_task: None,
-            // slopty: dictation removed.
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_edit: None,
@@ -606,21 +600,19 @@ impl ComposerInput {
         self
     }
 
-    // slopty: no pull-request pages.
 
     pub fn with_single_line(mut self) -> Self {
         self.single_line = true;
         self
     }
 
-    /// slopty: names the field for assistive tech apart from its placeholder.
+    /// Names the field for assistive tech apart from its placeholder.
     #[must_use]
     pub fn with_name(mut self, name: impl Into<SharedString>) -> Self {
         self.name = Some(name.into());
         self
     }
 
-    // slopty: no pull-request pages.
 
     pub fn with_accessibility_role(mut self, role: Role) -> Self {
         self.accessibility_role = role;
@@ -643,7 +635,7 @@ impl ComposerInput {
             self.blink_task = None;
             return false;
         }
-        // slopty: Reduce Motion holds the caret still, as iOS keeps Prefer Non-Blinking Cursor
+        // Reduce Motion holds the caret still, as iOS keeps Prefer Non-Blinking Cursor
         // beside it under Motion: on while focused, and nothing wakes the app to flip it.
         if crate::motion::reduced_motion(cx) {
             self.blink_task = None;
@@ -713,7 +705,6 @@ impl ComposerInput {
     }
 
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         self.content = text.into();
         if self.single_line {
             self.content = self.content.replace(['\r', '\n'], " ");
@@ -738,7 +729,6 @@ impl ComposerInput {
         cx.notify();
     }
 
-    // slopty: dictation removed.
     // ---- undo history ----
 
     fn snapshot(&self) -> EditSnapshot {
@@ -753,7 +743,6 @@ impl ComposerInput {
     /// Called with the range about to be replaced, BEFORE the content changes,
     /// so the pushed snapshot is the pre-edit state.
     fn record_edit(&mut self, range: &Range<usize>, new_text: &str, now: Instant) {
-        // slopty: dictation removed.
         let kind = if new_text.is_empty() {
             EditKind::Delete
         } else {
@@ -800,7 +789,6 @@ impl ComposerInput {
     }
 
     fn restore(&mut self, snapshot: EditSnapshot, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         self.content = snapshot.content;
         self.selected_range = snapshot.selected_range;
         self.selection_reversed = snapshot.selection_reversed;
@@ -817,7 +805,6 @@ impl ComposerInput {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         if self.read_only {
             return;
         }
@@ -829,7 +816,6 @@ impl ComposerInput {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         if self.read_only {
             return;
         }
@@ -851,7 +837,6 @@ impl ComposerInput {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         self.last_edit = None;
         self.selected_range = offset..offset;
         self.selection_reversed = false;
@@ -864,7 +849,6 @@ impl ComposerInput {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         self.last_edit = None;
         self.extend_selection(offset, cx);
     }
@@ -1197,7 +1181,7 @@ impl ComposerInput {
         if self.read_only {
             return;
         }
-        // slopty: a field takes the clipboard's words; a picture or a copied file has none.
+        // A field takes the clipboard's words; a picture or a copied file has none.
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             // Clipboard operations remain separate undo steps, even a one-character paste.
             self.last_edit = None;
@@ -1235,7 +1219,6 @@ impl ComposerInput {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // slopty: dictation removed.
         if escape_dismisses_completion(&event.keystroke.key, self.mention_open) {
             cx.emit(ComposerInputEvent::MentionDismiss);
             cx.stop_propagation();
@@ -1846,7 +1829,6 @@ impl EntityInputHandler for ComposerInput {
         if self.read_only {
             return;
         }
-        // slopty: dictation removed.
         let single_line_text;
         let new_text = if self.single_line {
             single_line_text = new_text.replace(['\r', '\n'], " ");
@@ -1891,7 +1873,6 @@ impl EntityInputHandler for ComposerInput {
         if self.read_only {
             return;
         }
-        // slopty: dictation removed.
         let single_line_text;
         let new_text = if self.single_line {
             single_line_text = new_text.replace(['\r', '\n'], " ");
@@ -2258,7 +2239,7 @@ impl Render for ComposerInput {
             .role(self.accessibility_role)
             .aria_label(self.name.clone().unwrap_or_else(|| self.placeholder.clone()))
             .aria_placeholder(self.placeholder.clone())
-            // slopty: a screen reader reads the words in the field, not only its placeholder.
+            // A screen reader reads the words in the field, not only its placeholder.
             .when(!self.content.is_empty(), |el| el.aria_value(self.content.clone()))
             .key_context(self.key_context)
             .track_focus(&self.focus_handle)
@@ -2296,7 +2277,6 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::submit))
-            // slopty: dictation removed.
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_key_down(cx.listener(Self::on_key_down))
@@ -2352,7 +2332,7 @@ impl Render for ComposerInput {
     }
 }
 
-/// slopty: the press of a control drawn `width` by `height` pt: on a touch screen it takes a
+/// The press of a control drawn `width` by `height` pt: on a touch screen it takes a
 /// finger's 44 pt around what it draws, its negative margins giving the room back, so the layout,
 /// the drawn wash and the focus ring (`focus_ring_within` with the reach) stay put (#23). Under a
 /// pointer it is the drawn size. On a touch screen its press raises no keyboard: the composer's
@@ -2377,7 +2357,7 @@ pub(crate) fn finger_press(id: impl Into<gpui::ElementId>, width: f32, height: f
     (press, x.min(y))
 }
 
-/// slopty: the colour of one of xterm's 256 colours, the first 16 from the terminal theme: a
+/// The colour of one of xterm's 256 colours, the first 16 from the terminal theme: a
 /// code fence's terminal colours (`markdown/ansi.rs`).
 pub(crate) fn ansi_color(index: u8, theme: &Theme) -> gpui::Hsla {
     const LEVELS: [u32; 6] = [0, 95, 135, 175, 215, 255];
@@ -2402,7 +2382,7 @@ mod modal_selection_tests;
 mod tests {
     use super::*;
 
-    /// slopty: a field alone in a window.
+    /// A field alone in a window.
     pub(super) struct InputHarness {
         pub(super) input: Entity<ComposerInput>,
     }
@@ -2421,7 +2401,6 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -2592,7 +2571,7 @@ mod tests {
     #[gpui::test]
     fn crlf_navigation_deletion_and_newlines_keep_the_pair_intact(cx: &mut gpui::TestAppContext) {
         with_composer_input(cx, |input, window, cx| {
-            // slopty: a plain field: a list item's newline is a newline, no marker carried on.
+            // A plain field: a list item's newline is a newline, no marker carried on.
             for first in ["plain café", "- item", "- [x] item"] {
                 let raw = format!("{first}\r\nnext");
                 input.set_text(&raw, cx);
@@ -2844,8 +2823,7 @@ mod tests {
         });
     }
 
-    // slopty: `$` opens skills alone and `/` commands alone, for every agent alike.
-    // slopty: appshots removed.
+    // `$` opens skills alone and `/` commands alone, for every agent alike.
     #[test]
     fn input_wheel_scroll_uses_gpui_direction_and_clamps() {
         // Positive wheel delta moves toward the start; negative moves down.
@@ -3129,4 +3107,3 @@ mod tests {
 
 }
 
-// slopty: appshots removed.

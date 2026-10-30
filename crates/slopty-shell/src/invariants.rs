@@ -1,5 +1,4 @@
-// slopty: Slopty's own module (not in zeron).
-//! slopty: what must hold of the shell's state whatever path its data took, checked as the
+//! What must hold of the shell's state whatever path its data took, checked as the
 //! app runs.
 //!
 //! The person meets bugs where the worker, the view model and the shell meet: a message shown

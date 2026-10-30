@@ -1,7 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! slopty-harness — the agent drivers (Claude Code, Codex, …) behind one `Harness` trait.
 //!
-//! slopty: only what the shell reads is kept: the documented manual install command per agent.
+//! The shell reads only the documented manual install command per agent.
 //! The drivers themselves are Slopty's workers'.
 
 pub mod install {
@@ -18,7 +18,7 @@ pub mod install {
             HarnessId::GROK => "npm install -g @xai-official/grok",
             HarnessId::HERMES => "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
             HarnessId::DEVIN => "curl -fsSL https://cli.devin.ai/install.sh | bash",
-            // slopty: any other agent is installed as its own docs say.
+            // Any other agent is installed as its own docs say.
             _ => return None,
         })
     }

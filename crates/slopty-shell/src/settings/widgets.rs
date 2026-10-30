@@ -255,9 +255,9 @@ pub fn rail<V: 'static>(
 ) -> Option<AnyElement> {
     let metrics = scroll.metrics()?;
     popover::schedule_scrollbar_hide(&mut scroll.bar, move |view: &mut V| &mut reach(view).bar, cx); // slopty
-    let (now, reduced) = (cx.frame_time(), cx.reduce_motion()); // slopty: the frame's moment
+    let (now, reduced) = (cx.frame_time(), cx.reduce_motion());
     let strip = scroll.bar.render_rail(theme, metrics, now, reduced)?;
-    // slopty: its fade is the shell rail's, a GPUI animation from the linger's wake.
+    // Its fade is the shell rail's, a GPUI animation from the linger's wake.
     Some(popover::fading_rail(
         strip
             .id(id)
@@ -372,7 +372,7 @@ pub fn page_subtitle(theme: &Theme, copy: impl Into<SharedString>) -> gpui::Div 
         .child(copy.into())
 }
 
-// slopty: every page opens one way (T3's settings header): the title on a 32-tall row with the
+// Every page opens one way (T3's settings header): the title on a 32-tall row with the
 // page's one action centred on it at the right edge, and under it a line saying what the page
 // is for. Pages put the action on three heights and explained themselves on four of nine.
 /// A settings page's head: [`page_header`] on a 32 row with `action` right on it, and
@@ -623,7 +623,7 @@ pub fn row_title(theme: &Theme, title: impl Into<SharedString>) -> gpui::Div {
 /// text-muted-foreground/65` fragments joined by dots.
 pub fn meta_line(theme: &Theme, fragments: Vec<AnyElement>) -> gpui::Div {
     let mut line = div()
-        // slopty: 4 under the title, opencode's settings leading, where 1 pressed the two lines
+        // 4 under the title, opencode's settings leading, where 1 pressed the two lines
         // into one block.
         .mt(px(ROW_DESCRIPTION_GAP))
         .min_w_0()
@@ -666,7 +666,6 @@ pub fn badge(theme: &Theme, label: impl Into<SharedString>) -> gpui::Div {
         .child(label.into())
 }
 
-// slopty: no green "Active" pill; nothing routine wears a status hue.
 
 pub const SWITCH_WIDTH: f32 = 44.8;
 const SWITCH_HEIGHT: f32 = 28.8;
@@ -686,7 +685,7 @@ pub fn toggle_switch(theme: &Theme, on: bool, key: impl Into<SharedString>) -> g
         .flex_none()
         .w(px(SWITCH_WIDTH))
         .h(px(SWITCH_TRACK_HEIGHT))
-        // slopty: the pill is the element, so the ring follows it (M8).
+        // The pill is the element, so the ring follows it (M8).
         .my(px((SWITCH_HEIGHT - SWITCH_TRACK_HEIGHT) / 2.0))
         .rounded_full()
         .child(SwitchVisual {
@@ -1098,7 +1097,7 @@ pub fn tab_selection_t(
     selected: bool,
     reduced_motion: bool,
 ) -> f32 {
-    let now = window.frame_time(); // slopty: the frame's moment
+    let now = window.frame_time();
     let target = if selected { 1.0 } else { 0.0 };
     let value = window.with_global_id(key.into().into(), |id, window| {
         window.with_element_state(id, |previous: Option<TabSelectionTravel>, _| {
@@ -1611,7 +1610,7 @@ impl<V: 'static> Select<V> {
 #[derive(Clone, Copy)]
 pub enum ActionTone {
     Quiet,
-    // slopty: a page's destructive action, its words in the danger tone, no fill.
+    // A page's destructive action, its words in the danger tone, no fill.
     QuietDanger,
     Outlined,
     Filled,
@@ -1623,7 +1622,7 @@ pub fn action_button(theme: &Theme, tone: ActionTone) -> gpui::Div {
     action_button_when(theme, tone, true)
 }
 
-/// slopty: [`action_button`] that may be disabled: dimmed to [`crate::theme::DISABLED_OPACITY`],
+/// [`action_button`] that may be disabled: dimmed to [`crate::theme::DISABLED_OPACITY`],
 /// with the default cursor and no hover lift, since a second `.hover` would replace the tone's
 /// rather than remove it. The caller says so to assistive tech (`aria_disabled`) and skips the
 /// click.
@@ -1712,11 +1711,11 @@ pub fn ghost_action(theme: &Theme) -> gpui::Div {
 /// border-red-400/20 bg-red-400/[0.06] text-red-300/90` with a leading
 /// `DangerTriangle mt-0.5 size-4`).
 pub fn error_strip(theme: &Theme, message: impl Into<SharedString>) -> gpui::Div {
-    // slopty: one anatomy with [`error_strip_with`].
+    // One anatomy with [`error_strip_with`].
     error_strip_with(theme, message, Vec::new())
 }
 
-// slopty: the same strip holding more than its message: a failure's hint and the output lines
+// The same strip holding more than its message: a failure's hint and the output lines
 // that explain it, under the title.
 /// [`error_strip`] with `details` under its message.
 pub fn error_strip_with(
@@ -1823,12 +1822,12 @@ impl RenderOnce for SettingsScroll {
 /// actions), in the same frosted chip as the rest of the app's tooltips.
 pub struct TextTooltip {
     text: SharedString,
-    // slopty: the action's key, resolved when the tooltip opened, and a second line.
+    // The action's key, resolved when the tooltip opened, and a second line.
     keys: Option<SharedString>,
     detail: Option<SharedString>,
 }
 
-// slopty: the window anchors every tooltip under the control it names (`lib.rs`,
+// The window anchors every tooltip under the control it names (`lib.rs`,
 // `set_tooltip_placement`), so the chip is drawn as it is; a control with content below it
 // sets `tooltip_placement(Above)` itself.
 
@@ -1838,7 +1837,7 @@ impl Render for TextTooltip {
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl IntoElement {
-        // slopty: the card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
+        // The card is `live::chrome::tooltip_card`, which Slopty's own views draw too.
         let theme = Theme::of(cx);
         match self.detail.clone() {
             Some(detail) => tooltip_card_detail(self.text.clone(), detail, self.keys.clone(), theme),
@@ -1862,7 +1861,7 @@ pub fn text_tooltip(
     }
 }
 
-// slopty: tooltips name the action and its key (`docs/decisions/ui.md`, "Tooltips name the
+// Tooltips name the action and its key (`docs/decisions/ui.md`, "Tooltips name the
 // action and its key"). The key is looked up each time the tooltip opens, so a rebind shows at
 // once and an unbound action shows its words alone.
 
@@ -1986,7 +1985,7 @@ pub fn tooltip_card_detail(
             )
             .child(
                 div()
-                    .text_size(crate::typography::ui_rems(11.0)) // slopty: the tooltip's detail at 11
+                    .text_size(crate::typography::ui_rems(11.0)) // the tooltip's detail at 11
                     .text_color(theme.text_faint)
                     .child(detail.into()),
             ),
@@ -2020,7 +2019,7 @@ pub trait ActionHint: StatefulInteractiveElement + Sized {
 
 impl<E: StatefulInteractiveElement + Sized> ActionHint for E {}
 
-// slopty: every choice marks its default and the one Slopty recommends, in plain words after the
+// Every choice marks its default and the one Slopty recommends, in plain words after the
 // option (`docs/decisions/ui.md`, "Every choice marks its default and the recommended one").
 
 /// What an option is to the person: the default, the one Slopty recommends, or both.
@@ -2135,7 +2134,7 @@ pub fn restore_defaults(theme: &Theme, id: &str, any_changed: bool) -> gpui::Sta
         .child(SharedString::from("Restore defaults"))
 }
 
-// slopty: truncated text always has a way out: the whole of it in a tooltip, only when cut.
+// Truncated text always has a way out: the whole of it in a tooltip, only when cut.
 
 /// A one-line label that fades its tail when the room runs out (the sidebar's fade) and, only
 /// then, shows the whole text in a tooltip.
@@ -2336,7 +2335,7 @@ mod page_head_tests {
         }
     }
 
-    // slopty: every page opens one way: its action centred on the title's 32 row at its right,
+    // Every page opens one way: its action centred on the title's 32 row at its right,
     // the line saying what the page is for under it.
     #[gpui::test]
     fn a_page_head_centres_its_action_on_the_title_row(cx: &mut gpui::TestAppContext) {
@@ -2372,7 +2371,7 @@ mod page_head_tests {
         }
     }
 
-    // slopty: a row's description stands 4 under its title on every page (opencode's settings
+    // A row's description stands 4 under its title on every page (opencode's settings
     // leading), not pressed against it.
     #[gpui::test]
     fn a_rows_description_stands_clear_of_its_title(cx: &mut gpui::TestAppContext) {
