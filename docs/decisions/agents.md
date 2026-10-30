@@ -107,7 +107,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       "Limit reached" read from the second), and so did what only the old tray read of the
       work tray (its counts and summary, a row's figures, times, outcome, output, nesting depth
       and the like): the tray now carries only the work at it, in the order the inspector's
-      Now lists it.
+      Now lists it. A failed turn's usage-limit reset went last (`TurnState::Failed`'s
+      `until_ms`, read from Claude Code's `quotaLimits.resetsAt`), with the view model's limit
+      reset that carried it to the shell: only the composer's limit notice read it.
       The TUI asks in its terminal and takes the answer there; the CLI's `agent answer` is
       gone. A note
       answers nothing: a push carries no request and no buttons, and opens its session; the
@@ -1599,7 +1601,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`. The measurement above checks
     that the real `codex app-server` takes the `config`.
 
-- ✅ **A turn a usage limit stopped fails until the limit resets** (2026-10-04). A limit used
+- ✅ **A turn a usage limit stopped fails until the limit resets** *Its reset time went
+  2026-10-30 ("TUI-first" above): nothing read it once the composer had gone; the turn still
+  fails as a limit.* (2026-10-04). A limit used
   to end Claude Code's turn as done, and Codex's limit error was a plain API error.
   - The turn's state `Failed` carries `until_ms`: when the agent can go on, where it is known.
     Its notice is of kind `limit`.

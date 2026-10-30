@@ -380,9 +380,7 @@ impl SubagentEnd {
         match self {
             Self::Completed => (TurnState::Complete, Phase::Done),
             Self::Stopped => (TurnState::Interrupted, Phase::Stopped),
-            Self::Failed(error) => {
-                (TurnState::Failed { error: error.clone(), until_ms: None }, Phase::Failed)
-            }
+            Self::Failed(error) => (TurnState::Failed { error: error.clone() }, Phase::Failed),
         }
     }
 }
@@ -608,19 +606,14 @@ impl History {
                 let state = match end {
                     End::Interrupted => TurnState::Interrupted,
                     End::Failed(said) => {
-                        let (error, until_ms) = mapped.stopped.get(&turn).map_or_else(
+                        let error = mapped.stopped.get(&turn).map_or_else(
                             || {
-                                let said = said.clone();
-                                (
-                                    said.unwrap_or_else(|| {
-                                        "Claude Code's request failed".to_owned()
-                                    }),
-                                    None,
-                                )
+                                said.clone()
+                                    .unwrap_or_else(|| "Claude Code's request failed".to_owned())
                             },
-                            |(stop, error)| (error.clone(), stop.until_ms),
+                            |(_, error)| error.clone(),
                         );
-                        TurnState::Failed { error, until_ms }
+                        TurnState::Failed { error }
                     }
                     End::Complete => TurnState::Complete,
                 };
@@ -1149,9 +1142,7 @@ impl History {
         let state = match (record.ended_ms, mapped.stopped.get(&turn)) {
             (None, _) => TurnState::Active,
             (Some(_), _) if mapped.interrupted.contains(&turn) => TurnState::Interrupted,
-            (Some(_), Some((stop, error))) => {
-                TurnState::Failed { error: error.clone(), until_ms: stop.until_ms }
-            }
+            (Some(_), Some((_, error))) => TurnState::Failed { error: error.clone() },
             (Some(_), None) => TurnState::Complete,
         };
         let usage = usage(&record.usage);

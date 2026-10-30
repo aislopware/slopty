@@ -409,8 +409,6 @@ pub enum TurnState {
     Failed {
         /// What went wrong.
         error: String,
-        /// When what stopped it lifts, where the agent says: the reset of a usage limit it hit.
-        until_ms: Option<WallMs>,
     },
 }
 
@@ -595,7 +593,7 @@ impl Notice {
     pub const INFO: &'static str = "info";
     /// The person stopped the agent.
     pub const INTERRUPTED: &'static str = "interrupted";
-    /// The agent stopped on a usage limit: its words, and the turn says when it resets.
+    /// The agent stopped on a usage limit, in its words.
     pub const LIMIT: &'static str = "limit";
     /// The agent saved or recalled memories: "Saved 2 memories", "Recalled 3 memories".
     pub const MEMORY: &'static str = "memory";

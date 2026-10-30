@@ -290,8 +290,6 @@ pub struct Stop {
     /// Claude Code's kind of error ([`Stop::RATE_LIMIT`], `invalid_request`,
     /// `authentication_failed`, `server_error`, …); `unknown` when it names none.
     pub error: String,
-    /// For a usage limit, when it resets, where Claude Code was told.
-    pub until_ms: Option<WallMs>,
 }
 
 impl Stop {

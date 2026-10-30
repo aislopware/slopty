@@ -371,14 +371,11 @@ fn read(records: &[serde_json::Value]) -> Vec<Change> {
 
 /// A prompt, then the API error Claude Code gave up on (`error`, with `quota` as its
 /// `quotaLimits` when it has them), then its end-of-turn record.
-fn stopped_turn(error: &str, quota: Option<serde_json::Value>) -> Vec<serde_json::Value> {
-    let mut refusal = serde_json::json!({"type": "assistant", "uuid": "e1", "parentUuid": "p1",
+fn stopped_turn(error: &str) -> Vec<serde_json::Value> {
+    let refusal = serde_json::json!({"type": "assistant", "uuid": "e1", "parentUuid": "p1",
         "timestamp": "2026-09-27T03:15:40.000Z", "isApiErrorMessage": true, "error": error,
         "message": {"role": "assistant", "model": "<synthetic>",
             "content": [{"type": "text", "text": "You've hit your limit · resets 6pm"}]}});
-    if let Some(quota) = quota {
-        refusal["quotaLimits"] = quota;
-    }
     vec![
         serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null,
             "timestamp": "2026-09-27T03:15:25.849Z",
@@ -393,14 +390,11 @@ fn done(history: &mut History) -> Vec<Out> {
     history.status(Phase::Done, None, Liveness::Live, WallMs::from_millis(3))
 }
 
-/// A turn a usage limit stopped fails with when the limit resets, as Claude Code recorded the
-/// quota it hit; its notice is a limit, and the agent's done is a failure, whichever of the
-/// engine's word and the record comes first.
+/// A turn a usage limit stopped fails in Claude Code's words; its notice is a limit, and the
+/// agent's done is a failure, whichever of the engine's word and the record comes first.
 #[test]
-fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
-    let quota = serde_json::json!({"status": "rejected", "resetsAt": 1_790_020_000_u64,
-        "rateLimitType": "five_hour"});
-    let changes = read(&stopped_turn(conv::Stop::RATE_LIMIT, Some(quota)));
+fn a_turn_a_usage_limit_stopped_fails() {
+    let changes = read(&stopped_turn(conv::Stop::RATE_LIMIT));
     let mut observed = observed();
     let mut host = Host::default();
     host.take(observed.drain());
@@ -411,10 +405,7 @@ fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
     let [turn] = thread.turns.as_slice() else { panic!("one turn: {:#?}", thread.turns) };
     assert_eq!(
         turn.state,
-        TurnState::Failed {
-            error: "You've hit your limit · resets 6pm".to_owned(),
-            until_ms: Some(WallMs::from_millis(1_790_020_000_000)),
-        }
+        TurnState::Failed { error: "You've hit your limit · resets 6pm".to_owned() }
     );
     let kinds: Vec<&str> = thread
         .items
@@ -436,9 +427,8 @@ fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
     assert_eq!(host.thread(observed.main()).status.phase, Phase::Done, "a new prompt starts over");
 }
 
-/// A limit stop that says no reset fails with none, as a limit; any other error that ended a
-/// turn fails it with no reset, as an API error; and a turn the model went on in after an
-/// error completes.
+/// A limit stop fails as a limit; any other error that ended a turn fails it as an API error;
+/// and a turn the model went on in after an error completes.
 #[test]
 fn a_stopped_turn_fails_by_what_stopped_it() {
     let ended = |records: &[serde_json::Value]| {
@@ -453,13 +443,13 @@ fn a_stopped_turn_fails_by_what_stopped_it() {
         });
         (thread.turns.first().map(|t| t.state.clone()), notice)
     };
-    let (state, notice) = ended(&stopped_turn(conv::Stop::RATE_LIMIT, None));
-    assert!(matches!(state, Some(TurnState::Failed { until_ms: None, .. })), "{state:?}");
+    let (state, notice) = ended(&stopped_turn(conv::Stop::RATE_LIMIT));
+    assert!(matches!(state, Some(TurnState::Failed { .. })), "{state:?}");
     assert_eq!(notice.as_deref(), Some(Notice::LIMIT));
-    let (state, notice) = ended(&stopped_turn("server_error", None));
-    assert!(matches!(state, Some(TurnState::Failed { until_ms: None, .. })), "{state:?}");
+    let (state, notice) = ended(&stopped_turn("server_error"));
+    assert!(matches!(state, Some(TurnState::Failed { .. })), "{state:?}");
     assert_eq!(notice.as_deref(), Some(Notice::API_ERROR));
-    let mut went_on = stopped_turn("server_error", None);
+    let mut went_on = stopped_turn("server_error");
     went_on.insert(
         2,
         serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "e1",

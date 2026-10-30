@@ -360,7 +360,7 @@ mod golden_thread {
             Action::TurnStarted(turn()),
             Action::TurnEnded {
                 turn: TurnId(1),
-                state: TurnState::Failed { error: "overloaded".to_owned(), until_ms: None },
+                state: TurnState::Failed { error: "overloaded".to_owned() },
                 usage: usage(),
                 ended_ms: ms(5),
             },

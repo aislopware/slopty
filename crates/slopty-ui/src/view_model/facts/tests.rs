@@ -397,7 +397,7 @@ fn a_retry_reads_trying_again_then_recovered() {
     assert!(recovered.recovered && recovered.retry.is_none());
     assert_eq!(recovered.text, "API error · recovered on attempt 2");
     assert_eq!(recovered.tone, NoteRow::SUCCESS);
-    state.turns = vec![turn(TurnState::Failed { error: "500".into(), until_ms: None })];
+    state.turns = vec![turn(TurnState::Failed { error: "500".into() })];
     assert_eq!(row(&state).text, "API error · gave up after 2 attempts");
     let plain = Notice::new(Notice::API_ERROR, Clipped::whole("boom"));
     assert!(note_row(&plain, "boom".into(), "n1", TurnId(1), 0, &state).is_none(), "a failure");

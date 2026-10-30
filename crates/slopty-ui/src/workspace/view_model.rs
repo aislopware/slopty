@@ -17,7 +17,7 @@ use gpui::{Context, Subscription, Task};
 use slopty_client::WorkerKey;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{Intent, IntentDone, ThreadRow};
-use slopty_proto::thread::{IntentId, Liveness, Phase, ThreadId, ThreadState, TurnState};
+use slopty_proto::thread::{IntentId, Liveness, Phase, ThreadId};
 use slopty_view_rpc::{RpcError, RpcReply, methods};
 use tokio::sync::mpsc;
 
@@ -125,16 +125,6 @@ impl std::fmt::Debug for Bridge {
 fn refused_at(id: IntentId) -> Option<u64> {
     let (secs, nanos) = id.as_uuid().get_timestamp()?.to_unix();
     Some(secs.saturating_mul(1000).saturating_add(u64::from(nanos / 1_000_000)))
-}
-
-/// When the usage limit holding `state`'s agent lifts, while one holds it: its failed last turn's
-/// own word.
-fn limit_resets(state: &ThreadState) -> Option<DateTime<Utc>> {
-    let until = state.turns.last().and_then(|turn| match turn.state {
-        TurnState::Failed { until_ms, .. } => until_ms,
-        _ => None,
-    })?;
-    (state.status.phase == Phase::Failed).then(|| rows::time(until))
 }
 
 /// How many bytes of words an excerpt of a search keeps on each side of its match.
@@ -492,7 +482,7 @@ impl WorkspaceView {
             transcript::refused(&refusal.words, at, &device, &mut entries);
         }
         let history_pending = state.older && hub.linked();
-        Some(Transcript { entries, history_pending, limit_resets_at: limit_resets(state) })
+        Some(Transcript { entries, history_pending })
     }
 
     /// Ask for what the followed threads' transcripts still lack: their older turns, and the

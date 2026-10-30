@@ -160,15 +160,13 @@ pub struct Transcript {
     /// Older turns are still on their way: the entries are the latest ones, which the shell
     /// shows as it waits for the whole history (zeron's opening tail).
     pub history_pending: bool,
-    /// When the usage limit holding the agent lifts, while one does.
-    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Transcript {
     /// The whole of a transcript of `entries`, with nothing more to say.
     #[must_use]
     pub const fn of(entries: Vec<SessionMessageEntry>) -> Self {
-        Self { entries, history_pending: false, limit_resets_at: None }
+        Self { entries, history_pending: false }
     }
 }
 
@@ -504,8 +502,7 @@ impl Drop for Closing {
 ///
 /// While older turns are on their way the latest ones go as zeron's opening tail
 /// (`historyPending`), and the whole history, once here, as one reset the shell takes as
-/// history: older turns put in front never arrive as live ones. When a usage limit lifts rides
-/// every frame.
+/// history: older turns put in front never arrive as live ones.
 fn transcript_frames(
     said: watch::Receiver<Option<Arc<Transcript>>>,
     closing: Closing,
@@ -525,23 +522,14 @@ fn transcript_frames(
                 TranscriptUpdate {
                     replay_baseline: Some(TranscriptBaseline::capture(&next.entries)),
                     frame: TranscriptFrame::reset(&next.entries),
-                    context_usage: None,
-                    limits: Vec::new(),
-                    limit_resets_at: next.limit_resets_at,
                 }
             } else {
                 let last = last.as_ref()?;
                 let frame = slopty_view_doc::diff_transcript(&last.entries, &next.entries);
-                if frame.is_empty_delta() && last.limit_resets_at == next.limit_resets_at {
+                if frame.is_empty_delta() {
                     continue;
                 }
-                TranscriptUpdate {
-                    replay_baseline: None,
-                    frame,
-                    context_usage: None,
-                    limits: Vec::new(),
-                    limit_resets_at: next.limit_resets_at,
-                }
+                TranscriptUpdate { replay_baseline: None, frame }
             };
             let mut value = serde_json::to_value(&update).ok()?;
             if next.history_pending

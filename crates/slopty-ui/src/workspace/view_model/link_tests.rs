@@ -1,11 +1,11 @@
-//! What the shell reads of the chats through the workspace: each chat's link to its machine,
-//! the chats found by their words, and when a usage limit lifts.
+//! What the shell reads of the chats through the workspace: each chat's link to its machine and
+//! the chats found by their words.
 
 use gpui::AppContext as _;
 use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::wire::{TableFrame, ThreadFrame};
-use slopty_proto::thread::{Cursor, ThreadState, TurnState};
+use slopty_proto::thread::{Cursor, ThreadState};
 use slopty_view_proto::{ChatSyncState, ConnectivityState};
 use slopty_view_rpc::methods;
 use tokio::sync::mpsc::Receiver;
@@ -116,17 +116,4 @@ fn chats_are_found_by_their_words(cx: &mut gpui::TestAppContext) {
     assert_eq!(excerpt.get(start..end).map(str::to_lowercase), Some(word.to_lowercase()));
     assert_eq!(search("zzqqxx-nowhere", cx), serde_json::json!([]));
     assert_eq!(search("a", cx), serde_json::json!([]), "one letter finds nothing");
-}
-
-/// When a usage limit holding the agent lifts: its failed turn's own word.
-#[test]
-fn a_limit_says_when_it_lifts() {
-    use slopty_proto::thread::Phase;
-    let mut state = fixtures::thread("tools");
-    assert_eq!(super::limit_resets(&state), None);
-    let until = WallMs::from_millis(1_760_000_000_000);
-    state.turns.last_mut().expect("a turn").state =
-        TurnState::Failed { error: "limit".to_owned(), until_ms: Some(until) };
-    state.status.phase = Phase::Failed;
-    assert_eq!(super::limit_resets(&state), Some(crate::view_model::rows::time(until)));
 }

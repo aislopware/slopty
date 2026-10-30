@@ -771,16 +771,9 @@ impl Conversation {
         let Some(content) = message.get("content") else { return };
         if bool_at(record, "isApiErrorMessage") {
             let text = content_text(content);
-            // Claude Code records the error it gave up on with its kind, and a refusal for a
-            // usage limit with the quota it hit (`quotaLimits.resetsAt`, in seconds).
-            let until_ms = record
-                .get("quotaLimits")
-                .and_then(|q| u64_at(q, "resetsAt"))
-                .map(|s| WallMs::from_millis(s.saturating_mul(1000)));
-            let stop = Stop {
-                error: string_at(record, "error").unwrap_or_else(|| "unknown".to_owned()),
-                until_ms,
-            };
+            // Claude Code records the error it gave up on with its kind.
+            let stop =
+                Stop { error: string_at(record, "error").unwrap_or_else(|| "unknown".to_owned()) };
             let body = Body::Note(Note {
                 kind: NoteKind::ApiError,
                 text: Clipped::head(text.trim(), OUTPUT, None),

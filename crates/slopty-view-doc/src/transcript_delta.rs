@@ -16,27 +16,17 @@ use std::collections::HashMap;
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
 
-/// Transcript changes and the current host-owned context snapshot travel together.
-/// Older readers ignore `contextUsage`; older hosts decode as unknown usage.
+// slopty: no context usage or plan windows: the agent's own TUI shows them.
+/// Transcript changes, with the history they carry when they bring some.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptUpdate {
     #[serde(flatten)]
     pub frame: TranscriptFrame,
-    #[serde(default)]
-    pub context_usage: Option<slopty_view_proto::ContextUsage>,
     /// Historical content included in this update, independent of reset/delta
     /// encoding. Omitted on ordinary live updates and by older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay_baseline: Option<TranscriptBaseline>,
-    // slopty: the plan's rate windows ride the transcript beside the context, as the agent's
-    // meters say them.
-    /// The plan's rate windows, most used first.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub limits: Vec<slopty_view_proto::AgentUsageWindow>,
-    /// When the usage limit holding the agent lifts, while one does.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit_resets_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Compact presentation watermark: stable part ids and text byte lengths.
@@ -525,23 +515,15 @@ mod tests {
 mod context_update_tests {
     use super::*;
     #[test]
-    fn usage_envelope_is_compatible_with_old_hosts_and_readers() {
+    fn an_update_is_its_frame_and_the_history_it_brings() {
         let old = serde_json::json!({"reset": []});
         let update: TranscriptUpdate = serde_json::from_value(old).unwrap();
-        assert_eq!(update.context_usage, None);
         assert!(update.replay_baseline.is_none());
         let value = serde_json::to_value(TranscriptUpdate {
             frame: TranscriptFrame::reset(&[]),
             replay_baseline: Some(TranscriptBaseline::default()),
-            context_usage: Some(slopty_view_proto::ContextUsage {
-                tokens: Some(0),
-                window: Some(200000),
-            }),
-            limits: Vec::new(),
-            limit_resets_at: None,
         })
         .unwrap();
-        assert_eq!(value["contextUsage"]["tokens"], 0);
         let roundtrip: TranscriptUpdate = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(
             roundtrip.replay_baseline,

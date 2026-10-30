@@ -680,7 +680,7 @@ fn a_failed_turn_says_its_error_once_at_its_end() {
     };
     let mut state = fixtures::thread("tools");
     let turn = state.turns.last_mut().expect("a turn");
-    turn.state = TurnState::Failed { error: "Overloaded".to_owned(), until_ms: None };
+    turn.state = TurnState::Failed { error: "Overloaded".to_owned() };
     let entries = transcript::entries(&state, &transcript::Look::new("w"));
     let said = errors(&entries);
     assert_eq!(said.len(), 1, "once");
@@ -904,14 +904,11 @@ async fn older_turns_arrive_as_history() {
     assert!(matches!(asks.recv().await, Some(Ask::Follow(_))));
     let all = transcript::entries(&fixtures::thread("tools"), &transcript::Look::new("w"));
     let tail = all.get(1..).expect("more than one entry").to_vec();
-    let said = super::Transcript { entries: tail, history_pending: true, limit_resets_at: None };
+    let said = super::Transcript { entries: tail, history_pending: true };
     feed.transcript("c", said);
     let value = watch.recv().await.expect("the tail");
     assert_eq!(value["historyPending"], true);
-    feed.transcript(
-        "c",
-        super::Transcript { entries: all.clone(), history_pending: false, limit_resets_at: None },
-    );
+    feed.transcript("c", super::Transcript { entries: all.clone(), history_pending: false });
     let value = watch.recv().await.expect("the whole history");
     assert!(value.get("historyPending").is_none());
     let update: TranscriptUpdate = serde_json::from_value(value).expect("the shell's frame");
@@ -1107,7 +1104,7 @@ fn a_failure_reads_in_one_grammar() {
 
     let mut state = fixtures::thread("tools");
     for turn in &mut state.turns {
-        turn.state = TurnState::Failed { error: "Overloaded".to_owned(), until_ms: None };
+        turn.state = TurnState::Failed { error: "Overloaded".to_owned() };
     }
     let entries = transcript::entries(&state, &transcript::Look::new("w").host("studio"));
     let errors: Vec<&String> = entries
