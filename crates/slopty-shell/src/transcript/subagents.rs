@@ -289,19 +289,7 @@ impl SubagentsState {
         });
     }
 
-    /// The child transcripts open in place now (tests).
-    #[cfg(test)]
-    pub fn open_children(&self) -> Vec<String> {
-        let mut open: Vec<String> = self.open.keys().cloned().collect();
-        open.sort();
-        open
-    }
 
-    /// The transcript of child `chat`, open in place.
-    #[cfg(test)]
-    pub(super) fn child(&self, chat: &str) -> Option<Entity<Transcript>> {
-        self.open.get(chat).map(|child| child.transcript.clone())
-    }
 
     /// The most room a child transcript open in a card takes: a share of the window's height.
     pub(super) fn child_room(&self) -> f32 {

@@ -1,6 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 46d4e42), see THIRD_PARTY_NOTICES.md
 //! The conversation view: virtualized transcript with block-granularity rows,
-//! stick-to-bottom, tool-group folding, and streaming markdown.
+//! the follow rule, tool-group folding, and streaming markdown.
 //!
 //! Row model (docs/research/mugen-pretext.md §3):
 //! - one row per BLOCK: user message = one bubble row; assistant messages split
@@ -15,16 +15,12 @@
 //!   messages rebuild (the anti-"streaming stutter" trick);
 //! - row-set changes diff by (id, version) into one minimal `splice`.
 //!
-//! Stick-to-bottom is a velocity spring (mugen §1e, the same shape as
-//! stackblitz's use-stick-to-bottom): while pinned, a per-frame stepper glides
-//! the viewport toward the list end with a feed-forward term tracking the
-//! smoothed target growth, so 120ms doc commits read as a continuous glide
-//! instead of per-commit snaps. The pin breaks only on user input (the list's
-//! scroll handler fires exclusively from its wheel/touch path) and re-engages
-//! inside the 70px band; the first send in an empty chat anchors the prompt at
-//! the viewport top and hands off to the same glide when the reply overflows.
-//! Wheel/touch releases that anchor immediately, including when background
-//! streaming has advanced beyond the last measured frame.
+//! slopty: the follow rule (`docs/decisions/inspector.md`, "Follow and anchor"): the list
+//! follows its end (GPUI's `FollowMode::Tail`) only while within [`FOLLOW_PX`] of it, and lets
+//! go only on the person's own move: a wheel or drag up, a scroll key, a jump, or a press or a
+//! selection in a row. Otherwise the first row in view holds its place by its key, whatever
+//! lands above or below it; scrolling back to the end follows again, and while it does not, a
+//! pill says how many rows wait below.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -34,9 +30,9 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
+    AnyElement, Bounds, ClipboardItem, Context, Entity, FollowMode, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, ScrollDelta, ScrollEvent, SharedString, StyledImage as _, StyledText,
+    Pixels, Point, SharedString, StyledImage as _, StyledText,
     Subscription, Task, TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
 };
 
@@ -70,6 +66,7 @@ mod subagents;
 mod surface_tests; // slopty: the transcript's own rows, read by assistive tech.
 pub mod work;
 pub(crate) mod find;
+mod jump; // slopty: the pill that says what waits below and goes back to it.
 pub use extras::{claude_too_old, serve_terminal_runs};
 pub use find::{FindInThread, FindNext, FindPrevious};
 
@@ -77,23 +74,10 @@ pub use find::{FindInThread, FindNext, FindPrevious};
 // Constants (mugen ports)
 // ---------------------------------------------------------------------------
 
-/// Re-engage the bottom pin when the user returns within this many px of the end.
-pub const STICK_THRESHOLD_PX: f32 = 70.0;
 /// List overdraw beyond the viewport.
 pub const OVERDRAW_PX: f32 = 320.0;
-/// Show the scroll-to-bottom button beyond this distance from the end.
+/// slopty: the jump pill shows, with no new row below, once the view is this far from the end.
 pub const SCROLL_BUTTON_THRESHOLD_PX: f32 = 320.0;
-
-fn jump_visibility(was_shown: bool, distance: f32) -> bool {
-    // Once offered, keep the control until close to the end. A single 320px
-    // threshold made it disappear halfway through a downward scroll gesture.
-    distance
-        > if was_shown {
-            AT_BOTTOM_PX
-        } else {
-            SCROLL_BUTTON_THRESHOLD_PX
-        }
-}
 /// Bound session-local viewport memory independently of total chat history.
 const MAX_SAVED_VIEWPORTS: usize = 256;
 /// Text-selection edge scrolling runs only during a drag. A 24 ms cadence is
@@ -157,9 +141,6 @@ fn tool_group_header_height() -> f32 {
 const TOOL_TREE_ROW_HEIGHT: f32 = 32.0;
 /// slopty: a jump's landing flash fading out (Claude's `code-reply-flash`, 1.2 s ease-out, #13).
 const LANDING_FLASH: motion::MotionSpec = motion::MotionSpec::new(1_200, motion::EASE_OUT);
-/// slopty: the person's own send coming in: faded up and risen from [`SEND_RISE`] below (#15).
-const SEND_ENTRANCE: motion::MotionSpec = motion::MotionSpec::new(300, motion::EASE_OUT_QUINT);
-const SEND_RISE: f32 = 6.0;
 /// slopty: a bubble not yet taken by the agent is tinted, not faded (Amp): 14 % of the accent
 /// mixed into its fill, as a queued row's; it settles over 200 ms once taken.
 pub(crate) const QUEUED_TINT: f32 = 0.14;
@@ -236,44 +217,12 @@ const USER_TOGGLE_LINE_HEIGHT: f32 = 18.0;
 pub const ATT_THUMB_W: f32 = 112.0;
 pub const ATT_THUMB_H: f32 = 80.0;
 
-// ---------------------------------------------------------------------------
-// Stick-to-bottom spring (mugen §1e — same constants as its DEFAULT_SPRING,
-// which follows the shape of stackblitz/use-stick-to-bottom)
-// ---------------------------------------------------------------------------
-
-/// Retains velocity frame-to-frame (higher = more glide).
-pub const SPRING_DAMPING: f32 = 0.7;
-/// Pull toward the target (higher = snappier).
-pub const SPRING_STIFFNESS: f32 = 0.05;
-/// Inertia (higher = slower to start/stop).
-pub const SPRING_MASS: f32 = 1.25;
-/// Reference frame for the fixed-timestep integration (60fps).
-pub const SPRING_FRAME_MS: f32 = 1000.0 / 60.0;
-/// Cap on simulated frames per tick — a hitch catches up instead of teleporting.
-pub const SPRING_MAX_CATCHUP_FRAMES: f32 = 8.0;
-/// EMA rate for the feed-forward target-growth estimate.
-pub const SPRING_GROWTH_EMA: f32 = 0.12;
-/// While streaming, chase up to this many px above the true bottom (keeps the
-/// growing tail visible instead of hugging a moving edge).
-pub const SPRING_CHASE_MAX_LEAD: f32 = 32.0;
-/// Treat as exactly pinned within this distance of the bottom.
-pub const AT_BOTTOM_PX: f32 = 2.0;
-
-/// A live stream already resting at the end should keep that end anchored as
-/// its measured height grows. This is deliberately narrower than `pinned`:
-/// users gliding back toward the bottom keep the normal spring behavior.
-fn should_anchor_live_stream(pinned: bool, distance_from_bottom: f32, streaming: bool) -> bool {
-    pinned && streaming && distance_from_bottom <= AT_BOTTOM_PX
-}
-
-/// Retain the spring's state this long after landing, so a streaming pause
-/// resumes at cruise. Retaining state does not require drawing idle frames.
-pub const SPRING_SETTLE_GRACE_MS: u64 = 500;
-/// Teleport when farther than this many viewports from the end; glide the rest.
-pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
-/// A freshly-sent prompt rests this far below the transcript viewport's top. slopty: the
-/// transcript lays out inside its pane, which clears the window's chrome, so the inset is only
-/// its own top scroll edge: the prompt rests where that fade ends.
+/// slopty: the view follows its end only while within this of it (`inspector.md`, "Follow and
+/// anchor").
+pub const FOLLOW_PX: f32 = 2.0;
+/// slopty: a row a jump lands on rests this far below the transcript viewport's top (`rail.rs`):
+/// the transcript lays out inside its pane, which clears the window's chrome, so the inset is
+/// only its own top scroll edge, and the row rests where that fade ends.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TRANSCRIPT_FADE_BAND;
 /// slopty: what a markdown block says, as plain text: its texts as drawn (a relabelled link by
 /// its label), in paint order, a line each.
@@ -363,122 +312,22 @@ fn rows_height(list: &ListState) -> Option<f32> {
     Some(f32::from(end.bottom() - viewport.top()))
 }
 
-/// Epsilon of extra height under the reservation. The runway ends AT the
-/// app's bottom — this is not scroll room (24px of it read as a janky
-/// overshoot-and-fight zone, user report) — it exists only to keep the held
-/// layout out of gpui's shorter-than-viewport regime, where a bottom-aligned
-/// list reports no item bounds (sizing goes blind) and position becomes a
-/// function of content height instead of the hold. Two pixels of travel is
-/// below perception.
-const OWN_SEND_SCROLL_SLACK_PX: f32 = 2.0;
-/// Per-60fps-frame fraction of the remaining entry glide retained (~90%
-/// covered in ~230ms, ease-out).
-const OWN_SEND_GLIDE_RETAIN: f32 = 0.85;
-/// The entry glide snaps to the absolute hold within this error.
-const OWN_SEND_GLIDE_SNAP_PX: f32 = 1.0;
 
-/// A bounds-free guard for gliding through rows whose heights are still
-/// being measured. The provisional reservation is never a scroll target.
-fn own_turn_glide_crossed(offset: ListOffset, anchor_ix: usize, inset: f32) -> bool {
-    offset.item_ix > anchor_ix
-        || (offset.item_ix == anchor_ix && f32::from(offset.offset_in_item) > -inset)
-}
 
-/// Pure stick-to-bottom spring stepper — the mugen `tick()` integration:
-/// velocity relaxes toward `(damping·v + stiffness·diff)/mass` per 60fps
-/// sub-frame, position advances by `v + target_vel` where `target_vel` is a
-/// feed-forward EMA of target growth px/frame, and the chase point sits up to
-/// [`SPRING_CHASE_MAX_LEAD`] px above the true bottom proportional to growth.
-#[derive(Debug, Clone, Copy)]
-pub struct StickSpring {
-    /// Spring velocity, px per 60fps frame.
-    velocity: f32,
-    /// Feed-forward: smoothed target growth, px per 60fps frame.
-    target_vel: f32,
-    /// Target observed at the previous tick (`None` = fresh/parked).
-    last_target: Option<f32>,
-}
 
-impl Default for StickSpring {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
-impl StickSpring {
-    pub fn new() -> Self {
-        Self {
-            velocity: 0.0,
-            target_vel: 0.0,
-            last_target: None,
-        }
-    }
-
-    /// Park the spring (drops all state; the next tick starts cold).
-    pub fn reset(&mut self) {
-        *self = Self::new();
-    }
-
-    /// Residual motion below mugen's settle thresholds (`v < .05 && targetVel
-    /// < .05`)?
-    pub fn is_idle(&self) -> bool {
-        self.velocity < 0.05 && self.target_vel < 0.05
-    }
-
-    fn needs_frame(distance: f32) -> bool {
-        // The spring is clamped to the target. Residual velocity cannot move
-        // a viewport already there; virtual-list height estimates can keep
-        // that velocity nonzero indefinitely even after a turn completes.
-        distance > 0.5
-    }
-
-    #[cfg(test)]
-    pub(crate) fn target_vel(&self) -> f32 {
-        self.target_vel
-    }
-
-    /// Advance one tick. `pos`/`target` are scroll offsets in px (larger =
-    /// closer to the bottom); `frames` is elapsed time in 60fps frames
-    /// (clamped by the caller to [`SPRING_MAX_CATCHUP_FRAMES`]). Returns the
-    /// new position: never overshoots `target`, monotone while approaching,
-    /// and snaps exactly once within 0.5px.
-    pub fn step(&mut self, mut pos: f32, target: f32, mut frames: f32) -> f32 {
-        let grew = self.last_target.map_or(0.0, |last| target - last);
-        self.last_target = Some(target);
-        if grew < -1.0 {
-            // Target shrank (row collapse/removal) — growth estimate is stale.
-            self.target_vel = 0.0;
-        } else {
-            let observed = grew.max(0.0) / frames.max(0.25);
-            self.target_vel += SPRING_GROWTH_EMA * (observed - self.target_vel);
-        }
-        let chase = target - (self.target_vel * 9.0).min(SPRING_CHASE_MAX_LEAD);
-        let mut v = self.velocity;
-        while frames > 0.0 {
-            let h = frames.min(1.0);
-            frames -= h;
-            let diff = (chase - pos).max(0.0);
-            v += h * ((SPRING_DAMPING * v + SPRING_STIFFNESS * diff) / SPRING_MASS - v);
-            pos = (pos + (v + self.target_vel) * h).min(target);
-        }
-        self.velocity = v;
-        if target - pos <= 0.5 { target } else { pos }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Row model (pure)
 // ---------------------------------------------------------------------------
 
 /// What a chip inside a [`RowKind::ToolGroup`] represents. `Call` items come
-/// from doc tool parts; `Thought` (reasoning) and `Note` (a text part folded
-/// by compact mode) are UI-synthesized in [`rows_for_entry`] — the doc never
-/// emits either.
+/// from doc tool parts; `Thought` (reasoning) is UI-synthesized in
+/// [`rows_for_entry`] — the doc never emits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolItemKind {
     Call,
     Thought,
-    Note,
 }
 
 /// One tool invocation inside a group row.
@@ -519,10 +368,9 @@ pub struct ToolItem {
     /// `Call` is a real doc tool invocation; `Thought` (a reasoning part
     /// riding the tool group — the thought process belongs inside the
     /// combined "Ran N commands" accordion, opening/closing with the same
-    /// tween) and `Note` (compact mode's folded narration) are synthesized
-    /// in [`rows_for_entry`], never from a doc tool part. A `Thought`'s text
-    /// is the `detail`; `resolved == false` means it is still streaming (the
-    /// chip then defaults open).
+    /// tween) is synthesized in [`rows_for_entry`], never from a doc tool
+    /// part. A `Thought`'s text is the `detail`; `resolved == false` means it
+    /// is still streaming.
     pub kind: ToolItemKind,
     /// Image files the call read, wrote or printed (as reported; relative
     /// paths resolve against the chat cwd). Expanding the chip previews them.
@@ -568,12 +416,12 @@ fn tool_group_collapses(tools: &[ToolItem]) -> bool {
 }
 
 /// slopty: whether a group folds behind its header, and whether it is one call shown as itself.
-/// Agent/spawn chips never fold (a running subagent stays visible), except under a turn's
-/// divider, which holds everything. A group of one call (or one thought) shows the call itself
-/// ("Read main.rs"), not a summary to open to learn it ("Read 1 file ›") (#2).
-fn group_shape(tools: &[ToolItem], divider: bool) -> (bool, bool) {
-    let collapses = divider || tool_group_collapses(tools);
-    let solo = !divider && collapses && tools.len() == 1 && !is_spawn_link(&tools[0]);
+/// Agent/spawn chips never fold (a running subagent stays visible). A group of one call (or one
+/// thought) shows the call itself ("Read main.rs"), not a summary to open to learn it ("Read 1
+/// file ›") (#2).
+fn group_shape(tools: &[ToolItem]) -> (bool, bool) {
+    let collapses = tool_group_collapses(tools);
+    let solo = collapses && tools.len() == 1 && !is_spawn_link(&tools[0]);
     (collapses, solo)
 }
 
@@ -903,21 +751,6 @@ fn thought_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
         images: Arc::new([]),
         facts: None,
     }
-}
-
-/// A folded assistant TEXT part as a tool-group chip (compact mode): the
-/// narration between work steps collapses into the turn's single accordion
-/// as a "Wrote" chip whose detail is the text's markdown flattened exactly
-/// like a thought's. `live` = the part is the streaming tail — unresolved,
-/// so the collapsed header keeps its working shimmer until the reply lands.
-fn note_item(part_id: &str, tree: &BlockTree, live: bool) -> ToolItem {
-    let mut item = thought_item(part_id, tree, live);
-    item.call = ToolCall::Unknown {
-        name: "Note".into(),
-        input: None,
-    };
-    item.kind = ToolItemKind::Note;
-    item
 }
 
 /// A chip's expandable detail payload.
@@ -1308,18 +1141,11 @@ pub enum RowKind {
         tree: Arc<BlockTree>,
         block_ix: usize,
     },
+    /// slopty: a run of calls and thoughts, folded to one line until the person opens it;
+    /// nothing opens it by itself (`docs/decisions/inspector.md`, "One fold depth").
     ToolGroup {
         summary: Sentence,
         tools: Arc<Vec<ToolItem>>,
-        auto_open: bool,
-        /// The turn divider's settled duration for this turn, in seconds.
-        worked_secs: Option<i64>,
-        /// The turn's divider (Amp's settled turn). Expanded content is sibling rows tagged
-        /// [`Row::compact_fold`], not chips.
-        compact_shell: bool,
-        /// slopty: when the divider's turn ended ("Done 3:42 PM"), its tooltip: the turn's done
-        /// line, folded into it.
-        done: Option<SharedString>,
     },
     InputChip {
         /// slopty: what kind of ask it was: "Question", "Approval", "Confirm", "Form", "Plan".
@@ -1408,7 +1234,7 @@ pub struct Row {
     /// settled row, beside the timestamp; tools and transport-only metadata
     /// are deliberately excluded.
     pub copy_text: Option<SharedString>,
-    /// Hidden while the named compact-work fold is closed.
+    /// slopty: hidden while the named fold is closed (a long plan's rows past its first lines).
     pub compact_fold: Option<SharedString>,
 }
 
@@ -1486,7 +1312,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
+fn tool_fingerprint(tools: &[ToolItem]) -> u64 {
     let mut acc = Vec::with_capacity(tools.len() * 8 + 1);
     for t in tools {
         acc.extend_from_slice(t.part_id.as_bytes());
@@ -1495,7 +1321,7 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
         acc.extend_from_slice(label.as_bytes());
         acc.extend_from_slice(&(detail.len() as u32).to_le_bytes());
         acc.push(t.is_error as u8 | (t.resolved as u8) << 1);
-        // Thought/note chips share `ToolCall::Unknown` — the kind is the
+        // Thought chips use `ToolCall::Unknown` — the kind is the
         // label/icon discriminator, so a flip must re-splice.
         acc.push(t.kind as u8);
         acc.push(t.images.len() as u8);
@@ -1592,7 +1418,6 @@ fn tool_fingerprint(tools: &[ToolItem], auto_open: bool) -> u64 {
             work::hash_into(&mut acc, facts.as_ref());
         }
     }
-    acc.push(auto_open as u8);
     fnv1a(&acc)
 }
 
@@ -1651,34 +1476,13 @@ thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { s
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
 /// incremental parsers for live parts and a cache for complete ones; tests pass
 /// a plain `parse_full`.
-/// slopty: a turn reads as its prompt, one divider and its reply (Amp's settled turn): every
-/// working step — tool calls, thoughts, and the narration text between them — folds into ONE
-/// [`RowKind::ToolGroup`] drawn as the divider, so only the reply text (the trailing run of text
-/// parts) stays a visible row. The rows it opens to are [`work_rows`].
+/// slopty: a turn's rows are its records in the order they were written, never re-sorted
+/// (`docs/decisions/inspector.md`, "Rows in record order"): its narration where it was said, each
+/// run of calls and thoughts one group line, each notice and error where it happened. A late
+/// record lands in its place and no row ever changes container, so the turn's end moves nothing.
 pub fn rows_for_entry(
     entry: &SessionMessageEntry,
     pending: bool,
-    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
-) -> Vec<Row> {
-    entry_rows(entry, pending, true, parse)
-}
-
-/// slopty: the rows a turn's work opens to under its divider: each call, thought and narration
-/// in its own groups and rows, as they ran.
-pub(crate) fn work_rows(
-    entry: &SessionMessageEntry,
-    pending: bool,
-    parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
-) -> Vec<Row> {
-    entry_rows(entry, pending, false, parse)
-}
-
-/// `compact` folds the turn's work behind its divider ([`rows_for_entry`]), or not
-/// ([`work_rows`]).
-fn entry_rows(
-    entry: &SessionMessageEntry,
-    pending: bool,
-    compact: bool,
     parse: &mut dyn FnMut(&str, &str) -> Arc<BlockTree>,
 ) -> Vec<Row> {
     #[cfg(test)]
@@ -1736,66 +1540,34 @@ fn entry_rows(
     // ordinary tools. Agent/spawn chips flush into their own group so they
     // never share a collapse with Reads/Runs.
     let last_part_ix = entry.parts.len().saturating_sub(1);
-    // Compact mode's reply boundary: the index where the turn's TRAILING run
-    // of non-empty text parts begins. Every text part before it is narration
-    // that folds into the single work group; the run itself stays visible
-    // rows. While the turn still STREAMS there is no reply yet — a "tail"
-    // text would only fold back in once work resumes, so it rides the group
-    // too and nothing visible expands by default. `None` means the turn ends
-    // on work (or is mid-flight) — only the accordion renders.
-    let reply_start = (compact && !streaming)
-        .then(|| {
-            let mut start = entry.parts.iter().rposition(
-                |part| matches!(part, MessagePart::Text { text, .. } if !text.trim().is_empty()),
-            )?;
-            while start > 0
-                && matches!(
-                    &entry.parts[start - 1],
-                    MessagePart::Text { text, .. } if !text.trim().is_empty()
-                )
-            {
-                start -= 1;
-            }
-            Some(start)
-        })
-        .flatten();
-    let mut group_ix = 0usize;
     let mut pending_group: Vec<ToolItem> = Vec::new();
     let mut group_last_part_ix = 0usize;
-    // Compact mode: the row index the single work group lands at — the
-    // position of the FIRST foldable part, so Input/Error chips ahead of it
-    // keep their doc order.
-    let mut compact_group_pos: Option<usize> = None;
 
-    let flush_group =
-        |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, group_ix: &mut usize, last_ix: usize| {
-            if group.is_empty() {
-                return;
-            }
-            let tools = std::mem::take(group);
-            let auto_open = streaming && last_ix == last_part_ix;
-            let waiting = waiting_on(entry.parts.get(last_ix + 1));
-            rows.push(Row {
-                id: format!("{}#g{}", entry.id, group_ix).into(),
-                version: tool_fingerprint(&tools, auto_open)
-                    ^ (u64::from(waiting.is_some()) << 63)
-                    ^ (u64::from(streaming) << 61),
-                turn_start: false,
-                kind: RowKind::ToolGroup {
-                    summary: tool_group_summary_waiting(&tools, waiting, !streaming),
-                    tools: Arc::new(tools),
-                    auto_open,
-                    worked_secs: None,
-                    compact_shell: false,
-                    done: None,
-                },
-                entry_id: entry.id.clone().into(),
-                timestamp: None,
-                copy_text: None,
-                compact_fold: None,
-            });
-            *group_ix += 1;
+    // slopty: a group is keyed by its first step's record id, so a group that grows, or that a
+    // spawn splits as its input lands, keeps its key and its fold (`inspector.md`, "Keys").
+    let flush_group = |rows: &mut Vec<Row>, group: &mut Vec<ToolItem>, last_ix: usize| {
+        let Some(first) = group.first() else {
+            return;
         };
+        let id: SharedString = format!("{}#g:{}", entry.id, first.part_id).into();
+        let tools = std::mem::take(group);
+        let waiting = waiting_on(entry.parts.get(last_ix + 1));
+        rows.push(Row {
+            id,
+            version: tool_fingerprint(&tools)
+                ^ (u64::from(waiting.is_some()) << 63)
+                ^ (u64::from(streaming) << 61),
+            turn_start: false,
+            kind: RowKind::ToolGroup {
+                summary: tool_group_summary_waiting(&tools, waiting, !streaming),
+                tools: Arc::new(tools),
+            },
+            entry_id: entry.id.clone().into(),
+            timestamp: None,
+            copy_text: None,
+            compact_fold: None,
+        });
+    };
 
     for (part_ix, part) in entry.parts.iter().enumerate() {
         match part {
@@ -1836,23 +1608,13 @@ fn entry_rows(
                     images: crate::tool_images::image_paths(call, output.as_deref()),
                     facts: facts.as_deref().cloned().map(Arc::new), // slopty: its facts.
                 };
-                if compact {
-                    // Compact mode keeps ONE group for the whole turn —
-                    // agent chips fold in with everything else, so the genus
-                    // split below never runs.
-                    compact_group_pos.get_or_insert(rows.len());
-                } else if pending_group
+                if pending_group
                     .first()
                     .is_some_and(|head| is_agent_tool(head) != is_agent_tool(&item))
                 {
                     // Agent chips don't share a fold with ordinary tools:
                     // flush whenever the genus flips so each group is uniform.
-                    flush_group(
-                        &mut rows,
-                        &mut pending_group,
-                        &mut group_ix,
-                        group_last_part_ix,
-                    );
+                    flush_group(&mut rows, &mut pending_group, group_last_part_ix);
                 }
                 pending_group.push(item);
                 group_last_part_ix = part_ix;
@@ -1879,45 +1641,16 @@ fn entry_rows(
                         ..slopty_view_doc::ToolFacts::default()
                     }));
                 }
-                if compact {
-                    compact_group_pos.get_or_insert(rows.len());
-                } else if pending_group.first().is_some_and(is_agent_tool) {
+                if pending_group.first().is_some_and(is_agent_tool) {
                     // Thoughts join ordinary tool groups; agent (spawn-link)
                     // groups stay pure, exactly like the tool genus rule.
-                    flush_group(
-                        &mut rows,
-                        &mut pending_group,
-                        &mut group_ix,
-                        group_last_part_ix,
-                    );
+                    flush_group(&mut rows, &mut pending_group, group_last_part_ix);
                 }
                 pending_group.push(item);
                 group_last_part_ix = part_ix;
             }
             other => {
-                // Compact mode: narration text folds into the single group as
-                // a "Wrote" chip — only the reply (the trailing text run)
-                // stays a row.
-                if compact
-                    && let MessagePart::Text { id: part_id, text } = other
-                    && !text.trim().is_empty()
-                    && reply_start.is_none_or(|start| part_ix < start)
-                {
-                    compact_group_pos.get_or_insert(rows.len());
-                    let tree = parse(&format!("{}#{}", entry.id, part_id), text);
-                    let live = streaming && part_ix == last_part_ix;
-                    pending_group.push(note_item(part_id, &tree, live));
-                    group_last_part_ix = part_ix;
-                    continue;
-                }
-                if !compact {
-                    flush_group(
-                        &mut rows,
-                        &mut pending_group,
-                        &mut group_ix,
-                        group_last_part_ix,
-                    );
-                }
+                flush_group(&mut rows, &mut pending_group, group_last_part_ix);
                 match other {
                     MessagePart::Text { id: part_id, text } => {
                         if text.trim().is_empty() {
@@ -2116,88 +1849,7 @@ fn entry_rows(
             }
         }
     }
-    if compact {
-        // Collapsed: one work header. Expanded: the same rows compact-off
-        // would emit for the work parts, tagged so the fold can hide them.
-        if !pending_group.is_empty() {
-            let tools = std::mem::take(&mut pending_group);
-            let work_id: SharedString = format!("{}#work", entry.id).into();
-            let work_parts: Vec<MessagePart> = entry
-                .parts
-                .iter()
-                .enumerate()
-                .filter(|(ix, part)| is_compact_work_part(*ix, part, reply_start))
-                .map(|(_, part)| part.clone())
-                .collect();
-            let mut inner = if work_parts.is_empty() {
-                Vec::new()
-            } else {
-                let work_entry = SessionMessageEntry {
-                    parts: work_parts,
-                    duration_ms: None,
-                    continuation_of: None,
-                    ..entry.clone()
-                };
-                let mut inner = work_rows(&work_entry, pending, parse);
-                // slopty: what the turn changed is said once, under the divider, never again
-                // inside it (its row id would be drawn twice).
-                inner.retain(|row| !matches!(row.kind, RowKind::TurnChanges { .. }));
-                inner
-            };
-            for row in &mut inner {
-                row.turn_start = false;
-                row.timestamp = None;
-                row.copy_text = None;
-                row.compact_fold = Some(work_id.clone());
-            }
-            // slopty: the turn's done line folds into its divider, which says how long it worked;
-            // when it ended is the divider's tooltip, so the time shows once (TX4).
-            let done = rows.iter().rposition(is_done_line).map(|ix| rows.remove(ix)).and_then(|row| {
-                let RowKind::Notice { note } = row.kind else { return None };
-                done_clock(&note.text)
-            });
-            // slopty: a request right after the work holds its divider up, as it does a group (#3).
-            let waiting = waiting_on(entry.parts.get(group_last_part_ix + 1));
-            let header = Row {
-                id: work_id,
-                version: tool_fingerprint(&tools, false)
-                    ^ done.as_ref().map_or(0, |done| fnv1a(done.as_bytes()).rotate_left(7))
-                    ^ (u64::from(waiting.is_some()) << 63),
-                turn_start: false,
-                kind: RowKind::ToolGroup {
-                    summary: tool_group_summary_waiting(&tools, waiting, !streaming),
-                    tools: Arc::new(tools),
-                    auto_open: false,
-                    worked_secs: (!streaming)
-                        .then(|| {
-                            entry
-                                .duration_ms
-                                .filter(|&ms| ms > 0)
-                                .map(|ms| (ms / 1000).max(1))
-                        })
-                        .flatten(),
-                    compact_shell: true,
-                    done,
-                },
-                entry_id: entry.id.clone().into(),
-                timestamp: None,
-                copy_text: None,
-                compact_fold: None,
-            };
-            let pos = compact_group_pos.unwrap_or(rows.len());
-            for (i, row) in inner.into_iter().enumerate() {
-                rows.insert(pos + i, row);
-            }
-            rows.insert(pos, header);
-        }
-    } else {
-        flush_group(
-            &mut rows,
-            &mut pending_group,
-            &mut group_ix,
-            group_last_part_ix,
-        );
-    }
+    flush_group(&mut rows, &mut pending_group, group_last_part_ix);
 
     // slopty: a settled turn says what it changed, above its done line, which ends it (#4).
     let done = rows.last().is_some_and(is_done_line);
@@ -2233,24 +1885,6 @@ fn is_done_line(row: &Row) -> bool {
 /// slopty: the kind of a turn's done line (`slopty_ui::view_model::folds::DONE`).
 const DONE_NOTE: &str = "done";
 
-/// slopty: a divider says how long its turn worked, once known (`secs`).
-fn settle_worked(row: &mut Row, secs: Option<i64>) {
-    if let (Some(secs), RowKind::ToolGroup { worked_secs, compact_shell: true, .. }) =
-        (secs, &mut row.kind)
-    {
-        *worked_secs = Some(secs);
-    }
-}
-
-/// slopty: when a done line says its turn ended, as its own sentence: "Worked for 1m 5s · done
-/// 3:42 PM" (`slopty_ui::view_model::folds::done_words`) ends "Done 3:42 PM".
-fn done_clock(line: &str) -> Option<SharedString> {
-    let (_, clock) = line.rsplit_once(" · ")?;
-    let mut chars = clock.chars();
-    let first = chars.next()?;
-    Some(format!("{}{}", first.to_uppercase(), chars.as_str()).into())
-}
-
 /// slopty: what a request right after a group holds its open call up for (#3).
 fn waiting_on(next: Option<&MessagePart>) -> Option<&'static str> {
     match next {
@@ -2262,17 +1896,6 @@ fn waiting_on(next: Option<&MessagePart>) -> Option<&'static str> {
             })
         }
         _ => None,
-    }
-}
-
-fn is_compact_work_part(ix: usize, part: &MessagePart, reply_start: Option<usize>) -> bool {
-    match part {
-        MessagePart::Tool { .. } => true,
-        MessagePart::Reasoning { text, .. } => !text.trim().is_empty(),
-        MessagePart::Text { text, .. } => {
-            !text.trim().is_empty() && reply_start.is_none_or(|start| ix < start)
-        }
-        _ => false,
     }
 }
 
@@ -3062,159 +2685,6 @@ pub fn ticking_elapsed(secs: i64) -> String {
     }
 }
 
-fn worked_for_label(secs: i64) -> String {
-    format!("Worked for {}", format_elapsed(secs))
-}
-
-/// slopty: a settled divider as a screen reader says it: how long the turn worked, then its
-/// work's sentence from a small letter ("Worked for 6s, ran 2 commands").
-fn spoken_divider(worked: &str, summary: &str) -> String {
-    let mut letters = summary.chars();
-    match letters.next() {
-        Some(first) => format!("{worked}, {}{}", first.to_lowercase(), letters.as_str()),
-        None => worked.to_owned(),
-    }
-}
-
-/// slopty: a phase label's swap (Clanker's `SWAP`): the outgoing words fade over 120 ms, the
-/// incoming ones fade in over 200 ms and rise 3 px (`.research/design-inspiration-2026-10-19.md`
-/// item 8).
-const PHASE_OUT: motion::MotionSpec =
-    motion::MotionSpec::new(120, motion::CubicBezier::new(0.4, 0.0, 0.6, 1.0));
-const PHASE_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
-const PHASE_RISE: f32 = 3.0;
-
-/// slopty: how far a phase swap `ms` in has gone: the outgoing words' opacity, then the
-/// incoming words' opacity and how far they still sit below their line.
-fn phase_swap(ms: f32) -> (f32, f32, f32) {
-    let out = 1.0 - PHASE_OUT.progress(ms / PHASE_OUT.duration_ms as f32);
-    let arrived = PHASE_IN.progress(ms / PHASE_IN.duration_ms as f32);
-    (out, arrived, PHASE_RISE * (1.0 - arrived))
-}
-
-/// slopty: what a turn's divider says while its turn runs (shut, one live line across many
-/// agents) or when no one knows how long it worked: Amp's two words for the fold, by whether it
-/// stands open. What the work was is the divider's tooltip and what a screen reader hears; the
-/// words stay short and still, since the working line under the turn already says what runs,
-/// and for how long.
-fn divider_words(open: bool) -> &'static str {
-    if open { "Hide work" } else { "Show work" }
-}
-
-/// The turn divider's words: the live words swap into "Worked for" ([`phase_swap`]), `ms` into
-/// the swap.
-fn divider_title(live: SharedString, worked: SharedString, ms: f32, theme: &Theme) -> AnyElement {
-    let (out, arrived, below) = phase_swap(ms);
-    if arrived >= 1.0 {
-        return tool_group_title(worked, &[], None, theme);
-    }
-    // The new words hold the room; the old ones fade over them.
-    div()
-        .relative()
-        .min_w_0()
-        .h(px(TOOL_LABEL_LINE_HEIGHT))
-        .child(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .top_0()
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .opacity(out)
-                .child(tool_group_title(live, &[], None, theme)),
-        )
-        .child(
-            div()
-                .relative()
-                .top(px(below))
-                .h(px(TOOL_LABEL_LINE_HEIGHT))
-                .flex()
-                .items_center()
-                .overflow_hidden()
-                .opacity(arrived)
-                .child(tool_group_title(worked, &[], None, theme)),
-        )
-        .into_any_element()
-}
-
-/// The turn divider's rules and button (Amp `AJ/af7bde63.js:25-38`): a 1 px hairline each side,
-/// 12 px from the label, which is a 6 × 2 button with a 7 % wash under the pointer and a 12 px
-/// chevron that turns as the work opens.
-const DIVIDER_GAP: f32 = 12.0;
-const DIVIDER_CHEVRON: f32 = 12.0;
-
-/// slopty: a turn's divider: `title` (named `label`) between two hairlines, opening the work
-/// behind it; `done` says when the turn ended, in its tooltip.
-fn turn_divider(
-    row_id: &SharedString,
-    label: SharedString,
-    title: AnyElement,
-    open: bool,
-    disclosure: f32,
-    done: Option<SharedString>,
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
-) -> gpui::Stateful<gpui::Div> {
-    let hover = format!("{row_id}-divider");
-    let rule = || div().flex_1().min_w(px(DIVIDER_GAP)).h(px(1.0)).bg(theme.border);
-    let button = crate::surface_chrome::key_stop(
-        div().id(SharedString::from(format!("{row_id}-hdr"))),
-        theme,
-    )
-    .role(gpui::Role::Button)
-    .aria_label(label)
-    .aria_expanded(open)
-    .flex_shrink(1.0)
-    .min_w_0()
-    .flex()
-    .flex_row()
-    .items_center()
-    .gap(px(4.0))
-    .px(px(6.0))
-    .py(px(2.0))
-    // slopty: a finger's whole row, 44 pt, on a touch screen.
-    .when(crate::shell::touch_screen(), |button| button.h_full())
-    .rounded(px(6.0))
-    .bg(motion::hover_blend(&hover, gpui::transparent_black(), crate::theme::ink(0.07)))
-    .hover_fade(hover)
-    .cursor_pointer()
-    // slopty: on the button, so Enter or Space on it opens the work as a click does.
-    .on_click(on_click)
-    .text_size(px(TOOL_LABEL_SIZE))
-    .line_height(px(TOOL_LABEL_LINE_HEIGHT))
-    .text_color(theme.text_muted.opacity(0.7))
-    .whitespace_nowrap()
-    .child(div().min_w_0().overflow_hidden().child(title))
-    .child(
-        crate::icons::icon(crate::icons::ALT_ARROW_DOWN)
-            .flex_none()
-            .size(px(DIVIDER_CHEVRON))
-            .with_transformation(gpui::Transformation::rotate(gpui::radians(
-                -std::f32::consts::FRAC_PI_2 * (1.0 - disclosure),
-            )))
-            .text_color(theme.text_muted.opacity(0.7)),
-    )
-    .when_some(done, |button, done| {
-        button
-            .tooltip(crate::settings::widgets::text_tooltip(done))
-            .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-    });
-    div()
-        .id(SharedString::from(format!("{row_id}-divider-row")))
-        .h(px(tool_group_header_height()))
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(DIVIDER_GAP))
-        .debug_selector(|| "turn-divider".into())
-        .child(rule())
-        .child(button)
-        .child(rule())
-}
-
 // ---------------------------------------------------------------------------
 // Highlight store (background, time-sliced, paint-only)
 // ---------------------------------------------------------------------------
@@ -3618,57 +3088,6 @@ fn tool_disclosure_progress(open: bool, fold: FoldState, now: Instant) -> f32 {
     if open { share } else { 1.0 - share }
 }
 
-/// The compact work fold's animated body budget: `fold.from` lerps toward
-/// the rows' measured total while open (zero when closed) as the one fold
-/// moves ([`tool_fold`]). Each sibling body row clips to `budget - prefix`, so
-/// the group opens/closes exactly like an ordinary tool fold's single
-/// overflow-hidden container — including reversals, which seed `from` with
-/// the budget in flight.
-fn compact_body_height(fold: FoldState, total: f32, reduce_motion: bool, now: Instant) -> f32 {
-    let target = if fold.open.unwrap_or(false) {
-        total
-    } else {
-        0.0
-    };
-    let Some(at) = fold.toggled_at.filter(|_| !reduce_motion) else {
-        return target;
-    };
-    let share = tool_fold(fold.open.unwrap_or(false), Some(at), now, false).share;
-    motion::lerp(fold.from, target, share)
-}
-
-/// Clip geometry for one compact-fold body row: `(prefix, own, total)`
-/// natural heights over the contiguous `work_id` run containing `ix`.
-/// Unmeasured rows report 0 until their prepaint probe lands — they stay
-/// clipped for that one pass instead of flashing open at full height.
-fn compact_fold_geometry(
-    rows: &[Row],
-    heights: &HashMap<SharedString, Rc<Cell<f32>>>,
-    work_id: &SharedString,
-    ix: usize,
-) -> (f32, f32, f32) {
-    let mut start = ix;
-    while start > 0 && rows[start - 1].compact_fold.as_ref() == Some(work_id) {
-        start -= 1;
-    }
-    let mut prefix = 0.0;
-    let mut own = 0.0;
-    let mut total = 0.0;
-    for (j, row) in rows.iter().enumerate().skip(start) {
-        if row.compact_fold.as_ref() != Some(work_id) {
-            break;
-        }
-        let height = heights.get(&row.id).map_or(0.0, |cell| cell.get());
-        if j < ix {
-            prefix += height;
-        } else if j == ix {
-            own = height;
-        }
-        total += height;
-    }
-    (prefix, own, total)
-}
-
 /// Viewport compensation paired with a long user-message collapse. While the
 /// row loses height, this scrolls upward by the same eased distance so a
 /// bottom-pinned viewport keeps the collapsing bubble in view.
@@ -3726,50 +3145,7 @@ impl FrameAsk {
     }
 }
 
-/// A locally-sent turn reserves the viewport below its prompt. The last row
-/// has a minimum height, so streaming content and the working trailer consume
-/// or release space in the same layout pass. Only changes to the preceding
-/// rows require a post-layout refinement. Wheel input releases the automatic
-/// glide/hold while preserving the reservation; overflow hands off to the
-/// ordinary bottom spring. Chat switches restore the reservation released.
-#[derive(Clone, Debug)]
-struct OwnTurnAnchor {
-    chat_id: String,
-    message_id: SharedString,
-    /// The step still owns the viewport (glide → hold). Any wheel/touch
-    /// input releases it — the reservation stays behind as plain scrollable
-    /// space, and the ordinary escape/restick rules apply from then on.
-    held: bool,
-    /// The entry glide has landed; the hold now re-asserts the prompt's
-    /// position absolutely after every layout (glue- and lag-proof — the
-    /// exact mechanism the shipped first-send anchor used).
-    positioned: bool,
-    /// A fresh send may install the anchor one notification before its echo.
-    /// Once the prompt has appeared, its later disappearance is terminal
-    /// (failed echo or removed entry) and the runway must retire.
-    seen_prompt: bool,
-    // slopty: the person's own scroll (a wheel, a touch, its restick) moved the view under this
-    // hold. Only then is the slack under the reservation resting space; layout alone leaving
-    // the view there is put back on the exact hold, so where it rests never hangs on the order
-    // the layouts and arrivals came in.
-    scrolled: bool,
-}
 
-impl OwnTurnAnchor {
-    fn released_for_restore(mut self) -> Self {
-        self.held = false;
-        self.positioned = false;
-        self.seen_prompt = true;
-        self
-    }
-
-    fn observe_prompt(&mut self, exists: bool) -> bool {
-        if exists {
-            self.seen_prompt = true;
-        }
-        exists || !self.seen_prompt
-    }
-}
 
 /// A stable per-chat viewport anchor. Row identity is preferred over its old
 /// index because async replay can insert or remove rows while a chat is away.
@@ -3831,17 +3207,12 @@ enum SavedViewport {
     Anchored {
         anchor: ViewportAnchor,
         distance_from_bottom: f32,
-        /// Preserve the runway that made a short active turn scrollable.
-        /// Navigation releases its automatic hold, so revisiting restores the
-        /// viewport without immediately following new output to the bottom.
-        own_turn: Option<OwnTurnAnchor>,
     },
 }
 
 struct RestoredViewport {
     offset: ListOffset,
     distance_from_bottom: f32,
-    own_turn: Option<OwnTurnAnchor>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3883,7 +3254,6 @@ impl SavedViewport {
         scroll_top: ListOffset,
         pinned: bool,
         distance_from_bottom: f32,
-        own_turn: Option<&OwnTurnAnchor>,
     ) -> Option<Self> {
         if rows.is_empty() {
             return None;
@@ -3894,7 +3264,6 @@ impl SavedViewport {
         Some(Self::Anchored {
             anchor: ViewportAnchor::capture(rows, scroll_top)?,
             distance_from_bottom,
-            own_turn: own_turn.cloned(),
         })
     }
 
@@ -3905,7 +3274,6 @@ impl SavedViewport {
         let Self::Anchored {
             anchor,
             distance_from_bottom,
-            own_turn,
         } = self
         else {
             return None;
@@ -3915,17 +3283,9 @@ impl SavedViewport {
         } else {
             anchor.resolve_exact(rows)?
         };
-        let own_turn = own_turn
-            .clone()
-            .filter(|turn| {
-                rows.iter()
-                    .any(|row| row.turn_start && row.entry_id == turn.message_id)
-            })
-            .map(OwnTurnAnchor::released_for_restore);
         Some(RestoredViewport {
             offset,
             distance_from_bottom: *distance_from_bottom,
-            own_turn,
         })
     }
 }
@@ -3976,6 +3336,12 @@ pub struct Transcript {
     /// The shell may retain this already-laid-out view briefly for its exit.
     /// Cleared as soon as the exit is invisible; never used for another chat.
     retain_on_deselect: bool,
+    /// slopty: what the list ends with, under its last row (the inspector's mirror of the TUI's
+    /// prompt box, [`Self::set_footer`]).
+    footer: Option<gpui::AnyView>,
+    /// slopty: the press under way began on the footer, which is no row: it leaves the follow
+    /// rule alone (`inspector.md`, "Follow and anchor": a press in a row lets go).
+    footer_press: bool,
     /// `Some(doc_id)` pins this instance to a SUBAGENT doc: rows come from
     /// `AppState::sub_transcript(doc_id)` instead of the selected chat, and
     /// the instance is READ-ONLY — no echoes, no own-turn hold, and no global
@@ -4094,70 +3460,18 @@ pub struct Transcript {
     /// Width held free at the column's right for a docked side card; the
     /// reading column centers in what remains.
     right_reserve: f32,
-    /// Compact work-group entry ids that were live this session — the
-    /// "Worked for" subtitle fades in only for those, not historical rows.
-    compact_live_entries: HashSet<SharedString>,
-    /// Last live elapsed (seconds) per assistant entry, used if `duration_ms`
-    /// has not landed on the doc yet when the turn settles.
-    compact_last_elapsed: HashMap<String, i64>,
-    /// When a compact work group first settled this session, so "Worked for"
-    /// can fade in without replaying on later paints.
-    compact_worked_fade_at: HashMap<SharedString, Instant>,
-    /// Natural heights of compact-fold body rows, written by each row's
-    /// prepaint probe without notifying. The work fold's tween
-    /// clips the sibling rows against one shared budget without knowing
-    /// their layout up front.
-    compact_fold_heights: HashMap<SharedString, Rc<Cell<f32>>>,
-    /// Post-tween sweep that drops a closed work fold's retained body rows.
-    compact_fold_settle: Option<Task<()>>,
     highlights: HighlightStore,
-    show_jump_button: bool,
     /// slopty: the last row there was when the person left the end; the jump pill counts the
     /// rows after it as new (design-inspiration item 11).
     jump_mark: Option<SharedString>,
     /// slopty: each message strip fading in or out: whether it shows, where its fade started
     /// and when ([`Transcript::strip_fade`]).
     strip_fades: HashMap<SharedString, (bool, f32, Instant)>,
-    /// Distance from the bottom at the last observation (wheel event or spring
-    /// tick) — restick and escape are direction-aware
-    /// (see [`Transcript::should_restick`]).
+    /// Distance from the bottom at the person's last scroll.
     last_scroll_distance: f32,
-    // slopty: the wheel's own travel since the last scroll decision (positive
-    // toward the top), so rows measured taller under a glide are not read as
-    // the person scrolling up, which broke the jump short of the end.
-    wheel_travel: f32,
-    /// The stick-to-bottom pin. Broken only by user input (wheel/touch up);
-    /// re-engaged inside the 70px band, after an own-send first overflows, and
-    /// on the jump button.
+    /// slopty: whether the view follows its end (the list's `FollowMode::Tail`), the follow
+    /// rule's one state ([`Transcript::follow`], [`Transcript::let_go`]).
     pinned: bool,
-    /// The latest wheel/touch input headed for the top of a scrollable list
-    /// and broke the pin as it arrived ([`Transcript::on_scroll_wheel`]); the
-    /// deferred decision in [`Transcript::handle_scroll`] must not re-engage
-    /// it.
-    input_escaped: bool,
-    /// The list took the wheel event in flight ([`Transcript::handle_scroll`]
-    /// runs first): a wheel the list never saw (one an overlay above it let
-    /// bubble) must not break the pin.
-    list_took_input: bool,
-    /// A locally-sent prompt currently held near the viewport top while its
-    /// reply grows into the empty space below it.
-    own_turn: Option<OwnTurnAnchor>,
-    /// A layout-affecting change needs one post-layout own-turn measurement.
-    own_turn_kick: bool,
-    /// One own-turn `on_next_frame` callback in flight at most.
-    own_turn_scheduled: FrameAsk,
-    /// Wall-clock of the previous entry-glide tick (`None` = not gliding).
-    own_turn_last_tick: Option<Instant>,
-    spring: StickSpring,
-    /// Wall-clock of the previous spring tick (`None` = parked).
-    spring_last_tick: Option<Instant>,
-    /// When the spring last landed on the bottom (settle-grace bookkeeping).
-    spring_settled_at: Option<Instant>,
-    /// A doc commit / wake happened before layout measured it — run at least
-    /// one spring tick even though the pre-layout distance still reads 0.
-    spring_kick: bool,
-    /// One `on_next_frame` callback in flight at most.
-    spring_scheduled: FrameAsk,
     /// slopty: a jump's glide under way, stepped once a frame (`rail.rs`, #13), and whether
     /// its next frame is asked for.
     glide: Option<crate::rail::Glide>,
@@ -4194,9 +3508,6 @@ pub struct Transcript {
     strip_focus: HashMap<SharedString, StripFocus>,
     /// slopty: the entries whose strip this frame drew, for pruning [`Self::strip_focus`].
     strip_drawn: HashSet<SharedString>,
-    /// slopty: the person's send under way (its message id) and when its bubble first drew:
-    /// it fades and rises in, as the person's own words arriving (#15).
-    send_entrance: Option<(SharedString, Option<Instant>)>,
     /// slopty: the bubbles last drawn pending, and when each one sent: it fades up to full (#15).
     pending_bubbles: HashSet<SharedString>,
     sent_bubbles: HashMap<SharedString, Instant>,
@@ -4445,19 +3756,11 @@ impl Transcript {
         follow: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        // FollowMode stays Normal: the tail pin is ours (a per-frame spring),
-        // not the list's per-layout hard snap.
-        //
         // Override instances align TOP: a subagent transcript reads like a
         // fresh notes page — entries anchored at the top, streaming growing
         // into the empty space below, never rising from the pane's bottom.
         // Top alignment gets that structurally (a short list rests at the
-        // top with no reservation pad), and the PIN machinery still runs on
-        // top of it for end-follow: the spring is purely distance-based, and
-        // the glue trap it was built around is Bottom-only — layout
-        // materializes a Top list's past-end offset to a CONCRETE position
-        // every frame (gpui list.rs: only `Bottom` re-glues to the `None`
-        // sentinel), so a parked spring can't re-glue and hard-track growth.
+        // top with no reservation pad), and the follow rule runs on top of it.
         let list_top = doc_override.is_some();
         let list = Self::new_list(list_top, cx);
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.sync(cx));
@@ -4489,6 +3792,9 @@ impl Transcript {
         // until streaming overflows the pane — then it follows, releases on
         // wheel-up, and resticks/jumps exactly like the main transcript.
         let pinned = follow;
+        if pinned {
+            list.set_follow_mode(FollowMode::Tail);
+        }
         let mut this = Self {
             state,
             list,
@@ -4499,6 +3805,8 @@ impl Transcript {
             // instance must not reset (or re-pin) on selection changes.
             chat_id: doc_override.clone(),
             retain_on_deselect: false,
+            footer: None,
+            footer_press: false,
             land_end_pending: doc_override.is_some() && !follow,
             doc_live: doc_override.is_some() && follow,
             doc_override,
@@ -4537,29 +3845,11 @@ impl Transcript {
             // slopty: the window's width arrives with the first render.
             content_width: crate::settings::transcript_width(0.0, cx),
             right_reserve: 0.0,
-            compact_live_entries: HashSet::new(),
-            compact_last_elapsed: HashMap::new(),
-            compact_worked_fade_at: HashMap::new(),
-            compact_fold_heights: HashMap::new(),
-            compact_fold_settle: None,
             highlights: HighlightStore::default(),
-            show_jump_button: false,
             jump_mark: None,
             strip_fades: HashMap::new(),
             last_scroll_distance: 0.0,
-            wheel_travel: 0.0,
             pinned,
-            input_escaped: false,
-            list_took_input: false,
-            own_turn: None,
-            own_turn_kick: false,
-            own_turn_scheduled: FrameAsk::default(),
-            own_turn_last_tick: None,
-            spring: StickSpring::new(),
-            spring_last_tick: None,
-            spring_settled_at: None,
-            spring_kick: false,
-            spring_scheduled: FrameAsk::default(),
             glide: None,
             glide_scheduled: FrameAsk::default(),
             landed: None,
@@ -4572,7 +3862,6 @@ impl Transcript {
             hovered_entry: None,
             strip_focus: HashMap::new(),
             strip_drawn: HashSet::new(),
-            send_entrance: None,
             pending_bubbles: HashSet::new(),
             sent_bubbles: HashMap::new(),
             last_lane: None,
@@ -4619,9 +3908,6 @@ impl Transcript {
             self.right_reserve = reserve;
             // Rows rewrap at the new width, including virtual ones offscreen.
             self.list.remeasure();
-            if self.pinned {
-                self.wake_spring(crate::clock::now(cx));
-            }
             cx.notify();
         }
     }
@@ -4640,8 +3926,8 @@ impl Transcript {
     /// slopty: row `row` takes another height (a subagent's card opened, closed, or fit to its
     /// run): it is measured again, and the list's layer painted afresh with it, so no row under
     /// it is shown where it stood before.
-    /// As a diagram's row does, it lets the bottom pin and the own-turn runway take the new
-    /// height: a list held at its end stays there as the card grows.
+    /// As a diagram's row does, it lets the follow rule take the new height: a list following
+    /// its end stays there as the card grows, and one held by its first row holds it.
     pub(crate) fn row_resized(&mut self, row: &str, cx: &mut Context<Self>) {
         self.diagram_layout_changed(&[SharedString::from(row.to_owned())], cx);
         cx.notify();
@@ -4649,6 +3935,27 @@ impl Transcript {
 
     pub(crate) fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// slopty: end the list with `footer`, under its last row, as the TUI keeps its prompt box
+    /// under the conversation: what grows there grows at the list's end, which the follow rule
+    /// follows, so nothing above it moves (`docs/decisions/inspector.md`, "Fixed frame"). With
+    /// no rows it stands at the foot alone.
+    pub fn set_footer(&mut self, footer: Option<gpui::AnyView>, cx: &mut Context<Self>) {
+        self.footer = footer;
+        if let Some(last) = self.rows.len().checked_sub(1) {
+            self.list.remeasure_items(last..last + 1);
+        }
+        cx.notify();
+    }
+
+    /// slopty: `footer` in a frame that marks a press begun on it, before the transcript's own
+    /// press handler hears it ([`Self::footer_press`]).
+    fn footer_frame(footer: gpui::AnyView, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .w_full()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.footer_press = true))
+            .child(footer)
     }
 
     pub(crate) fn list_state(&self) -> &ListState {
@@ -4679,7 +3986,6 @@ impl Transcript {
             self.list.logical_scroll_top(),
             self.pinned,
             distance_from_bottom,
-            self.own_turn.as_ref(),
         ) else {
             return;
         };
@@ -4724,16 +4030,7 @@ impl Transcript {
         {
             self.pending_viewport = None;
             self.list.scroll_to(restored.offset);
-            self.own_turn = restored.own_turn;
-            self.own_turn_kick = self.own_turn.is_some();
-            self.own_turn_last_tick = None;
-            if self.own_turn.is_some() {
-                // Replay readiness can change while echo rows stay identical,
-                // so the no-diff path may install a runway without splicing.
-                self.remeasure_last_row();
-            }
             self.last_scroll_distance = restored.distance_from_bottom;
-            self.show_jump_button = restored.distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
             self.viewport_finalize_pending = true;
             return true;
         }
@@ -4746,12 +4043,7 @@ impl Transcript {
         // valid, but an unrelated echo must never become an index fallback
         // for old history.
         self.discard_pending_viewport();
-        if self.own_turn.is_none() {
-            self.pinned = true;
-            self.last_scroll_distance = 0.0;
-            self.show_jump_button = false;
-            self.list.scroll_to_end();
-        }
+        self.follow();
         true
     }
 
@@ -4781,16 +4073,29 @@ impl Transcript {
     }
 
     fn stop_automatic_scrolling(&mut self) {
-        // Navigation and selection within the session release the hold but keep the
-        // runway (user spec: only leaving and revisiting the session clears
-        // it) — scrolling back down re-arms the hold like any restick.
-        self.release_own_turn_hold();
-        self.pinned = false;
-        self.spring.reset();
-        self.spring_last_tick = None;
-        self.spring_settled_at = None;
-        self.spring_kick = false;
+        self.let_go();
         self.glide = None;
+    }
+
+    /// slopty: follow the list's end: GPUI's tail mode snaps to it on every layout, so what
+    /// grows at the end stays in view (`inspector.md`, "Follow and anchor").
+    pub(crate) fn follow(&mut self) {
+        self.pinned = true;
+        self.jump_mark = None;
+        self.last_scroll_distance = 0.0;
+        self.list.set_follow_mode(FollowMode::Tail);
+    }
+
+    /// slopty: stop following, on the person's own move: the first row in view holds its place
+    /// from here, whatever lands below, and the rows that do are counted for the jump pill.
+    pub(crate) fn let_go(&mut self) {
+        if !self.pinned {
+            return;
+        }
+        self.materialize_scroll_anchor();
+        self.list.set_follow_mode(FollowMode::Normal);
+        self.pinned = false;
+        self.jump_mark = self.rows.last().map(|row| row.id.clone());
     }
 
     /// slopty: store the glide after [`Self::begin_scroll_navigation`] (`rail.rs`).
@@ -4813,17 +4118,6 @@ impl Transcript {
         }
     }
 
-    /// slopty: whether the bubble of `entry` comes in now: the person's send under way, within
-    /// its entrance from when it first drew (#15).
-    fn bubble_enters(&mut self, entry: &SharedString, cx: &Context<Self>) -> bool {
-        let now = crate::clock::now(cx);
-        match self.send_entrance.as_mut() {
-            Some((id, at)) if id == entry => {
-                now.saturating_duration_since(*at.get_or_insert(now)) < SEND_ENTRANCE.total()
-            }
-            _ => false,
-        }
-    }
 
     /// slopty: the bubble `row` drawn `pending` or not, and whether it is fading up from
     /// pending to sent (#15).
@@ -4854,21 +4148,7 @@ impl Transcript {
         self.landed = self.rows.get(ix).map(|row| (row.id.clone(), crate::clock::now(cx), epoch));
     }
 
-    /// Give the viewport to the user/navigation without dropping the
-    /// reservation: the pad stays, the hold stands down until a restick.
-    fn release_own_turn_hold(&mut self) {
-        if let Some(anchor) = self.own_turn.as_mut() {
-            anchor.held = false;
-        }
-        self.own_turn_last_tick = None;
-    }
 
-    fn remeasure_last_row(&mut self) {
-        if let Some(last) = self.rows.len().checked_sub(1) {
-            self.list.remeasure_items(last..last + 1);
-            self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
-        }
-    }
 
     pub(crate) fn distance_from_bottom(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -4876,26 +4156,10 @@ impl Transcript {
         (max + cur).max(0.0)
     }
 
-    // slopty: where the wheel alone left the distance from the bottom. Rows
-    // measured under a glide move the distance too; read against the last
-    // observation they looked like a scroll up and broke the pin.
-    fn wheel_previous_distance(&mut self, distance: f32) -> f32 {
-        let travel = std::mem::take(&mut self.wheel_travel);
-        if travel == 0.0 {
-            self.last_scroll_distance
-        } else {
-            distance - travel
-        }
-    }
 
-    /// Whether a user scroll should re-engage the bottom pin: inside the 70px
-    /// stick band *and* moving toward the bottom. Direction matters — a small
-    /// wheel-up notch near the bottom stays inside the band, and re-sticking
-    /// on it would snap the view straight back, making the pin unbreakable.
-    pub fn should_restick(distance: f32, previous_distance: f32) -> bool {
-        distance <= STICK_THRESHOLD_PX && distance < previous_distance
-    }
 
+    /// slopty: the person moved the list (its wheel or touch; programmatic scrolls never come
+    /// here): back within [`FOLLOW_PX`] of the end it follows again, and away from it, it lets go.
     fn handle_scroll(&mut self, _event: &ListScrollEvent, cx: &mut Context<Self>) {
         // Cancel synchronously, before a queued animation frame can undo the
         // wheel/touch input. Neither operation reads the borrowed ListState.
@@ -4909,93 +4173,18 @@ impl Transcript {
                 card.update(cx, |_, cx| cx.notify());
             }
         }
-        self.list_took_input = true;
-        let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
-        self.release_own_turn_hold();
-        if self.own_turn.is_some() {
-            // Cancel any tail spring synchronously too; the deferred input
-            // decision below may re-engage it after reading the new offset.
-            self.pinned = false;
-            self.spring.reset();
-            self.spring_last_tick = None;
-        }
-        // The list invokes this handler ONLY from its wheel/touch input path
-        // (programmatic scroll_by/scroll_to never re-enter it), while holding
-        // its internal RefCell borrow — reading the ListState back
-        // synchronously panics with "already mutably borrowed". Defer to the
-        // end of the effect cycle, after the list has released its borrow.
+        // The list calls this while holding its own borrow: reading it back now panics, so the
+        // decision waits for the end of the effect cycle.
         let this = cx.weak_entity();
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
-                this.list_took_input = false;
-                let escaped = std::mem::take(&mut this.input_escaped);
-                // Input owns the viewport immediately, including wheel-down
-                // after background streaming. A held turn can be stale while
-                // frame callbacks are paused; reasserting its old prompt here
-                // made scrolling down impossible until an upward gesture.
-                if let Some(anchor) = this.own_turn.as_mut() {
-                    anchor.scrolled = true; // slopty: the person's scroll, not layout.
-                    let distance = this.distance_from_bottom();
-                    let previous = this.wheel_previous_distance(distance); // slopty
-                    this.last_scroll_distance = distance;
-                    // Reaching the end preserves normal tail-follow intent
-                    // without reasserting a possibly stale prompt hold.
-                    this.pinned = !escaped
-                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous));
-                    this.spring.reset();
-                    this.spring_last_tick = None;
-                    // Re-stick only when returning to a short turn's actual
-                    // hold. An off-screen prompt belongs to an overflowing
-                    // reply, even if reservation refinement hasn't run yet.
-                    let at_hold = this.own_turn_anchor_ix().is_some_and(|ix| {
-                        this.list.bounds_for_item(ix).is_some_and(|bounds| {
-                            f32::from(bounds.top() - this.list.viewport_bounds().top())
-                                >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
-                        })
-                    });
-                    if !released_own_turn
-                        && !escaped
-                        && at_hold
-                        && Self::should_restick(distance, previous)
-                    {
-                        if let Some(anchor) = this.own_turn.as_mut() {
-                            anchor.held = true;
-                            anchor.positioned = false;
-                        }
-                        this.pinned = false;
-                        this.own_turn_kick = true;
-                    }
-                    if this.pinned {
-                        this.wake_spring(crate::clock::now(cx));
-                    }
-                    this.show_jump_button = jump_visibility(this.show_jump_button, distance)
-                        && !this.own_turn.as_ref().is_some_and(|a| a.held);
-                    cx.notify();
-                    return;
-                }
                 let distance = this.distance_from_bottom();
-                let previous = this.wheel_previous_distance(distance); // slopty
                 this.last_scroll_distance = distance;
-                if escaped || (distance > previous + 1.0 && distance > AT_BOTTOM_PX) {
-                    // User input moving away from the bottom breaks the pin.
-                    // Content growth never lands here — it doesn't fire the
-                    // scroll handler (mugen §1e: interrupt from input, not
-                    // scrollbar position).
-                    this.pinned = false;
-                    this.spring.reset();
-                    this.spring_last_tick = None;
-                } else if distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous) {
-                    // Returning toward the bottom inside the 70px band (or
-                    // arriving at it) re-engages the pin with a glide.
-                    if !this.pinned {
-                        this.pinned = true;
-                        this.wake_spring(crate::clock::now(cx));
-                    }
-                }
-                let show = jump_visibility(this.show_jump_button, distance) && !this.pinned;
-                if show != this.show_jump_button {
-                    this.show_jump_button = show;
+                if distance <= FOLLOW_PX {
+                    this.follow();
+                } else {
+                    this.let_go();
                 }
                 cx.notify();
             })
@@ -5003,31 +4192,6 @@ impl Transcript {
         });
     }
 
-    /// A wheel notch headed for the top breaks the pin as it arrives, however
-    /// little it moved, as use-stick-to-bottom's wheel handler does. The
-    /// distance test in [`Self::handle_scroll`] can't see that on its own: a
-    /// smoothed notch starts and ends with sub-pixel slices, and its slices
-    /// arrive on frames, where the spring's step runs before that deferred
-    /// decision, pulling the view back and recording the distance it then
-    /// compares against. Precise (trackpad) input keeps the distance test.
-    /// Children bubble first, so the list has applied the input by now, or
-    /// never saw it.
-    fn on_scroll_wheel(
-        &mut self,
-        event: &ScrollEvent,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        let toward_top = matches!(event.delta, ScrollDelta::Lines(delta) if delta.y > 0.0);
-        self.input_escaped = std::mem::take(&mut self.list_took_input)
-            && toward_top
-            && self.list.max_offset_for_scrollbar().y > px(0.0);
-        if self.input_escaped {
-            self.pinned = false;
-            self.spring.reset();
-            self.spring_last_tick = None;
-        }
-    }
 
     fn on_selection_mouse_move(
         &mut self,
@@ -5052,10 +4216,16 @@ impl Transcript {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Text listeners claim the drag before it bubbles here. Stop following
-        // immediately: a stream commit can otherwise virtualize the anchor
-        // before the first mouse move. Keep the user bubble's long-press timer.
+        // slopty: a press in a row lets go of the end, so what it pressed stays where it is as
+        // more arrives (`inspector.md`, "Follow and anchor"); a selection's drag too, before a
+        // stream commit can virtualize its anchor. Keep the user bubble's long-press timer. A
+        // press on the footer (the prompt box's mirror, no row) leaves the view following.
+        let on_footer = std::mem::take(&mut self.footer_press);
         if !crate::markdown::selection::is_dragging() {
+            if self.pinned && !on_footer {
+                self.let_go();
+                cx.notify();
+            }
             return;
         }
         self.selection_drag_position = Some(event.position);
@@ -5082,8 +4252,6 @@ impl Transcript {
         }
         if was_selecting {
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
             cx.notify();
         }
     }
@@ -5134,53 +4302,10 @@ impl Transcript {
         self.begin_scroll_navigation();
         self.list.scroll_by(px(step));
         self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
         cx.notify();
         self.schedule_selection_scroll(cx);
     }
 
-    /// Reserve the reply's space below a locally-sent prompt — EVERY send,
-    /// not just the first (a steer or a post-turn send used to collapse the
-    /// previous reservation and drop the messages back down — user report).
-    /// [`Self::step_own_turn`] sizes the reservation and eases the prompt to
-    /// its top inset. Replacing a previous anchor starts a new glide.
-    pub fn on_own_send(&mut self, chat_id: String, message_id: String, cx: &mut Context<Self>) {
-        self.user_collapse_scroll = None;
-        self.cancel_user_hold();
-        self.discard_pending_viewport();
-        self.pinned = false;
-        self.show_jump_button = false;
-        self.spring.reset();
-        self.spring_last_tick = None;
-        self.spring_settled_at = None;
-        self.spring_kick = false;
-        self.glide = None;
-        // A glued offset re-snaps to the end on EVERY layout — the pad would
-        // land and the viewport hard-track its bottom in the same frame,
-        // skipping the glide entirely (rig-traced). Pin the offset to a
-        // CONCRETE visible item first; the pad then reads as scrollable
-        // distance for the glide to cover.
-        self.materialize_scroll_anchor();
-        let prompt_ix = self
-            .rows
-            .iter()
-            .position(|row| row.turn_start && row.entry_id == message_id.as_str());
-        // slopty: its bubble comes in as it first draws (#15).
-        self.send_entrance =
-            (!motion::reduced_motion(cx)).then(|| (SharedString::from(message_id.clone()), None));
-        self.own_turn = Some(OwnTurnAnchor {
-            chat_id,
-            message_id: SharedString::from(message_id),
-            held: true,
-            positioned: false,
-            seen_prompt: prompt_ix.is_some(),
-            scrolled: false,
-        });
-        self.own_turn_last_tick = None;
-        self.own_turn_kick = true;
-        self.remeasure_last_row();
-        cx.notify();
-    }
 
     /// Convert a glued scroll offset (`None`/past-the-end — layout re-snaps
     /// it to the end each frame) into a concrete `{item, offset}` anchored at
@@ -5220,411 +4345,77 @@ impl Transcript {
         }
     }
 
-    /// The held prompt's top offset from the viewport top. Row 0 already
-    /// carries the titlebar chrome inside its own box (the first row's
-    /// top gap), so the hold adds nothing — adding the inset on top parked
-    /// a new chat's first prompt a double-chrome ~66px low (user report).
-    fn own_send_inset(anchor_ix: usize) -> f32 {
-        if anchor_ix == 0 {
-            0.0
-        } else {
-            OWN_SEND_TOP_INSET_PX
-        }
-    }
 
-    fn own_turn_anchor_ix(&self) -> Option<usize> {
-        let anchor = self.own_turn.as_ref()?;
-        self.rows
-            .iter()
-            .position(|row| row.turn_start && row.entry_id == anchor.message_id)
-    }
 
-    fn reconcile_own_turn_prompt(&mut self) {
-        let Some(message_id) = self
-            .own_turn
-            .as_ref()
-            .map(|anchor| anchor.message_id.clone())
-        else {
-            return;
-        };
-        let exists = self
-            .rows
-            .iter()
-            .any(|row| row.turn_start && row.entry_id == message_id);
-        let keep = self
-            .own_turn
-            .as_mut()
-            .is_some_and(|anchor| anchor.observe_prompt(exists));
-        if keep {
-            return;
-        }
 
-        self.own_turn = None;
-        self.own_turn_kick = false;
-        self.own_turn_last_tick = None;
-        self.remeasure_last_row();
-        self.last_scroll_distance = self.distance_from_bottom();
-        self.show_jump_button = jump_visibility(self.show_jump_button, self.last_scroll_distance);
-        self.viewport_finalize_pending = true;
-    }
 
-    /// Install the reservation before list layout. Its height follows the
-    /// current viewport in that same pass, including window resizes.
-    fn update_runway_minimum(&mut self, cx: &gpui::App) {
-        if let Some(ix) = self.own_turn_anchor_ix() {
-            // Revealing the prompt adds reading space; only reply growth
-            // consumes the runway. Include the same expansion tween in the
-            // reservation before layout, including its reverse on Show less.
-            let expansion = self.user_folds.get(&self.rows[ix].id).map_or(0.0, |fold| {
-                let target = if fold.open == Some(true) {
-                    fold.user_expansion_height
-                } else {
-                    0.0
-                };
-                match fold.toggled_at {
-                    Some(at) if !motion::reduced_motion(cx) && fold.duration_ms > 0 => {
-                        let raw = (cx.frame_time().saturating_duration_since(at).as_secs_f32() * 1000.0 / fold.duration_ms as f32)
-                            .clamp(0.0, 1.0);
-                        let progress = user_resize_spec(fold.user_expansion_height).progress(raw);
-                        motion::lerp(fold.user_expansion_height - target, target, progress)
-                    }
-                    _ => target,
-                }
-            });
-            self.list.set_tail_reservation(Some((
-                ix,
-                px(Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - expansion),
-            )));
-        } else if self.own_turn.is_none() {
-            self.list.set_tail_reservation(None);
-        }
-    }
 
-    fn scroll_own_turn_by(&self, delta: f32) {
-        let offset = self.list.logical_scroll_top();
-        if offset.item_ix == 0 && offset.offset_in_item < px(0.0) {
-            self.list.scroll_to(ListOffset {
-                item_ix: 0,
-                offset_in_item: offset.offset_in_item + px(delta),
-            });
-        } else {
-            self.list.scroll_by(px(delta));
-        }
-    }
-
-    /// Advance the prompt glide or hand a filled reservation to tail-follow.
-    /// Reservation sizing happens in the list layout, never in this callback.
-    fn step_own_turn(&mut self, cx: &mut Context<Self>) {
-        if self.route_exit_pending(cx) {
-            return;
-        }
-        self.own_turn_kick = false;
-        // Layout moves the bottom too (pad refinement, streaming growth):
-        // refresh the wheel handler's escape baseline every frame so only a
-        // WHEEL's own delta registers as user intent. Without this, the pad
-        // growing at turn-completion between two wheel events read as
-        // "scrolled away" and silently released the hold — the next wheels
-        // then sank unopposed deep into the runway blank (rig-traced).
-        self.last_scroll_distance = self.distance_from_bottom();
-        let Some(anchor_ix) = self.own_turn_anchor_ix() else {
-            // The optimistic echo may arrive on the next state notification.
-            return;
-        };
-        if let Some(anchor) = self.own_turn.as_mut() {
-            anchor.seen_prompt = true;
-        }
-        let viewport = self.list.viewport_bounds();
-        let viewport_height = f32::from(viewport.size.height);
-        if viewport_height <= 0.0 {
-            self.own_turn_kick = true;
-            cx.notify();
-            return;
-        }
-        let inset = Self::own_send_inset(anchor_ix);
-        if self.is_glued() && self.own_turn.as_ref().is_some_and(|anchor| anchor.held) {
-            self.list.scroll_by(px(-viewport_height));
-        }
-        let anchor_bounds = self.list.bounds_for_item(anchor_ix);
-        // The list consumes the reservation in the same layout that measures
-        // new rows. The height tree remains available when the prompt or tail
-        // is outside the viewport, so neither can block the handoff.
-        if self.list.tail_reservation_filled() {
-            let held = self.own_turn.take().is_some_and(|a| a.held);
-            self.own_turn_last_tick = None;
-            self.list.set_tail_reservation(None);
-            if held
-                || self.pinned
-                || (self.selection_drag_position.is_none()
-                    && self.distance_from_bottom() <= AT_BOTTOM_PX)
-            {
-                self.engage_pin(cx);
-            } else {
-                cx.notify();
-            }
-            return;
-        }
-
-        // ---- entry glide, then absolute hold -------------------------------
-        let (held, positioned, scrolled) = self
-            .own_turn
-            .as_ref()
-            .map_or((false, false, false), |a| (a.held, a.positioned, a.scrolled));
-        if !held {
-            return;
-        }
-        if positioned {
-            // Landed: re-assert the prompt's position after every layout.
-            // scroll_to is absolute and bounds-independent, so neither glue
-            // re-snaps, pad-sizing lag, nor a splice's unmeasured flicker can
-            // carry the view off the prompt (each broke the spring-held
-            // variants of this — rig-traced). ONE-SIDED: only upward drift
-            // (view above the hold) is corrected. The scroll slack under the
-            // reservation is legal resting space — wheel-down sinks into it
-            // and stops hard at the list's own clamp; snapping back up from
-            // there made the bottom bounce/stutter on every scroll event
-            // (user report). Way-below-slack (impossible short of a bug)
-            // still re-asserts.
-            let moved = match anchor_bounds {
-                Some(b) => {
-                    let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                    // The legal rest zone below the hold is the epsilon plus
-                    // rounding; anything deeper is a transient-collision sink
-                    // and rubber-bands back.
-                    // slopty: the slack rests only a view the person scrolled there.
-                    err > 0.5 || err < -(OWN_SEND_SCROLL_SLACK_PX + 2.0) || (!scrolled && err < -0.5)
-                }
-                // Bounds vanish in the glued representation (dissolved
-                // above, so at most for this one frame) and through splice
-                // flicker. Near the stop that is dead-band space — no
-                // assert (asserting on None here was the bottom bounce);
-                // far from it the position is unknowable flicker: re-assert.
-                None => self.distance_from_bottom() > OWN_SEND_SCROLL_SLACK_PX + 8.0,
-            };
-            if moved {
-                // Correct with the entry glide's ease, not a snap: the only
-                // in-band escapes are one-frame commit transients and splice
-                // flicker, and an eased ~200ms return reads as native
-                // rubber-banding where an instant re-assert read as stutter
-                // (user report). Bounds-less flicker still snaps — there is
-                // nothing to ease against.
-                match anchor_bounds {
-                    Some(b) => {
-                        let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
-                        let now = crate::clock::now(cx);
-                        let frames = match self.own_turn_last_tick {
-                            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0
-                                / SPRING_FRAME_MS)
-                                .min(SPRING_MAX_CATCHUP_FRAMES),
-                            None => 1.0,
-                        };
-                        self.own_turn_last_tick = Some(now);
-                        let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
-                        if err.abs() <= OWN_SEND_GLIDE_SNAP_PX {
-                            self.list.scroll_by(px(err));
-                            self.own_turn_last_tick = None;
-                        } else {
-                            self.scroll_own_turn_by(err * ease);
-                        }
-                        self.own_turn_kick = true;
-                    }
-                    None => {
-                        self.list.scroll_to(ListOffset {
-                            item_ix: anchor_ix,
-                            offset_in_item: px(-inset),
-                        });
-                        self.own_turn_last_tick = None;
-                    }
-                }
-                cx.notify();
-            } else {
-                self.own_turn_last_tick = None;
-            }
-            return;
-        }
-        let now = crate::clock::now(cx);
-        let frames = match self.own_turn_last_tick {
-            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
-                .min(SPRING_MAX_CATCHUP_FRAMES),
-            None => 1.0,
-        };
-        self.own_turn_last_tick = Some(now);
-        let ease = 1.0 - OWN_SEND_GLIDE_RETAIN.powf(frames);
-        // Prefer the prompt geometry. When it is being remeasured but is
-        // already the scroll anchor, its logical offset is equally exact.
-        // Otherwise approach through the unmeasured rows, capping every step
-        // at the prompt so the provisional minimum can never cause overshoot.
-        let (err, anchored) = match anchor_bounds {
-            Some(bounds) => (
-                f32::from(bounds.top()) - (f32::from(viewport.top()) + inset),
-                true,
-            ),
-            None if self.list.logical_scroll_top().item_ix == anchor_ix => (
-                -f32::from(self.list.logical_scroll_top().offset_in_item) - inset,
-                true,
-            ),
-            None => {
-                // Remeasurement retains preceding row heights as hints. Read
-                // the prompt's coordinate from that same height tree rather
-                // than aiming at the provisional minimum's (larger) bottom.
-                let current = f32::from(self.list.scroll_px_offset_for_scrollbar().y);
-                let target = -f32::from(self.list.offset_for_item(anchor_ix)) + inset;
-                (current - target, false)
-            }
-        };
-        let glide_max = GLIDE_MAX_VIEWPORTS * viewport_height;
-        let err = if err > glide_max {
-            self.list.scroll_by(px(err - glide_max));
-            glide_max
-        } else {
-            err
-        };
-        let land = |list: &ListState| {
-            list.scroll_to(ListOffset {
-                item_ix: anchor_ix,
-                offset_in_item: px(-inset),
-            });
-        };
-        if motion::reduced_motion(cx) {
-            land(&self.list);
-            if let Some(anchor) = self.own_turn.as_mut() {
-                anchor.positioned = true;
-            }
-            self.own_turn_last_tick = None;
-        } else if anchored
-            && err <= OWN_SEND_GLIDE_SNAP_PX
-            && err >= -(OWN_SEND_SCROLL_SLACK_PX + 2.0)
-        {
-            // At the hold — or resting inside the slack under it (a restick
-            // that fired at the true bottom): land WITHOUT pulling the view
-            // up. Only a still-above position gets the snap.
-            if err > 0.5 || (!scrolled && err < -0.5) {
-                land(&self.list); // slopty: or below it, where layout alone put it.
-            }
-            if let Some(anchor) = self.own_turn.as_mut() {
-                anchor.positioned = true;
-            }
-            self.own_turn_last_tick = None;
-        } else if !anchored && err <= OWN_SEND_GLIDE_SNAP_PX {
-            // The height hints put us at the prompt. Land by row identity
-            // so its final measurement cannot leave us in the reservation.
-            land(&self.list);
-            if let Some(anchor) = self.own_turn.as_mut() {
-                anchor.positioned = true;
-            }
-            self.own_turn_last_tick = None;
-        } else {
-            self.scroll_own_turn_by(err * ease);
-            if own_turn_glide_crossed(self.list.logical_scroll_top(), anchor_ix, inset) {
-                land(&self.list);
-            }
-        }
-        self.own_turn_kick = true;
-        cx.notify();
-    }
 
     /// Whether the transcript is currently pinned to the bottom.
     pub fn is_pinned(&self) -> bool {
         self.pinned
     }
 
-    /// Whether the shell should float the "Scroll to bottom" pill (scrolled
-    /// more than [`SCROLL_BUTTON_THRESHOLD_PX`] off the end, unpinned).
+    /// slopty: whether the jump pill shows: the view does not follow, and rows arrived below
+    /// since it let go, or it is more than [`SCROLL_BUTTON_THRESHOLD_PX`] from the end.
     pub fn jump_button_shown(&self) -> bool {
-        self.show_jump_button
+        !self.pinned && (self.jump_unseen() > 0 || self.last_scroll_distance > SCROLL_BUTTON_THRESHOLD_PX)
     }
 
     fn strip_fade(&mut self, key: &SharedString, shown: bool, now: Instant, still: bool) -> (f32, bool) {
         strip_fade(&mut self.strip_fades, key, shown, now, still || TOUCH)
     }
 
-    /// slopty: how many rows arrived since the person left the end, for the jump pill to say.
+    /// slopty: how many rows arrived since the view let go of the end, for the jump pill to say.
     pub fn jump_unseen(&self) -> usize {
-        let Some(mark) = self.jump_mark.as_ref().filter(|_| self.show_jump_button) else {
+        let Some(mark) = self.jump_mark.as_ref().filter(|_| !self.pinned) else {
             return 0;
         };
         self.rows.iter().rposition(|row| &row.id == mark).map_or(0, |ix| self.rows.len() - ix - 1)
     }
 
-    /// slopty: marks the last row there is as the person leaves the end, and forgets it as
-    /// they come back.
-    fn mark_jump(&mut self) {
-        if !self.show_jump_button {
-            self.jump_mark = None;
-        } else if self.jump_mark.is_none() {
-            self.jump_mark = self.rows.last().map(|row| row.id.clone());
+    /// slopty: the jump pill, at the list's foot while it does not follow its end and something
+    /// waits below; a run in its card or a subagent's doc has none.
+    fn render_jump(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const KEY: &str = "transcript-jump";
+        if self.fit.is_some() || self.doc_override.is_some() {
+            return None;
         }
+        let now = crate::clock::now(cx);
+        let leaving = jump::presence(KEY, self.jump_button_shown(), now)?;
+        if leaving.is_some() {
+            // Drawn again until it has gone, so a spent pill never lingers unseen.
+            cx.notify();
+        }
+        let button = jump::button(
+            KEY,
+            "transcript-jump-hover",
+            self.jump_unseen(),
+            (motion::reduced_motion(cx), now),
+            Theme::of(cx),
+            cx.listener(|this, _, _, cx| this.jump_to_bottom(cx)),
+        );
+        Some(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(Theme::SPACE_MD))
+                .flex()
+                .justify_center()
+                .child(jump::leave(KEY, leaving, button))
+                .into_any_element(),
+        )
     }
 
-    /// The scroll-to-bottom pill's click: glide back to the end and re-pin.
+    /// slopty: the jump pill's press: back to the end, following it.
     pub fn jump_to_bottom(&mut self, cx: &mut Context<Self>) {
         self.user_collapse_scroll = None;
         self.cancel_user_hold();
         self.discard_pending_viewport();
-        // An expanded prompt can be taller than the viewport. Its reservation
-        // is retained, but jumping should reveal the reply below that prompt.
-        if self.own_turn_anchor_ix().is_some_and(|ix| {
-            self.user_folds
-                .get(&self.rows[ix].id)
-                .is_some_and(|fold| fold.open == Some(true))
-        }) {
-            self.release_own_turn_hold();
-            self.engage_pin(cx);
-            return;
-        }
-        // With a live runway, "bottom" IS the held position (the reservation
-        // makes prompt-at-top and pad-bottom the same place): re-arm the hold
-        // and glide back instead of destroying the runway (user spec — only
-        // navigating away and back clears it).
-        if let Some(anchor) = self.own_turn.as_mut() {
-            anchor.held = true;
-            anchor.positioned = false;
-            self.own_turn_last_tick = None;
-            self.own_turn_kick = true;
-            self.show_jump_button = false;
-            cx.notify();
-            return;
-        }
-        self.engage_pin(cx);
-    }
-
-    /// Re-engage the bottom pin with a glide. Long jumps teleport to within
-    /// [`GLIDE_MAX_VIEWPORTS`] of the end first (mugen `springToBottom`);
-    /// reduced motion snaps.
-    fn engage_pin(&mut self, cx: &mut Context<Self>) {
-        self.pinned = true;
-        self.show_jump_button = false;
-        if motion::reduced_motion(cx) {
-            self.list.scroll_to_end();
-            cx.notify();
-            return;
-        }
-        let viewport = f32::from(self.list.viewport_bounds().size.height);
-        let distance = self.distance_from_bottom();
-        let glide_max = GLIDE_MAX_VIEWPORTS * viewport;
-        if viewport > 0.0 && distance > glide_max {
-            self.list.scroll_by(px(distance - glide_max));
-        }
-        self.wake_spring(crate::clock::now(cx));
+        self.glide = None;
+        self.follow();
         cx.notify();
-    }
-
-    /// Arm the per-frame spring driver — `render` schedules the next frame
-    /// while [`Self::spring_should_run`].
-    fn wake_spring(&mut self, now: Instant) {
-        if self.spring_settled_at.is_some_and(|settled| {
-            now.saturating_duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
-        }) {
-            self.spring.reset();
-            self.spring_last_tick = None;
-        }
-        self.spring_settled_at = None;
-        self.spring_kick = true;
-    }
-
-    /// A layout kick needs one observation; otherwise only unfinished motion
-    /// needs another frame. The settle grace retains state without repainting.
-    fn spring_should_run(&self) -> bool {
-        self.spring_kick || StickSpring::needs_frame(self.distance_from_bottom())
     }
 
     /// Whether the scroll offset is in a bottom-glued representation (`None`
@@ -5634,66 +4425,6 @@ impl Transcript {
         self.list.logical_scroll_top().item_ix >= self.rows.len()
     }
 
-    /// One spring frame: observe target growth, step the stepper, apply the
-    /// delta, and park on landing. Runs from `window.on_next_frame`,
-    /// i.e. after layout — measurements are fresh.
-    fn step_spring(&mut self, cx: &mut Context<Self>) {
-        if self.route_exit_pending(cx) {
-            return;
-        }
-        self.spring_kick = false;
-        if !self.pinned {
-            self.spring_last_tick = None;
-            return;
-        }
-        let now = crate::clock::now(cx);
-        if self.spring_settled_at.is_some_and(|settled| {
-            now.duration_since(settled) >= Duration::from_millis(SPRING_SETTLE_GRACE_MS)
-        }) {
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-        }
-        let frames = match self.spring_last_tick {
-            Some(last) => (now.duration_since(last).as_secs_f32() * 1000.0 / SPRING_FRAME_MS)
-                .min(SPRING_MAX_CATCHUP_FRAMES),
-            None => 1.0,
-        };
-        self.spring_last_tick = Some(now);
-
-        let target = f32::from(self.list.max_offset_for_scrollbar().y);
-        let mut distance = self.distance_from_bottom();
-        // Long jumps (chat switch mid-history, huge pastes) teleport first.
-        let viewport = f32::from(self.list.viewport_bounds().size.height);
-        let glide_max = GLIDE_MAX_VIEWPORTS * viewport;
-        if viewport > 0.0 && distance > glide_max {
-            self.list.scroll_by(px(distance - glide_max));
-            distance = glide_max;
-        }
-        let pos = target - distance;
-        let next = self.spring.step(pos, target, frames);
-        if next > pos {
-            self.list.scroll_by(px(next - pos));
-        }
-        self.last_scroll_distance = (target - next).max(0.0);
-
-        if target - next <= 0.5 {
-            // Land on the final item, not the scrollbar's estimated pixel
-            // total. Remeasuring virtual rows can otherwise move that total
-            // after every landing and restart the glide indefinitely.
-            self.list.scroll_to_end();
-            self.spring_settled_at.get_or_insert(now);
-        } else {
-            self.spring_settled_at = None;
-        }
-        // A stationary spring used to repaint throughout the 500ms grace.
-        // Repeated layout kicks kept that loop alive for entire streams even
-        // at distance=0, velocity=0. Preserve the final movement's paint and
-        // every moving frame; a settled spring wakes on the next layout kick.
-        if next > pos || StickSpring::needs_frame(self.last_scroll_distance) {
-            cx.notify();
-        }
-    }
 
     pub(crate) fn retain_for_route_exit(&mut self) {
         self.retain_on_deselect = true;
@@ -5717,7 +4448,6 @@ impl Transcript {
     /// Rebuild rows from app state; splice minimal ranges into the list.
     fn sync(&mut self, cx: &mut Context<Self>) {
         self.clock = crate::clock::utc(cx);
-        let now = crate::clock::now(cx);
         if self.retain_on_deselect
             && self.doc_override.is_none()
             && self.state.read(cx).selected_chat.is_none()
@@ -5800,15 +4530,6 @@ impl Transcript {
                 .and_then(|chat_id| self.saved_viewports.get_cloned_and_touch(chat_id));
             self.remember_current_viewport();
             self.remember_folds(selected.as_deref());
-            let keep_own_turn = self
-                .own_turn
-                .as_ref()
-                .is_some_and(|anchor| selected.as_deref() == Some(anchor.chat_id.as_str()));
-            if !keep_own_turn {
-                self.own_turn = None;
-                self.own_turn_kick = false;
-                self.own_turn_last_tick = None;
-            }
             self.chat_id = selected;
             self.rows.clear();
             self.tool_images.clear(cx);
@@ -5834,8 +4555,6 @@ impl Transcript {
             self.hovered_entry = None;
             self.pending_bubbles.clear(); // slopty
             self.sent_bubbles.clear(); // slopty
-            self.compact_fold_heights.clear();
-            self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
             self.user_hold_task = None;
             self.user_collapse_scroll = None;
@@ -5846,40 +4565,25 @@ impl Transcript {
             self.pending_viewport = None;
             self.viewport_generation = self.viewport_generation.wrapping_add(1);
             self.viewport_finalize_pending = false;
-            if self.own_turn.is_some() {
-                // A kept own-turn hold (send-created chat) owns the viewport.
-                self.pinned = false;
-                self.last_scroll_distance = 0.0;
-                self.show_jump_button = false;
-            } else if let Some(SavedViewport::Anchored {
+            self.jump_mark = None;
+            if let Some(SavedViewport::Anchored {
                 anchor,
                 distance_from_bottom,
-                own_turn,
             }) = saved_viewport
             {
-                // Keep a possible runway pending until replay confirms that
-                // its optimistic prompt still exists. Installing it on this
-                // empty attach frame can leave a failed send's stale anchor
-                // intercepting scroll-to-bottom forever.
+                // slopty: back where the person was reading, not following; the rows it resolves
+                // against arrive with the replay.
                 self.pinned = false;
+                self.list.set_follow_mode(FollowMode::Normal);
                 self.last_scroll_distance = distance_from_bottom;
-                self.show_jump_button = distance_from_bottom > SCROLL_BUTTON_THRESHOLD_PX;
                 self.pending_viewport = Some(SavedViewport::Anchored {
                     anchor,
                     distance_from_bottom,
-                    own_turn,
                 });
             } else {
-                // New chats and chats that were following their tail retain
-                // the existing open-at-bottom behavior.
-                self.pinned = true;
-                self.last_scroll_distance = 0.0;
-                self.show_jump_button = false;
+                // New chats and chats that were following their tail open at their end.
+                self.follow();
             }
-            self.spring.reset();
-            self.spring_last_tick = None;
-            self.spring_settled_at = None;
-            self.spring_kick = false;
             self.glide = None;
             self.stop_selection_scroll();
         }
@@ -5888,7 +4592,7 @@ impl Transcript {
         // Borrow the transcript only while deriving rows. Cloning the entity
         // handle lets rows_for mutate our caches without copying every text
         // and tool payload on each app-state notification.
-        let (entries_empty, tail_streaming) = {
+        let entries_empty = {
             let state = self.state.clone();
             let state = state.read(cx);
             let entries = match &self.doc_override {
@@ -5908,25 +4612,13 @@ impl Transcript {
                 .collect();
             for entry in entries {
                 if let Some(rows) = prepared.and_then(|p| p.rows.get(&entry.id)) {
-                    // slopty: a plan's fold hides its rows here too; a divider says how long its
-                    // turn worked, as a row built here would.
-                    let secs = self.compact_worked_secs_for(entry);
-                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row, now)).cloned().map(
-                        |mut row| {
-                            settle_worked(&mut row, secs);
-                            row
-                        },
-                    ));
+                    // slopty: a plan's fold hides its rows here too.
+                    new_rows.extend(rows.iter().filter(|row| self.fold_shows(row)).cloned());
                 } else {
-                    new_rows.extend(self.rows_for(entry, false, now));
+                    new_rows.extend(self.rows_for(entry, false));
                 }
             }
-            (
-                entries.is_empty(),
-                entries
-                    .last()
-                    .is_some_and(|e| e.status == Some(MessageStatus::Streaming)),
-            )
+            entries.is_empty()
         };
 
         let baseline = self
@@ -6062,12 +4754,11 @@ impl Transcript {
         let now = crate::clock::now(cx);
         let mut live_tool_groups = HashSet::new();
         for row in &new_rows {
-            let RowKind::ToolGroup { tools, compact_shell, .. } = &row.kind else {
+            let RowKind::ToolGroup { tools, .. } = &row.kind else {
                 continue;
             };
-            // Agent/spawn groups are standalone cards, not task trees; a turn's divider folds
-            // them with the rest.
-            if !compact_shell && !tool_group_collapses(tools) {
+            // Agent/spawn groups are standalone cards, not task trees.
+            if !tool_group_collapses(tools) {
                 continue;
             }
             live_tool_groups.insert(row.id.clone());
@@ -6182,21 +4873,22 @@ impl Transcript {
         self.historical_markdown
             .retain(|id, _| active_markdown.contains(id));
 
-        // Capture this before the row splice changes the list's measured end.
-        // When the user is truly live-following, retaining the end anchor
-        // keeps the in-flow working trailer at the same viewport position as
-        // transcript lines grow above it. Nothing about the trailer's layout
-        // or coordinates changes.
-        let live_following =
-            should_anchor_live_stream(self.pinned, self.distance_from_bottom(), tail_streaming);
-        let was_empty = self.rows.is_empty();
+        // slopty: not following, the first row in view holds its place by its key, whatever the
+        // splice replaces around it (`inspector.md`, "Follow and anchor"). A list the layout
+        // clamped to its end (its rows under the held one no longer filled the view) is held by
+        // the row it shows first, so what lands below never carries it along.
+        if !self.pinned && self.pending_viewport.is_none() && self.is_glued() {
+            self.materialize_scroll_anchor();
+        }
+        let held = (!self.pinned && self.pending_viewport.is_none())
+            .then(|| ViewportAnchor::capture(&self.rows, self.list.logical_scroll_top()))
+            .flatten();
         let old_last = self.rows.len().checked_sub(1);
         match diff_rows(&self.rows, &new_rows) {
             None => {
                 self.rows = new_rows;
                 self.refresh_protected_attachments(cx);
                 self.release_departed_tool_images(cx);
-                self.reconcile_own_turn_prompt();
                 // Replay readiness is independent of row content: an empty
                 // reset (or one identical to optimistic rows) still resolves
                 // or retires the pending viewport.
@@ -6225,8 +4917,7 @@ impl Transcript {
                     // those items to hint-less Unmeasured (heights read 0
                     // until the next paint) and, when the viewport-top item is
                     // inside the range, clobber the scroll anchor to the range
-                    // start — the end-of-turn up/down jump the spring then has
-                    // to walk back. `remeasure_items` keeps old sizes as hints
+                    // start. `remeasure_items` keeps old sizes as hints
                     // and holds the anchor across the remeasure.
                     self.list.remeasure_items(old_range);
                 } else {
@@ -6241,18 +4932,14 @@ impl Transcript {
                 // Bottom chrome moves to the new tail too.
                 self.list.remeasure_items(ix..ix + 1);
             }
-            if was_empty && self.own_turn.is_some() && !self.rows.is_empty() {
-                // There was no concrete row to materialize at send time.
-                // Start the echo at the bottom edge before adding its runway.
-                self.list.scroll_to(ListOffset {
-                    item_ix: 0,
-                    offset_in_item: -self.list.viewport_bounds().size.height,
-                });
-            }
+        }
+        if let Some(offset) = held.and_then(|held| held.resolve_exact(&self.rows))
+            && offset != self.list.logical_scroll_top()
+        {
+            self.list.scroll_to(offset);
         }
         self.refresh_protected_attachments(cx);
         self.release_departed_tool_images(cx);
-        self.reconcile_own_turn_prompt();
         self.restore_pending_viewport(replay);
         if self.land_end_pending && !self.rows.is_empty() {
             // First content for an unpinned override tab: land at the end.
@@ -6264,54 +4951,12 @@ impl Transcript {
             self.land_end_pending = false;
             self.list.scroll_to_end();
         }
-        if self.own_turn.is_some() {
-            self.own_turn_kick = true;
-        }
-        if self.pinned {
-            if live_following || baseline_changed {
-                self.list.scroll_to_end();
-                self.spring.reset();
-                self.spring_last_tick = None;
-                self.spring_settled_at = None;
-                self.spring_kick = false;
-                self.last_scroll_distance = 0.0;
-            } else {
-                if motion::reduced_motion(cx) || was_empty {
-                    // First fill (chat open) lands at the bottom instantly
-                    // (mugen initialScroll:'bottom'); reduced motion snaps.
-                    self.list.scroll_to_end();
-                } else if self.is_glued() {
-                    // A glued offset (`None` / anchored past the end) makes
-                    // the upcoming layout hard-snap to the new end — the
-                    // per-commit stutter. Materialize a pixel anchor a hair
-                    // above the bottom so layout holds position and the
-                    // spring glides the growth.
-                    self.list.scroll_by(px(-0.75));
-                }
-                self.spring_kick = true;
-            }
-        }
+        // slopty: following, the list's tail mode keeps its end in view on every layout.
         cx.notify();
     }
 
-    fn compact_worked_secs_for(&self, entry: &SessionMessageEntry) -> Option<i64> {
-        if entry.role != MessageRole::Assistant {
-            return None;
-        }
-        if entry.status == Some(MessageStatus::Streaming) {
-            return None;
-        }
-        if let Some(ms) = entry.duration_ms {
-            return (ms > 0).then_some((ms / 1000).max(1));
-        }
-        self.compact_last_elapsed
-            .get(&entry.id)
-            .copied()
-            .filter(|&secs| secs > 0)
-    }
-
     /// Cached row build for one entry (streaming entries bypass the cache).
-    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool, now: Instant) -> Vec<Row> {
+    fn rows_for(&mut self, entry: &SessionMessageEntry, pending: bool) -> Vec<Row> {
         let streaming = entry.status == Some(MessageStatus::Streaming);
         // Live entries always rebuild; don't allocate a fingerprint that the
         // streaming path cannot use.
@@ -6335,10 +4980,6 @@ impl Transcript {
             };
             rows_for_entry(entry, pending, &mut parse)
         };
-        let secs = self.compact_worked_secs_for(entry);
-        for row in &mut rows {
-            settle_worked(row, secs);
-        }
 
         if !streaming {
             self.row_cache.insert(
@@ -6349,22 +4990,15 @@ impl Transcript {
                 },
             );
         }
-        rows.retain(|row| self.fold_shows(row, now)); // slopty: shared with the prepared rows.
+        rows.retain(|row| self.fold_shows(row)); // slopty: shared with the prepared rows.
         rows
     }
 
-    /// A row shows unless its fold is closed. A closing fold keeps its body mounted through
-    /// the fold's tween; the shell's settle sweep drops the rows afterwards.
-    fn fold_shows(&self, row: &Row, now: Instant) -> bool {
-        match &row.compact_fold {
-            None => true,
-            Some(id) => self.folds.get(id).is_some_and(|fold| {
-                fold.open == Some(true)
-                    || fold
-                        .toggled_at
-                        .is_some_and(|at| now.saturating_duration_since(at) < FOLD_TWEEN_WINDOW)
-            }),
-        }
+    /// A row shows unless its fold (a long plan's) is closed.
+    fn fold_shows(&self, row: &Row) -> bool {
+        row.compact_fold
+            .as_ref()
+            .is_none_or(|id| self.folds.get(id).is_some_and(|fold| fold.open == Some(true)))
     }
 
     /// Fetch a sidecar blob (full tool output or diff) and build its upgraded
@@ -6434,10 +5068,8 @@ impl Transcript {
         now: Instant,
     ) {
         let duration_ms = user_resize_duration_ms(full_h - collapsed_h);
-        // A fold owns the viewport just like explicit navigation. Release
-        // the sent-turn hold as well as the spring: otherwise growing beyond
-        // the reserved space hands the still-held turn back to the bottom
-        // pin and hides the beginning of the newly expanded prompt.
+        // A fold owns the viewport just like explicit navigation: following the end would hide
+        // the beginning of the newly expanded prompt.
         self.begin_scroll_navigation();
         let entry = self.user_folds.entry(row_id).or_default();
         let currently_open = entry.open.unwrap_or(false);
@@ -6562,96 +5194,20 @@ impl Transcript {
         if raw >= 1.0 {
             self.user_collapse_scroll = None;
             self.last_scroll_distance = self.distance_from_bottom();
-            self.show_jump_button =
-                jump_visibility(self.show_jump_button, self.last_scroll_distance);
         }
         cx.notify();
     }
 
-    fn toggle_fold(
-        &mut self,
-        row_id: SharedString,
-        open_height: f32,
-        auto_open: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let shell_ix = self.rows.iter().position(|row| {
-            row.id == row_id
-                && matches!(
-                    row.kind,
-                    RowKind::ToolGroup {
-                        compact_shell: true,
-                        ..
-                    }
-                )
-        });
-        // A compact shell tweens its sibling body rows, so the tween opens
-        // from the body's CURRENT rendered height — including mid-tween
-        // reversals — not the header's analytic chip height.
-        let body_height = shell_ix.map(|ix| {
-            let total = self.compact_fold_total(&row_id, ix);
-            let fold = self.folds.get(&row_id).copied().unwrap_or_default();
-            compact_body_height(fold, total, motion::reduced_motion(cx), crate::clock::now(cx))
-        });
-        let now_open = {
-            let entry = self.folds.entry(row_id.clone()).or_default();
-            let currently_open = entry.open.unwrap_or(auto_open);
-            entry.from = body_height.unwrap_or(if currently_open { open_height } else { 0.0 });
-            entry.open = Some(!currently_open);
-            entry.epoch += 1;
-            entry.toggled_at = Some(crate::clock::now(cx));
-            entry.disclosure_at = entry.toggled_at;
-            !currently_open
-        };
-        if shell_ix.is_none() {
-            return;
-        }
-        let reduce = motion::reduced_motion(cx);
-        if now_open || reduce {
-            if reduce && !now_open {
-                // Instant transition — no tween, so nothing retains the body.
-                if let Some(entry) = self.folds.get_mut(&row_id) {
-                    entry.toggled_at = None;
-                }
-            }
-            // Mount the folded rows so the tween has content to reveal —
-            // or, under reduced motion, drop them immediately on close.
-            self.last_source = None;
-            self.sync(cx);
-        } else {
-            // The body stays mounted through the close tween; sweep it out
-            // of the row list once the retention window elapses.
-            self.compact_fold_settle = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(FOLD_TWEEN_WINDOW + Duration::from_millis(50))
-                    .await;
-                this.update(cx, |this, cx| {
-                    this.last_source = None;
-                    this.sync(cx);
-                    cx.notify();
-                })
-                .ok();
-            }));
-        }
-    }
-
-    /// A folded body row's natural height as measured by its prepaint probe;
-    /// zero until the row's first paint lands the measurement.
-    fn compact_fold_height(&self, row_id: &SharedString) -> f32 {
-        self.compact_fold_heights
-            .get(row_id)
-            .map_or(0.0, |cell| cell.get())
-    }
-
-    /// Total natural height of the contiguous body rows following a compact
-    /// shell header (`shell_ix` is the header's row index).
-    fn compact_fold_total(&self, work_id: &SharedString, shell_ix: usize) -> f32 {
-        self.rows
-            .iter()
-            .skip(shell_ix + 1)
-            .take_while(|row| row.compact_fold.as_ref() == Some(work_id))
-            .map(|row| self.compact_fold_height(&row.id))
-            .sum()
+    /// slopty: open or shut the group `row_id`, as the person asked: the tween runs from the
+    /// height it was drawn at (`open_height` open, none shut).
+    fn toggle_fold(&mut self, row_id: SharedString, open_height: f32, cx: &mut Context<Self>) {
+        let entry = self.folds.entry(row_id).or_default();
+        let was_open = entry.open.unwrap_or(false);
+        entry.from = if was_open { open_height } else { 0.0 };
+        entry.open = Some(!was_open);
+        entry.epoch += 1;
+        entry.toggled_at = Some(crate::clock::now(cx));
+        entry.disclosure_at = entry.toggled_at;
     }
 
     // ---- attachment read-back (user-attachments.tsx + transcript cache) ----
@@ -7625,8 +6181,8 @@ impl Transcript {
     }
 
     /// A diagram replaced its source (or the reverse): remeasure the rows
-    /// painting it and let the bottom pin and the own-turn runway absorb the
-    /// height change, exactly like any other layout-affecting row update.
+    /// painting it and let the follow rule absorb the height change, exactly
+    /// like any other layout-affecting row update.
     fn diagram_layout_changed(&mut self, rows: &[SharedString], cx: &mut Context<Self>) {
         let mut changed = false;
         for (ix, row) in self.rows.iter().enumerate() {
@@ -7639,12 +6195,6 @@ impl Transcript {
             return;
         }
         self.viewport_layout_revision = self.viewport_layout_revision.wrapping_add(1);
-        if self.pinned {
-            self.wake_spring(crate::clock::now(cx));
-        }
-        if self.own_turn.is_some() {
-            self.own_turn_kick = true;
-        }
         cx.notify();
     }
 
@@ -8014,26 +6564,6 @@ impl Transcript {
         // slopty: the clock moves on at the timer's next whole second, so the second a frame
         // says is the one every frame built after it says.
         self.tick_clock(Some(turn), cx);
-        if elapsed_secs > 0 {
-            let entry_id = if let Some(doc_id) = &self.doc_override {
-                self.state
-                    .read(cx)
-                    .sub_transcript(doc_id)
-                    .last()
-                    .map(|e| e.id.clone())
-            } else {
-                self.state
-                    .read(cx)
-                    .transcript
-                    .iter()
-                    .rev()
-                    .find(|e| e.role == MessageRole::Assistant)
-                    .map(|e| e.id.clone())
-            };
-            if let Some(entry_id) = entry_id {
-                self.compact_last_elapsed.insert(entry_id, elapsed_secs);
-            }
-        }
         // slopty: the call under way, or the newest thought, in place of the flavour word.
         let step = {
             let state = self.state.read(cx);
@@ -8393,17 +6923,6 @@ impl Transcript {
                         .flex()
                         .child(bubble)
                         .children(beside.take());
-                    // slopty: the person's own send fades and rises in as it first draws (#15).
-                    let foot = if self.bubble_enters(&row.entry_id, cx) {
-                        foot.with_animation(
-                            SharedString::from(format!("enter-{}", row.id)),
-                            SEND_ENTRANCE.animation(),
-                            |foot, t| foot.opacity(t).top(px(SEND_RISE * (1.0 - t))),
-                        )
-                        .into_any_element()
-                    } else {
-                        foot.into_any_element()
-                    };
                     column = column.child(div().w_full().flex().justify_end().child(foot));
                 }
                 column.into_any_element()
@@ -8556,24 +7075,9 @@ impl Transcript {
                 }
                 el
             }
-            RowKind::ToolGroup {
-                tools,
-                auto_open,
-                summary,
-                worked_secs,
-                compact_shell,
-                done,
-            } => self.render_tool_group(
-                &row.id,
-                tools,
-                summary,
-                *auto_open,
-                *worked_secs,
-                *compact_shell,
-                done.clone(),
-                &theme,
-                cx,
-            ),
+            RowKind::ToolGroup { tools, summary } => {
+                self.render_tool_group(&row.id, tools, summary, &theme, cx)
+            }
             RowKind::InputChip { label, header, resolved } => {
                 input_chip(&row.id, label.clone(), header.clone(), *resolved, &theme)
             }
@@ -8724,79 +7228,10 @@ impl Transcript {
                     .max_w(px(self.content_width))
                     .min_w_0()
                     .child(inner)
-                    .children(lane),
+                    .children(lane)
+                    .children(self.footer.clone().filter(|_| is_last).map(|footer| Self::footer_frame(footer, cx))),
             );
-        let Some(work_id) = row.compact_fold.clone() else {
-            return outer.into_any_element();
-        };
-
-        // Compact work-fold body row: the shell header tweens ONE shared
-        // height budget across these sibling rows — each row clips to
-        // `budget - prefix`, reproducing an ordinary fold's single
-        // overflow-hidden container. A prepaint probe keeps the row's
-        // natural height current so the tween never needs its layout ahead
-        // of time.
-        let probe = self
-            .compact_fold_heights
-            .entry(row.id.clone())
-            .or_insert_with(|| Rc::new(Cell::new(0.0)))
-            .clone();
-        let body = div().relative().flex_none().w_full().child(outer).child(
-            canvas(
-                move |bounds, _, _| {
-                    let height = f32::from(bounds.size.height);
-                    if (probe.get() - height).abs() > 0.5 {
-                        probe.set(height);
-                    }
-                },
-                |_, _, _, _| (),
-            )
-            .absolute()
-            .inset_0(),
-        );
-        let fold = self.folds.get(&work_id).copied().unwrap_or_default();
-        let open = fold.open.unwrap_or(false);
-        let reduce_motion = motion::reduced_motion(cx);
-        let now = cx.frame_time(); // slopty: the frame's moment
-        let contents = tool_fold(open, fold.toggled_at, now, reduce_motion);
-        let animating = contents.moving;
-        if !animating {
-            // Settled states render plain — open rows untouched, closed rows
-            // empty until the settle sweep drops them from the row list.
-            return if open {
-                body.into_any_element()
-            } else {
-                gpui::Empty.into_any_element()
-            };
-        }
-        let (prefix, own, total) =
-            compact_fold_geometry(&self.rows, &self.compact_fold_heights, &work_id, ix);
-        let clip = (compact_body_height(fold, total, reduce_motion, now) - prefix).clamp(0.0, own);
-        if own > 0.0 && clip >= own {
-            return body.into_any_element();
-        }
-        if own > 0.0 && clip <= 0.0 {
-            return gpui::Empty.into_any_element();
-        }
-        let view = cx.entity_id();
-        div()
-            .relative()
-            .w_full()
-            .overflow_hidden()
-            .h(px(clip))
-            // slopty: the rows fade in after the height opens, and out before it lands.
-            .child(div().w_full().opacity(contents.opacity).mt(px(contents.rise)).child(body))
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |_, _, window, _| {
-                        window.on_next_frame(move |_, cx| cx.notify(view));
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            )
-            .into_any_element()
+        outer.into_any_element()
     }
 
     /// slopty: the last row's lane: `body` (its working line or its strip) at no less than the
@@ -9011,10 +7446,6 @@ impl Transcript {
         row_id: &SharedString,
         tools: &Arc<Vec<ToolItem>>,
         summary: &Sentence,
-        auto_open: bool,
-        worked_secs: Option<i64>,
-        compact_shell: bool,
-        done: Option<SharedString>,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -9028,25 +7459,11 @@ impl Transcript {
         }) {
             self.tick_soon(cx);
         }
-        let (collapses, solo) = group_shape(tools, compact_shell);
-        let arrival_pending = !cx.reduce_motion()
-            && self.tool_group_reveals.get(row_id).is_some_and(|reveal| {
-                reveal.starts.iter().flatten().any(|start| {
-                    crate::clock::now(cx)
-                        .checked_duration_since(*start)
-                        .unwrap_or_default()
-                        < TOOL_CONNECTOR_REVEAL.total()
-                })
-            });
-        // Compact mode never auto-opens — not for the streaming tail, and not
-        // to show chips arriving mid-reveal. Collapsed-by-default is the mode.
-        let effective_auto_open = auto_open || (arrival_pending && !compact_shell);
-        let open = solo || !collapses || fold.open.unwrap_or(effective_auto_open);
-        // Compact shells only change `open` through `toggle_fold`, which
-        // already seeds `from` with the body's measured height — the
-        // rendered-height reset below must not clobber it with the shell's
-        // own (unused) body tracking.
-        if collapses && !compact_shell {
+        let (collapses, solo) = group_shape(tools);
+        // slopty: a group opens only as the person asks; nothing opens it by itself, not a
+        // running call and not one arriving (`inspector.md`, "One fold depth").
+        let open = solo || !collapses || fold.open.unwrap_or(false);
+        if collapses {
             let reveal = self.tool_group_reveals.entry(row_id.clone()).or_default();
             if reveal
                 .rendered_open
@@ -9059,39 +7476,14 @@ impl Transcript {
             }
             reveal.rendered_open = Some(open);
         }
-        // The title shimmer reads "working" even under the collapsed compact
-        // fold — any unresolved chip (a running tool, a live thought) keeps it
-        // pulsing until the turn's work settles. Compute this before the
-        // collapsed-body skip, which may empty `tools`.
-        let active =
-            collapses && (auto_open || (compact_shell && tools.iter().any(|t| !t.resolved)));
-        if compact_shell && active {
-            self.compact_live_entries.insert(row_id.clone());
-        }
-        let worked_secs = worked_secs.filter(|_| compact_shell);
-        if worked_secs.is_some() && self.compact_live_entries.remove(row_id) {
-            self.compact_worked_fade_at
-                .insert(row_id.clone(), crate::clock::now(cx));
-        }
-        let animate_worked = self
-            .compact_worked_fade_at
-            .get(row_id)
-            .is_some_and(|at| frame_now.saturating_duration_since(*at) < PHASE_IN.total());
-        // slopty: how far into the swap from the live summary to "Worked for", in ms; a settled
-        // turn seen later is past it.
-        let worked_fade_ms = match self.compact_worked_fade_at.get(row_id) {
-            Some(at) if animate_worked && !cx.reduce_motion() => {
-                frame_now.saturating_duration_since(*at).as_secs_f32() * 1_000.0
-            }
-            _ => f32::INFINITY,
-        };
+        // The title shimmer reads "working" while any call or thought of the group still runs.
+        // Compute this before the collapsed-body skip, which may empty `tools`.
+        let active = collapses && tools.iter().any(|t| !t.resolved);
 
         // A settled collapsed group has no visible body. Do not construct or
         // format thousands of hidden chips merely to clip them to zero height.
         // Keep the body during closing so the existing fold animation survives.
-        // slopty: a turn's divider draws none of its calls: its rows are the turn's own.
-        let body_visible =
-            !compact_shell && (open || tool_fold(open, fold.toggled_at, frame_now, cx.reduce_motion()).moving);
+        let body_visible = open || tool_fold(open, fold.toggled_at, frame_now, cx.reduce_motion()).moving;
         let tools = if body_visible {
             tools.as_slice()
         } else {
@@ -9210,14 +7602,9 @@ impl Transcript {
             .zip(&detail_folds)
             .zip(tools.iter())
             .map(|(((detail, invocation), fold), tool)| {
-                // A STREAMING thought chip defaults open (the live thinking
-                // is the point); settled chips default closed. A user toggle
-                // overrides either way; a turn's divider opens only to
-                // the person.
-                let default_open =
-                    tool.kind == ToolItemKind::Thought && !tool.resolved && !compact_shell;
+                // slopty: a step's detail opens only as the person asks, a live thought's too.
                 (detail.is_some() || invocation.is_some() || chip_has_images(tool))
-                    && fold.open.unwrap_or(default_open)
+                    && fold.open.unwrap_or(false)
             })
             .collect();
         // Image previews exist only while their chip's body is mounted (open,
@@ -9328,9 +7715,8 @@ impl Transcript {
         let viewport_height = revealed_height;
         let target = if open { viewport_height } else { 0.0 };
         // slopty: a running call's row sweeps in phase with its group's title (#14).
-        let running_call = auto_open && tools.iter().any(sweeps);
-        // slopty: a turn's divider stays still; only a group's title and its running row sweep.
-        let shimmer_phase = if (active || running_call) && !reduce_motion && !compact_shell {
+        let running_call = open && tools.iter().any(sweeps);
+        let shimmer_phase = if (active || running_call) && !reduce_motion {
             motion::pulse_lease(cx.entity_id(), cx);
             // slopty: the pulse's tick, which drew it, on the shimmer's one clock.
             Some(shimmer_ms(motion::pulse_moment(cx.entity_id(), cx)))
@@ -9354,68 +7740,6 @@ impl Transcript {
             crate::clock::now(cx),
         );
         let toggle_id = row_id.clone();
-        // slopty: a turn's work folds behind one centred divider (Amp's settled turn): "Worked for
-        // 1m 12s ›" between two hairlines, when it ended in its tooltip.
-        if compact_shell {
-            let view = cx.entity_id();
-            // The sibling body rows fold as one ([`tool_fold`]) — keep frames (and
-            // the chevron's disclosure rotation) pumping until it lands.
-            if tool_fold(open, fold.toggled_at, frame_now, reduce_motion).moving {
-                motion_active = true;
-            }
-            // slopty: a screen reader hears what the work was as well as how long it took,
-            // which the eye finds by opening it: "Worked for 6s, ran 2 commands". Its words stay
-            // short and still (Amp): "Worked for 4m 13s" once known, else "Hide work" or "Show
-            // work"; the sentence is the tooltip of a turn still running (#1).
-            let live = SharedString::from(divider_words(open));
-            let label = match worked_secs {
-                Some(secs) => SharedString::from(spoken_divider(&worked_for_label(secs), &summary.text)),
-                None => SharedString::from(spoken_divider(&live, &summary.text)),
-            };
-            let title = match worked_secs {
-                Some(secs) => divider_title(
-                    live.clone(),
-                    SharedString::from(worked_for_label(secs)),
-                    worked_fade_ms,
-                    theme,
-                ),
-                None => tool_group_title(live, &[], None, theme),
-            };
-            let tip = done.or_else(|| (!summary.text.is_empty()).then(|| summary.text.clone()));
-            let divider = turn_divider(
-                row_id,
-                label,
-                title,
-                open,
-                disclosure_progress,
-                tip,
-                theme,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
-                    cx.notify();
-                }),
-            );
-            return div()
-                .relative()
-                .flex()
-                .flex_col()
-                .font_family(theme.font_sans_fixed.clone())
-                .child(divider)
-                .when(motion_active || animate_worked, |group| {
-                    group.child(
-                        canvas(
-                            |_, _, _| (),
-                            move |_, _, window, _| {
-                                window.on_next_frame(move |_, cx| cx.notify(view));
-                            },
-                        )
-                        .absolute()
-                        .inset_0(),
-                    )
-                })
-                .into_any_element();
-        }
         // A quiet summary sits above the activity rail; its chevron occupies
         // the same gutter as the rounded task-tree elbows below it.
         // slopty: a button the keyboard reaches, Enter or Space opening it (#9).
@@ -9450,7 +7774,7 @@ impl Transcript {
             .hover(|s| s.text_color(theme.text))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.toggle_fold(toggle_id.clone(), viewport_height, effective_auto_open, cx);
+                this.toggle_fold(toggle_id.clone(), viewport_height, cx);
                 cx.notify();
             }))
             .child(
@@ -9498,16 +7822,9 @@ impl Transcript {
                     tool_connector_continuation(connector_progress.get(ix + 1).copied());
                 let row_height = row_heights[ix];
                 // slopty: a spawn is its subagent's card, which opens in place and drills in
-                // (`transcript/subagents.rs`); the newest running one of the turn under way
-                // opens itself.
+                // (`transcript/subagents.rs`), only as the person asks.
                 if is_spawn_link(tool) {
-                    let frontier = auto_open
-                        && tools[ix + 1..]
-                            .iter()
-                            .all(|later| !is_spawn_link(later) || !subagents::Card::of(later).running);
-                    return self.render_subagent_card(
-                        row_id, ix, tool, frontier, collapses, theme, cx,
-                    );
+                    return self.render_subagent_card(row_id, ix, tool, false, collapses, theme, cx);
                 }
                 let detail = details[ix].clone();
                 let invocation = invocations[ix].clone();
@@ -9777,7 +8094,7 @@ impl Transcript {
                 ))
             })
             .child(body)
-            .when(motion_active || animate_worked, |group| {
+            .when(motion_active, |group| {
                 group.child(
                     canvas(
                         |_, _, _| (),
@@ -10567,23 +8884,6 @@ fn thought_line_text(line: &[InlineRun], theme: &Theme) -> Option<(SharedString,
     Some((text.into(), runs))
 }
 
-/// The folded-narration chip's header detail — the first non-blank line of
-/// the text, already flattened by [`thought_lines`] (inline markers became
-/// styling, so they don't leak `**` glyphs into the one-liner).
-fn note_chip_detail(tool: &ToolItem) -> String {
-    let Some(ToolDetail::Thought { lines, .. }) = tool.detail.as_deref() else {
-        return String::new();
-    };
-    for line in lines {
-        let text: String = line.iter().map(|run| run.text.as_str()).collect();
-        let text = single_line(text.trim());
-        if !text.is_empty() {
-            return text;
-        }
-    }
-    String::new()
-}
-
 /// The trailing tile on a chip header, when it has one.
 enum ChipTrail {
     /// Expand/collapse chevron — flipped while the detail body is open. slopty: on an activity
@@ -10632,7 +8932,6 @@ impl ToolFileOpener {
 fn chip_words(tool: &ToolItem) -> (String, String) {
     let (label, detail) = match tool.kind {
         ToolItemKind::Thought => ("Thought process", String::new()),
-        ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
         ToolItemKind::Call => tool_chip_content(&tool.call),
     };
     // slopty: a call zeron draws as `Tool · {name}` says itself in the TUI's words.
@@ -10754,7 +9053,6 @@ fn chip_header_row(
                     .child(
                         crate::icons::icon(match tool.kind {
                             ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
-                            ToolItemKind::Note => crate::icons::PEN,
                             ToolItemKind::Call => tool_icon_path(&tool.call),
                         })
                         .size(px(12.0))
@@ -11174,7 +9472,6 @@ fn activity_rail(
         .child(
             crate::icons::icon(match tool.kind {
                 ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
-                ToolItemKind::Note => crate::icons::PEN,
                 ToolItemKind::Call => tool_icon_path(&tool.call),
             })
             .absolute()
@@ -11306,7 +9603,6 @@ fn solo_rail(tool: &ToolItem, row_height: f32, theme: &Theme) -> gpui::Div {
     div().relative().w(px(SOLO_RAIL_WIDTH)).flex_none().child(
         crate::icons::icon(match tool.kind {
             ToolItemKind::Thought => crate::icons::CHAT_ROUND_LINE,
-            ToolItemKind::Note => crate::icons::PEN,
             ToolItemKind::Call => tool_icon_path(&tool.call),
         })
         .absolute()
@@ -11404,15 +9700,16 @@ impl Render for Transcript {
         self.page_viewport = self.list.viewport_bounds();
         // slopty: a subagent's card sizes its child by the window, and drills in on a phone's.
         self.subagents.window = window.viewport_size();
-        self.mark_jump();
+        // slopty: the list stopped following on an input of its own (its scrollbar's drag), so
+        // the rule lets go too.
+        if self.pinned && !self.list.is_following_tail() {
+            self.let_go();
+        }
         self.md_images.borrow_mut().folder = self.image_host(cx).1;
         if record_view_frame("transcript") {
             tracing::warn!(
                 distance = self.distance_from_bottom(),
-                spring = self.spring_should_run(),
-                velocity = self.spring.velocity,
-                target_velocity = self.spring.target_vel,
-                own_turn = self.own_turn.is_some(),
+                following = self.pinned,
                 veils = self.veils.len(),
                 "transcript motion state"
             );
@@ -11434,12 +9731,6 @@ impl Render for Transcript {
             // changes. Invalidate virtual row heights explicitly, retaining
             // their anchors and all live animation/provenance state.
             self.list.remeasure();
-            if self.pinned {
-                self.wake_spring(crate::clock::now(cx));
-            }
-            if self.own_turn.is_some() {
-                self.own_turn_kick = true;
-            }
         }
         let typography_generation = crate::typography::generation(cx);
         if self.typography_generation != typography_generation {
@@ -11472,32 +9763,8 @@ impl Render for Transcript {
         if !released_diagrams.is_empty() {
             crate::image_media::release_media(released_diagrams, cx);
         }
-        // Own-turn driver: measurements are only authoritative after layout,
-        // so reservation sizing, the send glide, and the outgrown-handoff
-        // each advance at most once per requested frame. Scheduled on every
-        // frame while an anchor is live (not just on kicks) so viewport
-        // resizes and streaming growth re-derive the reservation; the step
-        // only notifies on change, so a settled hold schedules no next frame.
         let frame_asked_at = crate::clock::now(cx);
-        if !self.route_exit_pending(cx)
-            && (self.own_turn.is_some() || self.own_turn_kick)
-            && let Some(ask) = self.own_turn_scheduled.ask(frame_asked_at)
-        {
-            let entity = cx.weak_entity();
-            window.on_next_frame(move |_, cx| {
-                entity
-                    .update(cx, |this: &mut Transcript, cx| {
-                        if this.own_turn_scheduled.answered(ask) {
-                            this.step_own_turn(cx);
-                        }
-                    })
-                    .ok();
-            });
-        }
-        // slopty: travel no scroll decision took (a nested scroller's step) is
-        // not this list's.
-        self.wheel_travel = 0.0;
-        // slopty: a jump's glide steps once a frame, as the spring does (#13).
+        // slopty: a jump's glide steps once a frame (#13).
         if self.glide.is_some()
             && let Some(ask) = self.glide_scheduled.ask(frame_asked_at)
         {
@@ -11507,26 +9774,6 @@ impl Render for Transcript {
                     .update(cx, |this: &mut Transcript, cx| {
                         if this.glide_scheduled.answered(ask) {
                             this.step_glide(cx);
-                        }
-                    })
-                    .ok();
-            });
-        }
-        // Spring driver: one on_next_frame callback at a time; each tick
-        // notifies, which re-enters render and schedules the next frame until
-        // the spring parks. Reduced motion never schedules (sync snaps).
-        if !self.route_exit_pending(cx)
-            && self.pinned
-            && !motion::reduced_motion(cx)
-            && self.spring_should_run()
-            && let Some(ask) = self.spring_scheduled.ask(frame_asked_at)
-        {
-            let entity = cx.weak_entity();
-            window.on_next_frame(move |_, cx| {
-                entity
-                    .update(cx, |this: &mut Transcript, cx| {
-                        if this.spring_scheduled.answered(ask) {
-                            this.step_spring(cx);
                         }
                     })
                     .ok();
@@ -11555,11 +9802,7 @@ impl Render for Transcript {
                             }
                             return;
                         }
-                        let distance = this.distance_from_bottom();
-                        this.last_scroll_distance = distance;
-                        this.show_jump_button = jump_visibility(this.show_jump_button, distance)
-                            && !this.pinned
-                            && !this.own_turn.as_ref().is_some_and(|turn| turn.held);
+                        this.last_scroll_distance = this.distance_from_bottom();
                         if token.layout_settled(this.viewport_layout_revision) {
                             this.viewport_finalize_pending = false;
                         }
@@ -11586,11 +9829,6 @@ impl Render for Transcript {
                     .ok();
             });
         }
-        // The scroll-to-bottom pill is rendered by the SHELL (conversation
-        // region overlay): it must float just above the composer and paint
-        // OVER the bottom fade gradient, which is a later sibling of this
-        // outlet — an overlay here would be tinted by the fade.
-        self.update_runway_minimum(cx);
         let list_el = crate::overscroll::overscroll(
             "transcript-overscroll",
             crate::overscroll::OverscrollSource::List(self.list.clone()),
@@ -11615,6 +9853,9 @@ impl Render for Transcript {
             .relative()
             .size_full()
             .min_h_0()
+            // slopty: every press starts off no footer's; the footer's own frame says otherwise
+            // before the press handler below hears it.
+            .capture_any_mouse_down(cx.listener(|this, _: &gpui::MouseDownEvent, _, _| this.footer_press = false))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(Self::on_selection_mouse_down),
@@ -11624,11 +9865,6 @@ impl Render for Transcript {
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_selection_mouse_up))
             // slopty: a right-click on selected text opens its menu.
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_context_click))
-            // slopty: the list's wheel step, before its deferred scroll decision.
-            .on_scroll(cx.listener(|this, event: &gpui::ScrollEvent, _, _| {
-                this.wheel_travel += f32::from(event.delta.pixel_delta(px(20.0)).y);
-            }))
-            .on_scroll(cx.listener(Self::on_scroll_wheel))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -11640,7 +9876,12 @@ impl Render for Transcript {
             // slopty: find's per-row counts start again each frame, before any row paints.
             .child(crate::markdown::find::frame_reset(cx.entity_id().as_u64()))
             .child(content)
-            .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))); // slopty
+            .children(self.fit.clone().map(|fit| fit.measure(self.list.clone()))) // slopty
+            // slopty: with no row to end, the footer stands at the foot alone.
+            .children(self.footer.clone().filter(|_| self.rows.is_empty()).map(|footer| {
+                let footer = Self::footer_frame(footer, cx);
+                div().absolute().left_0().right_0().bottom_0().px(px(self.row_inset())).child(footer)
+            }));
         // slopty: the held group's band defers its paint above the top fade; added before the
         // menus, which defer theirs too, so they open over it.
         let root = root.children(self.render_sticky_group(window, cx));
@@ -11648,6 +9889,7 @@ impl Render for Transcript {
         let root = root.children(self.render_context_menu(cx)); // slopty
         // slopty: find in thread, over the transcript's top right.
         let root = root.children(self.render_find_bar(window, cx));
+        let root = root.children(self.render_jump(cx));
         // Full-size viewer for a clicked user-bubble thumbnail
         // (AttachmentPreviewDialog: bare lightbox, click closes).
         if let Some(preview) = self.attachment_preview.clone() {
@@ -11684,113 +9926,201 @@ impl Render for Transcript {
 mod tests {
     use super::*;
 
-    #[test]
-    fn jump_button_stays_available_when_scrolling_down_until_near_bottom() {
-        let mut shown = false;
-        for distance in [500.0, 330.0, 319.0, 200.0, 100.0] {
-            shown = jump_visibility(shown, distance);
-            assert!(shown, "button vanished with {distance}px remaining");
-        }
-        assert!(!jump_visibility(shown, AT_BOTTOM_PX));
-        assert!(!jump_visibility(false, 319.0));
-        assert!(jump_visibility(false, 321.0));
-    }
-
+    /// slopty: the follow rule as a model (`docs/decisions/inspector.md`, "Follow and anchor"),
+    /// over seeded runs of record arrivals (below the view, above it, and a reply streaming at
+    /// the end) and the person's moves (a wheel up or down, a press in a row). An arrival never
+    /// changes whether the view follows; following, the view stays at the end; not following,
+    /// the first row in view keeps its key and its place to the pixel, whatever landed. Only the
+    /// person lets go, and scrolling back to the end follows again.
     #[gpui::test]
-    fn a_glided_notch_leaves_the_bottom_and_stays_where_it_lands(cx: &mut gpui::TestAppContext) {
+    fn the_view_moves_only_when_the_person_moves_it(cx: &mut gpui::TestAppContext) {
         struct Root(Entity<Transcript>);
         impl Render for Root {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                crate::smooth_scroll::smooth_scroll(self.0.clone())
+                div().size_full().child(self.0.clone())
             }
         }
+        #[derive(Debug, Clone, Copy)]
+        enum Step {
+            Below(usize),
+            Above(usize),
+            Stream(usize),
+            WheelUp(f32),
+            WheelDown(f32),
+            Press,
+        }
+        let paragraphs = |n: usize, tag: &str| (0..n).map(|i| format!("{tag} paragraph {i}.\n\n")).collect::<String>();
         let dir = tempfile::tempdir().unwrap();
-        let transcript = cx.update(|cx| {
+        let state = cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
             crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-            let state = cx.new(|_| AppState::new());
-            state.update(cx, |state, _| {
+            cx.new(|_| AppState::new())
+        });
+        let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        let mut entries: Vec<SessionMessageEntry> = (0..3)
+            .map(|i| assistant(&format!("e{i}"), MessageStatus::Complete, vec![text_part("t", &paragraphs(30, "Old"))]))
+            .collect();
+        let show = |entries: &[SessionMessageEntry], cx: &mut gpui::VisualTestContext| {
+            state.update(cx, |state, cx| {
                 state.selected_chat = Some("chat".into());
                 state.transcript_replayed = true;
-                state.transcript = vec![assistant(
-                    "reply",
-                    MessageStatus::Complete,
-                    vec![text_part("text", &"History.\n\n".repeat(120))],
-                )];
+                state.transcript = entries.to_vec();
                 state.transcript_revision += 1;
+                cx.notify();
             });
-            cx.new(|cx| Transcript::new(state, cx))
-        });
-        transcript.update(cx, |this, cx| this.sync(cx)); // slopty: no rail
-        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
-        // Frames at 120Hz: the glide and the bottom spring both read the
-        // clock.
-        // slopty: on the test dispatcher's clock, which the shell's clock reads.
-        let frame = |cx: &mut gpui::VisualTestContext| {
-            cx.executor().advance_clock(Duration::from_millis(8));
-            cx.update(|window, cx| {
-                window.simulate_next_frame(cx);
-                window.draw(cx).clear(cx);
-            });
+            cx.run_until_parked();
+            for _ in 0..3 {
+                cx.executor().advance_clock(Duration::from_millis(16));
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+            }
         };
-        for _ in 0..30 {
-            frame(cx);
-        }
-        let distance = |cx: &mut gpui::VisualTestContext| {
-            transcript.read_with(cx, |this, _| this.distance_from_bottom())
+        // Where the view stands: whether it follows, its distance from the end, and its first
+        // row in view as drawn, with that row's top against the viewport's; a list the layout
+        // holds at its very end says so ([`END`]), as it has no row to anchor by until rows land.
+        const END: &str = "<end>";
+        let probe = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| {
+                let top = f32::from(this.list.viewport_bounds().top());
+                let first = if this.is_glued() {
+                    Some((SharedString::from(END), 0.0))
+                } else {
+                    (0..this.rows.len()).find_map(|ix| {
+                        let bounds = this.list.bounds_for_item(ix)?;
+                        (f32::from(bounds.bottom()) > top + 0.5)
+                            .then(|| (this.rows[ix].id.clone(), f32::from(bounds.top()) - top))
+                    })
+                };
+                // How the list holds itself, said with a failure.
+                let held = format!(
+                    "{:?} tail={} rows={} vp={}",
+                    this.list.logical_scroll_top(),
+                    this.list.is_following_tail(),
+                    this.rows.len(),
+                    f32::from(this.list.viewport_bounds().size.height),
+                );
+                (this.pinned, this.distance_from_bottom(), first, held)
+            })
         };
-        assert!(transcript.read_with(cx, |this, _| this.pinned));
-        assert!(distance(cx) <= 1.0, "{}", distance(cx));
-
-        // A wheel the list never took (an overlay above it let it bubble)
-        // leaves the pin alone.
-        transcript.update_in(cx, |this, window, cx| {
-            this.on_scroll_wheel(
-                &gpui::ScrollEvent {
-                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
-                    ..Default::default()
-                },
-                window,
-                cx,
+        show(&entries, cx);
+        let opened = probe(cx);
+        assert!(opened.0, "a session opens following its end: {opened:?}");
+        assert!(
+            transcript.read_with(cx, |this, _| this.rows.len()) > 10,
+            "its rows are in, more than a viewport of them: {opened:?}"
+        );
+        let middle = transcript.read_with(cx, |this, _| this.list.viewport_bounds().center());
+        let mut seed: u64 = 0x5eed_f011_0b0e;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let mut streamed = 0;
+        // The steps so far and where each left the view, said with a failure.
+        let mut history: Vec<String> = Vec::new();
+        for round in 0..160 {
+            let step = match next(6) {
+                0 => Step::Below(1 + next(12) as usize),
+                1 => Step::Above(1 + next(6) as usize),
+                2 => Step::Stream(1 + next(4) as usize),
+                3 => Step::WheelUp(20.0 + next(600) as f32),
+                4 => Step::WheelDown(20.0 + next(900) as f32),
+                _ => Step::Press,
+            };
+            let before = probe(cx);
+            match step {
+                Step::Below(n) => {
+                    let id = format!("e{}", entries.len());
+                    entries.push(assistant(&id, MessageStatus::Complete, vec![text_part("t", &paragraphs(n, "New"))]));
+                    show(&entries, cx);
+                }
+                Step::Above(n) => {
+                    let MessagePart::Text { text, .. } = &mut entries[0].parts[0] else { unreachable!() };
+                    text.push_str(&paragraphs(n, "Late"));
+                    show(&entries, cx);
+                }
+                Step::Stream(n) => {
+                    streamed += n;
+                    entries.retain(|entry| entry.id != "live");
+                    entries.push(assistant("live", MessageStatus::Streaming, vec![text_part("t", &paragraphs(streamed, "Live"))]));
+                    show(&entries, cx);
+                }
+                Step::WheelUp(y) | Step::WheelDown(y) => {
+                    let y = if matches!(step, Step::WheelUp(_)) { y } else { -y };
+                    cx.simulate_event(gpui::ScrollEvent {
+                        position: middle,
+                        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(y))),
+                        ..Default::default()
+                    });
+                    show(&entries, cx);
+                }
+                Step::Press => {
+                    cx.simulate_event(gpui::MouseDownEvent {
+                        button: MouseButton::Left,
+                        position: middle,
+                        modifiers: gpui::Modifiers::default(),
+                        click_count: 1,
+                        first_mouse: false,
+                    });
+                    history.push(format!("{round} pressed -> {:?}", probe(cx)));
+                    cx.simulate_event(gpui::MouseUpEvent {
+                        button: MouseButton::Left,
+                        position: middle,
+                        modifiers: gpui::Modifiers::default(),
+                        click_count: 1,
+                    });
+                    history.push(format!("{round} released -> {:?}", probe(cx)));
+                    show(&entries, cx);
+                }
+            }
+            let after = probe(cx);
+            history.push(format!("{round} {step:?} -> {after:?}"));
+            let said = format!(
+                "round {round}, {step:?}: {before:?} -> {after:?}; before it: {}",
+                history.iter().rev().skip(1).take(8).rev().cloned().collect::<Vec<_>>().join("; ")
             );
-            assert!(this.pinned, "a wheel the list never saw broke the pin");
-            // Precise input keeps the distance test it always had.
-            this.list_took_input = true;
-            this.on_scroll_wheel(
-                &gpui::ScrollEvent {
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(0.5))),
-                    ..Default::default()
-                },
-                window,
-                cx,
-            );
-            assert!(
-                this.pinned && !this.input_escaped,
-                "a trackpad took the escape"
-            );
-        });
-
-        // One 3-line notch up. Its glide starts and ends with slices well
-        // under a pixel.
-        cx.simulate_event(gpui::ScrollEvent {
-            position: gpui::point(px(200.0), px(200.0)),
-            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
-            ..Default::default()
-        });
-        // The glide lands within 200ms; the rest shows the view stays there.
-        for _ in 0..50 {
-            frame(cx);
+            // Let go, the view is held by a row, never left to the layout's hold on the end,
+            // which would carry it along with what lands below.
+            if !after.0 {
+                assert_ne!(after.2.as_ref().map(|(key, _)| key.as_ref()), Some(END), "let go, a row holds it: {said}");
+            }
+            match step {
+                Step::Below(_) | Step::Above(_) | Step::Stream(_) => {
+                    assert_eq!(after.0, before.0, "an arrival never takes or gives the end: {said}");
+                    if before.0 {
+                        assert!(after.1 <= FOLLOW_PX, "following, the view stays at the end: {said}");
+                    } else {
+                        let (was, y0) = before.2.clone().unwrap_or_else(|| panic!("a row in view before: {said}"));
+                        let (now, y1) = after.2.clone().unwrap_or_else(|| panic!("a row in view after: {said}"));
+                        assert_eq!(was, now, "the first row in view keeps its key: {said}");
+                        assert!((y0 - y1).abs() < 0.5, "and its place: {said}");
+                    }
+                }
+                Step::WheelUp(_) => {
+                    assert_eq!(after.0, after.1 <= FOLLOW_PX, "up the list, it lets go: {said}");
+                }
+                Step::WheelDown(_) => {
+                    if after.1 <= FOLLOW_PX {
+                        assert!(after.0, "back at the end, it follows: {said}");
+                    }
+                }
+                Step::Press => assert!(!after.0, "a press in a row lets go: {said}"),
+            }
+            if after.0 {
+                assert_eq!(transcript.read_with(cx, |this, _| this.jump_unseen()), 0, "{said}");
+            }
         }
-        assert!(
-            !transcript.read_with(cx, |this, _| this.pinned),
-            "scrolling up must release the bottom"
-        );
-        let landed = distance(cx);
-        assert!(
-            (landed - 60.0).abs() <= 1.0,
-            "a 3-line notch scrolls 60px, as it does without smoothing: {landed}"
-        );
+        // Back to the end through the pill, whatever stands below.
+        transcript.update(cx, |this, cx| this.jump_to_bottom(cx));
+        show(&entries, cx);
+        let end = probe(cx);
+        assert!(end.0 && end.1 <= FOLLOW_PX, "the jump follows the end again: {end:?}");
     }
 
     #[gpui::test]
@@ -11865,27 +10195,10 @@ mod tests {
                 .find(|row| matches!(row.kind, RowKind::ToolGroup { .. }))
                 .unwrap()
                 .clone();
-            let RowKind::ToolGroup {
-                tools,
-                auto_open,
-                summary,
-                ..
-            } = &row.kind
-            else {
+            let RowKind::ToolGroup { tools, summary } = &row.kind else {
                 unreachable!()
             };
-            assert!(!auto_open);
-            let _ = this.render_tool_group(
-                &row.id,
-                tools,
-                summary,
-                *auto_open,
-                None,
-                false,
-                None,
-                &Theme::dark(),
-                cx,
-            );
+            let _ = this.render_tool_group(&row.id, tools, summary, &Theme::dark(), cx);
             let reveal = &this.tool_group_reveals[&row.id];
             assert_eq!(
                 reveal.rendered_open,
@@ -11919,7 +10232,7 @@ mod tests {
                 transcript.update(cx, |this, _| {
                     // Navigate away during the previous close animation.
                     this.folds.insert(
-                        "tools#work".into(),
+                        "tools#g:call".into(),
                         FoldState {
                             open: Some(false),
                             from: 120.0,
@@ -11950,14 +10263,13 @@ mod tests {
     #[gpui::test]
     fn a_chat_come_back_to_keeps_the_work_its_person_opened(cx: &mut gpui::TestAppContext) {
         with_tool_group_navigation(cx, |state, transcript, cx| {
-            let work: SharedString = "tools#work".into();
-            let folded_rows =
-                |transcript: &Entity<Transcript>, cx: &mut gpui::App| {
-                    transcript.read(cx).rows.iter().filter(|row| row.compact_fold.is_some()).count()
-                };
-            assert_eq!(folded_rows(&transcript, cx), 0, "the work starts shut");
-            transcript.update(cx, |this, cx| this.toggle_fold(work.clone(), 0.0, false, cx));
-            assert!(folded_rows(&transcript, cx) > 0, "a click opens the work");
+            let work: SharedString = "tools#g:call".into();
+            let open = |transcript: &Entity<Transcript>, cx: &mut gpui::App| {
+                transcript.read(cx).folds.get(&work).and_then(|fold| fold.open) == Some(true)
+            };
+            assert!(!open(&transcript, cx), "the work starts shut");
+            transcript.update(cx, |this, cx| this.toggle_fold(work.clone(), 0.0, cx));
+            assert!(open(&transcript, cx), "a click opens the work");
 
             for away in ["chat-b", "chat-c"] {
                 // The pointer on the reply as it leaves: the row unmounts with no leave.
@@ -11967,14 +10279,9 @@ mod tests {
                 state.update(cx, |state, cx| state.select_chat(Some(away.into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
                 replay_tool_group(&state, &transcript, away, cx);
-                assert_eq!(folded_rows(&transcript, cx), 0, "{away}'s own work stays shut");
+                assert!(!open(&transcript, cx), "{away}'s own work stays shut");
                 replay_tool_group(&state, &transcript, "chat-a", cx);
-                assert_eq!(
-                    transcript.read(cx).folds.get(&work).and_then(|fold| fold.open),
-                    Some(true),
-                    "back from {away}, the work is open as it was left",
-                );
-                assert!(folded_rows(&transcript, cx) > 0, "back from {away}, its rows are drawn");
+                assert!(open(&transcript, cx), "back from {away}, the work is open as it was left");
                 assert!(
                     transcript.read(cx).hovered_entry.is_none(),
                     "back from {away}, no strip is lit by a pointer that left with the chat",
@@ -12043,7 +10350,7 @@ mod tests {
                 Some(slopty_view_doc::TranscriptBaseline::capture(&cached)),
                 cx,
             );
-            let row_id: SharedString = "tools#work".into();
+            let row_id: SharedString = "tools#g:call".into();
             {
                 let reveal = &transcript.read(cx).tool_group_reveals[&row_id];
                 assert_eq!(reveal.starts.len(), 1);
@@ -12254,21 +10561,21 @@ mod tests {
             };
             apply(&preview, true, cx);
             assert_settled(1, cx);
-            // Prepending history puts the older call and the narration after it ahead of the
-            // tail tool in the turn's one group: three items. Its new place must not turn it
-            // into a live entrance.
+            // Prepending history puts the older call, then the narration after it, ahead of the
+            // tail tool: two groups in record order, the words between them. The tail tool's
+            // new place must not turn it into a live entrance.
             apply(&full, false, cx);
-            assert_settled(3, cx);
+            assert_settled(2, cx);
             for _ in 0..3 {
                 state.update(cx, |state, cx| state.select_chat(Some("away".into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
                 state.update(cx, |state, cx| state.select_chat(Some("whale".into()), cx));
                 transcript.update(cx, |this, cx| this.sync(cx));
-                assert_settled(3, cx);
+                assert_settled(2, cx);
                 apply(&preview, true, cx); // ignored because the cache is complete
-                assert_settled(3, cx);
+                assert_settled(2, cx);
                 apply(&full, false, cx);
-                assert_settled(3, cx);
+                assert_settled(2, cx);
             }
             let mut live = full.clone();
             live[0].parts.push(tool_part("new-live-tool", "git status"));
@@ -12285,13 +10592,12 @@ mod tests {
             });
             transcript.update(cx, |this, cx| this.sync(cx));
             let this = transcript.read(cx);
-            let work = &this.tool_group_reveals[&SharedString::from("turn#work")];
-            assert!(work.header_started_at.is_none());
-            assert!(
-                work.starts[..3].iter().all(Option::is_none),
-                "existing work must remain settled"
-            );
-            assert!(work.starts[3].is_some(), "new live tool must still animate");
+            let older = &this.tool_group_reveals[&SharedString::from("turn#g:older-tool")];
+            assert!(older.header_started_at.is_none());
+            assert!(older.starts.iter().all(Option::is_none), "existing work must remain settled");
+            let work = &this.tool_group_reveals[&SharedString::from("turn#g:tail-tool")];
+            assert!(work.starts[0].is_none(), "existing work must remain settled");
+            assert!(work.starts[1].is_some(), "new live tool must still animate");
         });
     }
 
@@ -12334,14 +10640,14 @@ mod tests {
             });
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
-                let reveal = &this.tool_group_reveals[&SharedString::from("tools#work")];
+                let reveal = &this.tool_group_reveals[&SharedString::from("tools#g:call")];
                 assert!(reveal.header_started_at.is_none());
                 assert!(reveal.starts[..2].iter().all(Option::is_none));
                 assert!(
                     reveal.starts[2].is_some(),
                     "live tail was swallowed by the replay"
                 );
-                let new_group = &this.tool_group_reveals[&SharedString::from("new-live-group#work")];
+                let new_group = &this.tool_group_reveals[&SharedString::from("new-live-group#g:new")];
                 assert!(new_group.header_started_at.is_some());
                 assert!(new_group.starts[0].is_some());
             });
@@ -12376,12 +10682,12 @@ mod tests {
                 vec![tool_part("live-a", "pwd"), tool_part("live-b", "pwd")],
             )];
             apply(&entries, None, cx);
-            let row: SharedString = "mixed#work".into();
+            let row: SharedString = "mixed#g:live-a".into();
             let starts = transcript.read(cx).tool_group_reveals[&row].starts.clone();
             assert!(starts.iter().all(Option::is_some));
             let header = transcript.read(cx).tool_group_reveals[&row].header_started_at;
-            entries[0].parts.insert(0, tool_part("old-a", "pwd"));
-            entries[0].parts.insert(2, tool_part("old-b", "pwd"));
+            entries[0].parts.insert(1, tool_part("old-a", "pwd"));
+            entries[0].parts.insert(3, tool_part("old-b", "pwd"));
             let mut historical = entries.clone();
             historical[0].parts.retain(|p| p.id().starts_with("old"));
             apply(
@@ -12390,7 +10696,7 @@ mod tests {
                 cx,
             );
             let reveal = &transcript.read(cx).tool_group_reveals[&row];
-            assert_eq!(reveal.starts, vec![None, starts[0], None, starts[1]]);
+            assert_eq!(reveal.starts, vec![starts[0], None, starts[1], None]);
             assert_eq!(reveal.header_started_at, header);
             // A further mixed frame must animate only its new live activity.
             entries[0].parts.push(tool_part("old-c", "pwd"));
@@ -12402,7 +10708,7 @@ mod tests {
                 cx,
             );
             let reveal = &transcript.read(cx).tool_group_reveals[&row];
-            assert_eq!(reveal.starts[..5], [None, starts[0], None, starts[1], None]);
+            assert_eq!(reveal.starts[..5], [starts[0], None, starts[1], None, None]);
             assert!(reveal.starts[5].is_some());
         });
     }
@@ -12441,7 +10747,7 @@ mod tests {
             });
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
-                let reveal = &this.tool_group_reveals[&SharedString::from("first#work")];
+                let reveal = &this.tool_group_reveals[&SharedString::from("first#g:first-call")];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts[0].is_some());
             });
@@ -12476,7 +10782,7 @@ mod tests {
                 this.sync(cx);
                 for ix in 0..5 {
                     let reveal =
-                        &this.tool_group_reveals[&SharedString::from(format!("live-{ix}#work"))];
+                        &this.tool_group_reveals[&SharedString::from(format!("live-{ix}#g:call"))];
                     assert!(reveal.header_started_at.is_some());
                     assert!(reveal.starts[0].is_some());
                 }
@@ -12489,7 +10795,7 @@ mod tests {
         with_tool_group_navigation(cx, |state, transcript, cx| {
             transcript.update(cx, |this, _| {
                 this.folds.insert(
-                    "tools#work".into(),
+                    "tools#g:call".into(),
                     FoldState {
                         open: Some(true),
                         ..Default::default()
@@ -12502,26 +10808,10 @@ mod tests {
             replay_tool_group(&state, &transcript, "chat-a", cx);
             transcript.update(cx, |this, cx| {
                 let row = this.rows[0].clone();
-                let RowKind::ToolGroup {
-                    tools,
-                    auto_open,
-                    summary,
-                    ..
-                } = &row.kind
-                else {
+                let RowKind::ToolGroup { tools, summary } = &row.kind else {
                     panic!("expected tools")
                 };
-                let _ = this.render_tool_group(
-                    &row.id,
-                    tools,
-                    summary,
-                    *auto_open,
-                    None,
-                    false,
-                    None,
-                    &Theme::dark(),
-                    cx,
-                );
+                let _ = this.render_tool_group(&row.id, tools, summary, &Theme::dark(), cx);
                 assert_eq!(this.folds[&row.id].open, Some(true));
                 assert_eq!(this.tool_group_reveals[&row.id].rendered_open, Some(true));
                 assert!(
@@ -12542,27 +10832,10 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.sync(cx);
                 let row = this.rows.last().unwrap().clone();
-                let RowKind::ToolGroup {
-                    tools,
-                    auto_open,
-                    summary,
-                    ..
-                } = &row.kind
-                else {
+                let RowKind::ToolGroup { tools, summary } = &row.kind else {
                     panic!("expected tools")
                 };
-                assert!(!*auto_open, "a turn's work never opens itself, live or settled");
-                let _ = this.render_tool_group(
-                    &row.id,
-                    tools,
-                    summary,
-                    *auto_open,
-                    None,
-                    false,
-                    None,
-                    &Theme::dark(),
-                    cx,
-                );
+                let _ = this.render_tool_group(&row.id, tools, summary, &Theme::dark(), cx);
                 let reveal = &this.tool_group_reveals[&row.id];
                 assert!(reveal.header_started_at.is_some());
                 assert!(reveal.starts.iter().all(Option::is_some));
@@ -12746,180 +11019,15 @@ mod tests {
         assert_eq!(outcome, ParseOutcome::Cached);
     }
 
-    // ---- stick-to-bottom spring ----
 
-    #[test]
-    fn stationary_spring_does_not_keep_requesting_frames() {
-        let mut spring = StickSpring::new();
-        let mut pos = 600.0;
-        for _ in 0..120 {
-            let next = spring.step(pos, 600.0, 1.0);
-            assert_eq!(next, pos);
-            assert!(!StickSpring::needs_frame(600.0 - next));
-            pos = next;
-        }
-        // Real growth must still wake and complete the same smooth glide.
-        let target = 900.0;
-        let mut moving_frames = 0;
-        while StickSpring::needs_frame(target - pos) && moving_frames < 600 {
-            let next = spring.step(pos, target, 1.0);
-            assert!(next >= pos && next <= target);
-            pos = next;
-            moving_frames += 1;
-        }
-        assert_eq!(pos, target);
-        assert!(moving_frames > 1 && moving_frames < 600);
-        assert!(!StickSpring::needs_frame(0.0));
-    }
 
-    #[test]
-    fn estimated_height_growth_at_the_bottom_cannot_keep_spring_awake() {
-        let mut spring = StickSpring::new();
-        // Virtualized height estimates can grow while the viewport remains
-        // anchored to exactly the same final row. This previously kept the
-        // feed-forward velocity and the redraw loop alive after completion.
-        for frame in 0..120 {
-            let target = 10000.0 + frame as f32 * 400.0;
-            let next = spring.step(target, target, 1.0);
-            assert_eq!(next, target);
-            assert!(!StickSpring::needs_frame(target - next));
-        }
-        assert!(spring.target_vel() > 1.0, "exercise a nonzero estimate");
-    }
 
-    #[test]
-    fn spring_converges_to_a_fixed_target() {
-        let mut spring = StickSpring::new();
-        let target = 400.0;
-        let mut pos = 0.0;
-        let mut frames = 0;
-        while pos < target && frames < 600 {
-            pos = spring.step(pos, target, 1.0);
-            frames += 1;
-        }
-        assert_eq!(pos, target, "spring must land exactly on the target");
-        assert!(
-            frames < 300,
-            "400px should converge within 5s of frames, took {frames}"
-        );
-        // Once landed it stays landed (and idles out).
-        for _ in 0..120 {
-            pos = spring.step(pos, target, 1.0);
-            assert_eq!(pos, target);
-        }
-        assert!(spring.is_idle(), "no residual motion at rest");
-    }
 
-    #[test]
-    fn spring_never_overshoots_or_oscillates() {
-        let mut spring = StickSpring::new();
-        let target = 250.0;
-        let mut pos = 0.0;
-        let mut last = pos;
-        for _ in 0..600 {
-            pos = spring.step(pos, target, 1.0);
-            assert!(pos <= target, "overshoot: {pos} > {target}");
-            assert!(
-                pos >= last - 1e-3,
-                "oscillation: position moved backwards {last} -> {pos}"
-            );
-            last = pos;
-        }
-        assert_eq!(pos, target);
-    }
 
-    #[test]
-    fn spring_feed_forward_tracks_constant_growth() {
-        // Target grows 2px/frame (≈120px/s — a typical stream). After warmup
-        // the EMA feed-forward must carry the viewport at the same rate with a
-        // bounded, stable lag — a glide, not 0,0,0,Npx steps.
-        let growth = 2.0;
-        let mut spring = StickSpring::new();
-        let mut target = 600.0;
-        let mut pos = 600.0;
-        let mut deltas: Vec<f32> = Vec::new();
-        for frame in 0..400 {
-            target += growth;
-            let next = spring.step(pos, target, 1.0);
-            if frame >= 200 {
-                deltas.push(next - pos);
-            }
-            pos = next;
-        }
-        // Steady state: per-frame movement ≈ growth rate…
-        let mean = deltas.iter().sum::<f32>() / deltas.len() as f32;
-        assert!(
-            (mean - growth).abs() < 0.2,
-            "steady-state speed {mean} should track growth {growth}"
-        );
-        // …with no stepping (every frame moves, none jumps).
-        for d in &deltas {
-            assert!(*d > 0.0, "viewport stalled mid-stream");
-            assert!(*d < growth * 3.0, "viewport jumped: {d}px in one frame");
-        }
-        // The EMA growth estimate itself has locked on.
-        assert!((spring.target_vel() - growth).abs() < 0.3);
-        // Lag stays bounded by the chase lead.
-        assert!(target - pos <= SPRING_CHASE_MAX_LEAD + growth);
-    }
 
-    #[test]
-    fn spring_feed_forward_resets_when_target_shrinks() {
-        let mut spring = StickSpring::new();
-        let mut pos = 0.0;
-        for i in 1..=50 {
-            pos = spring.step(pos, 100.0 + i as f32 * 4.0, 1.0);
-        }
-        assert!(spring.target_vel() > 1.0);
-        // A collapse (target shrinks by more than 1px) drops the estimate.
-        spring.step(pos.min(120.0), 120.0, 1.0);
-        assert_eq!(spring.target_vel(), 0.0);
-    }
 
-    #[test]
-    fn spring_catchup_frames_glide_instead_of_teleporting() {
-        // A 5-frame hitch advances roughly as far as 5 single steps would —
-        // sub-stepped, still clamped at the target.
-        let target = 300.0;
-        let mut a = StickSpring::new();
-        let mut pos_a = 0.0;
-        for _ in 0..5 {
-            pos_a = a.step(pos_a, target, 1.0);
-        }
-        let mut b = StickSpring::new();
-        let pos_b = b.step(0.0, target, 5.0);
-        assert!((pos_a - pos_b).abs() < 1.0, "{pos_a} vs {pos_b}");
-        assert!(pos_b <= target);
-    }
 
-    #[test]
-    fn restick_is_direction_aware() {
-        // Scrolling away from the bottom never resticks, even inside the band
-        // (a 20px wheel notch from the pinned bottom must break the pin).
-        assert!(!Transcript::should_restick(20.0, 0.0));
-        assert!(!Transcript::should_restick(69.0, 30.0));
-        // Returning toward the bottom resticks once inside the 70px band…
-        assert!(Transcript::should_restick(69.0, 120.0));
-        assert!(Transcript::should_restick(0.0, 30.0));
-        // …but not while still outside it.
-        assert!(!Transcript::should_restick(200.0, 300.0));
-        // No movement — leave the pin alone.
-        assert!(!Transcript::should_restick(50.0, 50.0));
-    }
 
-    #[test]
-    fn only_a_stream_at_the_bottom_gets_a_hard_end_anchor() {
-        assert!(should_anchor_live_stream(true, 0.0, true));
-        assert!(should_anchor_live_stream(true, AT_BOTTOM_PX, true));
-
-        // A user who has moved away from the end keeps control of the
-        // viewport, even if the transcript is still streaming.
-        assert!(!should_anchor_live_stream(true, AT_BOTTOM_PX + 0.1, true));
-        assert!(!should_anchor_live_stream(false, 0.0, true));
-
-        // Ordinary transcript updates retain the existing spring behavior.
-        assert!(!should_anchor_live_stream(true, 0.0, false));
-    }
 
     fn viewport_row(id: &str, entry_id: &str) -> Row {
         Row {
@@ -12998,7 +11106,7 @@ mod tests {
     #[test]
     fn optimistic_echo_cannot_consume_a_historical_viewport_before_replay() {
         let history = vec![viewport_row("historical", "historical-entry")];
-        let saved = SavedViewport::capture(&history, ListOffset::default(), false, 480.0, None)
+        let saved = SavedViewport::capture(&history, ListOffset::default(), false, 480.0)
             .expect("historical viewport");
         let echo_only = vec![viewport_row("echo", "echo-entry")];
 
@@ -13020,7 +11128,7 @@ mod tests {
         assert!(TranscriptReplayState::Populated.allows_fallback());
 
         let echo_viewport =
-            SavedViewport::capture(&echo_only, ListOffset::default(), false, 0.0, None)
+            SavedViewport::capture(&echo_only, ListOffset::default(), false, 0.0)
                 .expect("echo viewport");
         assert!(
             echo_viewport.resolve(&echo_only, false).is_some(),
@@ -13028,113 +11136,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn saved_viewport_preserves_and_releases_an_active_turn_runway() {
-        let rows = vec![viewport_row("prompt", "prompt")];
-        let own_turn = OwnTurnAnchor {
-            chat_id: "chat-a".into(),
-            message_id: "prompt".into(),
-            held: true,
-            positioned: true,
-            seen_prompt: true,
-            scrolled: false,
-        };
-        let saved = SavedViewport::capture(
-            &rows,
-            ListOffset {
-                item_ix: 0,
-                offset_in_item: px(0.0),
-            },
-            false,
-            0.0,
-            Some(&own_turn),
-        )
-        .expect("active chat viewport");
-        let SavedViewport::Anchored {
-            own_turn: Some(saved_turn),
-            ..
-        } = &saved
-        else {
-            panic!("an active turn must keep its runway with the viewport");
-        };
-        assert!(saved_turn.held);
-        assert!(saved_turn.positioned);
 
-        let restored = saved
-            .resolve(&rows, false)
-            .expect("exact queued echo survives an empty replay");
-        let restored_turn = restored.own_turn.expect("valid restored runway");
-        assert!(!restored_turn.held);
-        assert!(!restored_turn.positioned);
-        assert!(restored_turn.seen_prompt);
 
-        let list_state = ListState::new(rows.len(), ListAlignment::Bottom, px(0.0));
-        list_state.reset(0);
-        list_state.splice(0..0, rows.len());
-        list_state.scroll_to(restored.offset);
-        assert_eq!(list_state.logical_scroll_top().item_ix, 0);
-        assert_eq!(list_state.logical_scroll_top().offset_in_item, px(0.0));
-
-        assert!(
-            SavedViewport::capture(&[], ListOffset::default(), false, 0.0, Some(&own_turn))
-                .is_none(),
-            "an empty rapid-switch replay must not overwrite the older snapshot"
-        );
-    }
-
-    #[test]
-    fn own_turn_waits_for_its_first_echo_then_retires_if_it_disappears() {
-        let mut turn = OwnTurnAnchor {
-            chat_id: "chat-a".into(),
-            message_id: "prompt".into(),
-            held: true,
-            positioned: false,
-            seen_prompt: false,
-            scrolled: false,
-        };
-
-        assert!(turn.observe_prompt(false), "fresh send waits one state gap");
-        assert!(turn.observe_prompt(true), "echo activates the runway");
-        assert!(turn.seen_prompt);
-        assert!(
-            !turn.observe_prompt(false),
-            "failed echo retires the activated runway"
-        );
-    }
-
-    #[test]
-    fn restored_viewport_discards_a_failed_optimistic_turn() {
-        let outgoing = vec![viewport_row("prompt", "prompt")];
-        let own_turn = OwnTurnAnchor {
-            chat_id: "chat-a".into(),
-            message_id: "prompt".into(),
-            held: true,
-            positioned: true,
-            seen_prompt: true,
-            scrolled: false,
-        };
-        let saved = SavedViewport::capture(
-            &outgoing,
-            ListOffset::default(),
-            false,
-            420.0,
-            Some(&own_turn),
-        )
-        .expect("outgoing viewport");
-
-        // The failed echo vanished while A was hidden. The ordinary viewport
-        // still restores by index, but no stale runway may intercept jump.
-        let replay = vec![viewport_row("older", "older")];
-        let restored = saved.resolve(&replay, true).expect("index fallback");
-        assert!(restored.own_turn.is_none());
-        assert_eq!(restored.offset.item_ix, 0);
-        assert_eq!(restored.distance_from_bottom, 420.0);
-    }
 
     #[test]
     fn pinned_viewports_follow_tail_and_the_cache_is_bounded() {
         let rows = vec![viewport_row("row", "entry")];
-        let pinned = SavedViewport::capture(&rows, ListOffset::default(), true, 999.0, None)
+        let pinned = SavedViewport::capture(&rows, ListOffset::default(), true, 999.0)
             .expect("pinned viewport");
         assert!(matches!(pinned, SavedViewport::FollowTail));
 
@@ -13224,7 +11232,7 @@ mod tests {
             serde_json::from_str(include_str!("../tests/fixtures/generated-images.json")).unwrap();
         let entry = &entries[0];
         let original = entry_fingerprint(entry, false);
-        let row_version = work_rows(entry, false, &mut parse)[0].version;
+        let row_version = rows_for_entry(entry, false, &mut parse)[0].version;
         for field in 0..4 {
             let mut changed = entry.clone();
             if field == 0 {
@@ -13244,12 +11252,12 @@ mod tests {
             }
             assert_ne!(entry_fingerprint(&changed, false), original);
             assert_ne!(
-                work_rows(&changed, false, &mut parse)[0].version,
+                rows_for_entry(&changed, false, &mut parse)[0].version,
                 row_version
             );
         }
         for entry in entries {
-            let rows = work_rows(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, false, &mut parse);
             assert_eq!(rows.len(), 1);
             assert!(rows[0].turn_start);
             assert_eq!(
@@ -13301,111 +11309,6 @@ mod tests {
         crate::markdown::selection::clear_if_owner("probe-0");
     }
 
-    /// slopty: a sent prompt rests on its exact hold whatever order its layouts come in: layout
-    /// alone leaving the view in the slack under the reservation, before or after the reply's
-    /// rows come, is put back on the hold; the person's own wheel into it rests there (zeron's
-    /// anti-bounce rule). At the self-test's scale.
-    #[gpui::test]
-    fn a_sent_prompt_rests_on_its_hold_unless_the_person_scrolled(cx: &mut gpui::TestAppContext) {
-        struct Fixture(Entity<Transcript>);
-        impl Render for Fixture {
-            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                div().size_full().child(self.0.clone())
-            }
-        }
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::dark());
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
-        });
-        const PROMPT: usize = 40;
-        let off_hold = |this: &Transcript| {
-            let Some(bounds) = this.list.bounds_for_item(PROMPT) else {
-                panic!(
-                    "the prompt is not drawn: top {:?}, {}px from the end, anchor {:?}",
-                    this.list.logical_scroll_top(),
-                    this.distance_from_bottom(),
-                    this.own_turn.as_ref().map(|a| (a.held, a.positioned, a.scrolled)),
-                )
-            };
-            f32::from(bounds.top() - this.list.viewport_bounds().top())
-                - Transcript::own_send_inset(PROMPT)
-        };
-        // Layout drift: the view moved down by no input of the person's.
-        fn drift(this: &mut Transcript, _: &mut Context<Transcript>) {
-            this.list.scroll_by(px(2.0));
-        }
-        fn reply(this: &mut Transcript, cx: &mut Context<Transcript>) {
-            let at = this.rows.len();
-            this.rows.push(viewport_row(&format!("reply-{at}"), "reply"));
-            this.list.splice(at..at, 1);
-            this.remeasure_last_row();
-            this.own_turn_kick = true;
-            cx.notify();
-        }
-        type Step = fn(&mut Transcript, &mut Context<Transcript>);
-        let orders: [(&str, [Step; 2]); 2] =
-            [("drift, then the reply", [drift, reply]), ("the reply, then drift", [reply, drift])];
-        for (order, steps) in orders {
-            let state = cx.new(|_| AppState::new());
-            let transcript = cx.new(|cx| Transcript::new(state, cx));
-            transcript.update(cx, |this, cx| {
-                this.rows = (0..=PROMPT)
-                    .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
-                    .collect();
-                this.list.reset(PROMPT + 1);
-                cx.notify();
-            });
-            let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
-            cx.simulate_scale_factor_change(2.0);
-            cx.simulate_resize(gpui::size(px(1000.0), px(800.0)));
-            cx.run_until_parked();
-            let frames = |cx: &mut gpui::VisualTestContext| {
-                for _ in 0..90 {
-                    transcript.update(cx, |this, cx| {
-                        // One frame's step each time.
-                        this.own_turn_last_tick = None;
-                        if this.own_turn.is_some() {
-                            this.step_own_turn(cx);
-                        }
-                        cx.notify();
-                    });
-                    cx.run_until_parked();
-                }
-            };
-            transcript.update(cx, |this, cx| this.on_own_send("chat".into(), "entry-40".into(), cx));
-            frames(cx);
-            let landed = transcript.read_with(cx, |this, _| off_hold(this));
-            assert!(landed.abs() <= 0.5, "{order}: landed {landed}px off the hold");
-            for step in steps {
-                transcript.update(cx, |this, cx| step(this, cx));
-                cx.run_until_parked();
-                frames(cx);
-            }
-            let (rest, above) =
-                transcript.read_with(cx, |this, _| (off_hold(this), this.distance_from_bottom()));
-            assert!(rest.abs() <= 0.5, "{order}: rests {rest}px off the hold");
-            assert!(
-                (above - OWN_SEND_SCROLL_SLACK_PX).abs() <= 0.5,
-                "{order}: the slack lies under the hold, {above}px"
-            );
-
-            // The person's wheel down sinks into the slack and stays there.
-            cx.simulate_event(gpui::ScrollEvent {
-                position: gpui::point(px(500.0), px(400.0)),
-                delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-40.0))),
-                ..Default::default()
-            });
-            cx.run_until_parked();
-            frames(cx);
-            // At the hold the list's end lies the slack below; sunk into it, at the end.
-            let (sunk, kept) =
-                transcript.read_with(cx, |this, _| (this.distance_from_bottom(), this.own_turn.is_some()));
-            assert!(kept, "{order}: the wheel keeps the turn's reservation");
-            assert!(sunk <= 0.5, "{order}: the wheel rests {sunk}px above the end, not in the slack");
-        }
-    }
 
     /// slopty: a picture a tool returned is named by its file; one the agent generated says so.
     #[test]
@@ -13724,7 +11627,7 @@ mod tests {
             transcript.update(cx, |this, cx| {
                 this.rows = entries
                     .iter()
-                    .flat_map(|entry| work_rows(entry, false, &mut parse))
+                    .flat_map(|entry| rows_for_entry(entry, false, &mut parse))
                     .collect();
                 for (ix, expected) in ["loaded", "loading", "error"].into_iter().enumerate() {
                     let RowKind::GeneratedImage {
@@ -13774,7 +11677,7 @@ mod tests {
             mime_type: "image/png".into(),
         };
         let entry = assistant("a", MessageStatus::Complete, vec![image.clone()]);
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].turn_start);
         assert!(rows[0].copy_text.is_none());
@@ -13789,7 +11692,7 @@ mod tests {
                 text_part("t2", "after"),
             ],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 4);
         assert!(matches!(rows[1].kind, RowKind::ToolGroup { .. }));
         assert!(matches!(rows[2].kind, RowKind::GeneratedImage { .. }));
@@ -13811,7 +11714,7 @@ mod tests {
                 tool_part("t3", "pwd"),
             ],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1, "one combined accordion row");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -13843,7 +11746,7 @@ mod tests {
                 tool_part("t", "cargo test"),
             ],
         );
-        let rows = work_rows(&timed, false, &mut parse);
+        let rows = rows_for_entry(&timed, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -13857,7 +11760,7 @@ mod tests {
                 tool_part("t", "cargo test"),
             ],
         );
-        let rows = work_rows(&brief, false, &mut parse);
+        let rows = rows_for_entry(&brief, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
@@ -13870,7 +11773,7 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "just thinking")],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
@@ -13883,27 +11786,21 @@ mod tests {
             MessageStatus::Complete,
             vec![reasoning_part("r0", "   ")],
         );
-        assert!(work_rows(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
     }
 
     #[test]
-    fn live_thought_streams_open_and_settles_closed() {
+    fn a_live_thought_runs_until_a_part_follows_it() {
         let entry = assistant(
             "a1",
             MessageStatus::Streaming,
             vec![reasoning_part("r0", "thinking hard")],
         );
-        let rows = work_rows(&entry, false, &mut parse);
-        let RowKind::ToolGroup {
-            tools, auto_open, ..
-        } = &rows[0].kind
-        else {
+        let rows = rows_for_entry(&entry, false, &mut parse);
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
-        // The live tail auto-opens the group; the chip itself is unresolved
-        // (defaults open) until the part stops being the tail.
-        assert!(*auto_open);
-        assert!(!tools[0].resolved);
+        assert!(!tools[0].resolved, "the live tail is still thinking");
 
         let entry = assistant(
             "a2",
@@ -13913,310 +11810,49 @@ mod tests {
                 text_part("t1", "answer"),
             ],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("expected a tool group");
         };
         assert!(tools[0].resolved, "a followed thought is settled");
     }
 
-    fn compact_visible(rows: &[Row]) -> Vec<&Row> {
-        rows.iter()
-            .filter(|row| row.compact_fold.is_none())
-            .collect()
-    }
-
+    /// slopty: a turn's rows are its records in the order they were written: its narration where
+    /// it was said, each run of calls and thoughts one group line keyed by its first call, an
+    /// error where it happened. A group grows in place under its key, and the turn's end moves
+    /// no row and changes no row's container (`docs/decisions/inspector.md`, "Rows in record
+    /// order").
     #[test]
-    fn a_turns_work_folds_behind_one_divider() {
-        // Collapsed: work header + reply. Expanded: header + the compact-off
-        // layout for work parts (thoughts/tools as groups, narration as
-        // markdown) + reply.
-        let entry = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![
-                reasoning_part("r0", "thinking about it"),
-                // slopty: a listing counts apart ("listed 1 directory"); a command here.
-                tool_part("t1", "cargo test"),
-                text_part("n1", "checking the layout now"),
-                tool_part("t2", "pwd"),
-                text_part("r1", "All done — here is the answer."),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let visible = compact_visible(&rows);
-        assert_eq!(visible.len(), 2, "collapsed: work header + the reply");
-        let RowKind::ToolGroup {
-            tools,
-            auto_open,
-            compact_shell,
-            ..
-        } = &visible[0].kind
-        else {
-            panic!("expected a tool group");
+    fn a_turns_rows_keep_record_order_and_their_place_when_it_ends() {
+        let ids = |rows: &[Row]| rows.iter().map(|row| row.id.to_string()).collect::<Vec<_>>();
+        let error = MessagePart::Error {
+            id: "e3".into(),
+            message: "Overloaded, trying again".into(),
+            detail: None,
         };
-        assert!(*compact_shell);
-        assert!(!*auto_open, "the work group never opens itself");
-        assert_eq!(tools.len(), 4);
-        assert_eq!(tools[0].kind, ToolItemKind::Thought);
-        assert_eq!(tools[1].kind, ToolItemKind::Call);
-        assert_eq!(tools[2].kind, ToolItemKind::Note);
-        assert_eq!(tools[3].kind, ToolItemKind::Call);
-        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
-        let summary = tool_group_summary(tools);
-        // slopty: the agent's own words between calls are no work to count (Amp counts tools).
-        assert!(!summary.contains("note"), "{summary}");
-        assert!(summary.contains("ran 2 commands"), "{summary}");
-        assert!(summary.contains("Thought once"), "{summary}");
-
-        assert!(rows.iter().any(|row| {
-            row.compact_fold.is_some() && matches!(row.kind, RowKind::Markdown { .. })
-        }));
-        assert!(rows.iter().any(|row| {
-            row.compact_fold.is_some()
-                && matches!(
-                    &row.kind,
-                    RowKind::ToolGroup {
-                        compact_shell: false,
-                        ..
-                    }
-                )
-        }));
-        let RowKind::ToolGroup { worked_secs, .. } = &visible[0].kind else {
-            panic!("expected a tool group");
-        };
-        assert_eq!(*worked_secs, None, "no duration stamped on the fixture");
-    }
-
-    #[test]
-    fn the_divider_carries_how_long_the_turn_worked() {
-        let mut entry = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![tool_part("t0", "ls"), text_part("r0", "done")],
-        );
-        entry.duration_ms = Some(310_000);
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
-            panic!("expected a tool group");
-        };
-        assert_eq!(*worked_secs, Some(310));
-        assert_eq!(worked_for_label(310), "Worked for 5m 10s");
-        assert_eq!(worked_for_label(95), "Worked for 1m 35s");
+        let parts = vec![
+            text_part("t0", "Looking at the build."),
+            tool_part("c1", "cargo build"),
+            reasoning_part("r2", "It failed on a lint."),
+            error,
+            tool_part("c4", "cargo clippy"),
+            text_part("t5", "Fixed it."),
+        ];
+        let early = assistant("a1", MessageStatus::Streaming, parts[..2].to_vec());
+        assert_eq!(ids(&rows_for_entry(&early, false, &mut parse)), ["a1#t0.0", "a1#g:c1"]);
+        let grown = assistant("a1", MessageStatus::Streaming, parts[..3].to_vec());
         assert_eq!(
-            spoken_divider("Worked for 6s", "Ran 2 commands and edited 1 file"),
-            "Worked for 6s, ran 2 commands and edited 1 file"
+            ids(&rows_for_entry(&grown, false, &mut parse)),
+            ["a1#t0.0", "a1#g:c1"],
+            "a thought joins its group under the group's own key"
         );
-        assert_eq!(spoken_divider("Worked for 6s", ""), "Worked for 6s");
-
-        let streaming = assistant("a1", MessageStatus::Streaming, vec![tool_part("t0", "ls")]);
-        let mut streaming = streaming;
-        streaming.duration_ms = Some(310_000);
-        let rows = rows_for_entry(&streaming, false, &mut parse);
-        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
-            panic!("expected a tool group");
-        };
-        assert_eq!(
-            *worked_secs, None,
-            "live compact groups keep the working trailer, not a settled duration"
-        );
-
-        let mut zero = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![tool_part("t0", "ls"), text_part("r0", "done")],
-        );
-        zero.duration_ms = Some(0);
-        let rows = rows_for_entry(&zero, false, &mut parse);
-        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
-            panic!("expected a tool group");
-        };
-        assert_eq!(
-            *worked_secs, None,
-            "a zero stamp is a real finish, not a missing field to guess from"
-        );
-
-        let missing = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![tool_part("t0", "ls"), text_part("r0", "done")],
-        );
-        let rows = rows_for_entry(&missing, false, &mut parse);
-        let RowKind::ToolGroup { worked_secs, .. } = &rows[0].kind else {
-            panic!("expected a tool group");
-        };
-        assert_eq!(
-            *worked_secs, None,
-            "pre-durationMs history keeps the tool summary"
-        );
+        let want = ["a1#t0.0", "a1#g:c1", "a1#e3", "a1#g:c4", "a1#t5.0"];
+        let live = assistant("a1", MessageStatus::Streaming, parts.clone());
+        assert_eq!(ids(&rows_for_entry(&live, false, &mut parse)), want, "live, in record order");
+        let done = assistant("a1", MessageStatus::Complete, parts);
+        assert_eq!(ids(&rows_for_entry(&done, false, &mut parse)), want, "ended, nothing moved");
     }
 
-    #[test]
-    fn the_reply_stays_and_a_turn_without_work_has_no_divider() {
-        // A reply-only turn renders exactly like the ordinary split — no
-        // empty accordion.
-        let entry = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![text_part("t0", "just an answer")],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(rows[0].kind, RowKind::Markdown { .. }));
-
-        // Consecutive trailing texts all stay visible — only earlier
-        // narration folds.
-        let entry = assistant(
-            "a2",
-            MessageStatus::Complete,
-            vec![
-                tool_part("t0", "ls"),
-                text_part("r0", "first half"),
-                text_part("r1", "second half"),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let visible = compact_visible(&rows);
-        assert_eq!(visible.len(), 3, "work header + two reply parts");
-        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
-        assert!(matches!(visible[2].kind, RowKind::Markdown { .. }));
-        assert!(
-            rows.iter().any(|row| {
-                row.compact_fold.is_some()
-                    && matches!(
-                        &row.kind,
-                        RowKind::ToolGroup {
-                            compact_shell: false,
-                            ..
-                        }
-                    )
-            }),
-            "expanded work restores the ordinary tool group"
-        );
-    }
-
-    #[test]
-    fn the_divider_stays_shut_while_the_turn_runs() {
-        // Streaming surfaces nothing under compact mode — in-progress text is
-        // narration until the turn settles, so it folds with the rest and the
-        // whole turn is one closed accordion.
-        let entry = assistant(
-            "a1",
-            MessageStatus::Streaming,
-            vec![
-                reasoning_part("r0", "thinking"),
-                tool_part("t1", "ls"),
-                text_part("r1", "streaming the answer"),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let visible = compact_visible(&rows);
-        assert_eq!(visible.len(), 1, "the streaming text tail folds too");
-        let RowKind::ToolGroup {
-            tools, auto_open, ..
-        } = &visible[0].kind
-        else {
-            panic!("expected a tool group");
-        };
-        assert!(!*auto_open);
-        assert_eq!(tools.len(), 3);
-        assert_eq!(tools[2].kind, ToolItemKind::Note);
-        assert!(rows.iter().any(|row| {
-            row.compact_fold.is_some()
-                && matches!(
-                    row.kind,
-                    RowKind::LiveMarkdown { .. } | RowKind::Markdown { .. }
-                )
-        }));
-
-        // On settle the same parts surface the reply as its own row.
-        let done = assistant("a1", MessageStatus::Complete, entry.parts.clone());
-        let rows = rows_for_entry(&done, false, &mut parse);
-        let visible = compact_visible(&rows);
-        assert_eq!(visible.len(), 2);
-        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(visible[1].kind, RowKind::Markdown { .. }));
-    }
-
-    #[test]
-    fn requests_and_errors_stay_outside_the_divider() {
-        // Interactive/error rows are not work steps — they stay outside the
-        // fold so a blocking question or a failure still surfaces.
-        let entry = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![
-                tool_part("t0", "ls"),
-                MessagePart::Error {
-                    id: "e1".into(),
-                    message: "boom".into(),
-                    detail: None, // slopty: new field.
-                },
-                tool_part("t1", "pwd"),
-                text_part("r0", "the answer"),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let visible = compact_visible(&rows);
-        assert_eq!(visible.len(), 3);
-        assert!(matches!(visible[0].kind, RowKind::ToolGroup { .. }));
-        assert!(matches!(visible[1].kind, RowKind::ErrorChip { .. }));
-        assert!(matches!(visible[2].kind, RowKind::Markdown { .. }));
-        assert!(visible[1].compact_fold.is_none());
-        let RowKind::ToolGroup { tools, .. } = &visible[0].kind else {
-            unreachable!();
-        };
-        assert_eq!(tools.len(), 2, "the error didn't split the work group");
-    }
-
-    #[test]
-    fn compact_fold_geometry_reports_prefix_own_and_total() {
-        // tool + narration + tool → three folded body rows (group, markdown,
-        // group) between the shell header and the reply.
-        let entry = assistant(
-            "a1",
-            MessageStatus::Complete,
-            vec![
-                tool_part("t1", "ls"),
-                text_part("n1", "checking the layout"),
-                tool_part("t2", "pwd"),
-                text_part("r0", "the answer"),
-            ],
-        );
-        let rows = rows_for_entry(&entry, false, &mut parse);
-        let work_id: SharedString = "a1#work".into();
-        let folded_ixs: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.compact_fold.is_some())
-            .map(|(ix, _)| ix)
-            .collect();
-        assert_eq!(folded_ixs.len(), 3, "fixture produces three body rows");
-        let mut heights = HashMap::new();
-        for (ix, row_ix) in folded_ixs.iter().enumerate() {
-            heights.insert(
-                rows[*row_ix].id.clone(),
-                Rc::new(Cell::new(100.0 * (ix + 1) as f32)),
-            );
-        }
-        let (prefix, own, total) = compact_fold_geometry(&rows, &heights, &work_id, folded_ixs[1]);
-        assert_eq!(prefix, 100.0);
-        assert_eq!(own, 200.0);
-        assert_eq!(total, 600.0);
-        // A row tagged to a DIFFERENT fold is not part of the run.
-        let mut rows = rows.clone();
-        rows.push(Row {
-            compact_fold: Some("other#work".into()),
-            ..rows[folded_ixs[2]].clone()
-        });
-        let (_, _, total) = compact_fold_geometry(&rows, &heights, &work_id, folded_ixs[1]);
-        assert_eq!(total, 600.0);
-    }
-
-    /// slopty: a tool fold opens its height first and its calls fade in after it (the one fold,
-    /// design-inspiration item 7): 60 ms in, the height is well on its way and the contents
-    /// still under 0.2; closing, the contents are gone before the height lands.
     #[test]
     fn a_tool_fold_shows_its_contents_after_its_height() {
         let at = Instant::now();
@@ -14229,131 +11865,6 @@ mod tests {
         assert!(closing.opacity <= 0.0 && closing.share < 1.0 && closing.moving, "{closing:?}");
         let still = tool_fold(true, Some(at), at, true);
         assert_eq!((still.share, still.opacity, still.moving), (1.0, 1.0, false), "reduced motion lands");
-    }
-
-    #[test]
-    fn compact_body_height_tweens_from_seeded_height_to_target() {
-        let now = Instant::now();
-        let opening = FoldState {
-            open: Some(true),
-            from: 0.0,
-            toggled_at: Some(now),
-            ..Default::default()
-        };
-        assert_eq!(compact_body_height(opening, 300.0, false, now), 0.0);
-        let mid = compact_body_height(opening, 300.0, false, now + motion::FOLD_OPEN.total() / 2);
-        assert!(mid > 150.0, "ease-out runs ahead of linear: {mid}");
-        assert!(mid < 300.0);
-        let landed = now + motion::FOLD_OPEN.total() + Duration::from_millis(1);
-        assert_eq!(compact_body_height(opening, 300.0, false, landed), 300.0);
-        assert_eq!(
-            compact_body_height(opening, 300.0, true, now),
-            300.0,
-            "reduced motion jumps straight to the target"
-        );
-        // A reversal seeds `from` with the budget in flight; the tween then
-        // walks it down rather than restarting at the full height.
-        let closing = FoldState {
-            open: Some(false),
-            from: 120.0,
-            toggled_at: Some(now),
-            ..Default::default()
-        };
-        let mid = compact_body_height(closing, 300.0, false, now + motion::FOLD_CLOSE.total() / 2);
-        assert!(mid > 0.0 && mid < 120.0, "mid-close: {mid}");
-        assert_eq!(compact_body_height(closing, 300.0, false, landed), 0.0);
-    }
-
-    #[gpui::test]
-    fn compact_fold_keeps_body_mounted_through_the_close_tween(cx: &mut gpui::TestAppContext) {
-        let mut handle = None;
-        with_tool_group_navigation(cx, |state, transcript, cx| {
-            state.update(cx, |state, _| {
-                state.transcript = vec![assistant(
-                    "a1",
-                    MessageStatus::Complete,
-                    vec![
-                        reasoning_part("r0", "thinking"),
-                        tool_part("t1", "ls"),
-                        text_part("r0", "the reply"),
-                    ],
-                )];
-                state.transcript_revision += 1;
-            });
-            transcript.update(cx, |this, cx| {
-                this.last_source = None;
-                this.sync(cx);
-            });
-            let work_id: SharedString = "a1#work".into();
-            let folded = |this: &Transcript| {
-                this.rows
-                    .iter()
-                    .filter(|row| row.compact_fold.is_some())
-                    .count()
-            };
-            transcript.update(cx, |this, _| {
-                assert_eq!(folded(this), 0, "collapsed fold mounts no body rows")
-            });
-            transcript.update(cx, |this, cx| {
-                this.toggle_fold(work_id.clone(), 0.0, false, cx);
-                assert_eq!(this.folds[&work_id].open, Some(true));
-                assert_eq!(this.folds[&work_id].from, 0.0);
-                assert!(folded(this) > 0, "opening mounts the body rows");
-                // A settled-open fold carries its measured total into the
-                // close tween's start.
-                for row in this.rows.iter().filter(|row| row.compact_fold.is_some()) {
-                    this.compact_fold_heights
-                        .insert(row.id.clone(), Rc::new(Cell::new(100.0)));
-                }
-                let total = 100.0 * folded(this) as f32;
-                this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(crate::clock::now(cx) - FOLD_TWEEN_WINDOW);
-                this.toggle_fold(work_id.clone(), 0.0, false, cx);
-                assert_eq!(this.folds[&work_id].open, Some(false));
-                assert_eq!(
-                    this.folds[&work_id].from, total,
-                    "closing tweens from the body's measured height"
-                );
-                assert!(
-                    folded(this) > 0,
-                    "the body stays mounted through the close tween"
-                );
-                assert!(this.compact_fold_settle.is_some());
-                // Reopening mid-tween continues from the budget in flight.
-                this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(crate::clock::now(cx) - motion::FOLD_CLOSE.total() / 2);
-                this.toggle_fold(work_id.clone(), 0.0, false, cx);
-                let from = this.folds[&work_id].from;
-                let expected = motion::lerp(total, 0.0, motion::FOLD_CLOSE.progress(0.5));
-                assert!(
-                    (from - expected).abs() < 1.0,
-                    "reversal resumes from the in-flight budget: {from} ≈ {expected}"
-                );
-                assert_eq!(this.folds[&work_id].open, Some(true));
-            });
-            // Close again, expire the retention window, and let the settle
-            // sweep's sync drop the rows. The sweep's scheduled task needs the
-            // app borrow, so it has to run after this update returns.
-            transcript.update(cx, |this, cx| {
-                this.toggle_fold(work_id.clone(), 0.0, false, cx);
-                assert!(folded(this) > 0);
-                this.folds.get_mut(&work_id).unwrap().toggled_at =
-                    Some(crate::clock::now(cx) - FOLD_TWEEN_WINDOW - Duration::from_millis(50));
-            });
-            handle = Some(transcript);
-        });
-        let transcript = handle.unwrap();
-        cx.executor()
-            .advance_clock(FOLD_TWEEN_WINDOW + Duration::from_millis(100));
-        cx.run_until_parked();
-        transcript.update(cx, |this, _| {
-            let folded = this
-                .rows
-                .iter()
-                .filter(|row| row.compact_fold.is_some())
-                .count();
-            assert_eq!(folded, 0, "the settle sweep drops closed rows")
-        });
     }
 
     fn thought_of(text: &str) -> Vec<Vec<InlineRun>> {
@@ -14506,7 +12017,7 @@ mod tests {
         // Live rows split per block exactly like completed ones (the list
         // virtualizes them — the fading tail is the only per-frame work).
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
-        let live_rows = work_rows(&live, false, &mut parse);
+        let live_rows = rows_for_entry(&live, false, &mut parse);
         assert_eq!(live_rows.len(), 3, "one live row per top-level block");
         assert!(
             live_rows
@@ -14517,7 +12028,7 @@ mod tests {
         assert_eq!(live_rows[2].id.as_ref(), "m1#t0.2");
 
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let done_rows = work_rows(&done, false, &mut parse);
+        let done_rows = rows_for_entry(&done, false, &mut parse);
         assert_eq!(done_rows.len(), 3, "three top-level blocks");
         // Every block row keeps its id across the flip — no flicker on handoff.
         for (live, done) in live_rows.iter().zip(&done_rows) {
@@ -14540,8 +12051,8 @@ mod tests {
         let t2 = "para one\n\npara two\n\npara three grows here";
         let live1 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t1)]);
         let live2 = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", t2)]);
-        let r1 = work_rows(&live1, false, &mut parse);
-        let r2 = work_rows(&live2, false, &mut parse);
+        let r1 = rows_for_entry(&live1, false, &mut parse);
+        let r2 = rows_for_entry(&live2, false, &mut parse);
         assert_eq!(r1.len(), 3);
         assert_eq!(r2.len(), 3);
         assert_eq!(r1[0].version, r2[0].version, "settled block untouched");
@@ -14564,7 +12075,7 @@ mod tests {
                 text_part("t1", "tail para"),
             ],
         );
-        let rows = work_rows(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, false, &mut parse);
         // Rows: t0.0, t0.1, t0.2 (three MD blocks), g0, t1.0.
         assert_eq!(rows.len(), 5);
         // Sibling markdown blocks from the same part: md block gap.
@@ -14590,9 +12101,9 @@ mod tests {
                 tool_part("c", "make"),
             ],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
-        assert_eq!(ids, ["m2#t0.0", "m2#g0", "m2#t1.0", "m2#g1"]);
+        assert_eq!(ids, ["m2#t0.0", "m2#g:a", "m2#t1.0", "m2#g:c"]);
         let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
             panic!("group expected")
         };
@@ -14641,29 +12152,25 @@ mod tests {
                 text_part("t1", "after"),
             ],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let ids: Vec<&str> = rows.iter().map(|r| r.id.as_ref()).collect();
         assert_eq!(
             ids,
             [
                 "m-agent#t0.0",
-                "m-agent#g0",
-                "m-agent#g1",
-                "m-agent#g2",
-                "m-agent#g3",
+                "m-agent#g:a",
+                "m-agent#g:s1",
+                "m-agent#g:c",
+                "m-agent#g:s2",
                 "m-agent#t1.0",
             ]
         );
 
-        let RowKind::ToolGroup {
-            tools, auto_open, ..
-        } = &rows[1].kind
-        else {
+        let RowKind::ToolGroup { tools, .. } = &rows[1].kind else {
             panic!("ordinary group expected")
         };
         assert_eq!(tools.len(), 2);
         assert!(tool_group_collapses(tools));
-        assert!(!*auto_open);
 
         let RowKind::ToolGroup { tools, .. } = &rows[2].kind else {
             panic!("agent group expected")
@@ -14708,7 +12215,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), stray, tool_part("c", "make")],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1, "one folded group, no agent split");
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("tool group expected")
@@ -14726,20 +12233,13 @@ mod tests {
             MessageStatus::Complete,
             vec![agent_part("s1", "scan repo")],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
-        let RowKind::ToolGroup {
-            tools, auto_open, ..
-        } = &rows[0].kind
-        else {
+        let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!("agent group expected")
         };
         assert_eq!(tools.len(), 1);
         assert!(!tool_group_collapses(tools), "no 'Called 1 tool' wrap");
-        assert!(
-            !*auto_open,
-            "auto_open is a streaming flag; agent rows ignore it at paint"
-        );
     }
 
     #[test]
@@ -14762,7 +12262,7 @@ mod tests {
             MessageStatus::Complete,
             vec![tool_part("a", "ls"), part],
         );
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 2);
         let RowKind::ToolGroup { tools, .. } = &rows[0].kind else {
             panic!()
@@ -14775,34 +12275,30 @@ mod tests {
         assert!(is_agent_call(&tools[0].call));
     }
 
-    #[test]
-    fn trailing_group_auto_opens_only_while_streaming() {
-        let parts = vec![text_part("t0", "hi"), tool_part("a", "ls")];
-        let streaming = assistant("m3", MessageStatus::Streaming, parts.clone());
-        let rows = work_rows(&streaming, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
-            panic!()
-        };
-        assert!(auto_open, "trailing group opens while streaming");
-
-        let complete = assistant("m3", MessageStatus::Complete, parts);
-        let rows = work_rows(&complete, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[1].kind else {
-            panic!()
-        };
-        assert!(!auto_open);
-
-        // A non-trailing group never auto-opens.
-        let mid = assistant(
-            "m4",
-            MessageStatus::Streaming,
-            vec![tool_part("a", "ls"), text_part("t0", "hi")],
-        );
-        let rows = work_rows(&mid, false, &mut parse);
-        let RowKind::ToolGroup { auto_open, .. } = rows[0].kind else {
-            panic!()
-        };
-        assert!(!auto_open);
+    /// slopty: a group opens only as the person asks: not while its calls run, not as more
+    /// arrive, not at the turn's end (`docs/decisions/inspector.md`, "One fold depth").
+    #[gpui::test]
+    fn a_group_never_opens_by_itself(cx: &mut gpui::TestAppContext) {
+        with_tool_group_navigation(cx, |state, transcript, cx| {
+            let mut parts = vec![text_part("t0", "hi"), tool_part("a", "ls"), tool_part("b", "pwd")];
+            let shown = |status: MessageStatus, parts: &[MessagePart], cx: &mut gpui::App| {
+                state.update(cx, |state, _| {
+                    state.transcript = vec![assistant("m3", status, parts.to_vec())];
+                    state.transcript_revision += 1;
+                });
+                transcript.update(cx, |this, cx| {
+                    this.sync(cx);
+                    let row = this.rows.iter().find(|row| row.id.as_ref() == "m3#g:a").unwrap().clone();
+                    let RowKind::ToolGroup { tools, summary } = &row.kind else { unreachable!() };
+                    let _ = this.render_tool_group(&row.id, tools, summary, &Theme::dark(), cx);
+                    this.tool_group_reveals[&row.id].rendered_open
+                })
+            };
+            assert_eq!(shown(MessageStatus::Streaming, &parts, cx), Some(false), "while it runs");
+            parts.push(tool_part("c", "make"));
+            assert_eq!(shown(MessageStatus::Streaming, &parts, cx), Some(false), "as a call arrives");
+            assert_eq!(shown(MessageStatus::Complete, &parts, cx), Some(false), "at the turn's end");
+        });
     }
 
     #[test]
@@ -14811,8 +12307,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", "hello")];
-        let confirmed = work_rows(&entry, false, &mut parse);
-        let echoed = work_rows(&entry, true, &mut parse);
+        let confirmed = rows_for_entry(&entry, false, &mut parse);
+        let echoed = rows_for_entry(&entry, true, &mut parse);
         assert_eq!(confirmed.len(), 1);
         assert_eq!(confirmed[0].id, echoed[0].id);
         // Pending → confirmed changes the version so the row re-renders.
@@ -14954,7 +12450,7 @@ mod tests {
                 transcript.update(cx, |this, cx| {
                     feed(this, entries, cx);
                     assert!(
-                        this.tool_group_reveals[&SharedString::from("reply#g0")].starts[0]
+                        this.tool_group_reveals[&SharedString::from("reply#g:live-tool")].starts[0]
                             .is_some()
                     );
                     this.pinned = true;
@@ -15214,126 +12710,6 @@ mod tests {
             });
         }
 
-        #[test]
-        fn replay_growth_snaps_only_when_following_the_tail() {
-            with_window(|transcript, window, cx| {
-                let entries: Vec<_> = (0..30).map(|ix| prompt(&format!("prompt-{ix}"))).collect();
-                transcript.update(cx, |this, cx| feed(this, entries.clone(), cx));
-                draw(window, cx);
-                let mut updated = entries;
-                for pinned in [false, true] {
-                    transcript.update(cx, |this, cx| {
-                        this.pinned = pinned;
-                        this.list.scroll_to(ListOffset {
-                            item_ix: 5,
-                            offset_in_item: px(12.0),
-                        });
-                        this.spring_kick = true;
-                        updated.push(prompt(&format!("history-{}", updated.len())));
-                        this.state.update(cx, |state, cx| {
-                            let frame = slopty_view_doc::diff_transcript(&state.transcript, &updated);
-                            state
-                                .receive_transcript_update(
-                                    slopty_view_doc::TranscriptUpdate {
-                                        frame,
-                                        replay_baseline: Some(
-                                            slopty_view_doc::TranscriptBaseline::capture(&updated),
-                                        ),
-                                    },
-                                    cx,
-                                )
-                                .unwrap();
-                        });
-                        this.sync(cx);
-                        if !pinned {
-                            let offset = this.list.logical_scroll_top();
-                            assert_eq!(offset.item_ix, 5);
-                            assert_eq!(offset.offset_in_item, px(12.0));
-                        } else {
-                            assert!(!this.spring_kick, "history must not start a scroll chase");
-                        }
-                    });
-                    draw(window, cx);
-                    if pinned {
-                        assert!(transcript.read(cx).distance_from_bottom() <= 0.5);
-                    }
-                }
-            });
-        }
-
-        // These exercise frame-by-frame geometry, including the first paint
-        // after a row append. Eventual settling alone misses visible jumps.
-        #[test]
-        fn runway_short_chat_glides_from_its_bottom_aligned_position() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = vec![viewport_row("prompt", "prompt")];
-                    this.list.reset(1);
-                    cx.notify();
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                let mut previous = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
-                assert!(previous > px(400.0));
-                for _ in 0..80 {
-                    transcript.update(cx, |this, cx| {
-                        this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                        this.step_own_turn(cx);
-                    });
-                    draw(window, cx);
-                    let top = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
-                    assert!(top <= previous + px(0.5), "glide reversed");
-                    assert!(
-                        previous - top < px(150.0),
-                        "glide jumped: {previous:?} -> {top:?}"
-                    );
-                    previous = top;
-                }
-                assert!(previous.abs() < px(1.0));
-            });
-        }
-
-        fn append_runway_rows(this: &mut Transcript, count: usize, cx: &mut Context<Transcript>) {
-            let old_last = this.rows.len() - 1;
-            let mut rows = this.rows.clone();
-            for ix in 0..count {
-                rows.push(viewport_row(&format!("reply-{}", old_last + ix), "reply"));
-            }
-            // Isolate the row-splice layout boundary; the streaming tests
-            // below exercise the real row builder and sync as well.
-            this.list.splice(this.rows.len()..this.rows.len(), count);
-            this.rows = rows;
-            this.list.remeasure_items(old_last..old_last + 1);
-            this.remeasure_last_row();
-            this.own_turn_kick = true;
-            cx.notify();
-        }
-
-        #[test]
-        fn runway_append_consumes_space_before_the_first_paint() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = vec![viewport_row("prompt", "prompt")];
-                    this.list.reset(1);
-                    this.on_own_send("chat".into(), "prompt".into(), cx);
-                    this.list.scroll_to(ListOffset::default());
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| this.step_own_turn(cx));
-                draw(window, cx);
-                let before = transcript.read(cx).list.max_offset_for_scrollbar().y;
-                transcript.update(cx, |this, cx| append_runway_rows(this, 3, cx));
-                draw(window, cx);
-                let after = transcript.read(cx).list.max_offset_for_scrollbar().y;
-                assert!(
-                    (after - before).abs() <= px(1.0),
-                    "append exposed blank scroll space: {before:?} -> {after:?}"
-                );
-            });
-        }
 
         fn feed(
             this: &mut Transcript,
@@ -15364,16 +12740,8 @@ mod tests {
             window: gpui::WindowHandle<CachedTranscript>,
             cx: &mut gpui::App,
         ) {
-            transcript.update(cx, |this, cx| {
-                this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                this.spring_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                if this.own_turn.is_some() {
-                    this.step_own_turn(cx);
-                }
-                if this.pinned {
-                    this.step_spring(cx);
-                }
-            });
+            // slopty: the list follows its end in its own layout; a frame is all a tick is.
+            transcript.update(cx, |_, cx| cx.notify());
             draw(window, cx);
         }
 
@@ -15482,7 +12850,6 @@ mod tests {
                             waiting_on: None, // slopty: new field.
                         })
                     });
-                    this.on_own_send("chat".into(), "prompt".into(), cx);
                 });
                 let entries = |status, text: &str| {
                     vec![
@@ -15573,329 +12940,11 @@ mod tests {
             });
         }
 
-        #[test]
-        fn runway_first_echo_starts_a_glide_in_an_empty_chat() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx); // notification before the optimistic echo
-                transcript.update(cx, |this, cx| feed(this, vec![prompt("prompt")], cx));
-                draw(window, cx);
-                let mut previous = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
-                assert!(
-                    previous > px(400.0),
-                    "first echo skipped its glide: {previous:?}"
-                );
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                    let top = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
-                    assert!(top <= previous + px(0.5));
-                    assert!(previous - top < px(150.0));
-                    previous = top;
-                }
-                assert!(previous.abs() <= px(1.0));
-            });
-        }
 
-        #[test]
-        fn runway_real_stream_consumes_reservation_then_follows_until_completion() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![prompt("prompt")], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                let mut text = String::new();
-                let mut handed_off = false;
-                for chunk in 0..30 {
-                    text.push_str(&format!("\n\nSection {chunk}. A paragraph to explain the result.\n\n```text\ncontent {chunk}\n```\n"));
-                    transcript.update(cx, |this, cx| {
-                        feed(
-                            this,
-                            vec![
-                                prompt("prompt"),
-                                assistant(
-                                    "reply",
-                                    MessageStatus::Streaming,
-                                    vec![text_part("text", &text)],
-                                ),
-                            ],
-                            cx,
-                        )
-                    });
-                    draw(window, cx); // assert the first paint, before correction
-                    let this = transcript.read(cx);
-                    if this.own_turn.is_some() && !this.list.tail_reservation_filled() {
-                        assert!(
-                            this.list.max_offset_for_scrollbar().y <= px(2.5),
-                            "provisional blank space after chunk {chunk}"
-                        );
-                    }
-                    for _ in 0..50 {
-                        tick(&transcript, window, cx);
-                    }
-                    let this = transcript.read(cx);
-                    if this.own_turn.is_none() {
-                        handed_off = true;
-                        assert!(this.pinned, "overflow lost automatic following");
-                        assert!(
-                            this.distance_from_bottom() <= 1.0,
-                            "stream stopped following at chunk {chunk}"
-                        );
-                    }
-                }
-                assert!(handed_off, "long output never retired the runway");
-                transcript.update(cx, |this, cx| {
-                    feed(
-                        this,
-                        vec![
-                            prompt("prompt"),
-                            assistant(
-                                "reply",
-                                MessageStatus::Complete,
-                                vec![text_part("text", &text)],
-                            ),
-                        ],
-                        cx,
-                    )
-                });
-                draw(window, cx);
-                for _ in 0..50 {
-                    tick(&transcript, window, cx);
-                }
-                assert!(transcript.read(cx).distance_from_bottom() <= 1.0);
-            });
-        }
 
-        #[test]
-        fn runway_wheel_down_cannot_enter_a_temporary_gap_or_reverse() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = vec![viewport_row("prompt", "prompt")];
-                    this.list.reset(1);
-                    this.on_own_send("chat".into(), "prompt".into(), cx);
-                    this.list.scroll_to(ListOffset::default());
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| append_runway_rows(this, 3, cx));
-                draw(window, cx);
-                let mut previous = px(0.0);
-                for _ in 0..20 {
-                    wheel(window, -60.0, cx);
-                    assert!(
-                        !transcript.read(cx).own_turn.as_ref().unwrap().held,
-                        "real wheel event must release the hold"
-                    );
-                    tick(&transcript, window, cx);
-                    let this = transcript.read(cx);
-                    let top = this
-                        .list
-                        .bounds_for_item(0)
-                        .map(|bounds| bounds.top())
-                        .unwrap_or_else(|| {
-                            // A genuine bottom pin uses GPUI's end sentinel, for
-                            // which bounds_for_item intentionally returns None.
-                            this.list.viewport_bounds().top()
-                                + this.list.offset_for_item(0)
-                                + this.list.scroll_px_offset_for_scrollbar().y
-                        });
-                    assert!(top >= px(-2.5), "wheel entered a blank runway: {top:?}");
-                    assert!(
-                        top <= previous + px(0.5),
-                        "downward wheel reversed: {previous:?} -> {top:?}"
-                    );
-                    previous = top;
-                }
-            });
-        }
 
-        #[test]
-        fn runway_background_burst_and_downward_input_reach_the_new_tail() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![prompt("prompt")], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                // Apply many commits with no layouts or animation frames,
-                // just as when the native window has stopped requesting them.
-                let mut text = String::new();
-                for chunk in 0..40 {
-                    text.push_str(&format!(
-                        "\n\nSection {chunk}\n\n```text\nresult {chunk}\n```\n"
-                    ));
-                    transcript.update(cx, |this, cx| {
-                        feed(
-                            this,
-                            vec![
-                                prompt("prompt"),
-                                assistant(
-                                    "reply",
-                                    MessageStatus::Streaming,
-                                    vec![text_part("text", &text)],
-                                ),
-                            ],
-                            cx,
-                        )
-                    });
-                }
-                draw(window, cx);
-                let mut previous = -transcript.read(cx).list.scroll_px_offset_for_scrollbar().y;
-                for _ in 0..100 {
-                    wheel(window, -180.0, cx);
-                    tick(&transcript, window, cx);
-                    let this = transcript.read(cx);
-                    let current = -this.list.scroll_px_offset_for_scrollbar().y;
-                    assert!(
-                        current >= previous - px(1.0),
-                        "refocus wheel snapped backward: {previous:?} -> {current:?}"
-                    );
-                    previous = current;
-                }
-                let this = transcript.read(cx);
-                assert!(this.own_turn.is_none());
-                assert!(
-                    this.distance_from_bottom() <= 1.0,
-                    "downward input never reached new output"
-                );
-                assert!(previous > px(800.0));
-            });
-        }
 
-        #[test]
-        fn runway_second_send_and_steer_keep_the_previous_viewport_until_echo() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![prompt("first")], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "first".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                let mut entries = vec![prompt("first")];
-                for (ix, status) in [MessageStatus::Complete, MessageStatus::Streaming]
-                    .into_iter()
-                    .enumerate()
-                {
-                    entries.push(assistant(
-                        &format!("reply-{ix}"),
-                        status,
-                        vec![text_part("text", "A short answer.")],
-                    ));
-                    transcript.update(cx, |this, cx| feed(this, entries.clone(), cx));
-                    draw(window, cx);
-                    for _ in 0..10 {
-                        tick(&transcript, window, cx);
-                    }
-                    let before = transcript.read(cx).list.scroll_px_offset_for_scrollbar().y;
-                    let id = format!("next-{ix}");
-                    transcript.update(cx, |this, cx| {
-                        this.on_own_send("chat".into(), id.clone(), cx)
-                    });
-                    draw(window, cx); // the echoed prompt has not landed yet
-                    assert!(
-                        (transcript.read(cx).list.scroll_px_offset_for_scrollbar().y - before)
-                            .abs()
-                            <= px(1.0),
-                        "waiting for echo moved the viewport"
-                    );
-                    entries.push(prompt(&id));
-                    transcript.update(cx, |this, cx| feed(this, entries.clone(), cx));
-                    draw(window, cx);
-                    let anchor = transcript.read(cx).own_turn_anchor_ix().unwrap();
-                    let mut previous = transcript
-                        .read(cx)
-                        .list
-                        .bounds_for_item(anchor)
-                        .unwrap()
-                        .top();
-                    assert!(previous > px(Transcript::own_send_inset(anchor) + 40.0));
-                    for _ in 0..80 {
-                        tick(&transcript, window, cx);
-                        let top = transcript
-                            .read(cx)
-                            .list
-                            .bounds_for_item(anchor)
-                            .unwrap()
-                            .top();
-                        assert!(top <= previous + px(0.5), "repeat send reversed");
-                        assert!(
-                            top >= px(Transcript::own_send_inset(anchor) - 2.5),
-                            "repeat send overshot"
-                        );
-                        assert!(previous - top < px(150.0), "repeat send jumped");
-                        previous = top;
-                    }
-                }
-            });
-        }
 
-        #[test]
-        fn runway_user_scroll_up_stays_released_when_output_overflows() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut entries = vec![prompt("old")];
-                    entries.push(assistant(
-                        "history",
-                        MessageStatus::Complete,
-                        vec![text_part("text", &"History paragraph.\n\n".repeat(80))],
-                    ));
-                    entries.push(prompt("prompt"));
-                    feed(this, entries, cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                wheel(window, 300.0, cx);
-                draw(window, cx);
-                assert!(!transcript.read(cx).own_turn.as_ref().unwrap().held);
-                let before = transcript.read(cx).list.logical_scroll_top();
-                transcript.update(cx, |this, cx| {
-                    let mut entries = this.state.read(cx).transcript.clone();
-                    entries.push(assistant(
-                        "reply",
-                        MessageStatus::Streaming,
-                        vec![text_part("text", &"Long streamed reply.\n\n".repeat(80))],
-                    ));
-                    feed(this, entries, cx);
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                let this = transcript.read(cx);
-                assert!(!this.pinned, "background growth stole the user's viewport");
-                let after = this.list.logical_scroll_top();
-                assert_eq!(before.item_ix, after.item_ix);
-                assert!((before.offset_in_item - after.offset_in_item).abs() <= px(1.0));
-            });
-        }
 
         // slopty: a jump reaches the end though rows measured under its glide
         // move the distance between wheel steps; a step up still breaks it.
@@ -15932,7 +12981,7 @@ mod tests {
                     tick(&transcript, window, cx);
                 }
                 let this = transcript.read(cx);
-                assert!(this.distance_from_bottom() <= AT_BOTTOM_PX, "the jump stopped short");
+                assert!(this.distance_from_bottom() <= FOLLOW_PX, "the jump stopped short");
                 assert!(!this.jump_button_shown());
                 // A step up is the person leaving the end.
                 wheel(window, 300.0, cx);
@@ -15941,298 +12990,10 @@ mod tests {
             });
         }
 
-        #[test]
-        fn runway_resizes_in_the_same_layout_without_a_provisional_gap() {
-            struct SizedTranscript {
-                transcript: Entity<Transcript>,
-                height: f32,
-            }
-            impl Render for SizedTranscript {
-                fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                    div()
-                        .w_full()
-                        .h(px(self.height))
-                        .child(self.transcript.clone())
-                }
-            }
-            with_window(|transcript, _, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = vec![viewport_row("prompt", "prompt")];
-                    this.list.reset(1);
-                    this.on_own_send("chat".into(), "prompt".into(), cx);
-                    this.list.scroll_to(ListOffset::default());
-                });
-                let window = cx
-                    .open_window(gpui::WindowOptions::default(), |_, cx| {
-                        cx.new(|_| SizedTranscript {
-                            transcript: transcript.clone(),
-                            height: 600.0,
-                        })
-                    })
-                    .unwrap();
-                for height in [600.0, 900.0, 450.0, 800.0] {
-                    window
-                        .update(cx, |root, window, cx| {
-                            root.height = height;
-                            cx.notify();
-                            window.refresh();
-                        })
-                        .unwrap();
-                    cx.update_window(window.into(), |_, window, cx| {
-                        let _ = window.draw(cx);
-                    })
-                    .unwrap();
-                    let this = transcript.read(cx);
-                    assert_eq!(this.list.viewport_bounds().size.height, px(height));
-                    assert!(
-                        (this.list.max_offset_for_scrollbar().y - px(2.0)).abs() <= px(0.5),
-                        "resize exposed blank space"
-                    );
-                    assert!(this.list.bounds_for_item(0).unwrap().top().abs() <= px(0.5));
-                }
-            });
-        }
 
-        #[test]
-        fn runway_direct_jump_to_an_unmeasured_tail_does_not_reserve_unknown_rows() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = (0..100)
-                        .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
-                        .collect();
-                    this.list.reset(100);
-                    this.list.scroll_to(ListOffset {
-                        item_ix: 99,
-                        offset_in_item: px(0.0),
-                    });
-                    this.pinned = false;
-                    cx.notify();
-                });
-                draw(window, cx);
-                let natural = transcript.read(cx).list.offset_for_item(100)
-                    - transcript.read(cx).list.offset_for_item(99);
-                transcript.update(cx, |this, cx| {
-                    this.list.reset(100); // discard all prefix height hints
-                    this.on_own_send("chat".into(), "entry-0".into(), cx);
-                    this.release_own_turn_hold();
-                    this.list.scroll_to(ListOffset {
-                        item_ix: 99,
-                        offset_in_item: px(0.0),
-                    });
-                });
-                draw(window, cx);
-                let this = transcript.read(cx);
-                assert_eq!(
-                    this.list.offset_for_item(100) - this.list.offset_for_item(99),
-                    natural,
-                    "unknown prefix rows created a blank tail"
-                );
-                assert!(this.distance_from_bottom() <= 1.0);
-            });
-        }
 
-        #[test]
-        fn runway_wheel_down_at_the_end_keeps_following_when_streaming_overflows() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![prompt("prompt")], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                wheel(window, -60.0, cx);
-                // Let the real wheel handler's deferred ListState read finish
-                // before delivering more output, as in the native event loop.
-                cx.defer(move |cx| {
-                    assert!(
-                        transcript.read(cx).pinned,
-                        "downward input at the runway end must retain follow intent"
-                    );
-                    let mut text = String::new();
-                    for chunk in 0..20 {
-                        text.push_str(&format!(
-                            "\n\nSection {chunk}\n\n```text\ncontent {chunk}\n```\n"
-                        ));
-                        transcript.update(cx, |this, cx| {
-                            feed(
-                                this,
-                                vec![
-                                    prompt("prompt"),
-                                    assistant(
-                                        "reply",
-                                        MessageStatus::Streaming,
-                                        vec![text_part("text", &text)],
-                                    ),
-                                ],
-                                cx,
-                            )
-                        });
-                        draw(window, cx);
-                        for _ in 0..40 {
-                            tick(&transcript, window, cx);
-                        }
-                    }
-                    let this = transcript.read(cx);
-                    assert!(this.own_turn.is_none());
-                    assert!(this.pinned);
-                    assert!(
-                        this.distance_from_bottom() <= 1.0,
-                        "output stopped following after the runway filled"
-                    );
-                });
-            });
-        }
 
-        #[test]
-        fn runway_down_then_up_before_overflow_preserves_the_user_viewport() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(
-                        this,
-                        vec![
-                            prompt("old"),
-                            assistant(
-                                "history",
-                                MessageStatus::Complete,
-                                vec![text_part("text", &"History.\n\n".repeat(80))],
-                            ),
-                            prompt("prompt"),
-                        ],
-                        cx,
-                    );
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                wheel(window, -60.0, cx);
-                cx.defer(move |cx| {
-                    assert!(transcript.read(cx).pinned);
-                    draw(window, cx);
-                    wheel(window, 300.0, cx);
-                    assert!(
-                        !transcript.read(cx).pinned,
-                        "upward input must cancel the spring synchronously"
-                    );
-                    cx.defer(move |cx| {
-                        assert!(!transcript.read(cx).pinned);
-                        let before = transcript.read(cx).list.logical_scroll_top();
-                        transcript.update(cx, |this, cx| {
-                            let mut entries = this.state.read(cx).transcript.clone();
-                            entries.push(assistant(
-                                "reply",
-                                MessageStatus::Streaming,
-                                vec![text_part("text", &"New output.\n\n".repeat(80))],
-                            ));
-                            feed(this, entries, cx);
-                        });
-                        draw(window, cx);
-                        for _ in 0..80 {
-                            tick(&transcript, window, cx);
-                        }
-                        let this = transcript.read(cx);
-                        assert!(!this.pinned);
-                        let after = this.list.logical_scroll_top();
-                        assert_eq!(before.item_ix, after.item_ix);
-                        assert!((before.offset_in_item - after.offset_in_item).abs() <= px(1.0));
-                    });
-                });
-            });
-        }
 
-        #[test]
-        fn runway_absorbs_tail_shrinkage_in_the_same_layout() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    let mut row = viewport_row("prompt", "prompt");
-                    row.kind = RowKind::ErrorChip {
-                        message: "line\n".repeat(12).into(),
-                    };
-                    this.rows = vec![row];
-                    this.list.reset(1);
-                    this.pinned = false;
-                    cx.notify();
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.list.scroll_to(ListOffset {
-                        item_ix: 0,
-                        offset_in_item: px(0.0),
-                    });
-                    this.step_own_turn(cx);
-                });
-                draw(window, cx);
-                let before = transcript.read(cx).list.bounds_for_item(0).unwrap();
-                transcript.update(cx, |this, cx| {
-                    // Simulate completion removing content from the last row.
-                    this.rows[0].kind = RowKind::ErrorChip {
-                        message: "done".into(),
-                    };
-                    this.list.remeasure_items(0..1);
-                    cx.notify();
-                });
-                // No controller tick between the change and this paint.
-                draw(window, cx);
-                let after = transcript.read(cx).list.bounds_for_item(0).unwrap();
-                assert_eq!(
-                    before.top(),
-                    after.top(),
-                    "completion must not move the prompt"
-                );
-                assert_eq!(
-                    before.size.height, after.size.height,
-                    "the runway absorbs the shrink"
-                );
-                transcript.update(cx, |this, cx| {
-                    this.rows[0].kind = RowKind::ErrorChip {
-                        message: "line\n".repeat(100).into(),
-                    };
-                    this.list.remeasure_items(0..1);
-                    cx.notify();
-                });
-                draw(window, cx);
-                let overflow_height = transcript
-                    .read(cx)
-                    .list
-                    .bounds_for_item(0)
-                    .unwrap()
-                    .size
-                    .height;
-                transcript.update(cx, |this, cx| {
-                    this.step_own_turn(cx);
-                    assert!(
-                        this.own_turn.is_none(),
-                        "overflow must retire the reservation"
-                    );
-                    assert!(this.pinned, "a held turn hands off to tail-follow");
-                });
-                draw(window, cx);
-                assert_eq!(
-                    transcript
-                        .read(cx)
-                        .list
-                        .bounds_for_item(0)
-                        .unwrap()
-                        .size
-                        .height,
-                    overflow_height,
-                    "retiring the minimum must be height-neutral"
-                );
-            });
-        }
 
         /// Run the next queued diagram synchronously, as the worker would.
         fn render_next_diagram(transcript: &Entity<Transcript>, cx: &mut gpui::App) -> bool {
@@ -16414,365 +13175,16 @@ mod tests {
             });
         }
 
-        #[test]
-        fn mermaid_completion_renders_the_tail_without_moving_the_runway_prompt() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    feed(this, vec![prompt("prompt")], cx);
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "prompt".into(), cx)
-                });
-                draw(window, cx);
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                let reply = |status| {
-                    vec![
-                        prompt("prompt"),
-                        assistant(
-                            "reply",
-                            status,
-                            vec![text_part(
-                                "text",
-                                &format!("Here it is:\n\n{MERMAID_FENCE}"),
-                            )],
-                        ),
-                    ]
-                };
-                transcript.update(cx, |this, cx| {
-                    feed(this, reply(MessageStatus::Streaming), cx)
-                });
-                for _ in 0..50 {
-                    tick(&transcript, window, cx);
-                }
-                assert!(transcript.read(cx).diagram_worker.is_none());
-                transcript.update(cx, |this, cx| {
-                    feed(this, reply(MessageStatus::Complete), cx)
-                });
-                for _ in 0..50 {
-                    tick(&transcript, window, cx);
-                }
-                let prompt_top = |cx: &gpui::App| {
-                    let this = transcript.read(cx);
-                    assert!(this.own_turn.is_some(), "a short reply keeps its runway");
-                    this.list.bounds_for_item(0).unwrap().top()
-                };
-                let before = prompt_top(cx);
-                assert!(render_next_diagram(&transcript, cx));
-                // No controller tick between the swap and this paint.
-                draw(window, cx);
-                assert_eq!(prompt_top(cx), before, "the diagram swap moved the prompt");
-                let this = transcript.read(cx);
-                assert!(
-                    this.list.max_offset_for_scrollbar().y <= px(2.5),
-                    "the swap opened blank space below the runway"
-                );
-                for _ in 0..50 {
-                    tick(&transcript, window, cx);
-                }
-                assert_eq!(prompt_top(cx), before);
 
-                // The lightbox frames an enlarged raster by the diagram's
-                // natural size and releases it on close.
-                let media = transcript
-                    .read(cx)
-                    .diagrams
-                    .borrow()
-                    .ready_media()
-                    .expect("rendered diagram");
-                cx.update_window(window.into(), |_, window, cx| {
-                    transcript.update(cx, |this, cx| {
-                        this.open_diagram_preview(media.clone(), window, cx)
-                    });
-                })
-                .unwrap();
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    assert!(this.attachment_preview.is_some());
-                    assert!(this.diagram_zoom.is_some());
-                    this.close_diagram_zoom(cx);
-                    assert!(this.attachment_preview.is_none());
-                    assert!(this.diagram_zoom.is_none());
-                });
-                draw(window, cx);
-            });
-        }
 
-        #[test]
-        fn send_glide_never_crosses_the_prompt_during_remeasurement() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = (0..12)
-                        .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
-                        .collect();
-                    this.list.reset(this.rows.len());
-                    cx.notify();
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    this.on_own_send("chat".into(), "entry-11".into(), cx)
-                });
-                draw(window, cx);
-                let start_top = transcript.read(cx).list.bounds_for_item(11).unwrap().top();
-                assert!(
-                    start_top > px(Transcript::own_send_inset(11) + 100.0),
-                    "installing the runway must preserve the start of the glide"
-                );
-                let mut previous_top = start_top;
-                for _ in 0..90 {
-                    draw(window, cx);
-                    transcript.update(cx, |this, cx| {
-                        // Pending-echo changes can invalidate the prompt before
-                        // the queued glide runs. Exercise that exact ordering.
-                        this.remeasure_last_row();
-                        this.own_turn_last_tick = Some(Instant::now() - Duration::from_millis(17));
-                        this.step_own_turn(cx);
-                    });
-                    draw(window, cx);
-                    let this = transcript.read(cx);
-                    let bounds = this.list.bounds_for_item(11).unwrap();
-                    assert!(
-                        bounds.top() <= previous_top + px(0.5),
-                        "the glide must not reverse"
-                    );
-                    previous_top = bounds.top();
-                    let target =
-                        this.list.viewport_bounds().top() + px(Transcript::own_send_inset(11));
-                    assert!(
-                        bounds.top() >= target - px(0.5),
-                        "send overshot: {:?} < {:?}",
-                        bounds.top(),
-                        target
-                    );
-                }
-                let this = transcript.read(cx);
-                let bounds = this.list.bounds_for_item(11).unwrap();
-                assert!(
-                    (f32::from(bounds.top() - this.list.viewport_bounds().top())
-                        - Transcript::own_send_inset(11))
-                    .abs()
-                        <= 1.0
-                );
-            });
-        }
 
-        #[test]
-        fn background_overflow_retires_hold_before_the_tail_is_measured() {
-            with_window(|transcript, window, cx| {
-                transcript.update(cx, |this, cx| {
-                    this.rows = (0..100)
-                        .map(|ix| viewport_row(&format!("row-{ix}"), &format!("entry-{ix}")))
-                        .collect();
-                    this.list.reset(this.rows.len());
-                    this.list.scroll_to(ListOffset {
-                        item_ix: 0,
-                        offset_in_item: px(0.0),
-                    });
-                    this.pinned = false;
-                    this.own_turn = Some(OwnTurnAnchor {
-                        chat_id: "chat".into(),
-                        message_id: "entry-0".into(),
-                        held: true,
-                        positioned: true,
-                        seen_prompt: true,
-                        scrolled: false,
-                    });
-                    cx.notify();
-                });
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    assert!(
-                        this.list.bounds_for_item(99).is_none(),
-                        "tail must remain virtualized"
-                    );
-                    this.step_own_turn(cx);
-                    assert!(
-                        this.own_turn.is_none(),
-                        "a filled hold cannot wait on off-screen bounds"
-                    );
-                    assert!(this.pinned);
-                });
-            });
-        }
 
-        #[test]
-        fn wheel_down_releases_stale_hold_before_a_background_frame_can_run() {
-            with_transcript(|this, cx| {
-                this.rows = vec![
-                    viewport_row("prompt", "prompt"),
-                    viewport_row("reply", "reply"),
-                ];
-                this.list.reset(2);
-                this.own_turn = Some(OwnTurnAnchor {
-                    chat_id: "chat".into(),
-                    message_id: "prompt".into(),
-                    held: true,
-                    positioned: true,
-                    seen_prompt: true,
-                    scrolled: false,
-                });
-                this.own_turn_scheduled.ask(Instant::now());
-                // A downward scroll into output received while no layout/frame
-                // callbacks were running. No preceding upward gesture.
-                this.list.scroll_to(ListOffset {
-                    item_ix: 1,
-                    offset_in_item: px(20.0),
-                });
-                this.handle_scroll(
-                    &ListScrollEvent {
-                        visible_range: 1..2,
-                        count: 2,
-                        is_scrolled: true,
-                        is_following_tail: false,
-                    },
-                    cx,
-                );
-                assert!(
-                    !this.own_turn.as_ref().unwrap().held,
-                    "input must cancel the queued hold synchronously"
-                );
-                let entity = cx.entity();
-                cx.defer(move |cx| {
-                    let this = entity.read(cx);
-                    assert!(!this.own_turn.as_ref().unwrap().held);
-                    assert_eq!(this.list.logical_scroll_top().item_ix, 1);
-                    assert_eq!(this.list.logical_scroll_top().offset_in_item, px(20.0));
-                });
-            });
-        }
 
-        #[test]
-        fn expanding_streaming_prompt_does_not_retire_its_runway() {
-            with_window(|transcript, window, cx| {
-                let mut user = prompt("prompt");
-                user.parts = vec![text_part("text", &"A long prompt line.\n".repeat(80))];
-                transcript.update(cx, |this, cx| {
-                    feed(
-                        this,
-                        vec![
-                            user.clone(),
-                            assistant(
-                                "reply",
-                                MessageStatus::Streaming,
-                                vec![text_part("text", "A short live reply.")],
-                            ),
-                        ],
-                        cx,
-                    );
-                    this.on_own_send("chat".into(), "prompt".into(), cx);
-                });
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                let before = transcript.read(cx).list.max_offset_for_scrollbar();
-                let toggle = |this: &mut Transcript, cx: &mut Context<Transcript>| {
-                    let full_h = this.user_heights["prompt"].get();
-                    this.toggle_user_fold(
-                        "prompt".into(),
-                        0,
-                        USER_LINE_HEIGHT * USER_COLLAPSED_LINES as f32,
-                        full_h,
-                        true,
-                    );
-                    this.user_folds.get_mut("prompt").unwrap().toggled_at =
-                        Some(Instant::now() - Duration::from_secs(5));
-                    cx.notify();
-                };
-                transcript.update(cx, toggle);
-                draw(window, cx);
-                tick(&transcript, window, cx);
-                assert!(
-                    transcript.read(cx).own_turn.is_some(),
-                    "Show more must not consume the runway as assistant output"
-                );
-                transcript.update(cx, toggle);
-                draw(window, cx);
-                tick(&transcript, window, cx);
-                assert!(transcript.read(cx).own_turn.is_some());
-                assert!(
-                    (transcript.read(cx).list.max_offset_for_scrollbar().y - before.y).abs()
-                        <= px(1.0),
-                    "Show less must restore the original reservation"
-                );
-                transcript.update(cx, toggle);
-                draw(window, cx);
-                transcript.update(cx, |this, cx| {
-                    feed(
-                        this,
-                        vec![
-                            user,
-                            assistant(
-                                "reply",
-                                MessageStatus::Streaming,
-                                vec![text_part("text", &"More assistant output.\n\n".repeat(80))],
-                            ),
-                        ],
-                        cx,
-                    )
-                });
-                transcript.update(cx, |this, cx| this.jump_to_bottom(cx));
-                for _ in 0..80 {
-                    tick(&transcript, window, cx);
-                }
-                assert!(
-                    transcript.read(cx).own_turn.is_none(),
-                    "real output must still retire the reservation while the prompt is expanded"
-                );
-            });
-        }
-
-        #[test]
-        fn folding_releases_sent_turn_hold_without_removing_reservation() {
-            with_transcript(|transcript, _| {
-                for reduced_motion in [false, true] {
-                    for open in [false, true] {
-                        transcript.own_turn = Some(OwnTurnAnchor {
-                            chat_id: "chat".into(),
-                            message_id: "prompt".into(),
-                            held: true,
-                            positioned: true,
-                            seen_prompt: true,
-                            scrolled: false,
-                        });
-                        transcript.pinned = true;
-                        transcript.spring_kick = true;
-                        transcript.own_turn_last_tick = Some(Instant::now());
-                        transcript
-                            .user_folds
-                            .entry("prompt".into())
-                            .or_default()
-                            .open = Some(open);
-
-                        // No row bounds yet: ownership must transfer even if
-                        // geometry is unavailable during a list remeasurement.
-                        transcript.toggle_user_fold(
-                            "prompt".into(),
-                            0,
-                            110.0,
-                            2200.0,
-                            reduced_motion,
-                        );
-
-                        let turn = transcript.own_turn.as_ref().unwrap();
-                        assert!(
-                            !turn.held,
-                            "an outgrown reservation must not re-engage the pin"
-                        );
-                        assert!(transcript.own_turn_last_tick.is_none());
-                        assert!(!transcript.pinned);
-                        assert!(!transcript.spring_kick);
-                        assert_eq!(transcript.user_folds["prompt"].open, Some(!open));
-                    }
-                }
-            });
-        }
 
         #[test]
         fn navigation_cancels_fold_compensation_before_queued_frame() {
             with_transcript(|transcript, cx| {
-                for navigation in ["wheel", "rail", "bottom", "send"] {
+                for navigation in ["wheel", "rail", "bottom"] {
                     transcript.user_collapse_scroll = Some(UserCollapseScroll {
                         started_at: Instant::now(),
                         duration_ms: 850,
@@ -16795,7 +13207,6 @@ mod tests {
                         ),
                         "rail" => transcript.begin_scroll_navigation(),
                         "bottom" => transcript.jump_to_bottom(cx),
-                        "send" => transcript.on_own_send("chat".into(), "prompt".into(), cx),
                         _ => unreachable!(),
                     }
                     assert!(transcript.user_collapse_scroll.is_none(), "{navigation}");
@@ -16870,8 +13281,8 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &"a line\n".repeat(40))];
-        let before = work_rows(&entry, false, &mut parse);
-        let after = work_rows(&entry, false, &mut parse);
+        let before = rows_for_entry(&entry, false, &mut parse);
+        let after = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
@@ -16883,7 +13294,7 @@ mod tests {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
             entry.role = MessageRole::User; // slopty: a prompt, as the record has it
             entry.status = None;
-            let rows = work_rows(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, false, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
                 panic!("expected a user row");
             };
@@ -16908,7 +13319,7 @@ mod tests {
             let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
             entry.role = MessageRole::User; // slopty: a prompt, as the record has it
             entry.status = None;
-            let rows = work_rows(&entry, false, &mut parse);
+            let rows = rows_for_entry(&entry, false, &mut parse);
             let RowKind::User { markdown, .. } = &rows[0].kind else {
                 panic!("expected a user row");
             };
@@ -16953,7 +13364,7 @@ mod tests {
         entry.role = MessageRole::User;
         entry.status = None;
         entry.parts = vec![text_part("t0", &content)];
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         assert_eq!(rows.len(), 1);
         let RowKind::User {
             text, attachments, ..
@@ -16970,7 +13381,7 @@ mod tests {
         // Image-only send: no bubble text, refs parsed.
         let only = crate::attachments::with_attachments("", &["/a/p.png".to_string()]);
         entry.parts = vec![text_part("t0", &only)];
-        let rows = work_rows(&entry, false, &mut parse);
+        let rows = rows_for_entry(&entry, false, &mut parse);
         let RowKind::User {
             text, attachments, ..
         } = &rows[0].kind
@@ -16986,9 +13397,9 @@ mod tests {
     fn diff_rows_appends_and_middle_edits() {
         let entry1 = assistant("m1", MessageStatus::Complete, vec![text_part("t0", "one")]);
         let entry2 = assistant("m2", MessageStatus::Complete, vec![text_part("t0", "two")]);
-        let r1 = work_rows(&entry1, false, &mut parse);
+        let r1 = rows_for_entry(&entry1, false, &mut parse);
         let mut both = r1.clone();
-        both.extend(work_rows(&entry2, false, &mut parse));
+        both.extend(rows_for_entry(&entry2, false, &mut parse));
 
         // Identical → None.
         assert!(diff_rows(&r1, &r1.clone()).is_none());
@@ -17003,12 +13414,12 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("t0", "one more")],
         );
-        let mut both_b = work_rows(&entry1b, false, &mut parse);
-        both_b.extend(work_rows(&entry2, false, &mut parse));
+        let mut both_b = rows_for_entry(&entry1b, false, &mut parse);
+        both_b.extend(rows_for_entry(&entry2, false, &mut parse));
         assert_eq!(diff_rows(&both, &both_b), Some((0..1, 1)));
 
         // Full reset when everything shifts.
-        let r2 = work_rows(&entry2, false, &mut parse);
+        let r2 = rows_for_entry(&entry2, false, &mut parse);
         assert_eq!(diff_rows(&r1, &r2), Some((0..1, 1)));
     }
 
@@ -17016,8 +13427,8 @@ mod tests {
     fn diff_handles_live_to_split_growth() {
         let live = assistant("m1", MessageStatus::Streaming, vec![text_part("t0", MD)]);
         let done = assistant("m1", MessageStatus::Complete, vec![text_part("t0", MD)]);
-        let live_rows = work_rows(&live, false, &mut parse);
-        let done_rows = work_rows(&done, false, &mut parse);
+        let live_rows = rows_for_entry(&live, false, &mut parse);
+        let done_rows = rows_for_entry(&done, false, &mut parse);
         // Same ids; every version flips its streaming bit → one 3-row splice.
         assert_eq!(diff_rows(&live_rows, &done_rows), Some((0..3, 3)));
     }
@@ -17646,7 +14057,7 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         };
-        let rows = work_rows(&user, true, &mut parse);
+        let rows = rows_for_entry(&user, true, &mut parse);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].timestamp, Some(ms));
 
@@ -17656,7 +14067,7 @@ mod tests {
             MessageStatus::Complete,
             vec![text_part("p1", "one\n\ntwo")],
         );
-        let rows = work_rows(&done, false, &mut parse);
+        let rows = rows_for_entry(&done, false, &mut parse);
         assert!(rows.len() >= 2);
         assert_eq!(rows.last().unwrap().timestamp, Some(done.created_at));
         assert_eq!(
@@ -17672,7 +14083,7 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("p1", "streaming…")],
         );
-        let rows = work_rows(&live, false, &mut parse);
+        let rows = rows_for_entry(&live, false, &mut parse);
         assert!(rows.iter().all(|r| r.timestamp.is_none()));
         assert!(rows.iter().all(|r| r.copy_text.is_none()));
         // Every row knows its entry (the hover group).
@@ -17920,9 +14331,8 @@ mod tests {
             MessageStatus::Streaming,
             vec![text_part("t0", ""), text_part("t1", "   ")],
         );
-        assert!(work_rows(&entry, false, &mut parse).is_empty());
+        assert!(rows_for_entry(&entry, false, &mut parse).is_empty());
     }
-
 }
 
 // slopty: appshots removed.

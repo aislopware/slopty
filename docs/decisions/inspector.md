@@ -187,3 +187,29 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
   files, published by each, as `conversation.rs` decodes Claude Code's transcript. Each gets one,
   pinned by recorded fixtures as Claude Code's is. Until then the inspector serves only Claude
   Code (`inspector.rs:959-968`; ours §4).
+- ✅ **How the stable base is built (2026-10-30).** Choices the ruling left open, made while
+  building "Stable above all":
+  - **A group is keyed by its first record.** A run of calls and thoughts is one row keyed
+    `{entry}#g:{first part id}`, so a group that grows, or that a spawn splits as its input
+    lands, keeps its key, its measured height and its fold. A key by position would move every
+    later group's fold when one split.
+  - **The follow rule rides GPUI's tail mode, with no spring.** While following, the list's
+    `FollowMode::Tail` snaps to the end on every layout, so growth at the end never shows a
+    frame off it, and an upward move caused by layout cannot happen. The person lets go with a
+    wheel or touch up past 2 pt, a scroll key or jump, a scrollbar drag, or a press or
+    selection in a row; letting go pins the first row in view to a concrete offset, and after
+    every splice that row is found again by its key and put back where it stood, so a splice
+    that replaces the rows around it moves nothing. Scrolling back within 2 pt of the end
+    follows again. The velocity spring, its 70 pt restick band and the own-send runway are
+    deleted: the desktop app snaps rather than glides (desktop §1.4), and the runway ran with
+    no caller.
+  - **The jump pill lives in the transcript.** It shows while the view does not follow and
+    rows arrived below since it let go, or it stands more than 320 pt from the end, and says
+    "↓ 12 new steps", counting rows (a group is one step). A press follows the end again.
+  - **The fixed lines are always drawn.** The header, Now and Changes are 28 pt lines whether
+    or not they have anything to say ("Nothing", "None"), so a session starting or resting
+    moves nothing under them. Now and Changes open a card under their line, which Esc or a
+    press outside closes and which gives the keyboard back to where it was.
+  - **The prompt box is the list's footer.** It is drawn under the last row rather than as an
+    item of its own, so every list index stays a row's and the follow rule treats its growth as
+    the end's.

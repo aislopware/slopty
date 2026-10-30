@@ -2,10 +2,10 @@
 //! recorded (`slopty-agent`'s fixtures, `tests/fixtures/conversation`) are planted as a session
 //! in Claude Code's own store on the stack's worker, taken up from the project's History by the
 //! stand-in TUI (`slopty-stub-claude`, `--resume <id>`) in the session's terminal, and the
-//! inspector beside it draws what Claude Code really wrote: tool calls grouped under one summary,
-//! a task list, a subagent's card that opens in place and drills in, and the files changed
-//! (`docs/decisions/ui.md`, "A session is its terminal, its inspector beside it"). Every state is
-//! a golden in light and in dark, and its words are read from the accessibility tree.
+//! inspector beside it draws what Claude Code really wrote, in the order it wrote it: tool calls
+//! grouped under one summary that opens only on a press, a task list, a subagent's card that
+//! opens in place and drills in, and the files changed (`docs/decisions/inspector.md`). Every
+//! state is a golden in light and in dark, and its words are read from the accessibility tree.
 
 use std::path::Path;
 
@@ -28,15 +28,22 @@ const LONG: &str = "7e1d4b2a-9c3f-4e8d-a6b5-0f2c4d6e8a91";
 /// three commands (one fails, one runs in the background), a file written, a subagent that reads.
 const TOOLS: &str = "Do these steps in order, using the named tools";
 
-/// What the `tools` turn's calls add up to over every group's summary, as the summaries count
-/// them ("Ran 2 commands · searched 2 times · 1 failed", "Ran 1 command · edited 1 file +2 −0"):
-/// commands run, searches, failures and files edited. Where the groups split follows where the
-/// recorded agent spoke between calls, which a new recording may move.
+/// What the `tools` turn's calls add up to over every group's summary and every lone call's line
+/// ("Ran 2 commands (1 failed) and searched 2 times", "Run sleep 1; echo bg-finished", "Write
+/// notes.md"): commands run, searches, failures and files edited. Where the groups split follows
+/// where the recorded agent spoke between calls, which a new recording may move.
 const CALLS: [(&str, u32); 4] = [("command", 3), ("searched", 2), ("failed", 1), ("edited", 1)];
 
 /// The counts `summary` (one group's sentence: "Ran 2 commands (1 failed), searched 2 times and
-/// edited 1 file") gives for each of [`CALLS`]' kinds.
+/// edited 1 file", or a lone call's line: "Run …", "Write …") gives for each of [`CALLS`]' kinds.
 fn counted(summary: &str) -> [u32; 4] {
+    // A lone call's own line: one command run, or one file written.
+    if summary.starts_with("Run ") {
+        return [1, 0, 0, 0];
+    }
+    if summary.starts_with("Write ") {
+        return [0, 0, 0, 1];
+    }
     let mut counts = [0_u32; 4];
     let clauses = summary.replace(" (", ", ").replace(')', "").replace(" and ", ", ");
     for part in clauses.split(", ") {
@@ -63,6 +70,19 @@ async fn goldens(drv: &mut Driver, renders: &Path, name: &str) {
     drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     crate::served::goldens_with(drv, renders, name, &[], &[]).await;
+}
+
+/// The inspector's buttons that would fold a whole turn ("Worked for 4s", "Show work"): none,
+/// since a turn reads as its steps (`docs/decisions/inspector.md`, "Stable above all").
+fn dividers(dump: &Dump) -> Vec<String> {
+    inspector(dump)
+        .into_iter()
+        .filter(|n| n.role == "Button")
+        .filter_map(|n| n.label.clone())
+        .filter(|l| {
+            l.starts_with("Worked for ") || l.starts_with("Show work") || l.starts_with("Hide work")
+        })
+        .collect()
 }
 
 /// Click `node` and let what it opens settle.
@@ -132,13 +152,14 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
     }
 }
 
-/// A recorded Claude Code session reads in the inspector as zeron draws a turn. The `tools`
-/// recording, taken up from History: settled, the turn is its prompt, one "Worked for" divider
-/// and its answer, and its finished task list leaves no list in Now. The divider opens on the
-/// work: its calls fold under a summary on each side of the subagent's card, counting them by
-/// kind ("Ran 2 commands (1 failed)", the glob and grep as searches; then the file written), and
-/// the subagent the turn ran is a card that opens in place and drills in; a click on a summary
-/// opens its group. Changes names the file the session wrote, with its counts.
+/// A recorded Claude Code session reads in the inspector as a trace of what it did. The `tools`
+/// recording, taken up from History: settled, the turn is its prompt, then its steps and words in
+/// the order the record has them, with no divider folding the turn, and its finished task list
+/// leaves Now saying nothing. Its calls fold under a summary between the words the agent said,
+/// counting them by kind ("Ran 2 commands (1 failed)", the glob and grep as searches), and a call
+/// alone between them shows itself (the background command, the file written); the subagent the
+/// turn ran is a card that opens in place and drills in; a click on a summary opens its group.
+/// Changes counts the file the session wrote, and its card names it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_recorded_session_reads_in_the_inspector() {
@@ -165,32 +186,49 @@ async fn a_recorded_session_reads_in_the_inspector() {
     if labelled(&folded, "ListItem", "Done: Survey files").is_some() {
         missing.push("a finished task list leaves Now once the turn ends".to_owned());
     }
-    // The changes the session made: the one file it wrote, a press from its diff.
-    if labelled(&folded, "Button", "Open the diff of notes.md").is_none() {
-        missing.push(format!("Changes names notes.md, the file the session wrote:\n{words}"));
+    // The changes the session made: its line counts them, and its card names the one file it
+    // wrote, a press from its diff; Esc closes the card.
+    match labelled(&folded, "Button", "Changes: 1 file, +2").cloned() {
+        Some(line) => {
+            press(drv, &line).await;
+            let card = drv
+                .wait_for("the Changes card", STEP, |d| {
+                    labelled(d, "Button", "Open the diff of notes.md").is_some()
+                })
+                .await;
+            if card.is_err() {
+                missing
+                    .push("the Changes card names notes.md, the file the session wrote".to_owned());
+            }
+            drv.keys("escape").await.unwrap();
+            if drv
+                .wait_for("the card closed", STEP, |d| {
+                    labelled(d, "Button", "Open the diff of notes.md").is_none()
+                })
+                .await
+                .is_err()
+            {
+                missing.push("Esc closes the Changes card".to_owned());
+            }
+        }
+        None => {
+            missing.push(format!("the Changes line counts the file the session wrote:\n{words}"));
+        }
     }
 
-    // The settled turn's work folds behind "Worked for", which a click opens.
-    let summary = if let Some(divider) = labelled(&folded, "Button", "Worked for ").cloned() {
-        let closed = folded.a11y.len();
-        press(drv, &divider).await;
-        if drv.wait_for("the turn's work open", STEP, |d| d.a11y.len() > closed).await.is_ok() {
-            goldens(drv, &renders, "inspector-turn-work").await;
-        } else {
-            missing.push("a click on the divider opens the turn's work".to_owned());
-        }
-        drv.dump().await.unwrap()
-    } else {
-        missing.push("the settled turn folds its work behind a \"Worked for\" divider".to_owned());
-        folded
-    };
+    // No divider folds the settled turn: its steps read in the record's order.
+    if !dividers(&folded).is_empty() {
+        missing.push(format!("no divider folds the turn: {:?}", dividers(&folded)));
+    }
+    let summary = folded;
 
-    // A summary for the calls on each side of the subagent's card, counted by kind.
+    // A summary for the calls between the agent's words, counted by kind; a call alone between
+    // them shows itself ("Run sleep 1; echo bg-finished", "Write notes.md") and counts as one.
     let groups: Vec<String> = inspector(&summary)
         .into_iter()
         .filter(|n| n.role == "Button")
         .filter_map(|n| n.label.clone())
-        .filter(|l| l.starts_with("Ran "))
+        .filter(|l| l.starts_with("Ran ") || l.starts_with("Run ") || l.starts_with("Write "))
         .collect();
     let total = groups.iter().map(|g| counted(g)).fold([0_u32; 4], |mut sum, counts| {
         for (s, c) in sum.iter_mut().zip(counts) {
@@ -254,9 +292,9 @@ const SESSION: [Turn; 5] = [
 ];
 
 /// A long session reads calm in the inspector from its top to its end, the way a real one goes
-/// ([`SESSION`]). Each settled turn is its prompt, one "Worked for" divider and its answer, so
-/// the timeline reads as a conversation, not a log; its end and its top are goldens in light and
-/// in dark.
+/// ([`SESSION`]). Each turn is its prompt, then its steps and words in the record's order, every
+/// group folded to its summary until pressed; its end and its top are goldens in light and in
+/// dark.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_long_session_reads_calm_from_its_top_to_its_end() {
@@ -268,7 +306,7 @@ async fn a_long_session_reads_calm_from_its_top_to_its_end() {
     })
     .await;
     let drv = &mut stack.driver;
-    // The last turn's history arrives and its divider folds; nothing moves after.
+    // The last turn's history arrives and draws; nothing moves after.
     tokio::time::sleep(SETTLE.saturating_mul(2)).await;
     goldens(drv, &renders, "inspector-session").await;
     let end = drv.dump().await.unwrap();
@@ -276,9 +314,9 @@ async fn a_long_session_reads_calm_from_its_top_to_its_end() {
     if !inspector_words(&end).contains("Nothing is left open.") {
         missing.push("the session's end shows its last answer".to_owned());
     }
-    // The last turn did no work: it ends on its answer, and no turn's work stays open.
-    if labelled(&end, "Button", "Hide work").is_some() {
-        missing.push("no settled turn's work stays open by itself at the end".to_owned());
+    // No turn folds behind a divider, and nothing opened by itself.
+    if !dividers(&end).is_empty() {
+        missing.push(format!("no divider folds a turn: {:?}", dividers(&end)));
     }
 
     // Its top: the survey's prompt, its folded work and the findings under it. The wheel over
@@ -293,20 +331,15 @@ async fn a_long_session_reads_calm_from_its_top_to_its_end() {
     if !inspector_words(&top).contains(TOOLS) {
         missing.push(format!("the session's top shows its first prompt, {TOOLS:?}"));
     }
-    // Every settled turn folds its work behind one "Worked for" divider.
-    let dividers: Vec<String> = inspector(&top)
-        .into_iter()
-        .filter(|n| n.role == "Button")
-        .filter_map(|n| n.label.clone())
-        .filter(|l| {
-            l.starts_with("Worked for ") || l.starts_with("Show work") || l.starts_with("Hide work")
-        })
-        .collect();
-    if !dividers.first().is_some_and(|l| l.starts_with("Worked for ")) {
-        missing.push(format!("the survey folds its work behind \"Worked for\", not {dividers:?}"));
+    // The survey's steps follow its prompt, folded to their summaries, with no divider over them.
+    let words = inspector_words(&top);
+    let prompt_at = words.find(TOOLS);
+    let first_group = words.find("Ran ");
+    if !matches!((prompt_at, first_group), (Some(prompt), Some(group)) if prompt < group) {
+        missing.push(format!("the survey's first group reads under its prompt:\n{words}"));
     }
-    if !dividers.iter().all(|l| l.starts_with("Worked for ")) {
-        missing.push(format!("every settled turn's divider says how long it worked: {dividers:?}"));
+    if !dividers(&top).is_empty() {
+        missing.push(format!("no divider folds a turn: {:?}", dividers(&top)));
     }
     assert!(missing.is_empty(), "the frames do not say:\n- {}", missing.join("\n- "));
     stack.shutdown().await;

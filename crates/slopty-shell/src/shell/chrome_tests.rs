@@ -346,8 +346,9 @@ mod session_card {
     }
 
     /// The inspector does not repeat its session's title, which the terminal's title bar
-    /// and the sidebar row say: a session at work has its status and time on one line over its
-    /// timeline, and an idle one has no header at all.
+    /// and the sidebar row say: its header is one fixed line over its timeline, at work or idle,
+    /// so nothing over the timeline moves as the session starts or rests
+    /// (`docs/decisions/inspector.md`, "Fixed frame").
     #[gpui::test]
     fn the_inspector_does_not_repeat_its_sessions_title(cx: &mut gpui::TestAppContext) {
         use super::super::retention_tests::{DESKTOP, chat_row, launch};
@@ -368,7 +369,7 @@ mod session_card {
             cx.debug_bounds("inspector-header").is_some()
         };
         assert!(inspect("a", cx), "a session at work says so over its timeline");
-        assert!(!inspect("c", cx), "an idle one has nothing to say over it");
+        assert!(inspect("c", cx), "an idle one keeps the same line");
     }
 
     /// slopty: a toast never stands over the session's terminal, whose TUI keeps its prompt in

@@ -1325,7 +1325,7 @@ mod tests {
             vec![MessagePart::Error { id: "refused:1".into(), message: start, detail: None }],
             MessageStatus::Complete,
         );
-        let rows = super::super::work_rows(&turn, false, &mut |_, text| {
+        let rows = super::super::rows_for_entry(&turn, false, &mut |_, text| {
             Arc::new(crate::markdown::parser::parse_full(text))
         });
         assert!(

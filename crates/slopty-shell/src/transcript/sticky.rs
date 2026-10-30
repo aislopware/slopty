@@ -3,10 +3,8 @@
 //! group trigger, `.research/opencode-study-2026-10-19.md` item 3): once the header has scrolled
 //! past the transcript's top while its rows still reach past it, a band of it spans that edge, on
 //! the pane's own ground, ending in a soft scroll edge rather than a hairline. A press folds the
-//! group and goes back to it. A turn's divider holds as the same centred divider it is in the
-//! list, in its own short words ("Worked for 4m 13s"), never the sentence of all its work. The
-//! band paints deferred, above the transcript's top fade, which would otherwise fade it with the
-//! words it stays above.
+//! group and goes back to it. The band paints deferred, above the transcript's top fade, which
+//! would otherwise fade it with the words it stays above.
 //!
 //! The person's prompt is held nowhere (2026-10-20): Amp, T3 Code and opencode hold none, and
 //! Claude desktop keeps its peek behind a flag; find goes back to a prompt.
@@ -19,7 +17,7 @@ use crate::theme::Theme;
 use crate::motion::HoverFade as _;
 
 /// The group band's height, at least: opencode's 28 pt trigger, or a finger's row where the
-/// divider it holds stands that tall.
+/// header it holds stands that tall.
 const GROUP_BAND_H: f32 = 28.0;
 
 fn band_height() -> f32 {
@@ -71,38 +69,31 @@ impl Transcript {
         if read == len {
             return None;
         }
-        let header = match &self.rows[read].compact_fold {
-            Some(group) => self.rows[..read].iter().rposition(|row| &row.id == group)?,
-            None => read,
-        };
-        if !self.group_open(header) || top(header) >= line {
+        if !self.group_open(read) || top(read) >= line {
             return None;
         }
-        let id = &self.rows[header].id;
-        let end = header + 1 + self.rows[header + 1..].iter().take_while(|row| row.compact_fold.as_ref() == Some(id)).count();
-        (top(end.min(len)) > line + band_height()).then_some(header)
+        (top((read + 1).min(len)) > line + band_height()).then_some(read)
     }
 
-    /// Whether row `ix` is a tool group shown open behind a header that folds it: its own rows,
-    /// or the rows of the work it heads.
+    /// Whether row `ix` is a tool group shown open behind a header that folds it.
     fn group_open(&self, ix: usize) -> bool {
         let row = &self.rows[ix];
-        let RowKind::ToolGroup { tools, auto_open, compact_shell, .. } = &row.kind else {
+        let RowKind::ToolGroup { tools, .. } = &row.kind else {
             return false;
         };
-        let (collapses, solo) = super::group_shape(tools, *compact_shell);
-        collapses && !solo && self.folds.get(&row.id).and_then(|fold| fold.open).unwrap_or(*auto_open)
+        let (collapses, solo) = super::group_shape(tools);
+        collapses && !solo && self.folds.get(&row.id).and_then(|fold| fold.open).unwrap_or(false)
     }
 
     /// Fold the group headed at row `ix` and glide back to it.
     fn fold_held_group(&mut self, ix: usize, cx: &mut Context<Self>) {
         let row = &self.rows[ix];
-        let RowKind::ToolGroup { auto_open, .. } = &row.kind else {
+        if !matches!(row.kind, RowKind::ToolGroup { .. }) {
             return;
-        };
-        let (id, auto_open) = (row.id.clone(), *auto_open);
+        }
+        let id = row.id.clone();
         let height = self.tool_group_reveals.get(&id).map_or(0.0, |reveal| reveal.rendered_height);
-        self.toggle_fold(id, height, auto_open, cx);
+        self.toggle_fold(id, height, cx);
         self.scroll_to_row(ix, cx);
         cx.notify();
     }
@@ -132,41 +123,14 @@ impl Transcript {
 
     fn render_held_group(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let row = &self.rows[ix];
-        let RowKind::ToolGroup { summary, worked_secs, compact_shell, .. } = &row.kind else {
+        let RowKind::ToolGroup { summary, .. } = &row.kind else {
             return None;
         };
         let theme = Theme::of(cx).clone();
-        // The pane's own ground, so the band reads as the divider staying put, not a bar.
+        // The pane's own ground, so the band reads as the header staying put, not a bar.
         let fill = if theme.is_frost() { theme.glass() } else { theme.session_ground() };
         let key: SharedString = format!("sticky-group-{}", cx.entity_id()).into();
-        let content = if *compact_shell {
-            // slopty: a turn's divider holds as the divider it is, centred between its rules, in
-            // its own short words ("Worked for 4m 13s"); its words in full stay what a screen
-            // reader hears.
-            let words: SharedString = match worked_secs {
-                Some(secs) => super::worked_for_label(*secs).into(),
-                None => super::divider_words(true).into(),
-            };
-            let label = SharedString::from(super::spoken_divider(&words, &summary.text));
-            let held: SharedString = format!("{}-held", row.id).into();
-            super::turn_divider(
-                &held,
-                label,
-                super::tool_group_title(words, &[], None, &theme),
-                true,
-                1.0,
-                None,
-                &theme,
-                cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.fold_held_group(ix, cx);
-                }),
-            )
-            .w_full()
-            .into_any_element()
-        } else {
-            self.held_group_header(ix, &summary.text, &key, &theme, cx)
-        };
+        let content = self.held_group_header(ix, &summary.text, &key, &theme, cx);
         let band = div()
             .id(key)
             .w_full()
@@ -300,9 +264,9 @@ mod tests {
         }
     }
 
-    /// slopty: an open group's header holds under the titlebar while its rows scroll, not
-    /// before its header has scrolled under, nor once folded; a press on it folds the group. A
-    /// turn's divider holds in its own short words, not its work's sentence.
+    /// slopty: an open group's header holds at the transcript's top while its rows scroll, not
+    /// before its header has scrolled under, nor once its rows have gone by; it says the group's
+    /// sentence, and a press on it folds the group.
     #[gpui::test]
     fn an_open_groups_header_holds_while_its_rows_scroll(cx: &mut gpui::TestAppContext) {
         struct Fixture(Entity<Transcript>);
@@ -321,43 +285,73 @@ mod tests {
         let state = cx.new(|_| AppState::new());
         let transcript = cx.new(|cx| Transcript::new(state, cx));
         let group: SharedString = "row-10".into();
+        let runs: Vec<super::super::ToolItem> = (0..30)
+            .map(|n| {
+                let entry = super::super::rows_for_entry(
+                    &slopty_view_doc::SessionMessageEntry {
+                        id: format!("run-{n}"),
+                        role: slopty_view_doc::MessageRole::Assistant,
+                        parts: vec![slopty_view_doc::MessagePart::Tool {
+                            id: format!("call-{n}"),
+                            call: slopty_view_proto::ToolCall::Exec { command: format!("cargo test -p crate{n}") },
+                            is_error: false,
+                            resolved: true,
+                            output: None,
+                            diff: None,
+                            output_ref: None,
+                            output_bytes: None,
+                            diff_ref: None,
+                            diff_stats: None,
+                            subagent_ref: None,
+                            subagent_status: None,
+                            subagent_tail: None,
+                            facts: None,
+                        }],
+                        created_at: 0,
+                        device_id: "d".into(),
+                        status: None,
+                        continuation_of: None,
+                        duration_ms: None,
+                    },
+                    false,
+                    &mut |_, text| Arc::new(crate::markdown::parser::parse_full(text)),
+                );
+                let Some(RowKind::ToolGroup { tools, .. }) = entry.into_iter().next().map(|row| row.kind) else {
+                    panic!("a call's group");
+                };
+                tools[0].clone()
+            })
+            .collect();
         transcript.update(cx, |this, cx| {
-            this.rows = (0..60)
+            this.rows = (0..40)
                 .map(|ix| match ix {
                     5 => row(ix, Some("Fix the flaky upload test")),
                     10 => Row {
-                        kind: RowKind::ToolGroup {
-                            summary: "Ran 30 commands".into(),
-                            tools: Arc::default(),
-                            auto_open: false,
-                            worked_secs: None,
-                            compact_shell: true,
-                            done: None,
-                        },
+                        kind: RowKind::ToolGroup { summary: "Ran 30 commands".into(), tools: Arc::new(runs.clone()) },
                         ..row(ix, None)
                     },
-                    11..=45 => Row { compact_fold: Some(group.clone()), ..row(ix, None) },
                     _ => row(ix, None),
                 })
                 .collect();
             this.folds.insert(group.clone(), super::super::FoldState { open: Some(true), ..Default::default() });
-            this.list.reset(60);
+            this.list.reset(40);
             this.pinned = false;
+            this.list.set_follow_mode(gpui::FollowMode::Normal);
             cx.notify();
         });
         let (_fixture, cx) = cx.add_window_view(|_, _| Fixture(transcript.clone()));
-        let at = |item_ix: usize, cx: &mut gpui::VisualTestContext| {
+        let at = |item_ix: usize, into: f32, cx: &mut gpui::VisualTestContext| {
             transcript.update(cx, |this, cx| {
-                this.list.scroll_to(ListOffset { item_ix, offset_in_item: px(0.0) });
+                this.list.scroll_to(ListOffset { item_ix, offset_in_item: px(into) });
                 cx.notify();
             });
             cx.run_until_parked();
             transcript.read_with(cx, |this, _| this.sticky_group())
         };
-        assert_eq!(at(3, cx), None, "its header is still read");
-        assert_eq!(at(25, cx), Some(10), "held at the transcript's own top");
-        assert_eq!(at(50, cx), None, "its rows have gone by");
-        assert_eq!(at(25, cx), Some(10));
+        assert_eq!(at(3, 0.0, cx), None, "its header is still read");
+        assert_eq!(at(10, 240.0, cx), Some(10), "held at the transcript's own top");
+        assert_eq!(at(20, 0.0, cx), None, "its rows have gone by");
+        assert_eq!(at(10, 240.0, cx), Some(10));
         cx.run_until_parked();
         cx.update(|window, cx| {
             window.refresh();
@@ -374,8 +368,8 @@ mod tests {
             })
         });
         assert!(
-            said.is_some_and(|labels| labels.iter().any(|label| label == "Hide work, ran 30 commands")),
-            "the divider's own words, then its work"
+            said.is_some_and(|labels| labels.iter().any(|label| label == "Ran 30 commands")),
+            "the group's own sentence"
         );
         let band = cx.debug_bounds("sticky-group").expect("the band");
         cx.simulate_click(band.center(), gpui::Modifiers::default());
