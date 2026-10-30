@@ -394,6 +394,12 @@ pub struct Turn {
     pub models: Vec<String>,
     /// Lines added and removed in the working tree over the turn.
     pub changed: Changed,
+    /// The permission mode it ran in, as the agent names it (Claude Code's `default`,
+    /// `acceptEdits`, `plan`, `auto`, `bypassPermissions`); `None` when its records do not say.
+    pub mode: Option<String>,
+    /// The tokens of context its last request to the model carried: what that request read,
+    /// fresh and from the cache, as the agent counts it; `None` before its first request.
+    pub context: Option<u64>,
 }
 
 /// How a turn stands.

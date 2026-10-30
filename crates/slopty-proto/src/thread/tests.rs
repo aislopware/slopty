@@ -30,6 +30,8 @@ fn turn(n: u32) -> Turn {
         usage: Usage::default(),
         models: Vec::new(),
         changed: Changed { added: n, removed: 1 },
+        mode: None,
+        context: None,
     }
 }
 
@@ -537,8 +539,8 @@ fn call_notes_follow_their_calls() {
     assert!(state.calls.is_empty(), "{:?}", state.calls);
 }
 
-/// A note says only what it knows: a running time said after the task keeps the task, a header
-/// and an ending said once stay, and what a later note says replaces them.
+/// A note says only what it knows: a running time said after the task keeps the task, a
+/// header, an ending and a run time said once stay, and what a later note says replaces them.
 #[test]
 fn a_call_note_keeps_what_a_later_one_leaves_unsaid() {
     let note = |n: CallNote| Action::CallNoted { item: ItemId("t1".to_owned()), note: n };
@@ -548,9 +550,11 @@ fn a_call_note_keeps_what_a_later_one_leaves_unsaid() {
         note(CallNote { task: Some("b1".to_owned()), ..CallNote::default() }),
         note(CallNote { title: Some("Read a.pdf · pages 2".to_owned()), ..CallNote::default() }),
         note(CallNote { elapsed_ms: Some(12_000), ..CallNote::default() }),
+        note(CallNote { ran_ms: Some(11_400), ..CallNote::default() }),
         note(CallNote { said: Some("Read PDF (1.2MB)".to_owned()), ..CallNote::default() }),
     ]);
     let kept = state.calls.get(&ItemId("t1".to_owned())).expect("the call's note");
+    assert_eq!(kept.ran_ms, Some(11_400), "the run time the hook said stays");
     assert_eq!(kept.task.as_deref(), Some("b1"));
     assert_eq!(kept.title.as_deref(), Some("Read a.pdf · pages 2"));
     assert_eq!(kept.said.as_deref(), Some("Read PDF (1.2MB)"));

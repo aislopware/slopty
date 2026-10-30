@@ -79,17 +79,23 @@ impl TaskNote {
 
 /// What the agent says of one call beside the call itself ([`super::Action::CallNoted`]).
 ///
-/// How long it has run, the background task it became, a retry of a subagent's request, the
-/// words it ended with, and its header where the agent's own UI words it better than its kind.
+/// How long it has run and, once it ended, how long its run alone took; the background task it
+/// became, a retry of a subagent's request, the words it ended with, and its header where the
+/// agent's own UI words it better than its kind.
 /// The TUI's "Running… (12s)", "Running in the background", "Interrupted", "exit code 2",
 /// "Denied by auto mode classifier · reason", "Read report.pdf · pages 1-3".
 ///
 /// A note leaves what it does not say as the last one said it: a running time said after the
-/// task keeps the task, and an ending said once stays.
+/// task keeps the task, and an ending or a run time said once stays.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct CallNote {
     /// How long it had run when the agent last said, in ms; a client ticks on from there.
     pub elapsed_ms: Option<u64>,
+    /// How long it ran once it ended, in ms, by the agent's own measure: its run alone, the
+    /// wait for the person's permission and the agent's own hooks before it left out (Claude
+    /// Code's `PostToolUse` `duration_ms`). The call's wall time, from its record to its
+    /// result's, holds both.
+    pub ran_ms: Option<u64>,
     /// When the agent last said so.
     pub at_ms: WallMs,
     /// The background task it started or became.
@@ -112,6 +118,7 @@ impl CallNote {
     #[must_use]
     pub fn over(self, had: &Self) -> Self {
         Self {
+            ran_ms: self.ran_ms.or(had.ran_ms),
             task: self.task.or_else(|| had.task.clone()),
             said: self.said.or_else(|| had.said.clone()),
             title: self.title.or_else(|| had.title.clone()),

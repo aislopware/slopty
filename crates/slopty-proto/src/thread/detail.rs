@@ -5,6 +5,8 @@
 //! ([`ContentRef`]), which [`super::wire::ThreadRequest::Expand`] resolves. Pictures travel as
 //! their digest and size, and their bytes only when asked for.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Where the whole of a clipped text or a picture is.
@@ -482,6 +484,14 @@ pub struct AgentDetail {
     pub tool_uses: Option<u64>,
     /// How long it ran.
     pub duration_ms: Option<u64>,
+    /// The model it ran on, as the agent resolved it (`claude-haiku-5-5`), once it says.
+    pub model: Option<String>,
+    /// Its tool calls by kind, as the agent tallies them once it ends: the [`super::kind`]
+    /// names it counts by (`read`, `search`, `exec`, `edit`, `other`), each with its count;
+    /// a kind it did not call is left out.
+    pub tally: BTreeMap<String, u64>,
+    /// Lines its edits added and removed, as the agent tallies them once it ends.
+    pub changed: super::Changed,
 }
 
 /// Questions for the person.

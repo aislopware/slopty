@@ -104,6 +104,8 @@ mod golden_thread {
             usage: usage(),
             models: vec!["claude-opus-5-5".to_owned()],
             changed: Changed { added: 3, removed: 1 },
+            mode: Some("acceptEdits".to_owned()),
+            context: Some(48_210),
         }
     }
 
@@ -517,8 +519,11 @@ mod golden_thread {
                 background: false,
                 report: Some(clip("found it")),
                 tokens: Some(32),
-                tool_uses: Some(0),
+                tool_uses: Some(3),
                 duration_ms: Some(46),
+                model: Some("claude-haiku-5-5".to_owned()),
+                tally: BTreeMap::from([(kind::READ.to_owned(), 2), (kind::SEARCH.to_owned(), 1)]),
+                changed: Changed { added: 4, removed: 2 },
             }),
             ToolDetail::Question(QuestionDetail {
                 questions: vec![Question {
@@ -589,6 +594,7 @@ mod golden_thread {
                 item: ItemId("toolu_3".to_owned()),
                 note: CallNote {
                     elapsed_ms: Some(30_000),
+                    ran_ms: Some(29_400),
                     at_ms: ms(30),
                     task: Some("b1".to_owned()),
                     retry: Some(Retry { attempt: 1, max: None, in_ms: Some(500) }),
