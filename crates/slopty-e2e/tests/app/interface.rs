@@ -233,13 +233,13 @@ async fn new_project_clones_a_repository_into_the_open_folder() {
         assert!(since.elapsed() < STEP, "the clone at {}", clone.display());
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    // The window lands in the clone's project, on a new session there: the thread it showed is
-    // left behind, and nothing says the clone failed.
-    let landed = stack
-        .driver
-        .wait_for("a new session in the clone", STEP, |d| {
-            d.a11y_node("Button", Some("Command palette")).is_some()
-                && d.a11y_node("Button", Some("Open in…")).is_none()
+    // The window lands in the clone's project, on its new-session canvas, and nothing says the
+    // clone failed.
+    let drv = &mut stack.driver;
+    let landed = drv
+        .wait_for("the new-session canvas", STEP, |d| {
+            d.a11y_node("Heading", Some("No session open")).is_some()
+                && crate::served::identity(d).is_none()
         })
         .await
         .unwrap();
@@ -248,6 +248,23 @@ async fn new_project_clones_a_repository_into_the_open_folder() {
         "{}",
         slopty_e2e::frame_text(&landed.a11y)
     );
+    // The project it landed in is the clone: a new session starts there first.
+    drv.keys("cmd-n").await.unwrap();
+    let first_start = |d: &slopty_e2e::Dump| {
+        d.a11y
+            .iter()
+            .filter(|n| {
+                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Start "))
+            })
+            .min_by(|a, b| a.bounds[1].total_cmp(&b.bounds[1]))
+            .and_then(|n| n.label.clone())
+    };
+    let picker = drv
+        .wait_for("the new session's projects", STEP, |d| first_start(d).is_some())
+        .await
+        .unwrap();
+    let first = first_start(&picker).unwrap();
+    assert!(first.ends_with(" in origin"), "the clone's project first: {first}");
     drop(daemon);
     stack.shutdown().await;
 }
@@ -412,8 +429,9 @@ async fn a_closed_view_comes_back_with_cmd_shift_t() {
     stack.shutdown().await;
 }
 
-/// Open in, from the chat's titlebar, hands the thread's folder to the editor picked: on this
-/// Mac as `open -a <app> <folder>`, on another machine as the editor's SSH link to it.
+/// Open in, which ⌥⌘O hangs under the titlebar's identity, hands the thread's folder to the
+/// editor picked: on this Mac as `open -a <app> <folder>`, on another machine as the editor's SSH
+/// link to it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn open_in_hands_the_folder_to_an_editor() {
@@ -452,31 +470,23 @@ async fn open_in_hands_the_folder_to_an_editor() {
 
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    // The thread reaches the sidebar once the worker publishes it: open its row when it is there.
-    let open_in = |d: &slopty_e2e::Dump| {
-        d.a11y.iter().any(|n| n.role == "Button" && n.label.as_deref() == Some("Open in…"))
-    };
+    // The thread reaches the sidebar once the worker publishes it: open it when it is there.
     let since = std::time::Instant::now();
-    let titlebar = loop {
+    let identity = loop {
         drv.keys("cmd-1").await.unwrap();
         let dump = drv.dump().await.unwrap();
-        if open_in(&dump) {
-            break dump;
+        if let Some(identity) = crate::served::identity(&dump) {
+            break identity.bounds;
         }
         assert!(
             since.elapsed() < STEP,
-            "the thread's Open in: {}",
+            "the thread's titlebar: {}",
             slopty_e2e::frame_text(&dump.a11y)
         );
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     };
-    let [x, y, w, h] = titlebar
-        .a11y
-        .iter()
-        .find(|n| n.role == "Button" && n.label.as_deref() == Some("Open in…"))
-        .unwrap()
-        .bounds;
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    // ⌥⌘O hangs the menu under the titlebar's identity.
+    drv.keys("alt-cmd-o").await.unwrap();
     let editors = ["Finder", "Visual Studio Code", "Cursor", "Zed"];
     let menu = drv
         .wait_for("the editors", STEP, |d| {
@@ -498,6 +508,12 @@ async fn open_in_hands_the_folder_to_an_editor() {
             );
         }
     };
+    let card = menu.a11y_node("Menu", Some("Open in")).expect("the menu").bounds;
+    assert!(
+        card[1] >= identity[1] + identity[3]
+            && (card[0] - (identity[0] - 8.0).max(8.0)).abs() <= 1.0,
+        "under the identity: {card:?} {identity:?}"
+    );
     let offered: Vec<_> = menu
         .a11y
         .iter()
@@ -578,9 +594,7 @@ async fn a_pages_icon_shows_on_its_tab() {
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
-    drv.wait_for("the thread open", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
-        .await
-        .unwrap();
+    drv.wait_for("the thread open", STEP, |d| crate::served::identity(d).is_some()).await.unwrap();
     // A browser beside the session, from the palette, and the page's address.
     drv.keys("cmd-shift-p").await.unwrap();
     drv.type_text("Browser").await.unwrap();

@@ -54,6 +54,20 @@ pub fn unread(dump: &Dump, title: &str) -> bool {
     })
 }
 
+/// How tall the titlebar row stands at the window's top (`Theme::TITLEBAR_HEIGHT`).
+pub const TITLEBAR: f32 = 38.0;
+
+/// The titlebar's identity: the button in the row at the window's top named as a session of the
+/// sidebar's list is, which the row names while that session is shown.
+pub fn identity(dump: &Dump) -> Option<&A11yNode> {
+    let named = |n: &A11yNode| n.role == "Button" && n.label.is_some();
+    dump.a11y.iter().filter(|n| named(n) && n.bounds[1] < TITLEBAR).find(|top| {
+        dump.a11y
+            .iter()
+            .any(|row| named(row) && row.bounds[1] >= TITLEBAR && row.label == top.label)
+    })
+}
+
 /// The middle of `node`, in window points.
 pub fn middle(node: &A11yNode) -> (f32, f32) {
     let [x, y, w, h] = node.bounds;
@@ -220,8 +234,7 @@ pub fn says(read: &Value, words: &str) -> bool {
 pub async fn open_thread(drv: &mut Driver, nth: u8) -> Dump {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys(&format!("cmd-{nth}")).await.unwrap();
-    seen(drv, "the session's titlebar", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
-        .await
+    seen(drv, "the session's titlebar", STEP, |d| identity(d).is_some()).await
 }
 
 /// Summon the shown session's inspector as the person does, with ⌘I, once its terminal is drawn:

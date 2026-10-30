@@ -62,16 +62,21 @@ async fn every_state_reads_at_a_glance() {
         header(d, "better-update, 1") && header(d, "slopty, 6")
     })
     .await;
-    // The read chat: open it.
+    // The read chat: open it from its row, under the titlebar that may name it too.
     let read = grouped
         .a11y
         .iter()
-        .find(|n| n.role == "Button" && n.label.as_deref() == Some(AT_REST[0].1))
+        .find(|n| {
+            n.role == "Button"
+                && n.label.as_deref() == Some(AT_REST[0].1)
+                && n.bounds[1] >= crate::served::TITLEBAR
+        })
         .expect("the README's row");
     let (x, y) = middle(read);
     drv.click(x, y).await.unwrap();
     let dump = seen(drv, "the open chat read", STEP, |d| {
-        !crate::served::unread(d, AT_REST[0].1) && d.a11y_node("Button", Some("Open in…")).is_some()
+        !crate::served::unread(d, AT_REST[0].1)
+            && crate::served::identity(d).is_some_and(|n| n.label.as_deref() == Some(AT_REST[0].1))
     })
     .await;
     let text = slopty_e2e::frame_text(&dump.a11y);
