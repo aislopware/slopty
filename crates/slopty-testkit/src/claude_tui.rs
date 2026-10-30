@@ -57,6 +57,13 @@
 //! it held (`sessions`), when each
 //! transcript record was written (`wrote`) and its tools' results (`mcp`).
 //! In `STUB_RECORD`, `{session}` is the seat (`none` outside one) and `{pid}` its pid.
+//!
+//! Its records and its record of itself are stamped by the system's clock, unless `STUB_CLOCK`
+//! names a moment (milliseconds since the epoch): then by a fixture's, which moves one second at
+//! each record, so a turn's times and how long it worked read the same in every run. Each
+//! stand-in of a run takes its own stretch of it, [`STRETCH_MS`] after the one started before it
+//! (the order they took the numbered files of `STUB_CLOCK_DIR`), so no two sessions' times tie.
+//! What `STUB_RECORD` notes keeps the system's clock: it is what a test measures by.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -98,6 +105,16 @@ const RELAY_LINE: &str = "const RELAY = ";
 
 /// The variable that moves Claude Code's temporary root, where pasted pictures are kept.
 const TMPDIR_ENV: &str = "CLAUDE_CODE_TMPDIR";
+
+/// How far apart the stretches of the fixture clock two stand-ins of a run start: ten minutes,
+/// six hundred records.
+pub const STRETCH_MS: u64 = 600_000;
+
+/// How far a fixture clock moves at each record.
+const RECORD_MS: u64 = 1_000;
+
+/// The most stand-ins a run numbers.
+const ORDINALS: u64 = 10_000;
 
 /// Run the TUI as `args` ask, until its session ends.
 #[must_use]
@@ -263,8 +280,8 @@ enum State {
     Idle,
     /// A turn that goes on until Esc.
     Holding,
-    /// A question asked of the person: its tool call, and when the turn began.
-    Asking { call: String, since: Instant },
+    /// A question asked of the person: its tool call, and when the turn began, by its clock.
+    Asking { call: String, since: u64 },
 }
 
 /// One Claude Code TUI.
@@ -286,6 +303,9 @@ struct Tui {
     waiting: Vec<String>,
     record: Option<PathBuf>,
     doc: Value,
+    /// What its records are stamped by, and when it started by it.
+    clock: Clock,
+    started_ms: u64,
     /// What its record says it does, what for while it waits, and since when (milliseconds
     /// since the epoch).
     doing: (&'static str, Option<&'static str>, u64),
@@ -319,6 +339,8 @@ impl Tui {
             "sessions": [session],
             "reads": [], "prompts": [], "hooks": [], "drafts": [], "wrote": [], "mcp": [],
         });
+        let clock = Clock::from_env();
+        let started_ms = clock.now();
         let mut tui = Self {
             args: args.to_vec(),
             config,
@@ -337,7 +359,9 @@ impl Tui {
             waiting: Vec::new(),
             record,
             doc,
-            doing: (IDLE, None, now_us() / 1000),
+            clock,
+            started_ms,
+            doing: (IDLE, None, started_ms),
             relay: flag(args, "--plugin-dir").and_then(|dir| relay_of(Path::new(&dir))),
             drafted: String::new(),
         };
@@ -482,7 +506,7 @@ impl Tui {
         self.prompt = Some(uuid());
         self.hook("UserPromptSubmit", &json!({ "prompt": line }));
         let prompt = self.write("user", json!({ "role": "user", "content": line }));
-        let since = Instant::now();
+        let since = self.clock.now();
         let calls = self.turns.get(&line).and_then(Value::as_array).cloned();
         if let Some(calls) = calls {
             self.call_tools(&calls);
@@ -519,7 +543,7 @@ impl Tui {
     }
 
     /// The turn's answer, its `Stop` hook and its end.
-    fn answer(&mut self, text: &str, since: Instant) {
+    fn answer(&mut self, text: &str, since: u64) {
         self.write("assistant", assistant(&json!([{ "type": "text", "text": text }])));
         self.hook("Stop", &json!({ "stop_hook_active": false, "last_assistant_message": text }));
         self.turn_end(since);
@@ -527,9 +551,10 @@ impl Tui {
         screen(&format!("\r\n● {text}\r\n> "));
     }
 
-    fn turn_end(&mut self, since: Instant) {
-        let ms = u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
+    /// The turn's end, `since` its prompt by its clock.
+    fn turn_end(&mut self, since: u64) {
         let mut record = self.base("system");
+        let ms = self.clock.now().saturating_sub(since);
         merge(
             &mut record,
             &json!({ "subtype": "turn_duration", "durationMs": ms, "isMeta": false }),
@@ -538,7 +563,7 @@ impl Tui {
     }
 
     /// A question asked by call `call` answered `answer`.
-    fn answered(&mut self, call: &str, answer: &str, since: Instant) {
+    fn answered(&mut self, call: &str, answer: &str, since: u64) {
         self.doing(BUSY, None);
         let result = format!("User has answered your questions: \"{answer}\"");
         self.write(
@@ -684,7 +709,7 @@ impl Tui {
     /// one: no link in the chain of messages, the prompt itself on an `enqueue`.
     fn queue(&mut self, operation: &str, content: Option<&str>) {
         let mut record = json!({
-            "type": "queue-operation", "operation": operation, "timestamp": timestamp(),
+            "type": "queue-operation", "operation": operation, "timestamp": iso(self.clock.stamp()),
             "sessionId": self.session,
         });
         if let (Some(fields), Some(content)) = (record.as_object_mut(), content) {
@@ -697,11 +722,11 @@ impl Tui {
     }
 
     /// The fields every record of `kind` has; a user record names the prompt it answers to.
-    fn base(&self, kind: &str) -> Value {
+    fn base(&mut self, kind: &str) -> Value {
         let mut record = json!({
             "parentUuid": self.last, "isSidechain": false, "userType": "external",
             "cwd": self.cwd, "sessionId": self.session, "version": VERSION, "gitBranch": "",
-            "type": kind, "uuid": uuid(), "timestamp": timestamp(),
+            "type": kind, "uuid": uuid(), "timestamp": iso(self.clock.stamp()),
         });
         if let (Some(fields), Some(prompt), "user") = (record.as_object_mut(), &self.prompt, kind) {
             fields.insert("promptId".to_owned(), Value::from(prompt.as_str()));
@@ -737,10 +762,9 @@ impl Tui {
     fn register(&self) {
         let at = self.registry();
         let (status, waiting_for, since) = self.doing;
-        let started = self.doc.get("started_us").and_then(Value::as_u64).unwrap_or_default();
         let mut record = json!({
             "pid": std::process::id(), "sessionId": self.session, "cwd": self.cwd,
-            "startedAt": started / 1000, "kind": "interactive", "entrypoint": "cli",
+            "startedAt": self.started_ms, "kind": "interactive", "entrypoint": "cli",
             "version": VERSION, "status": status, "updatedAt": since, "statusUpdatedAt": since,
         });
         if let (Some(fields), Some(waiting_for)) = (record.as_object_mut(), waiting_for) {
@@ -752,7 +776,7 @@ impl Tui {
     /// Its record says it does `status` from now, waiting for `waiting_for`, when that changed.
     fn doing(&mut self, status: &'static str, waiting_for: Option<&'static str>) {
         if (self.doing.0, self.doing.1) != (status, waiting_for) {
-            self.doing = (status, waiting_for, now_us() / 1000);
+            self.doing = (status, waiting_for, self.clock.now());
             self.register();
         }
     }
@@ -1020,10 +1044,75 @@ fn now_us() -> u64 {
     u64::try_from(now.as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Now, as ISO 8601 in UTC with milliseconds.
-fn timestamp() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = now.as_secs();
+/// Now by the system's clock, in milliseconds since the epoch.
+fn now_ms() -> u64 {
+    now_us() / 1000
+}
+
+/// What a stand-in stamps its records by ([module docs](self)).
+#[derive(Debug)]
+struct Clock {
+    /// The fixture's next moment, when it runs by one.
+    next: Option<u64>,
+    /// The latest moment it stamped, or when it started.
+    last: u64,
+}
+
+impl Clock {
+    /// The fixture's clock when `STUB_CLOCK` names its start, else the system's.
+    fn from_env() -> Self {
+        let start = std::env::var("STUB_CLOCK").ok().and_then(|ms| ms.trim().parse().ok());
+        start.map_or_else(
+            || Self { next: None, last: now_ms() },
+            |start| {
+                let dir = std::env::var_os("STUB_CLOCK_DIR").map(PathBuf::from);
+                Self::fixture(start, dir.as_deref())
+            },
+        )
+    }
+
+    /// A fixture's clock from `start`, in the stretch of it this stand-in's place among those
+    /// numbered in `dir` gives it.
+    fn fixture(start: u64, dir: Option<&Path>) -> Self {
+        let place = dir.map_or(0, ordinal);
+        let start = start.saturating_add(place.saturating_mul(STRETCH_MS));
+        Self { next: Some(start), last: start }
+    }
+
+    /// The moment a record written now is stamped with.
+    fn stamp(&mut self) -> u64 {
+        self.last = self.next.unwrap_or_else(now_ms);
+        if let Some(next) = self.next.as_mut() {
+            *next = next.saturating_add(RECORD_MS);
+        }
+        self.last
+    }
+
+    /// Now by it: the latest moment it stamped on a fixture's.
+    fn now(&self) -> u64 {
+        if self.next.is_some() { self.last } else { now_ms() }
+    }
+}
+
+/// This stand-in's place among those of the run, in the order they started: the first number
+/// whose file it made in `dir`, or 0 when it can make none there.
+fn ordinal(dir: &Path) -> u64 {
+    let _made = std::fs::create_dir_all(dir);
+    for n in 0..ORDINALS {
+        let file =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(n.to_string()));
+        match file {
+            Ok(_) => return n,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return 0,
+        }
+    }
+    0
+}
+
+/// `ms` since the epoch, as ISO 8601 in UTC with milliseconds.
+fn iso(ms: u64) -> String {
+    let secs = ms / 1000;
     let (days, rest) = (secs / 86_400, secs % 86_400);
     let (y, m, d) = civil(i64::try_from(days).unwrap_or_default());
     format!(
@@ -1031,7 +1120,7 @@ fn timestamp() -> String {
         rest / 3600,
         (rest % 3600) / 60,
         rest % 60,
-        now.subsec_millis()
+        ms % 1000
     )
 }
 
@@ -1103,5 +1192,30 @@ mod tests {
         let args: Vec<String> =
             ["--session-id", "s1", "--", "--session-id"].iter().map(|a| (*a).to_owned()).collect();
         assert_eq!(flag(&args, "--session-id").as_deref(), Some("s1"));
+    }
+
+    /// A fixture's clock moves a second a record from where the stand-in's place puts it, each
+    /// stand-in of a run a stretch after the one before; with no place to number, the first
+    /// stretch. The system's reads now.
+    #[test]
+    fn a_fixture_clock_moves_a_second_a_record() {
+        const START: u64 = 4_102_477_200_000;
+        let dir = std::env::temp_dir().join(format!("stub-clock-{}", uuid()));
+        let mut first = Clock::fixture(START, Some(&dir));
+        let next = START.saturating_add(RECORD_MS);
+        assert_eq!(
+            (first.now(), first.stamp(), first.stamp(), first.now()),
+            (START, START, next, next)
+        );
+        assert_eq!(iso(first.now()), "2100-01-01T09:00:01.000Z");
+        let mut second = Clock::fixture(START, Some(&dir));
+        assert_eq!(second.stamp(), START.saturating_add(STRETCH_MS));
+        let blocked = dir.join("0").join("not a directory");
+        assert_eq!(Clock::fixture(START, Some(&blocked)).now(), START, "no place to number");
+        assert_eq!(Clock::fixture(START, None).now(), START);
+        let before = now_ms();
+        let mut system = Clock { next: None, last: 0 };
+        assert!(system.stamp() >= before && system.now() >= before);
+        drop(std::fs::remove_dir_all(&dir));
     }
 }
