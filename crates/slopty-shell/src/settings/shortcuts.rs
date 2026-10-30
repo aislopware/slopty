@@ -179,14 +179,9 @@ impl ShortcutsPage {
                     .flex()
                     .flex_col()
                     .child(widgets::row_title(theme, id.label()))
-                    .when(matches!(id, ShortcutId::NextSession | ShortcutId::PrevSession), |row| {
-                        row.child(widgets::meta_line(
-                            theme,
-                            vec![
-                                div().child("Navigate within the focused pane.").into_any_element(),
-                            ],
-                        ))
-                    }),
+                    .children(description(id).map(|said| {
+                        widgets::meta_line(theme, vec![div().child(said).into_any_element()])
+                    })),
             )
             .child(self.render_binding_control(id, ix, theme, cx))
     }
@@ -330,6 +325,17 @@ const GROUP_ORDER: [&str; 4] = [
     "Other",
 ];
 
+/// What a shortcut's key does, under its name, where the name alone does not say.
+const fn description(id: ShortcutId) -> Option<&'static str> {
+    match id {
+        // The sidebar's order, round its ends, whichever pane has the keyboard: the session's
+        // terminal, a shell split beside it or a view summoned there.
+        ShortcutId::NextSession => Some("The one below in the sidebar, from any pane"),
+        ShortcutId::PrevSession => Some("The one above in the sidebar, from any pane"),
+        _ => None,
+    }
+}
+
 /// The section a shortcut's row renders under.
 const fn group(id: ShortcutId) -> &'static str {
     match id {
@@ -462,6 +468,23 @@ impl Render for ShortcutsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The session keys say what they do: the session below or above in the sidebar, from
+    /// whichever pane has the keyboard (`shell::navigation_tests`), not a move within the pane.
+    #[test]
+    fn the_session_keys_say_they_walk_the_sidebar_from_any_pane() {
+        let next = description(ShortcutId::NextSession).unwrap_or_default();
+        let previous = description(ShortcutId::PrevSession).unwrap_or_default();
+        assert_ne!(next, previous, "each says its own way");
+        for said in [next, previous] {
+            assert!(said.contains("sidebar") && said.contains("any pane"), "{said:?}");
+        }
+        assert_eq!(
+            description(ShortcutId::SaveFile),
+            None,
+            "a name that says what its key does stands alone"
+        );
+    }
 
     #[gpui::test]
     fn recorder_refuses_bound_actions_before_they_can_run(cx: &mut gpui::TestAppContext) {
