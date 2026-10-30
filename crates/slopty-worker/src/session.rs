@@ -415,8 +415,9 @@ impl SessionHandle {
     }
 
     /// Type `text` into the session's program as one message, for `client`: a paste (bracketed
-    /// when the program asked for it), then Enter as a write of its own [`SUBMIT_ENTER`] later,
-    /// since an Ink TUI (Claude Code) reads an Enter that arrives with the paste as part of it.
+    /// when the program asked for it), then Enter as a write of its own, [`SUBMIT_ENTER`] later
+    /// at least and once the program has read the paste, since an Ink TUI (Claude Code) reads an
+    /// Enter that arrives with the paste as part of it.
     /// The session's other input waits until the Enter is written.
     ///
     /// No client sends this: only an orchestrating agent's `agent_tell` does, through the
@@ -2738,18 +2739,24 @@ enum Held {
 struct Submitting {
     /// Whose words they are.
     client: ClientId,
-    /// When the Enter goes, if the words have left by then.
+    /// When the Enter goes, if by then the words have left and the program has read them.
     due: tokio::time::Instant,
 }
 
-/// How long a submit's Enter waits after its words: an Ink TUI (Claude Code) reads an Enter
-/// that comes in the same read as a paste as part of the paste, and drops it.
+/// How long a submit's Enter waits after its words at least: an Ink TUI (Claude Code) reads an
+/// Enter that comes in the same read as a paste as part of the paste, and drops it.
+///
+/// Past this it waits on until the program has read the words, however long that takes
+/// (`docs/decisions/agents.md`, "Typing").
 pub const SUBMIT_ENTER: Duration = Duration::from_millis(200);
+
+/// How often a submit's Enter looks again whether the program has read its words.
+const SUBMIT_POLL: Duration = Duration::from_millis(10);
 
 impl Actor {
     /// `client` sends `text`: its words go now as a paste, bracketed when the program asked for
-    /// it, and its Enter [`SUBMIT_ENTER`] later, once they have all left, as a write of its own;
-    /// the viewers' input waits until then.
+    /// it, and its Enter [`SUBMIT_ENTER`] later at least, once they have all left and the
+    /// program has read them, as a write of its own; the viewers' input waits until then.
     fn submit(&mut self, client: ClientId, text: &str) {
         let mut words = Vec::new();
         let queued = self
@@ -2765,13 +2772,25 @@ impl Actor {
             Some(Submitting { client, due: now.checked_add(SUBMIT_ENTER).unwrap_or(now) });
     }
 
-    /// A submit's Enter is due: written once its words have all left (else it waits another
-    /// [`SUBMIT_ENTER`] from now, so it never rides with them), then the input held behind it.
+    /// A submit's Enter is due: written once its words have all left and the program has read
+    /// them, then the input held behind it. Until then it looks again: another
+    /// [`SUBMIT_ENTER`] from now while words wait to be written, [`SUBMIT_POLL`] while they
+    /// wait to be read, so it never comes in their read. A program that never reads keeps it
+    /// waiting, as a full queue already did, until the session ends or the terminal closes.
     fn submit_enter(&mut self) {
         let Some(waiting) = self.submitting.take() else { return };
-        if !self.input.pending.is_empty() && !self.pty_closed {
+        let again = if self.pty_closed {
+            None
+        } else if !self.input.pending.is_empty() {
+            Some(SUBMIT_ENTER)
+        } else if self.words_unread() {
+            Some(SUBMIT_POLL)
+        } else {
+            None
+        };
+        if let Some(again) = again {
             let now = tokio::time::Instant::now();
-            let due = now.checked_add(SUBMIT_ENTER).unwrap_or(now);
+            let due = now.checked_add(again).unwrap_or(now);
             self.submitting = Some(Submitting { due, ..waiting });
             return;
         }
@@ -2796,6 +2815,24 @@ impl Actor {
             self.send_to(waiting.client, &TermEvent::Error(e));
         }
         self.release_held();
+    }
+
+    /// Whether the program has yet to read some of what was typed, so that an Enter written now
+    /// would come in the same read. Never for a program that reads by lines: its read ends at
+    /// the Enter whenever the Enter comes. When the terminal cannot be opened to count (its
+    /// program closed it to everyone else, [`PtyMaster::unread`]), none is taken as unread, and
+    /// the Enter goes on [`SUBMIT_ENTER`] alone.
+    fn words_unread(&self) -> bool {
+        if self.master.line_discipline().is_ok_and(|d| d.canonical) {
+            return false;
+        }
+        match self.master.unread() {
+            Ok(unread) => unread > 0,
+            Err(e) => {
+                tracing::warn!(session = %self.id, error = %e, "unread input uncounted");
+                false
+            }
+        }
     }
 }
 

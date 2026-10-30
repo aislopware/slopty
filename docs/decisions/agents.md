@@ -25,8 +25,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
        hooks, or the person types it into any Slopty terminal.
     2. The person is the one writer, in the TUI; the GUI types nothing into an agent.
        Orchestration's `agent_tell` types into the agent's terminal: a
-       bracketed paste, then Enter as its own write 200 ms later (Ink takes an Enter that
-       arrives in the paste's read as part of the paste). Nothing is typed while the session
+       bracketed paste, then Enter as its own write 200 ms later at least, once the TUI has
+       read the paste (Ink takes an Enter that arrives in the paste's read as part of the
+       paste). Nothing is typed while the session
        waits on the person at a dialog, because the TUI would read the Enter as an answer.
        Verified 2026-10-29 on 2.1.312: a two-line paste and its Enter land as one user
        message, and a pasted `/rename …` or `/model` with Enter runs the command.
@@ -90,8 +91,20 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       one held, and makes or changes one, or begins it anew, in one step
       (`Host::create_or_update`, `Host::begin`).
     - *Typing.* The worker's submit pastes (bracketed when the program asked for it), then
-      writes Enter 200 ms later; it is refused while the session needs the person. Only
-      `agent_tell` submits (`SessionHandle::submit`); the client link carries no submit, and
+      writes Enter once 200 ms have passed (`SUBMIT_ENTER`) and the program has read the
+      paste: nothing waits unread on the terminal's slave end (`PtyMaster::unread`, a look
+      that opens the slave and closes it again). Timed from the write alone, the Enter came in
+      the paste's read whenever the TUI read late, its loop busy (a loaded gate runner did it,
+      2026-10-31), and Ink then took it as part of the paste. A program that never reads keeps
+      the Enter, and the input held behind it, waiting until the terminal or the session
+      closes, as a full input queue already did. One that reads by lines gets the Enter on the
+      200 ms alone, since a line's read ends at the Enter whenever it comes, and so does one
+      whose terminal cannot be opened to look (held exclusive on Linux, its node closed to the
+      worker's user on macOS, where XNU refuses an exclusive open to root alone). Linux hands a
+      master's write to the slave on a kernel worker; the look polls the slave first, which
+      finishes that hand-over, so one look is exact there too. The submit is refused while the
+      session needs the person.
+      Only `agent_tell` submits (`SessionHandle::submit`); the client link carries no submit, and
       `SendMessage`, which no client sent, is gone (2026-10-30). An agent's words go framed as
       an agent's:
       "Agent <name> (<id>) says (an agent, not the person):". `agent_stop` presses Esc in each

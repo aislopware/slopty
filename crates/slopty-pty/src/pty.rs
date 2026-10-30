@@ -223,7 +223,7 @@ fn open_master() -> io::Result<OwnedFd> {
 /// not `ptsname_r`, which `stat`s the name and fails when there is no node, returning -1 where
 /// rustix reads an error number.
 #[cfg(target_os = "macos")]
-fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
+fn slave_path(master: impl AsFd) -> Result<PathBuf, PtyError> {
     use std::os::unix::ffi::OsStrExt as _;
 
     use rustix::ioctl::{Getter, ioctl, opcode};
@@ -241,7 +241,7 @@ fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
 
 /// The path of `master`'s slave.
 #[cfg(not(target_os = "macos"))]
-fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
+fn slave_path(master: impl AsFd) -> Result<PathBuf, PtyError> {
     let name = rustix::pty::ptsname(master, Vec::new()).map_err(|e| PtyError::os("ptsname", e))?;
     Ok(PathBuf::from(OsString::from(name.to_string_lossy().into_owned())))
 }
@@ -254,6 +254,42 @@ fn slave_path(master: &OwnedFd) -> Result<PathBuf, PtyError> {
 /// When `master` is no PTY master.
 pub fn slave_of(master: &OwnedFd) -> Result<PathBuf, PtyError> {
     slave_path(master)
+}
+
+/// How many bytes wait in the input queue of `tty`, a terminal's slave end: typed, and not yet
+/// read by its program.
+///
+/// Linux hands what the master writes to the slave on a kernel worker after the write has
+/// returned, and a poll of the slave finishes that hand-over before it answers (`n_tty_poll`),
+/// so every byte written before the call is counted; macOS hands it over in the write. A
+/// program that reads by lines (canonical mode) is counted its whole lines alone.
+///
+/// # Errors
+///
+/// When `tty` is no terminal.
+pub fn unread(tty: impl AsFd) -> Result<u64, PtyError> {
+    use rustix::event::{PollFd, PollFlags, Timespec};
+    let now = Timespec { tv_sec: 0, tv_nsec: 0 };
+    rustix::event::poll(&mut [PollFd::new(&tty, PollFlags::IN)], Some(&now))
+        .map_err(|e| PtyError::os("poll", e))?;
+    rustix::io::ioctl_fionread(tty).map_err(|e| PtyError::os("FIONREAD", e))
+}
+
+/// `master`'s slave, opened to look at: not as a controlling terminal. Linux opens it from the
+/// master itself (`TIOCGPTPEER`), whichever devpts this process sees.
+#[cfg(target_os = "linux")]
+fn peer(master: BorrowedFd<'_>) -> Result<OwnedFd, PtyError> {
+    use rustix::pty::OpenptFlags;
+    let flags = OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC;
+    rustix::pty::ioctl_tiocgptpeer(master, flags).map_err(|e| PtyError::os("TIOCGPTPEER", e))
+}
+
+/// `master`'s slave, opened to look at: not as a controlling terminal, and never waiting.
+#[cfg(not(target_os = "linux"))]
+fn peer(master: BorrowedFd<'_>) -> Result<OwnedFd, PtyError> {
+    let flags = OFlags::RDONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    rustix::fs::open(slave_path(master)?, flags, Mode::empty())
+        .map_err(|e| PtyError::os("open slave", e))
 }
 
 /// How many times [`open_granted`] replaces a master whose slave XNU never made.
@@ -506,6 +542,21 @@ impl PtyMaster {
     /// The slave's [`LineDiscipline`] now ([`line_discipline`] on this master).
     pub fn line_discipline(&self) -> Result<LineDiscipline, PtyError> {
         line_discipline(self.as_fd())
+    }
+
+    /// How many bytes typed into this terminal its program has not read yet ([`unread`] on the
+    /// slave).
+    ///
+    /// The slave is opened for the count and closed again: a descriptor of it kept open would
+    /// keep the terminal from hanging up when its program exits.
+    ///
+    /// # Errors
+    ///
+    /// When the slave cannot be opened: on Linux its program holds it exclusive (`TIOCEXCL`), and
+    /// on macOS (where XNU refuses an exclusive open to root alone) its node is gone or closed to
+    /// this user.
+    pub fn unread(&self) -> Result<u64, PtyError> {
+        unread(peer(self.as_fd())?)
     }
 }
 
@@ -1226,5 +1277,69 @@ mod tests {
         assert_eq!(p, login_shell());
         assert_eq!(a, vec!["-lic".to_owned(), "slopty-no-such-tool 'it'\\''s'".to_owned()]);
         assert_eq!(arg0, None);
+    }
+
+    /// A pty, its slave opened as a raw-mode program opens it (which reads bytes as typed), and
+    /// the slave's path.
+    fn raw_pair() -> (PtyMaster, OwnedFd, PathBuf) {
+        use rustix::termios::OptionalActions;
+        let pty = Pty::open(size()).unwrap();
+        let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
+        let path = pty.slave_path().to_owned();
+        let tty = rustix::fs::open(&path, flags, Mode::empty()).unwrap();
+        let mut termios = rustix::termios::tcgetattr(&tty).unwrap();
+        termios.make_raw();
+        rustix::termios::tcsetattr(&tty, OptionalActions::Now, &termios).unwrap();
+        (PtyMaster::new(pty.into_master()).unwrap(), tty, path)
+    }
+
+    /// What is typed counts as unread from the moment its write returns until the program
+    /// reads it, every byte of it: Linux's hand-over from the master to the slave, which runs
+    /// on a kernel worker after the write, is finished by the count itself. Were the count to
+    /// leave it running, a round would count the bytes still on their way short.
+    #[tokio::test]
+    async fn typed_bytes_are_unread_from_their_write_to_their_read() {
+        let (master, tty, _) = raw_pair();
+        let typed = b"\x1b[200~Second\rline\x1b[201~";
+        let len = u64::try_from(typed.len()).unwrap();
+        let mut buf = [0_u8; 64];
+        for round in 0..500 {
+            assert_eq!(master.unread().unwrap(), 0, "round {round}");
+            master.write_all(typed).await.unwrap();
+            assert_eq!(master.unread().unwrap(), len, "round {round}");
+            assert_eq!(unread(&tty).unwrap(), len, "the program's own count, round {round}");
+            let n = rustix::io::read(&tty, &mut buf).unwrap();
+            assert_eq!(&buf[..n], typed, "round {round}");
+        }
+    }
+
+    /// Close `tty`, the slave at `path`, to everyone else, as its program may (`closed`), or
+    /// open it again: Linux refuses to open a terminal held exclusive (`TIOCEXCL`), and macOS
+    /// one whose node this user may not read (XNU refuses an exclusive open to root alone).
+    fn close_to_others(tty: &OwnedFd, path: &Path, closed: bool) {
+        let done = match (cfg!(target_os = "linux"), closed) {
+            (true, true) => rustix::termios::ioctl_tiocexcl(tty),
+            (true, false) => rustix::termios::ioctl_tiocnxcl(tty),
+            (false, true) => rustix::fs::chmod(path, Mode::empty()),
+            (false, false) => rustix::fs::chmod(path, Mode::RUSR | Mode::WUSR | Mode::WGRP),
+        };
+        done.unwrap();
+        let flags = OFlags::RDONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let opened = rustix::fs::open(path, flags, Mode::empty());
+        assert_eq!(opened.is_err(), closed, "{opened:?}");
+    }
+
+    /// A terminal its program has closed to everyone else cannot be opened to count its unread
+    /// input, and saying so is an error rather than a count.
+    #[tokio::test]
+    async fn a_terminal_closed_to_others_is_not_counted() {
+        let (master, tty, path) = raw_pair();
+        master.write_all(b"typed").await.unwrap();
+        close_to_others(&tty, &path, true);
+        let refused = master.unread().unwrap_err();
+        assert!(matches!(&refused, PtyError::Os { .. }), "{refused}");
+        assert_eq!(unread(&tty).unwrap(), 5, "the program still counts its own");
+        close_to_others(&tty, &path, false);
+        assert_eq!(master.unread().unwrap(), 5, "and once open again, the worker too");
     }
 }

@@ -958,8 +958,10 @@ mod tests {
 
     /// What an orchestrating agent tells another (`agent_tell`) goes into the agent's TUI as one
     /// message: its words as one paste, bracketed as the TUI asked, two lines and all, then its
-    /// Enter as a write of its own the wait after them, since an Ink TUI reads an Enter that
-    /// comes with a paste as part of the paste.
+    /// Enter as a write of its own, the wait after them at least and once the TUI has read them,
+    /// since an Ink TUI reads an Enter that comes with a paste as part of the paste. A TUI whose
+    /// loop is busy reads the words late (the stand-in's `stall`, far past the wait), and still
+    /// alone; one that reads at once has the Enter the wait after the tell at the soonest.
     #[tokio::test]
     async fn an_agents_words_go_in_as_one_paste_and_an_enter_of_their_own() {
         use slopty_proto::thread::Phase;
@@ -972,31 +974,36 @@ mod tests {
         let (_daemons, record) = with_claude(&root, server.local_addr().unwrap()).await;
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
-        let thread =
-            seated_claude(&mut peer, reg.worker, &root, SessionId::new(), "Say hello.").await;
+        let first = "stall Say hello.";
+        let thread = seated_claude(&mut peer, reg.worker, &root, SessionId::new(), first).await;
         peer.heard(|m| at_phase(m, thread, Phase::Done)).await;
 
-        let tell = Verb::AgentTell { agent: thread, text: "Second\nline".to_owned() };
-        assert_eq!(peer.ask(tell).await, Outcome::Done);
         let prompts = |r: &serde_json::Value| r["prompts"].as_array().map_or(0, Vec::len);
-        let seen = recorded(&record, |r| prompts(r) == 2).await;
-        assert_eq!(seen["prompts"][1]["text"], "Second\nline", "one message");
-        let reads = reads(&seen);
-        let start = reads.iter().position(|(b, _)| b.contains("\u{1b}[200~")).expect("a paste");
-        let end = reads.iter().position(|(b, _)| b.contains("\u{1b}[201~")).expect("its end");
-        let pasted: String = reads[start..=end].iter().map(|(b, _)| b.as_str()).collect();
-        assert_eq!(
-            pasted.replace('\r', "\n"),
-            "\u{1b}[200~Second\nline\u{1b}[201~",
-            "the words as one paste, bracketed as the TUI asked"
-        );
-        let (enter, entered_us) = &reads[end + 1];
-        assert_eq!(enter, "\r", "the Enter is a write of its own");
-        // Timed where the TUI reads, so with the way's jitter (ptyd, the pty, the reader's turn
-        // to run): the wait is proved, its length is the worker's own clock.
-        let gap = entered_us - reads[end].1;
         let wait = u64::try_from(slopty_worker::session::SUBMIT_ENTER.as_micros()).unwrap();
-        assert!(gap >= wait * 3 / 4, "the Enter came {gap} µs after the paste");
+        for (told, text) in [(2, "Second\nline"), (3, "Third")] {
+            // The stand-in stamps its reads on the wall clock; this one's millisecond is no
+            // later than the tell.
+            let asked_us = slopty_core::WallMs::now().as_millis() * 1000;
+            let tell = Verb::AgentTell { agent: thread, text: text.to_owned() };
+            assert_eq!(peer.ask(tell).await, Outcome::Done);
+            let seen = recorded(&record, |r| prompts(r) == told).await;
+            assert_eq!(seen["prompts"][told - 1]["text"], text, "one message");
+            let reads = reads(&seen);
+            let start =
+                reads.iter().rposition(|(b, _)| b.contains("\u{1b}[200~")).expect("a paste");
+            let end = (start..reads.len()).find(|&i| reads[i].0.contains("\u{1b}[201~"));
+            let end = end.expect("its end");
+            let pasted: String = reads[start..=end].iter().map(|(b, _)| b.as_str()).collect();
+            assert_eq!(
+                pasted.replace('\r', "\n"),
+                format!("\u{1b}[200~{text}\u{1b}[201~"),
+                "the words as one paste, bracketed as the TUI asked"
+            );
+            let (enter, entered_us) = &reads[end + 1];
+            assert_eq!(enter, "\r", "the Enter is a write of its own: {reads:?}");
+            let after_us = entered_us.saturating_sub(asked_us);
+            assert!(after_us >= wait, "the Enter came {after_us} µs after the tell");
+        }
     }
 
     /// While an agent asks the person at a dialog, what another agent tells it is refused, with

@@ -35,6 +35,9 @@
 //!   the next line typed answers it, and the turn ends.
 //! - `hold <anything>`: a turn that goes on until Esc interrupts it, as Claude Code records an
 //!   interrupt, and no hook runs.
+//! - `stall <anything>`: answered at once, and the next input waits in its terminal for [`STALL`]
+//!   after it comes before it is read, as a TUI whose loop is busy (rendering, a turn's stream)
+//!   takes it late: what is written meanwhile comes in the same read.
 //! - a line `STUB_TURNS` names (`{"<line>": [{"name": …, "arguments": …}, …], …}`): those tools
 //!   called in order through the `slopty` MCP server its `--mcp-config` names, over stdio, each an
 //!   `mcp__slopty__<name>` call with its hooks and its result. In a call's arguments `{started}` is
@@ -84,6 +87,12 @@ const MCP_PATIENCE: Duration = Duration::from_secs(90);
 
 /// How long a call marked `until_ok` is made again, and how often.
 const UNTIL_OK: (Duration, Duration) = (Duration::from_secs(30), Duration::from_millis(100));
+
+/// How long the input after a `stall` line waits in the terminal before it is read.
+///
+/// Far past the wait a worker leaves between a paste and its Enter
+/// (`slopty_worker::session::SUBMIT_ENTER`).
+pub const STALL: Duration = Duration::from_secs(1);
 
 /// Bracketed paste's markers, around what a terminal pastes.
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -312,6 +321,8 @@ struct Tui {
     /// The relay Slopty's mod names, when one was loaded, and the draft it was last handed.
     relay: Option<Vec<String>>,
     drafted: String,
+    /// Whether a `stall` line holds back the next input ([`STALL`]).
+    stall: bool,
 }
 
 impl Tui {
@@ -364,6 +375,7 @@ impl Tui {
             doing: (IDLE, None, started_ms),
             relay: flag(args, "--plugin-dir").and_then(|dir| relay_of(Path::new(&dir))),
             drafted: String::new(),
+            stall: false,
         };
         if tui.resumed {
             tui.last = std::fs::read_to_string(tui.transcript()).ok().and_then(|text| {
@@ -402,6 +414,9 @@ impl Tui {
         let mut input = Input::default();
         let mut buf = [0_u8; 4096];
         'reading: loop {
+            if std::mem::take(&mut self.stall) {
+                stalled();
+            }
             let read = std::io::stdin().lock().read(&mut buf);
             let read = match read {
                 Ok(0) | Err(_) => break,
@@ -537,6 +552,8 @@ impl Tui {
             screen("\r\n… holding until Esc\r\n");
             self.state = State::Holding;
             return false;
+        } else if word == "stall" {
+            self.stall = true;
         }
         self.answer(&format!("Done: {line}"), since);
         self.after_turn()
@@ -1030,6 +1047,15 @@ fn replace(at: &Path, value: &Value) {
     let staged = at.with_extension(format!("partial-{}", std::process::id()));
     if std::fs::write(&staged, value.to_string()).is_ok() {
         drop(std::fs::rename(&staged, at));
+    }
+}
+
+/// Back once input has waited in the terminal for [`STALL`], unread.
+fn stalled() {
+    let stdin = std::io::stdin();
+    let mut ready = [rustix::event::PollFd::new(&stdin, rustix::event::PollFlags::IN)];
+    if rustix::event::poll(&mut ready, None).is_ok() {
+        pause(STALL);
     }
 }
 

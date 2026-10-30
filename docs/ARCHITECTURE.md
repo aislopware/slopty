@@ -990,7 +990,8 @@ intent's outcome (`WorkerMsg::IntentDone`). A followed thread streams on a unidi
 stream of its own (`UniHead::Thread`), one task per thread on the worker
 (`apps/slopty-worker/src/threads.rs`), which also carries its pages and expansions. What an
 agent sends an agent (`agent_tell`) is typed into its terminal (`SessionHandle::submit`, which
-no client link reaches: a paste, then Enter 200 ms later, refused while it needs the person), and
+no client link reaches: a paste, then Enter 200 ms later at least and once the program has read
+the paste, refused while it needs the person), and
 a stop is an Esc. While an
 agent's process lives, the worker stamps its thread alive (`Action::Lease`, every
 `LEASE_EVERY`), and stops the moment it is gone. A review

@@ -162,6 +162,8 @@ mod actor {
     #[derive(Clone)]
     struct Program {
         tty: Arc<slopty_pty::PtyMaster>,
+        /// Its terminal's path.
+        slave: std::path::PathBuf,
         in_flight: InFlight,
     }
 
@@ -224,7 +226,8 @@ mod actor {
         use rustix::termios::{LocalModes, OptionalActions};
         let pty = Pty::open(size).unwrap();
         let flags = OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC;
-        let tty = rustix::fs::open(pty.slave_path(), flags, Mode::empty()).unwrap();
+        let slave = pty.slave_path().to_owned();
+        let tty = rustix::fs::open(&slave, flags, Mode::empty()).unwrap();
         let mut termios = rustix::termios::tcgetattr(&tty).unwrap();
         termios.make_raw();
         termios.local_modes.set(LocalModes::ECHO, echoes);
@@ -267,7 +270,7 @@ mod actor {
             }
         });
         let tty = Arc::new(slopty_pty::PtyMaster::new(tty).unwrap());
-        Played { session, program: Program { tty, in_flight }, echoes, checkpoints }
+        Played { session, program: Program { tty, slave, in_flight }, echoes, checkpoints }
     }
 
     /// Run `test` in a `LocalSet` on the test's runtime, where a played session's actor runs.
@@ -1407,6 +1410,149 @@ mod actor {
         let _got = wait_for(&mut rx, |_, s| text(s).contains("got:two words:then:keys:")).await;
         session.close();
         let _killed = child.kill().await;
+    }
+
+    /// What waits unread in the played program's terminal, counted as the worker counts it.
+    fn unread(program: &Program) -> usize {
+        usize::try_from(slopty_pty::pty::unread(program.tty.as_fd()).unwrap()).unwrap()
+    }
+
+    /// What the played program reads from its terminal in one read.
+    async fn read_now(program: &Program) -> Vec<u8> {
+        let mut buf = vec![0; 4096];
+        let n = program.tty.read(&mut buf).await.expect("the terminal reads");
+        buf.truncate(n);
+        buf
+    }
+
+    /// How many descriptors this process has open now.
+    fn fds() -> usize {
+        let fds = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+        std::fs::read_dir(fds).unwrap().count()
+    }
+
+    /// A submit's Enter wait moved by `ms`: past it, or short of it when negative.
+    fn the_wait(ms: i8) -> Duration {
+        let by = Duration::from_millis(u64::from(ms.unsigned_abs()));
+        let wait = session::SUBMIT_ENTER;
+        let moved = if ms < 0 { wait.checked_sub(by) } else { wait.checked_add(by) };
+        moved.unwrap()
+    }
+
+    /// A submit's Enter goes [`session::SUBMIT_ENTER`] after its words when the program reads
+    /// them at once, and only once the program has read them when it reads late: a TUI whose
+    /// loop is busy (rendering, a turn's stream) never gets the Enter in the words' read, where
+    /// an Ink TUI would take it as part of the paste.
+    #[tokio::test(start_paused = true)]
+    async fn a_submits_enter_waits_for_the_program_to_read_its_words() {
+        local(async {
+            let played = played(size(40, 6), false);
+            let me = ClientId::new();
+            let words = b"Say hello.";
+            let held = still();
+            played.session.submit(me, "Say hello.".to_owned()).unwrap();
+            let asked = tokio::time::Instant::now();
+            assert_eq!(read_now(&played.program).await, words, "read at once");
+            drop(held);
+            tokio::time::sleep_until(asked.checked_add(the_wait(-1)).unwrap()).await;
+            assert_eq!(unread(&played.program), 0, "no Enter before the wait is out");
+            assert_eq!(read_now(&played.program).await, b"\r", "then the Enter alone");
+            assert!(asked.elapsed() >= session::SUBMIT_ENTER, "{:?}", asked.elapsed());
+
+            played.session.submit(me, "Say hello.".to_owned()).unwrap();
+            tokio::time::sleep(session::SUBMIT_ENTER.checked_mul(50).unwrap()).await;
+            assert_eq!(unread(&played.program), words.len(), "the words wait, with no Enter");
+            assert_eq!(read_now(&played.program).await, words, "read late, the words alone");
+            assert_eq!(
+                read_now(&played.program).await,
+                b"\r",
+                "then the Enter, in a read of its own"
+            );
+            played.session.close();
+        })
+        .await;
+    }
+
+    /// A program that never reads keeps its submit's Enter waiting: nothing more goes into its
+    /// terminal however long it waits, and the worker keeps no descriptor of the terminal
+    /// meanwhile. Closing the session ends the wait: the actor lets go of its viewers and its
+    /// master, and leaves no descriptor behind.
+    #[tokio::test(start_paused = true)]
+    async fn a_program_that_never_reads_keeps_the_enter_until_the_session_closes() {
+        local(async {
+            let before = fds();
+            let played = played(size(40, 6), false);
+            let me = ClientId::new();
+            let (tx, mut viewer) = viewer(1024);
+            played.session.attach(me, size(40, 6), tx).unwrap();
+            let open = fds();
+            played.session.submit(me, "Say hello.".to_owned()).unwrap();
+            tokio::time::sleep(session::SUBMIT_ENTER.checked_mul(50).unwrap()).await;
+            assert_eq!(unread(&played.program), b"Say hello.".len(), "the Enter waits on");
+            assert_eq!(fds(), open, "the worker counts with no descriptor kept");
+
+            played.session.close();
+            while viewer.rx.recv().await.is_some() {}
+            assert_eq!(fds(), before.checked_add(1).unwrap(), "the program's terminal alone");
+        })
+        .await;
+    }
+
+    /// When the worker cannot open the terminal to count what its program has not read (its
+    /// program closed it to everyone else: held exclusive on Linux, its node closed to this user
+    /// on macOS, where XNU refuses an exclusive open to root alone), a submit's Enter goes on
+    /// [`session::SUBMIT_ENTER`] alone, read or not.
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_closed_to_others_gets_its_enter_on_the_wait_alone() {
+        use rustix::fs::{Mode, OFlags};
+        local(async {
+            let played = played(size(40, 6), false);
+            let me = ClientId::new();
+            let slave = &played.program.slave;
+            if cfg!(target_os = "linux") {
+                rustix::termios::ioctl_tiocexcl(played.program.tty.as_fd()).unwrap();
+            } else {
+                rustix::fs::chmod(slave, Mode::empty()).unwrap();
+            }
+            let flags = OFlags::RDONLY | OFlags::NOCTTY | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            let refused = rustix::fs::open(slave, flags, Mode::empty());
+            assert!(refused.is_err(), "closed to others: {refused:?}");
+            played.session.submit(me, "Say hello.".to_owned()).unwrap();
+            let asked = tokio::time::Instant::now();
+            tokio::time::sleep_until(asked.checked_add(the_wait(-1)).unwrap()).await;
+            assert_eq!(unread(&played.program), b"Say hello.".len(), "the words alone");
+            tokio::time::sleep_until(asked.checked_add(the_wait(1)).unwrap()).await;
+            assert_eq!(unread(&played.program), b"Say hello.\r".len(), "the Enter, words unread");
+            assert_eq!(read_now(&played.program).await, b"Say hello.\r");
+            played.session.close();
+        })
+        .await;
+    }
+
+    /// A program that reads by lines gets its submit's Enter on [`session::SUBMIT_ENTER`]
+    /// alone, read or not: its read ends at the Enter whenever the Enter comes, so there is no
+    /// read for the Enter to share.
+    #[tokio::test(start_paused = true)]
+    async fn a_program_reading_lines_gets_its_enter_on_the_wait_alone() {
+        use rustix::termios::{InputModes, LocalModes, OptionalActions};
+        local(async {
+            let played = played(size(40, 6), false);
+            let me = ClientId::new();
+            let tty = played.program.tty.as_fd();
+            let mut termios = rustix::termios::tcgetattr(tty).unwrap();
+            termios.local_modes.insert(LocalModes::ICANON);
+            termios.input_modes.insert(InputModes::ICRNL);
+            rustix::termios::tcsetattr(tty, OptionalActions::Now, &termios).unwrap();
+            played.session.submit(me, "Say hello.".to_owned()).unwrap();
+            let asked = tokio::time::Instant::now();
+            tokio::time::sleep_until(asked.checked_add(the_wait(-1)).unwrap()).await;
+            assert_eq!(unread(&played.program), 0, "no whole line yet");
+            tokio::time::sleep_until(asked.checked_add(the_wait(1)).unwrap()).await;
+            assert_eq!(unread(&played.program), b"Say hello.\n".len(), "the line, ended unread");
+            assert_eq!(read_now(&played.program).await, b"Say hello.\n");
+            played.session.close();
+        })
+        .await;
     }
 
     /// The branches a viewer was told, in order.
