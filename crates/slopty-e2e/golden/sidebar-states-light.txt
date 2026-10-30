@@ -24,21 +24,10 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Tidy the README's install section
-Article │ You
-Paragraph │ Tidy the README's install section
-Button │ Copy message
-Article │ Claude Code
-Paragraph │ Done: Tidy the README's install section
-Splitter │ Resize side pane
 Button │ Open in…
-Button │ Hide inspector
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
+Button │ Show inspector
 Button │ Show files panel
-Button │ Hide side pane
+Button │ Show side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward

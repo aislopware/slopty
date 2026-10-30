@@ -13,8 +13,6 @@ Button │ Window controls
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show inspector
-Button │ Inspector
-Button │ Close Inspector
 Button │ Synthetic editor
 Button │ Close Synthetic editor
 Button │ New tab

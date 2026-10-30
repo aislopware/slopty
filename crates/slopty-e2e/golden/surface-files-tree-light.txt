@@ -32,8 +32,6 @@ Splitter │ Resize files panel
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Show inspector
-Button │ Inspector
-Button │ Close Inspector
 Button │ Changes
 Button │ Close Changes
 Button │ New tab

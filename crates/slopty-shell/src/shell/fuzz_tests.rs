@@ -706,7 +706,9 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     });
     cx.update(|window, _| window.set_a11y_active(true));
     frames(cx, Duration::from_millis(16), 60);
-    // slopty: a session shown the first time opens on its inspector, the timeline in it.
+    // ⌘I opens the session's inspector, the timeline in it.
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_inspector(window, cx)));
+    frames(cx, Duration::from_millis(16), 60);
     assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "the inspector shows");
     // Under the 400 characters that fold a prompt before it is measured, on one line: only its
     // layout knows it wraps past five lines in the column.

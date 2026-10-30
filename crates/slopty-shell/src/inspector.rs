@@ -2,7 +2,7 @@
 //! (`docs/decisions/ui.md`, "A session is its terminal, its inspector beside it").
 //!
 //! The person works in the agent's own TUI; the inspector keeps only what helps inspect the
-//! session, compact and quiet: a header (title, status, branch, time at work), what it is doing
+//! session, compact and quiet: a header (status, branch, time at work), what it is doing
 //! now (its task list, the subagents and commands it has running), the files it changed with
 //! their counts, its timeline, each turn rendered as the transcript renders it with tool calls
 //! folded to a line and opened whole, and under it the TUI's own prompt box, mirrored live (the
@@ -396,7 +396,12 @@ impl Inspector {
         cx.notify();
     }
 
-    fn render_header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The session's status, branch and time at work, on one line of those with something to
+    /// say, and nothing when none has; a subagent's timeline adds its task's name and the way
+    /// back to its parent. The session's own title is not said again here: its terminal's title
+    /// bar and its sidebar row say it (`docs/decisions/ui.md`, "The inspector says nothing its
+    /// session's chrome says").
+    fn render_header(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let now = self.clock;
         let state = self.state.read(cx);
         let chat = state.selected_chat_row().cloned();
@@ -455,11 +460,21 @@ impl Inspector {
         if let Some(at_work) = at_work {
             meta.push(quiet(at_work));
         }
-        let mut row = div().flex().flex_wrap().items_center().gap_x(px(10.0)).gap_y(px(2.0)).mt(px(4.0));
-        for item in meta {
-            row = row.child(item);
+        if parent.is_none() && meta.is_empty() {
+            return None;
         }
-        div()
+        let row = (!meta.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap_x(px(10.0))
+                .gap_y(px(2.0))
+                .when(parent.is_some(), |row| row.mt(px(4.0)))
+                .children(meta)
+        });
+        let task = parent.is_some().then_some(title);
+        let header = div()
             .id("inspector-header")
             .debug_selector(|| "inspector-header".into())
             .flex_none()
@@ -469,6 +484,7 @@ impl Inspector {
             .border_b_1()
             .border_color(theme.border)
             .when_some(parent, |el, parent| {
+                let ink = hover_blend("inspector-back", theme.text_muted, theme.text);
                 el.child(
                     div()
                         .id("inspector-back")
@@ -479,29 +495,31 @@ impl Inspector {
                         .mb(px(4.0))
                         .cursor_pointer()
                         .text_size(ui_rems(12.0))
-                        .text_color(hover_blend("inspector-back", theme.text_muted, theme.text))
+                        .text_color(ink)
                         .hover_fade("inspector-back")
                         .aria_label("Back to its parent")
-                        .child(icon(icons::ARROW_LEFT).size(px(12.0)))
+                        // An SVG paints only in a colour of its own.
+                        .child(icon(icons::ARROW_LEFT).size(px(12.0)).text_color(ink))
                         .child("Parent session")
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(InspectorEvent::Back { chat_id: parent.clone() });
                         })),
                 )
             })
-            .child(
+            .children(task.map(|title| {
                 div()
                     .id("inspector-title")
+                    .debug_selector(|| "inspector-title".into())
                     .role(gpui::Role::Heading)
                     .aria_label(title.clone())
                     .truncate()
                     .text_size(ui_rems(13.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(title),
-            )
-            .child(row)
-            .into_any_element()
+                    .child(title)
+            }))
+            .children(row);
+        Some(header.into_any_element())
     }
 
     /// A section's heading: its name and, quieter, its count.
@@ -892,7 +910,7 @@ impl gpui::Render for Inspector {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(header)
+            .children(header)
             .children(now)
             .children(changes)
             .child(

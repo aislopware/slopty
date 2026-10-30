@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ hold the release
 Article │ You
 Paragraph │ hold the release
 Button │ Copy message

@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Read the guide before the first run.
 Article │ You
 Paragraph │ Read [the guide](https://example.com/docs/guide/getting-started) before the first run.
 Link │ the guide

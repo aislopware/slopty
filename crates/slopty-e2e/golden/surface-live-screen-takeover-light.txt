@@ -10,8 +10,6 @@ Splitter │ Resize sidebar
 Group
 Terminal │ shell │ >
 Button │ Window controls
-Button │ Inspector
-Button │ Close Inspector
 Button │ Synthetic editor
 Button │ Close Synthetic editor
 Button │ New tab

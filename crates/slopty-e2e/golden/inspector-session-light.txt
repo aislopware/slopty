@@ -12,7 +12,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Open the diff of notes.md
 Button │ Open the diff of notes.txt
 Article │ You

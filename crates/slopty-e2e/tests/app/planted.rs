@@ -11,8 +11,7 @@ use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{A11yNode, Command, Driver, Dump};
 
 use crate::served::{
-    STEP, WINDOW, epoch_ms, escaped, holding, middle, node, rfc3339, says, seen, start,
-    thread_until,
+    STEP, WINDOW, epoch_ms, escaped, holding, middle, rfc3339, says, seen, start, thread_until,
 };
 
 /// What the live session that brings the project into the sidebar is asked.
@@ -276,14 +275,11 @@ pub async fn resume(drv: &mut Driver, title: &str) -> Dump {
     // to where the pointer pressed, so its hover and tooltip would show in whatever frame is
     // read next: the pointer leaves the window.
     drv.ok(&Command::Move { x: -1.0, y: -1.0 }).await.unwrap();
-    let opened = seen(drv, "the session in its terminal", STEP, |d| {
+    seen(drv, "the session in its terminal", STEP, |d| {
         holding(d, "Button", &row).is_none() && d.a11y.iter().any(|n| n.role == "Terminal")
     })
     .await;
-    if node(&opened, "Button", "Show inspector").is_some() {
-        drv.keys("cmd-i").await.unwrap();
-    }
-    seen(drv, "the inspector", STEP, |d| node(d, "Button", "Hide inspector").is_some()).await
+    crate::served::show_inspector(drv).await
 }
 
 /// Where the session's terminal ends on the right: what lies past it is the inspector's.

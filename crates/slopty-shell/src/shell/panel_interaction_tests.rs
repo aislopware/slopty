@@ -364,9 +364,9 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
 }
 
 /// slopty: a subagent of a call runs inside its agent's session, so its row shows that agent's
-/// pane, open and with the same tabs; an agent another agent started keeps a pane of its own,
-/// given its inspector the first time it shows. What the pane shows is kept, and comes back in a
-/// new launch once the chat is shown.
+/// pane, open and with the same tabs, and ⌘I there opens the agent's inspector in it; an agent
+/// another agent started keeps a pane of its own, shut until the person opens it. What the pane
+/// shows is kept, and comes back in a new launch once the chat is shown.
 #[gpui::test]
 fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppContext) {
     let (_dir, shell, cx) = setup(cx);
@@ -389,20 +389,33 @@ fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppCont
     let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["a"].clone());
     assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "{tabs:?}");
 
-    // Its agent's pane, shown the first time through it, is given the inspector.
+    // Its agent's pane, as the agent left it; the inspector opened there is the agent's.
     change(&shell, cx, |shell, _, cx| select(shell, Some("s"), cx));
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.panel_key(cx), "a");
         assert!(shell.right_pane_open(cx), "the agent's pane stays open on its subagent");
         let tabs = &shell.right_tabs["a"];
+        assert!(matches!(tabs.as_slice(), [RightSurface::Diff(_)]), "nothing added: {tabs:?}");
+    });
+    change(&shell, cx, |shell, window, cx| shell.toggle_inspector(window, cx));
+    settled(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        let tabs = &shell.right_tabs["a"];
         assert!(matches!(tabs.as_slice(), [RightSurface::Inspector, RightSurface::Diff(_)]), "{tabs:?}");
+        assert!(shell.inspector_shown(cx), "⌘I opens it in the agent's pane");
     });
     change(&shell, cx, |shell, _, cx| select(shell, Some("o"), cx));
     settled(&shell, cx);
     shell.read_with(cx, |shell, cx| {
         assert_eq!(shell.panel_key(cx), "o");
-        assert_eq!(shell.right_tabs["o"], [RightSurface::Inspector], "an agent started on its own has its own pane");
+        assert!(shell.right_tabs.get("o").is_none_or(Vec::is_empty), "an agent started on its own has its own pane");
+        assert!(!shell.right_pane_open(cx), "shut, its terminal alone");
+    });
+    change(&shell, cx, |shell, window, cx| shell.toggle_inspector(window, cx));
+    settled(&shell, cx);
+    shell.read_with(cx, |shell, cx| {
+        assert_eq!(shell.right_tabs["o"], [RightSurface::Inspector]);
         assert!(shell.inspector_shown(cx), "open on its inspector");
     });
 
@@ -412,11 +425,9 @@ fn a_subagent_shows_its_agents_pane_and_the_pane_comes_back(cx: &mut TestAppCont
     assert_eq!(kept["a"].tabs, [crate::settings::SavedSurface::Inspector, crate::settings::SavedSurface::Diff]);
     assert_eq!(kept["a"].active, Some(0));
 
-    // A new launch: nothing open in this run, the kept tabs come back once "a" shows, and the
-    // inspector is not given twice.
+    // A new launch: nothing open in this run, and the kept tabs come back once "a" shows.
     change(&shell, cx, |shell, _, cx| {
         shell.right_tabs.clear();
-        shell.inspector_given.clear();
         shell.unrestored_tabs = kept.clone();
         select(shell, Some("s"), cx);
     });

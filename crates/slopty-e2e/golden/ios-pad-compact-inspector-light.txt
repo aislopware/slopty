@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Say hello
 Article │ You
 Paragraph │ Say hello
 Article │ Claude Code

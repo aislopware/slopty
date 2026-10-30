@@ -377,12 +377,12 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.set_surfaces_open(true, cx);
+            // Its strip is the inspector ⌘I opened, and its diff.
+            shell.toggle_inspector(window, cx);
             shell.add_diff_surface(window, cx);
             shell.activate_right_surface(RightSurface::Diff(3), window, cx);
         })
     });
-    // slopty: its strip is the inspector it was given when it first showed, and its diff.
     for surface in [RightSurface::Inspector, RightSurface::Diff(3)] {
         press(cx, true);
         shell.read_with(cx, |shell, cx| {
@@ -393,15 +393,13 @@ fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
     shell.update(cx, |shell, cx| shell.open_chat("parent".into(), cx));
     cx.update(|window, cx| window.draw(cx).clear(cx));
     let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["parent"].clone());
-    assert_eq!(tabs, [RightSurface::Inspector, RightSurface::Diff(1), RightSurface::Diff(2)]);
+    assert_eq!(tabs, [RightSurface::Diff(1), RightSurface::Diff(2)], "none of the other's");
     let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
     cx.simulate_click(tab, gpui::Modifiers::default());
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    press(cx, true);
     assert_surface(&shell, cx, RightSurface::Diff(2));
     press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Inspector);
+    assert_surface(&shell, cx, RightSurface::Diff(1));
 }
 
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so

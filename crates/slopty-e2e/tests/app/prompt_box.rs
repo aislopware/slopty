@@ -81,6 +81,7 @@ async fn the_inspector_mirrors_the_tuis_prompt_box() {
     let agent = start(&stack, MACHINE, &repo, HELD).await;
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    crate::served::show_inspector(drv).await;
 
     // Stopped, the turn says so and no more: the frame holds nothing that moves or tells the
     // time, and the box nothing yet.

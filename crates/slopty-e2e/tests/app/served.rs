@@ -176,7 +176,7 @@ pub fn always_moving(a11y: &[A11yNode], scale: f32) -> Vec<PixelRect> {
 }
 
 /// The pixel rectangle of `node` at the window's `scale`, a few points wider each way.
-fn mask_of(node: &A11yNode, scale: f32) -> PixelRect {
+pub fn mask_of(node: &A11yNode, scale: f32) -> PixelRect {
     let [x, y, w, h] = node.bounds;
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
     let px = |v: f32| (v * scale).max(0.0).round() as u32;
@@ -237,6 +237,36 @@ pub async fn open_thread(drv: &mut Driver, nth: u8) -> Dump {
     drv.keys(&format!("cmd-{nth}")).await.unwrap();
     seen(drv, "the session's titlebar", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
         .await
+}
+
+/// What the session's right pane offers to open as `label` after ⌘T: a row of its new-tab menu
+/// once it holds a tab, else of the list the empty pane shows (a session opens on its terminal
+/// alone, the pane holding nothing).
+pub fn pane_offer<'a>(dump: &'a Dump, label: &str) -> Option<&'a A11yNode> {
+    let edge = dump
+        .a11y
+        .iter()
+        .find(|n| n.role == "Terminal")
+        .map_or(0.0, |n| n.bounds[0] + n.bounds[2] - 1.0);
+    dump.a11y.iter().find(|n| {
+        n.label.as_deref() == Some(label)
+            && (n.role == "MenuItem" || (n.role == "Button" && n.bounds[0] >= edge))
+    })
+}
+
+/// Open the shown session's inspector as the person does, with ⌘I, once its titlebar's toggle
+/// is drawn: a session opens on its terminal alone (`docs/decisions/ui.md`, "A session opens on
+/// its terminal alone"). The frame that shows it.
+pub async fn show_inspector(drv: &mut Driver) -> Dump {
+    let toggle = seen(drv, "the inspector's toggle", STEP, |d| {
+        node(d, "Button", "Show inspector").is_some()
+            || node(d, "Button", "Hide inspector").is_some()
+    })
+    .await;
+    if node(&toggle, "Button", "Show inspector").is_some() {
+        drv.keys("cmd-i").await.unwrap();
+    }
+    seen(drv, "the inspector", STEP, |d| node(d, "Button", "Hide inspector").is_some()).await
 }
 
 /// Type `text` into the open session's terminal, its TUI's prompt: the keyboard is the

@@ -2,7 +2,7 @@
 //! terminal, its inspector beside it"): an agent started in a project through the CLI is the
 //! stand-in Claude Code (`slopty-stub-claude`) running as its own TUI in a terminal of the
 //! worker. Opened, the session's main column is that terminal, holding the keyboard, and the
-//! inspector given it beside reads the session's turn from Claude Code's transcript: the prompt,
+//! inspector ⌘I opens beside it reads the session's turn from Claude Code's transcript: the prompt,
 //! the answer, and the turn's call of Slopty's `machines` tool folded to a line, which a press
 //! opens whole, its result shown in full. Judged by the accessibility tree, the terminal's rows
 //! and the goldens, in light and in dark.
@@ -12,7 +12,9 @@
 use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{A11yNode, Dump};
 
-use crate::served::{SETTLE, STEP, goldens, middle, open_thread, says, seen, start, thread_until};
+use crate::served::{
+    SETTLE, STEP, goldens, middle, open_thread, says, seen, show_inspector, start, thread_until,
+};
 
 /// The worker's name, as the CLI names the machine.
 const MACHINE: &str = "session";
@@ -82,6 +84,7 @@ async fn a_session_is_its_terminal_and_its_inspector_opens_a_call_whole() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     // The terminal shows the TUI's own answer and holds the keyboard; the inspector beside it
     // reads the same turn from the transcript.
     let shown = seen(drv, "the session's terminal and its inspector", STEP, |d| {

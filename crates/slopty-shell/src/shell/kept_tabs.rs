@@ -25,9 +25,7 @@ impl Shell {
                 saved.tabs.push(kept);
             }
         }
-        // slopty: a pane given its inspector is kept even with no tab left, so the inspector
-        // the person closed is not given again.
-        (!saved.tabs.is_empty() || self.inspector_given.contains(key)).then_some(saved)
+        (!saved.tabs.is_empty()).then_some(saved)
     }
 
     /// What opens `surface` of the pane `key` again; `None` for one that is not kept.

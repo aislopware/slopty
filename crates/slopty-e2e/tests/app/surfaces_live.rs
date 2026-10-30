@@ -296,8 +296,16 @@ mod stream {
         })
     }
 
+    /// What the stream's health mark says when its machine keeps up less well than the stream
+    /// asks (`slopty_ui::screen::health::Health`): frames missing the display, or a bitrate the
+    /// worker cut. In a guest that is a fact of the run's load, not of the chrome a golden holds,
+    /// so the mark is left out wherever it shows. A stall is not: the stream's picture moving is
+    /// asserted before each golden, and a stalled one fails it.
+    const STRAINED: [&str; 2] = ["Frames late", "Low bandwidth"];
+
     /// [`goldens`] with the pixels and the words inside `masks` left out, and those of the chat's
-    /// divider, whose time says how long the run's turn worked.
+    /// divider, whose time says how long the run's turn worked, and of a strained stream's health
+    /// mark ([`STRAINED`]).
     async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
         for (dark, appearance) in [(false, "light"), (true, "dark")] {
             drv.ok(&Command::Appearance { dark }).await.unwrap();
@@ -308,7 +316,13 @@ mod stream {
             // The chat's turn says how long it worked, which the run decides: its divider's
             // pixels and words are left out with the stream's.
             let moving = crate::served::always_moving(&frame.a11y, frame.scale);
-            let left_out: Vec<PixelRect> = masks.iter().copied().chain(moving).collect();
+            let strained = frame
+                .a11y
+                .iter()
+                .filter(|n| n.label.as_deref().is_some_and(|l| STRAINED.contains(&l)))
+                .map(|n| crate::served::mask_of(n, frame.scale));
+            let left_out: Vec<PixelRect> =
+                masks.iter().copied().chain(moving).chain(strained).collect();
             let masks = (left_out.as_slice(), left_out.as_slice());
             assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
         }
@@ -337,16 +351,11 @@ mod stream {
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         open_thread(drv, 1).await;
 
-        // The right pane's new-tab menu, from the session's terminal.
+        // What the right pane offers, from the session's terminal.
         drv.keys("cmd-t").await.unwrap();
-        let menu = drv
-            .wait_for("the pane's new-tab menu", STEP, |d| {
-                node(d, "MenuItem", "Remote window").is_some()
-            })
-            .await
-            .unwrap();
-        let [x, y, w, h] =
-            node(&menu, "MenuItem", "Remote window").map(|n| n.bounds).unwrap_or_default();
+        let offer = |d: &Dump| crate::served::pane_offer(d, "Remote window").map(|n| n.bounds);
+        let menu = drv.wait_for("the pane's offer", STEP, |d| offer(d).is_some()).await.unwrap();
+        let [x, y, w, h] = offer(&menu).unwrap_or_default();
         drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
         let title = "Synthetic editor";
         let listed = drv

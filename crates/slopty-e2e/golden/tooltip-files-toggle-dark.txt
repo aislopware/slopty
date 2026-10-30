@@ -9,21 +9,10 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Tidy the greeting
-Article │ You
-Paragraph │ Tidy the greeting
-Button │ Copy message
-Article │ Claude Code
-Paragraph │ Done: Tidy the greeting
-Splitter │ Resize side pane
 Button │ Open in…
-Button │ Hide inspector
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
+Button │ Show inspector
 Button │ Show files panel
-Button │ Hide side pane
+Button │ Show side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward

@@ -12,7 +12,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Open the diff of notes.md
 Article │ You
 Paragraph │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate a task "Survey files" and a task "Write notes". 2) TaskUpdate "Survey files" to in_progress. 3) Glob "*.rs". 4) Grep for "println" with output mode content. 5) Bash: `printf 'one\ntwo\n'` with a description. 6) Bash: `ls missing-file` (it fails; that is expected). 7) Bash with run_in_background true: `sleep 1; echo bg-finished`. 8) Write notes.md containing two lines: "# Notes" and "main.rs prints hello". 9) Use the Agent tool (subagent_type general-purpose, description "Count lines", run_in_background false) to count the lines in main.rs with Read; tell it to reply with just the number. 10) TaskUpdate both tasks to completed.

@@ -12,7 +12,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Read the plot
 Article │ You
 Paragraph │ Read the plot
 Button │ Copy message

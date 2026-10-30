@@ -14,20 +14,10 @@ Button │ Close Terminal 1
 Button │ New terminal
 Button │ Hide terminal
 Group (focused)
-Terminal │ shell │ 87/repo %
-Heading │ Say hello
-Article │ You
-Paragraph │ Say hello
-Article │ Claude Code
-Paragraph │ Done: Say hello
-Splitter │ Resize side pane
-Button │ Hide inspector
-Button │ Inspector
-Button │ Close Inspector
-Button │ New tab
-Button │ Expand side pane
+Terminal │ shell │ $SCRATCH/repo %
+Button │ Show inspector
 Button │ Show files panel
-Button │ Hide side pane
+Button │ Show side pane
 Button │ Hide sidebar
 Button │ Back
 Button │ Forward

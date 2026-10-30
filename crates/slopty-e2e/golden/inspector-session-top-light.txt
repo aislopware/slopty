@@ -12,7 +12,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Do these steps in order, using the named tools, then reply "done". 1) TaskCreate…
 Button │ Open the diff of notes.md
 Button │ Open the diff of notes.txt
 Article │ You
@@ -33,6 +32,9 @@ Paragraph │ The notes I wrote are in notes.md:
 Paragraph │ # Notes⏎main.rs prints hello
 Button │ Copy code
 Paragraph │ Next I'd add a test for the greeting, then run cargo test in CI.
+Article │ You
+Paragraph │ Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
+Button │ Copy message
 Splitter │ Resize side pane
 Button │ Open in…
 Button │ Hide inspector

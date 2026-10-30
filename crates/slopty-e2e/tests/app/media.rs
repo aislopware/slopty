@@ -20,7 +20,7 @@ use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
 use crate::served::{
     SETTLE, STEP, WINDOW, click, goldens, holding, hover, middle, node, open_thread, says, seen,
-    start, tell, thread_until,
+    show_inspector, start, tell, thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -120,6 +120,7 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     let drawn = seen(drv, "the visual's tabs", STEP, |d| {
         node(d, "Group", "Latency").is_some() && node(d, "Tab", "p99").is_some()
     })
@@ -209,6 +210,7 @@ async fn a_page_card_is_sandboxed_and_acts_for_the_person() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     // The card rests on its picture until the pointer comes to it, which makes it live.
     let resting = seen(drv, "the page's card", STEP, |d| {
         node(d, "Group", "Page: Probe")
@@ -374,6 +376,7 @@ async fn a_chart_fence_a_pdf_and_a_csv_draw_in_the_chat() {
     // The chart first, on screen alone: the files' cards below it push it out of view.
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     let charted = seen(drv, "the chart", STEP, |d| {
         node(d, "Group", "Page: Requests by day")
             .is_some_and(|n| matches!(n.value.as_deref(), Some("live" | "snapshot")))
@@ -471,6 +474,7 @@ async fn formulas_sit_on_their_line_and_diagrams_draw() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     // The reply's formulas: the person's message renders the same Markdown, so it holds its own.
     let math = |d: &Dump, tex: &str| {
         crate::served::replies(d)
@@ -683,6 +687,7 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     // The sidebar lists the newest first: ⌘1 is the pages, ⌘2 the words.
     let drv = &mut stack.driver;
     open_thread(drv, 2).await;
+    show_inspector(drv).await;
     seen(drv, "the words", STEP, |d| {
         holding(d, "Paragraph", "words where a page would be").is_some()
     })
@@ -690,6 +695,7 @@ async fn twelve_pages_in_one_chat_stay_within_budget() {
     tokio::time::sleep(SETTLE).await;
     let words_frames = scrolled(drv, "Section 1, line 1:").await;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     seen(drv, "a page's card", STEP, |d| {
         d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Page: Page ")))
     })

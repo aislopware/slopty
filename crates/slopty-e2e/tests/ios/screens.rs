@@ -116,10 +116,11 @@ fn inspector_says(dump: &Dump, words: &str) -> bool {
     })
 }
 
-/// A session on the device is its terminal, the stand-in's TUI, with nothing over or under it: a
-/// finger taps it and types the next prompt into the TUI, which answers. The inspector reads the
-/// turn: on a phone a sheet the navigation bar's Inspector puts up over the session and its
-/// close puts away, on an iPad the pane beside it.
+/// A session on the device is its terminal, the stand-in's TUI, with nothing over, under or
+/// beside it: a finger taps it and types the next prompt into the TUI, which answers. The
+/// inspector reads the turn once a finger opens it: on a phone a sheet the navigation bar's
+/// Inspector puts up over the session and its close puts away, on an iPad the pane beside it
+/// that the titlebar's Inspector opens.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_session_is_its_terminal_and_shows_its_inspector() {
@@ -160,9 +161,7 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
     read_until(&stack, &agent, "the typed words never reached the TUI", said(NEXT)).await;
 
     let drv = &mut stack.driver;
-    if phone {
-        tap(drv, "Button", "Show inspector").await;
-    }
+    tap(drv, "Button", "Show inspector").await;
     shown(drv, "the inspector reading the turn", |d| {
         (!phone || d.a11y_node("Dialog", Some("Inspector")).is_some())
             && inspector_says(d, &format!("Done: {NEXT}"))

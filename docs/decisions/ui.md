@@ -11564,7 +11564,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a_ready_rows_title_and_project_keep_their_own_slots}`. Goldens: `design-system` and
     `design-system-dark` (`slopty-e2e` `app::marks`).
 
-- ✅ **The interface is zeron's UI and UX, copied as Slopty's own (2026-10-13).** The person's
+- ✅ **The interface is zeron's UI and UX, copied as Slopty's own (2026-10-13).** *Superseded in
+  part 2026-10-30 by "The window is a terminal, not an app with a terminal in it" (`layout.md`):
+  the copy is where the shell started, no longer what its layout and components are held to; the
+  interface still credits the zeron code it was copied from, as its licence asks.* The person's
   word: the UI is identical to zeron (MIT), taken rather than redrawn, and nothing else of it is
   taken; nothing in Slopty reads as an integration with it. Its UI crates were copied at
   `053ce2e` and renamed: the shell (`crates/slopty-shell`), the view protocol, documents and RPC
@@ -11579,7 +11582,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `RpcService`: spaces are folder @ machine, chats are Slopty threads, subagents are child agents.
   Codex, pi and ACP agents are harness and model choices in the shell's picker, with no
   per-agent screens.
-- ✅ **zeron's improvements keep coming, by machine (2026-10-13).** `xtask/upstream.toml`'s
+- ❌ **zeron's improvements keep coming, by machine (2026-10-13).** *Superseded 2026-10-30 by
+  "What the layout leaves out" (`layout.md`): zeron is no longer adopted, so `cargo xtask
+  upstream adopt zeron` and `xtask/zeron.toml` go and a shell edit needs no `// slopty:`
+  marker.* `xtask/upstream.toml`'s
   `[zeron]` (kind `copied-ui`, its checkout and `base`) and `xtask/zeron.toml` say how a zeron
   file becomes ours: `[paths]` moves it (the longest prefix wins), the ordered `[[rename]]`
   rewrites its text, and `[skip]` names what is not taken. Applying them to a zeron file at
@@ -12207,7 +12213,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Tests: `slopty-shell` `shell::sidebar_status::tests`, `motion::tests::
   status_animations_mounted_apart_move_in_unison`, `theme::tests::dark_text_is_set_at_its_own_weight`;
   e2e `app::interface::a_rows_hover_card_names_where_it_runs`.
-- ✅ **The shell's frame, settings and toasts in zeron's anatomy (2026-10-16).** From
+- ✅ **The shell's frame, settings and toasts in zeron's anatomy (2026-10-16).** *Superseded in
+  part 2026-10-30 by `layout.md`: zeron's anatomy is no longer the base of the layout and its
+  components; the details below stand until the terminal-first layout replaces them.* From
   `.research/unstyled-audit-2026-10-16.md` F1 and H. The sidebar's server pill opens a menu with
   the link as its heading and rows for Devices, Connect a phone (while the server shows its code)
   and Change server. The right pane's "+" offers Remote window as its empty picker does, and a
@@ -13560,7 +13568,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     answers says "Answer in Slopty", which a phone's note can act on, where "Answer here" read
     as the note itself; the refusal says the same.
 - ✅ **The chrome around the chats reads as Claude desktop's and T3 Code's, on zeron's look
-  (2026-10-19).** A study of the sidebar, titlebar, palettes, History, the Add device dialog,
+  (2026-10-19).** *Superseded in part 2026-10-30 by `layout.md`: zeron's anatomy is no longer
+  the base of the layout and its components; the details below stand until the terminal-first
+  layout replaces them.*
+  A study of the sidebar, titlebar, palettes, History, the Add device dialog,
   Settings and the first-run canvas (`.research/polish-chrome-2026-10-19.md`) rated thirty
   details, and the Claude desktop 2.42304.2 study two more. Each became:
   - **The palettes and the Add device dialog stand by their top**, where a centred 480 px
@@ -13636,7 +13647,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     failed every later run of History's unreadable-store case
     (`harness::tests::a_root_left_with_a_locked_folder_is_cleared`).
 - ✅ **The side pane and the design system read as Claude desktop's and T3 Code's, on zeron's
-  look (2026-10-19).** A study of the changes, files, editor, terminal dock, browser, remote
+  look (2026-10-19).** *Superseded in part 2026-10-30 by `layout.md`: zeron's anatomy is no
+  longer the base of the layout and its components; the details below stand until the
+  terminal-first layout replaces them.*
+  A study of the changes, files, editor, terminal dock, browser, remote
   screen and the shared chrome (`.research/polish-pane-system-2026-10-19.md`) rated 24 details,
   and the Claude desktop 2.42304.2 study two more. Each became:
   - **A side-pane tab is as wide as its title needs**, 96 to 168 px, measured once for the
@@ -13752,7 +13766,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     either side is decided, so the box stays symmetric
     (`markdown::render::tests::flatten_collects_and_merges_inline_code_ranges`).
 
-- ✅ **Zeron is the base; the premium references set the bar (2026-10-19).** This partly
+- ❌ **Zeron is the base; the premium references set the bar (2026-10-19).** *Superseded
+  2026-10-30 by "The window is a terminal, not an app with a terminal in it" (`layout.md`): the
+  layout and every component break from zeron and the GUI-first apps, after a study of the
+  premium terminals, and zeron is no longer adopted.* This partly
   supersedes "The interface is zeron's UI and UX, copied as Slopty's own" and "Zeron's colours
   stay". The person no longer holds the interface to zeron's look in every detail. Slopty keeps
   zeron's shell as its base, and keeps taking zeron's improvements through `xtask upstream adopt`.
@@ -14386,7 +14403,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     selection follows the terminal: when `/clear`, `/resume` or an agent started in a plain
     terminal makes it another session's, the sidebar selects that session.
   - **The inspector** is a read-only tab of the right pane (`inspector.rs`), compact and quiet:
-    a header (title, status, model, mode, context used, branch, time at work), Now (what the
+    a header (title, status, model, mode, context used, branch, time at work; the model, mode
+    and context went with "TUI-first" in `agents.md`, and the title on 2026-10-30 with "The
+    inspector says nothing its session's chrome says", below), Now (what the
     agent is doing, its tasks, the subagents and commands it has running), Changes (the files it
     changed, with their counts), and the timeline, each turn as the transcript renders it with
     tool calls folded to a line and opened whole (an open call's result is a code block that
@@ -14394,7 +14413,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     opening a file or its diff, and showing a subagent's own timeline are all it does. ⌘I
     shows and hides it; its tab moves and closes as any other. A Claude Code session has one;
     Codex's and pi's are their rows, and a plain terminal has nothing to inspect.
-  - **Given once.** The first time an agent's session shows, its pane opens on its inspector,
+  - ❌ **Given once.** *Superseded 2026-10-30 by "A session opens on its terminal alone" (below):
+    the inspector shows only once the person opens it.*
+    The first time an agent's session shows, its pane opens on its inspector,
     the first tab of its strip, so the person meets it without knowing ⌘I. From then on the tab
     is the session's like any other and is kept with the pane's tabs across launches. One the
     person closed is not given again, in this run or the next: a pane kept from the last run,
@@ -14483,8 +14504,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `shell::chrome_tests::the_chat_menu_names_its_rows` (no Delete),
     `shell::spaces::tests::removing_a_project_says_its_sessions_are_archived`,
     `view::tests::words_typed_and_not_yet_sent_are_a_draft` (slopty-terminal),
-    `shell::chrome_tests::session_card::{cmd_i_opens_and_closes_the_inspector,
-    an_agent_session_is_given_its_inspector_the_first_time_it_shows}`,
+    `shell::chrome_tests::session_card::a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector`
+    (since 2026-10-30, for ⌘I),
     `shell::panel_interaction_tests::a_subagent_shows_its_agents_pane_and_the_pane_comes_back`,
     `shell::navigation_tests::each_session_cycles_only_its_own_tabs`,
     `shell::fuzz_tests::a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing`,
@@ -14624,3 +14645,32 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   went. `SLOPTY_E2E_AWAY` keeps the OS's word for a test that needs it. The server's presence
   and the notes still read the OS: the self-test's notes go nowhere, and a test of a notice by
   presence needs the window away.
+- ✅ **The inspector says nothing its session's chrome says (2026-10-30).** The inspector's
+  header opened with the session's title, in a band of its own over a hairline: the title stood
+  in the terminal's title bar and the sidebar row already, a hand's width away, and with nothing
+  else to say for an idle session the band was the title alone over empty space. The header now
+  holds only what the chrome does not say: the status, the branch and the time at work, on one
+  quiet line, and no band at all when none of them has anything to say. A subagent's timeline
+  keeps its task's name with the way back, which no other chrome names; that way back's arrow
+  had no colour of its own, and GPUI paints an SVG only in its own, so it never showed: it takes
+  the link's now. Test:
+  `chrome_tests::session_card::the_inspector_does_not_repeat_its_sessions_title` (a session at
+  work says its status with no title, an idle one has no header), and the goldens
+  `inspector-*`, `session-inspector*`, `code-*`, `prompt-box` and `media-*` without the title.
+- ✅ **A session opens on its terminal alone (2026-10-30).** Supersedes "Given once" in "A
+  session is its terminal, its inspector beside it". The person asked that the inspector no
+  longer come up by itself. Given the first time each session showed, it took two fifths of the
+  window from the TUI (more on an iPad) before there was anything to inspect, and did so on
+  every new session, since each was given its own. A session now opens on its terminal alone,
+  the side pane shut, on a Mac, an iPad and a phone alike. ⌘I, the titlebar's Inspector and a
+  phone's navigation bar open it, and the pane's kept tabs bring back across launches what the
+  person opened. The gift is deleted whole, with the set of the sessions given one and the pane
+  kept with no tab so that a closed inspector was not given again: nothing is given now, so a
+  pane with no tab keeps nothing. The e2e cases that read the inspector open it as a person
+  does, ⌘I on a Mac and a tap on Inspector on an iPad or a phone. A pane with no tab answers ⌘T
+  with its own list of what it can show rather than the menu, so a case that adds a surface
+  takes the offer from either. It is the first piece of "The window is a terminal, not an app
+  with a terminal in it" (`layout.md`), whose views open only when summoned. Test:
+  `chrome_tests::session_card::a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector`.
+  Goldens: the sidebar, past-sessions, tooltip and iPad cases show the terminal alone, and the
+  surface cases' strips lose the Inspector tab nobody opened.

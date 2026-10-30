@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Show the page
 Article │ You
 Paragraph │ Show the page
 Button │ Copy message

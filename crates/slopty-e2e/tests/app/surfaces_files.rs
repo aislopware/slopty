@@ -118,11 +118,14 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
 
-    // The right pane's new-tab menu (⌘T, from the session's terminal), then the working tree's
+    // What the right pane offers (⌘T, from the session's terminal), then the working tree's
     // diff: its two files, its hunks.
     drv.keys("cmd-t").await.unwrap();
-    click(drv, "MenuItem", "Changes").await;
-    drv.wait_for("the diff surface", STEP, |d| node(d, "MenuItem", "Changes").is_none())
+    let offer = |d: &Dump| crate::served::pane_offer(d, "Changes").map(|n| n.bounds);
+    let picker = drv.wait_for("the pane's offer", STEP, |d| offer(d).is_some()).await.unwrap();
+    let [x, y, w, h] = offer(&picker).unwrap();
+    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Close Changes").is_some())
         .await
         .unwrap();
     // The worker's first diff of the tree. The diff opened under the pointer, which rests on a

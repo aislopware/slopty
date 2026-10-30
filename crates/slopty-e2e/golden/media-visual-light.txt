@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Show the latency
 Article │ You
 Paragraph │ Show the latency
 Button │ Copy message

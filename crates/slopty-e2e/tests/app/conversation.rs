@@ -12,7 +12,8 @@ use slopty_e2e::harness::ServedApp;
 use slopty_e2e::{A11yNode, Driver, Dump};
 
 use crate::served::{
-    SETTLE, STEP, goldens, hover, middle, node, open_thread, says, seen, start, thread_until,
+    SETTLE, STEP, goldens, hover, middle, node, open_thread, says, seen, show_inspector, start,
+    thread_until,
 };
 
 /// The worker's name, as the CLI names the machine.
@@ -23,11 +24,13 @@ async fn stack() -> ServedApp {
     ServedApp::launch(MACHINE).await.unwrap()
 }
 
-/// Open the one session once the app holds its finished turn, and wait until it reads as seen:
-/// its row says nothing more, so a golden of it never catches the row before the mark is back.
+/// Open the one session and its inspector once the app holds its finished turn, and wait until
+/// it reads as seen: its row says nothing more, so a golden of it never catches the row before
+/// the mark is back.
 async fn open_read(drv: &mut Driver) {
     seen(drv, "the finished session's row", STEP, |d| node(d, "Status", "Done").is_some()).await;
     open_thread(drv, 1).await;
+    show_inspector(drv).await;
     seen(drv, "the session read", STEP, |d| node(d, "Status", "Done").is_none()).await;
 }
 

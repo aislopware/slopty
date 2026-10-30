@@ -10,7 +10,6 @@ Dialog │ Inspector
 Button │ Expand inspector
 Heading │ Inspector
 Button │ Close inspector
-Heading │ Say hello
 Article │ You
 Paragraph │ Say hello
 Article │ Claude Code

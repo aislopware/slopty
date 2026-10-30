@@ -516,73 +516,45 @@ mod session_card {
         shell.settings.sidebar_pins_mut("local".into()).push("pin".into());
     }
 
-    /// slopty: ⌘I opens the session's inspector beside its terminal, read-only, and closes it
-    /// again; the keyboard goes back to the terminal.
+    /// A session opens on its terminal alone, the side pane shut; ⌘I opens its inspector
+    /// beside it, its tab first in the pane, and closes it again, the keyboard back with the
+    /// terminal. A plain terminal has nothing to inspect.
     #[gpui::test]
-    fn cmd_i_opens_and_closes_the_inspector(cx: &mut gpui::TestAppContext) {
-        let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
-        shell.update(cx, |shell, cx| {
-            shell.state.update(cx, |state, cx| {
-                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
-                cx.notify();
-            });
-            shell.open_chat("a".into(), cx);
-        });
-        cx.run_until_parked();
-        let shown = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            let open = shell.read_with(cx, |shell, cx| shell.inspector_shown(cx));
-            assert_eq!(open, cx.debug_bounds("inspector-header").is_some(), "drawn as it stands");
-            open
-        };
-        let before = shown(cx);
-        cx.simulate_keystrokes("cmd-i");
-        cx.run_until_parked();
-        assert_ne!(shown(cx), before, "⌘I turns it");
-        cx.simulate_keystrokes("cmd-i");
-        cx.run_until_parked();
-        assert_eq!(shown(cx), before, "and back");
-        if !before {
-            let terminal = cx.update(|window, cx| {
-                shell.read(cx).session_terminal.read(cx).focus_handle().contains_focused(window, cx)
-            });
-            assert!(terminal, "the terminal has the keyboard back");
-        }
-    }
-
-    /// slopty: an agent's session shown the first time opens on its inspector, the first tab of
-    /// its pane, without the person knowing ⌘I. The tab is then the session's like any other: one
-    /// the person closed is not given again, in this run or the next, and a plain terminal is
-    /// given none.
-    #[gpui::test]
-    fn an_agent_session_is_given_its_inspector_the_first_time_it_shows(cx: &mut gpui::TestAppContext) {
+    fn a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector(cx: &mut gpui::TestAppContext) {
         use super::super::RightSurface;
         let (shell, cx) = super::super::retention_tests::launch(cx, super::super::retention_tests::DESKTOP);
         let show = |chat: &str, cx: &mut gpui::VisualTestContext| {
             shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
             cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            shell.read_with(cx, |shell, cx| {
-                (shell.right_tabs.get(chat).cloned().unwrap_or_default(), shell.inspector_shown(cx))
-            })
         };
-        assert_eq!(show("a", cx), (vec![RightSurface::Inspector], true), "given, in front");
-        assert!(cx.debug_bounds("inspector-header").is_some(), "and drawn");
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| shell.close_right_surface(RightSurface::Inspector, window, cx));
+        let shown = |chat: &str, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let (tabs, open, pane) = shell.read_with(cx, |shell, cx| {
+                let tabs = shell.right_tabs.get(chat).cloned().unwrap_or_default();
+                (tabs, shell.inspector_shown(cx), shell.right_pane_open(cx))
+            });
+            assert_eq!(open, cx.debug_bounds("inspector").is_some(), "drawn as it stands");
+            assert_eq!(open, pane, "the pane open only on the inspector");
+            (tabs, open)
+        };
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
+                cx.notify();
+            });
         });
-        assert_eq!(show("b", cx), (vec![RightSurface::Inspector], true), "each session its own");
-        assert_eq!(show("a", cx), (Vec::new(), false), "closed, it stays closed");
-        let kept = shell.read_with(cx, |shell, _| shell.settings.session_tabs.get("a").cloned());
-        assert_eq!(kept.map(|kept| kept.tabs), Some(Vec::new()), "and is kept closed");
-
-        // The next run knows only what was kept.
-        shell.update(cx, |shell, _| {
-            shell.right_tabs.clear();
-            shell.inspector_given.clear();
-            shell.unrestored_tabs = shell.settings.session_tabs.clone();
+        show("a", cx);
+        assert_eq!(shown("a", cx), (Vec::new(), false), "the terminal alone");
+        cx.simulate_keystrokes("cmd-i");
+        cx.run_until_parked();
+        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], true), "⌘I opens it");
+        cx.simulate_keystrokes("cmd-i");
+        cx.run_until_parked();
+        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], false), "and closes it");
+        let terminal = cx.update(|window, cx| {
+            shell.read(cx).session_terminal.read(cx).focus_handle().contains_focused(window, cx)
         });
-        assert_eq!(show("a", cx), (Vec::new(), false), "nor given in the next run");
+        assert!(terminal, "the terminal has the keyboard back");
 
         let terminal = format!("{}t", crate::inspector::TERMINAL_CHAT);
         shell.update(cx, |shell, cx| {
@@ -592,7 +564,36 @@ mod session_card {
                 cx.notify();
             });
         });
-        assert_eq!(show(&terminal, cx), (Vec::new(), false), "a plain terminal has nothing to inspect");
+        show(&terminal, cx);
+        cx.simulate_keystrokes("cmd-i");
+        cx.run_until_parked();
+        assert_eq!(shown(&terminal, cx), (Vec::new(), false), "a plain terminal has nothing to inspect");
+    }
+
+    /// The inspector does not repeat its session's title, which the terminal's title bar
+    /// and the sidebar row say: a session at work has its status and time on one line over its
+    /// timeline, and an idle one has no header at all.
+    #[gpui::test]
+    fn the_inspector_does_not_repeat_its_sessions_title(cx: &mut gpui::TestAppContext) {
+        use super::super::retention_tests::{DESKTOP, chat_row, launch};
+        let (shell, cx) = launch(cx, DESKTOP);
+        let now = chrono::Utc::now();
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.chats.push(chat_row("c", 3, None, now)));
+        });
+        let inspect = |chat: &str, cx: &mut gpui::VisualTestContext| {
+            shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
+            cx.run_until_parked();
+            cx.simulate_keystrokes("cmd-i");
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "{chat}'s inspector is open");
+            assert!(cx.debug_bounds("inspector-timeline").is_some(), "its timeline is drawn");
+            assert!(cx.debug_bounds("inspector-title").is_none(), "{chat}'s title is not said again");
+            cx.debug_bounds("inspector-header").is_some()
+        };
+        assert!(inspect("a", cx), "a session at work says so over its timeline");
+        assert!(!inspect("c", cx), "an idle one has nothing to say over it");
     }
 
     /// slopty: a toast never stands over the session's terminal, whose TUI keeps its prompt in

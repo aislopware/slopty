@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ List the machines
 Article │ You
 Paragraph │ List the machines
 Button │ Copy message

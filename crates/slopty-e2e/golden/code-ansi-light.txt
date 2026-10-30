@@ -9,7 +9,6 @@ Button │ Settings
 Splitter │ Resize sidebar
 Group (focused)
 Terminal │ shell │ >
-Heading │ Output: \x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m
 Article │ You
 Paragraph │ Output:⏎⏎```ansi⏎\x1b[1;32m✓\x1b[0m 12 passed \x1b[2m(0.4s)\x1b[0m⏎\x1b[31merror\x1b[0m: \x1b[1mcannot find\x1b[0m `x` in this scope⏎\x1b[38;5;208mwarning\x1b[0m: unused import⏎```
 Button │ Copy code

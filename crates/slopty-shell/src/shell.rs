@@ -1664,8 +1664,6 @@ pub struct Shell {
     starting: Option<(String, std::time::Instant)>,
     /// slopty: the redraw that ends "Starting…" once its time is up.
     _starting_redraw: Option<Task<()>>,
-    /// slopty: the sessions whose panes were given their inspector, the first time each showed.
-    inspector_given: std::collections::HashSet<String>,
     /// Session-transient disclosure state, matching the Archived shelf.
     pub(super) pinned_open: bool,
     /// The sidebar's archived accordion (t3code Sidebar): OPEN by default
@@ -2305,7 +2303,6 @@ impl Shell {
             new_session: None,
             starting: None,
             _starting_redraw: None,
-            inspector_given: std::collections::HashSet::new(),
             _transcript_events: transcript_events,
             _transcript_invalidation: transcript_invalidation,
         }
@@ -2543,10 +2540,6 @@ impl Shell {
             self.terminal_tween = None;
             self.fit_exits = [None; 3];
             let key = self.panel_key(cx);
-            // slopty: an agent's session shown the first time opens on its inspector.
-            if self.give_inspector(&key, cx) && !self.compact() {
-                self.panels.update(&key, |panels| panels.changes_open = true);
-            }
             // Entering the new-chat canvas always lands with the terminal
             // hidden (user request) — a previously opened canvas drawer must
             // not pop open on a fresh canvas. The source chat's flag stays in
@@ -2569,12 +2562,6 @@ impl Shell {
                 && let Some(changes) = self.diffs.get(&id).cloned()
             {
                 changes.update(cx, |changes, cx| changes.ensure_content(cx));
-            }
-        } else if !self.active_chat.is_empty() && !self.inspector_given.contains(self.active_owner()) {
-            // slopty: or once its row comes, for one shown before.
-            let key = self.panel_key(cx);
-            if self.give_inspector(&key, cx) && !self.compact() {
-                self.set_surfaces_open(true, cx);
             }
         }
         match state.read(cx).connection {
@@ -2804,8 +2791,7 @@ impl Shell {
         cx.notify();
     }
 
-    /// Hide the pane `key` once it holds no tab: its last closed, or its last page gone. An
-    /// agent session's pane always holds its inspector, and stays.
+    /// Hide the pane `key` once it holds no tab: its last closed, or its last page gone.
     pub(super) fn close_empty_right_pane(&mut self, key: &str, cx: &mut Context<Self>) {
         let empty = if key == self.panel_key(cx) {
             self.right_surface_rows(cx).is_empty()
@@ -2855,33 +2841,6 @@ impl Shell {
         }
         self.set_surfaces_open(true, cx);
         self.set_right_active(RightSurface::Inspector, cx);
-    }
-
-    /// slopty: the first time an agent's session shows, its pane's strip is given the inspector,
-    /// first and in front; whether it was, for the caller to open the pane (a phone leaves its
-    /// sheet down, the terminal being the screen there). From then on the tab is the session's
-    /// like any other, and one the person closed stays closed, in this run and the next: a pane
-    /// kept from the last run, even with no tab, was given its inspector then. It waits for the
-    /// session's row, which says whose session it is, as the kept tabs do; a plain terminal has
-    /// nothing to inspect.
-    fn give_inspector(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
-        if self.active_chat.is_empty() || self.inspector_given.contains(key) {
-            return false;
-        }
-        let state = self.state.read(cx);
-        if !state.chats.iter().any(|row| row.id == key) || !crate::inspector::inspects(state, key) {
-            return false;
-        }
-        self.inspector_given.insert(key.to_owned());
-        if self.unrestored_tabs.contains_key(key) {
-            return false;
-        }
-        let tabs = self.right_tabs.entry(key.to_owned()).or_default();
-        if !tabs.contains(&RightSurface::Inspector) {
-            tabs.insert(0, RightSurface::Inspector);
-        }
-        self.set_right_active(RightSurface::Inspector, cx);
-        true
     }
 
     /// slopty: what a press in the inspector asks.
