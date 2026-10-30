@@ -78,6 +78,20 @@ pub const NOTHING_TO_STOP: &str = "This agent is not at work: there is no turn t
 /// How many clone progress steps wait for the server's link before the oldest are dropped.
 const CLONE_PROGRESS: usize = 64;
 
+/// Why Esc may not be pressed in the terminal of a thread at `status`: only a turn at work that
+/// waits on nobody has one to stop, and at a dialog an Esc would answer it.
+fn stop_refused(status: &Status) -> Option<Failure> {
+    match status.phase {
+        Phase::Working if status.wait.is_none() => None,
+        Phase::NeedsYou => Some(Failure::new(
+            ErrorCode::Conflict,
+            crate::thread::submit_refused(status)
+                .unwrap_or_else(|| ANSWER_IN_ITS_TERMINAL.to_owned()),
+        )),
+        _ => Some(Failure::new(ErrorCode::Conflict, NOTHING_TO_STOP)),
+    }
+}
+
 /// Lines one `ReadOutput` returns at most, whatever it asks: a reply is one control-stream
 /// frame, and a caller pages on with `next`.
 pub const MAX_OUTPUT_LINES: u32 = 10_000;
@@ -435,15 +449,7 @@ impl Orchestrator {
     /// and waits on nobody: an Esc at a dialog would answer it, and one at rest has nothing to
     /// stop. The terminal and the session stay (`docs/decisions/agents.md`, "TUI-first").
     fn stop(&self, reads: &dyn ThreadReads, thread: ThreadId) -> Result<Outcome, Failure> {
-        let handle = self.terminal_of(reads, thread, |status| match status.phase {
-            Phase::Working if status.wait.is_none() => None,
-            Phase::NeedsYou => Some(Failure::new(
-                ErrorCode::Conflict,
-                crate::thread::submit_refused(status)
-                    .unwrap_or_else(|| ANSWER_IN_ITS_TERMINAL.to_owned()),
-            )),
-            _ => Some(Failure::new(ErrorCode::Conflict, NOTHING_TO_STOP)),
-        })?;
+        let handle = self.terminal_of(reads, thread, stop_refused)?;
         let escape = keys::parse("escape", 0).map_err(|e| Failure::new(ErrorCode::Failed, e))?;
         tracing::info!(%thread, session = %handle.id(), "Esc pressed in an agent's terminal");
         handle
@@ -1325,6 +1331,42 @@ mod tests {
     use slopty_proto::orchestration::FileKind;
 
     use super::*;
+
+    /// Another agent's words go into an agent's terminal, and its Esc, only where they cannot
+    /// answer a dialog for the person: words while it waits on nobody, an Esc while its turn
+    /// works and waits on nobody. At a dialog both are refused, naming what it asks.
+    #[test]
+    fn nothing_is_typed_or_pressed_at_a_dialog() {
+        use slopty_proto::thread::{Liveness, Wait};
+
+        use crate::thread::submit_refused;
+        let status = |phase, wait: Option<(&str, &str)>| Status {
+            phase,
+            wait: wait.map(|(kind, text)| Wait { kind: kind.to_owned(), text: text.to_owned() }),
+            liveness: Liveness::Live,
+            since_ms: WallMs::ZERO,
+        };
+        let working = status(Phase::Working, None);
+        assert_eq!((submit_refused(&working), stop_refused(&working)), (None, None));
+
+        let asks = status(Phase::NeedsYou, Some(("permission", "Wants to run cargo test")));
+        let said =
+            "It waits for you in its terminal (Wants to run cargo test): answer it there first";
+        assert_eq!(submit_refused(&asks).as_deref(), Some(said));
+        assert_eq!(stop_refused(&asks), Some(Failure::new(ErrorCode::Conflict, said)));
+        let unworded = status(Phase::NeedsYou, Some(("input", "  ")));
+        let said = "It waits for you in its terminal: answer it there first";
+        assert_eq!(submit_refused(&unworded).as_deref(), Some(said));
+        assert_eq!(stop_refused(&unworded), Some(Failure::new(ErrorCode::Conflict, said)));
+
+        let nothing = Some(Failure::new(ErrorCode::Conflict, NOTHING_TO_STOP));
+        for phase in [Phase::Idle, Phase::Waiting, Phase::Done, Phase::Failed, Phase::Stopped] {
+            let resting = status(phase, None);
+            assert_eq!((submit_refused(&resting), stop_refused(&resting)), (None, nothing.clone()));
+        }
+        let compacting = status(Phase::Working, Some((Wait::COMPACTING, "Compacting")));
+        assert_eq!(stop_refused(&compacting), nothing, "its own work, no turn of the person's");
+    }
 
     #[test]
     fn text_is_raw_runs_and_enter_presses() {
