@@ -7,6 +7,7 @@
 //! offset that starts with a known scheme and ends at whitespace or a quote is the link, minus
 //! the punctuation prose puts after a URL. A link the terminal wrapped is one link.
 
+use std::fmt::Write as _;
 use std::ops::Range;
 
 use slopty_grid::Line;
@@ -318,6 +319,307 @@ pub fn file_url_path(url: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+/// What quick select labels on a logical line.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Found {
+    /// A link: the OSC 8 target or the URL as printed.
+    Link(String),
+    /// A file path as printed, without the `:line` after it.
+    Path {
+        /// The path.
+        path: String,
+        /// The line number after it, if any.
+        line: Option<u32>,
+    },
+    /// A commit hash: 7 to 40 lowercase hex digits, a digit and a letter among them.
+    Commit(String),
+}
+
+impl Found {
+    /// The text a copy takes: the link, the path with its line, the hash.
+    #[must_use]
+    pub fn text(&self) -> String {
+        match self {
+            Self::Link(url) => url.clone(),
+            Self::Path { path, line: Some(line) } => format!("{path}:{line}"),
+            Self::Path { path, line: None } => path.clone(),
+            Self::Commit(hash) => hash.clone(),
+        }
+    }
+}
+
+/// One thing quick select can label: the cells it covers on its logical line and what it is.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Target {
+    /// First cell.
+    pub start: Cell,
+    /// One past the last cell, on the last cell's row.
+    pub end: Cell,
+    /// What it is.
+    pub found: Found,
+}
+
+/// Every link, file path and commit hash on the logical line `rows`, in reading order.
+///
+/// None lies over another: the OSC 8 runs the program marked, then in the text around them the
+/// URLs, the paths and the hashes, each read as [`link_at`] and [`path_at`] read them.
+#[must_use]
+pub fn targets(rows: &[&Line]) -> Vec<Target> {
+    let mut out: Vec<Target> = Vec::new();
+    for (row, line) in rows.iter().enumerate() {
+        for link in &line.links {
+            // A run carried on from the row above is that row's link.
+            let carried = link.col == 0
+                && row.checked_sub(1).and_then(|above| rows.get(above)).is_some_and(|above| {
+                    above
+                        .cols()
+                        .checked_sub(1)
+                        .and_then(|last| above.link_at(last))
+                        .is_some_and(|run| run.uri == link.uri)
+                });
+            if !carried && let Some(span) = osc8_at(rows, (row, link.col)) {
+                out.push(Target { start: span.start, end: span.end, found: Found::Link(span.url) });
+            }
+        }
+    }
+    let marked = out.len();
+    let (text, starts, _) = joined(rows, (usize::MAX, 0));
+    let is_delim = |c: char| {
+        c.is_whitespace()
+            || matches!(c, '"' | '\'' | '<' | '>' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',')
+    };
+    let push = |range: &Range<usize>, found: Found, out: &mut Vec<Target>| {
+        let Some((start, end)) = cells_of(&starts, range) else { return };
+        let over = |t: &Target| start < t.end && t.start < end;
+        if !out.get(..marked).unwrap_or_default().iter().any(over) {
+            out.push(Target { start, end, found });
+        }
+    };
+    let mut at = 0;
+    let mut word_start = true;
+    while let Some(c) = text.get(at..).and_then(|rest| rest.chars().next()) {
+        if let Some(range) = url_range_at(&text, at).filter(|range| range.start == at) {
+            let url = text.get(range.clone()).unwrap_or_default().to_owned();
+            push(&range, Found::Link(url), &mut out);
+            (at, word_start) = (range.end, false);
+            continue;
+        }
+        if word_start && !is_delim(c) {
+            if let Some((range, path, line)) =
+                path_range_at(&text, at).filter(|(range, ..)| range.start == at)
+            {
+                push(&range, Found::Path { path, line }, &mut out);
+                (at, word_start) = (range.end, false);
+                continue;
+            }
+            if let Some(len) = text.get(at..).and_then(|rest| commit_at(rest, is_delim)) {
+                let range = at..at.saturating_add(len);
+                let hash = text.get(range.clone()).unwrap_or_default().to_owned();
+                push(&range, Found::Commit(hash), &mut out);
+                (at, word_start) = (range.end, false);
+                continue;
+            }
+        }
+        word_start = is_delim(c);
+        at = at.saturating_add(c.len_utf8());
+    }
+    out.sort_by_key(|t| t.start);
+    out
+}
+
+/// The length of the commit hash `text` starts with, if its first word (up to `is_delim`, the
+/// punctuation prose leaves after it trimmed) is one: 7 to 40 lowercase hex digits with a
+/// digit and a letter among them, so neither a number nor a word like `defaced` is taken.
+fn commit_at(text: &str, is_delim: impl Fn(char) -> bool) -> Option<usize> {
+    let word = text.find(is_delim).map_or(text, |end| text.get(..end).unwrap_or(text));
+    let word = trim_trailing(word);
+    let hex = word.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let mixed =
+        word.bytes().any(|b| b.is_ascii_digit()) && word.bytes().any(|b| b.is_ascii_alphabetic());
+    (hex && mixed && (7..=40).contains(&word.len())).then_some(word.len())
+}
+
+/// What a link's banner shows of `target`: one line that cannot pass for another target.
+///
+/// Ghostty's `UntrustedURL.displayString`, with a browser's rule for hosts: a host label
+/// outside ASCII is shown in punycode (`xn--pple-43d.com`, never a lookalike `аpple.com`), a
+/// path is shown standardised (`a//b/../c` is `a/c`, as it would be opened), and a control,
+/// a direction mark or an invisible character is spelled out as `\u{…}`.
+#[must_use]
+pub fn display(target: &str) -> String {
+    let shown = if let Some(path) = file_url_path(target) {
+        tidy_path(&path)
+    } else if let Some((scheme, rest)) = target.split_once("://") {
+        format!("{scheme}://{}", ascii_host(rest))
+    } else if target.contains('/') {
+        tidy_path(target)
+    } else {
+        target.to_owned()
+    };
+    let mut out = String::with_capacity(shown.len());
+    for c in shown.chars() {
+        if unsafe_to_show(c) {
+            let _infallible = write!(out, "\\u{{{:X}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether `c` could hide or reorder what a one-line target says: ghostty's list of controls,
+/// direction marks, zero-width and line-breaking characters.
+const fn unsafe_to_show(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00..=0x1f
+            | 0x7f..=0x9f
+            | 0x061c
+            | 0x200b..=0x200f
+            | 0x202a..=0x202e
+            | 0x2066..=0x2069
+            | 0x2028..=0x2029
+            | 0x2060
+            | 0xfeff
+    )
+}
+
+/// `path` with its empty and `.` parts dropped and each `..` taking the part before it, as
+/// opening it would resolve them; a `..` at a relative path's head stays.
+fn tidy_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last| *last != "..") => {
+                parts.pop();
+            }
+            ".." if absolute => {}
+            part => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    let tail = if path.ends_with('/') && !joined.is_empty() { "/" } else { "" };
+    match (absolute, joined.is_empty()) {
+        (true, _) => format!("/{joined}{tail}"),
+        (false, true) => ".".to_owned(),
+        (false, false) => format!("{joined}{tail}"),
+    }
+}
+
+/// The part of a URL after its `://` with each host label outside ASCII in punycode.
+fn ascii_host(rest: &str) -> String {
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let (user, host) =
+        authority.rsplit_once('@').map_or(("", authority), |(user, host)| (user, host));
+    let (name, port) = if host.starts_with('[') {
+        (host, "")
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => {
+                (name, host.get(name.len()..).unwrap_or_default())
+            }
+            _ => (host, ""),
+        }
+    };
+    let labels: Vec<String> = name
+        .split('.')
+        .map(|label| {
+            if label.is_ascii() {
+                label.to_owned()
+            } else {
+                punycode(&label.to_lowercase())
+                    .map_or_else(|| label.to_owned(), |code| format!("xn--{code}"))
+            }
+        })
+        .collect();
+    let at = if user.is_empty() && !authority.contains('@') { "" } else { "@" };
+    format!("{user}{at}{}{port}{tail}", labels.join("."))
+}
+
+/// `label` in punycode (RFC 3492), without the `xn--` prefix; `None` past what its integers
+/// hold.
+fn punycode(label: &str) -> Option<String> {
+    const BASE: u32 = 36;
+    const T_MIN: u32 = 1;
+    const T_MAX: u32 = 26;
+    let digit = |d: u32| {
+        let d = u8::try_from(d).ok()?;
+        Some(char::from(if d < 26 {
+            b'a'.checked_add(d)?
+        } else {
+            b'0'.checked_add(d.checked_sub(26)?)?
+        }))
+    };
+    let points: Vec<u32> = label.chars().map(u32::from).collect();
+    let mut out: String = label.chars().filter(char::is_ascii).collect();
+    let basic = u32::try_from(out.len()).ok()?;
+    let total = u32::try_from(points.len()).ok()?;
+    if basic > 0 {
+        out.push('-');
+    }
+    let (mut n, mut delta, mut bias, mut handled) = (0x80_u32, 0_u32, 72_u32, basic);
+    while handled < total {
+        let next = points.iter().copied().filter(|&c| c >= n).min()?;
+        delta = delta.checked_add(next.checked_sub(n)?.checked_mul(handled.checked_add(1)?)?)?;
+        n = next;
+        for &c in &points {
+            if c < n {
+                delta = delta.checked_add(1)?;
+            }
+            if c == n {
+                let mut q = delta;
+                let mut k = BASE;
+                loop {
+                    let t = if k <= bias {
+                        T_MIN
+                    } else if k >= bias.checked_add(T_MAX)? {
+                        T_MAX
+                    } else {
+                        k.checked_sub(bias)?
+                    };
+                    if q < t {
+                        break;
+                    }
+                    let span = BASE.checked_sub(t)?;
+                    out.push(digit(t.checked_add(q.checked_sub(t)?.checked_rem(span)?)?)?);
+                    q = q.checked_sub(t)?.checked_div(span)?;
+                    k = k.checked_add(BASE)?;
+                }
+                out.push(digit(q)?);
+                bias = adapt(delta, handled.checked_add(1)?, handled == basic)?;
+                delta = 0;
+                handled = handled.checked_add(1)?;
+            }
+        }
+        delta = delta.checked_add(1)?;
+        n = n.checked_add(1)?;
+    }
+    Some(out)
+}
+
+/// Punycode's bias adaptation (RFC 3492 §6.1).
+fn adapt(delta: u32, points: u32, first: bool) -> Option<u32> {
+    const BASE: u32 = 36;
+    const SKEW: u32 = 38;
+    const DAMP: u32 = 700;
+    /// `base - t_min`.
+    const STEP: u32 = 35;
+    /// `(base - t_min) * t_max / 2`.
+    const ROOM: u32 = 455;
+    let mut delta = if first { delta.checked_div(DAMP)? } else { delta.checked_div(2)? };
+    delta = delta.checked_add(delta.checked_div(points)?)?;
+    let mut k = 0_u32;
+    while delta > ROOM {
+        delta = delta.checked_div(STEP)?;
+        k = k.checked_add(BASE)?;
+    }
+    let scaled = STEP.checked_add(1)?.checked_mul(delta)?.checked_div(delta.checked_add(SKEW)?)?;
+    k.checked_add(scaled)
+}
+
 /// The URL in `text` that covers byte `offset`.
 #[cfg(test)]
 #[must_use]
@@ -444,6 +746,56 @@ mod tests {
         assert_eq!(url_at("x=https://a.b", 0), None);
         assert_eq!(url_at("x=https://a.b", 4), Some("https://a.b"));
         assert_eq!(url_at("mailto:a@b.c", 3), Some("mailto:a@b.c"));
+    }
+
+    /// Every link, path and hash on a line, in reading order and none twice: an OSC 8 run
+    /// over a printed URL is the run, a path's `:line` is read off, and neither a number, a
+    /// word of hex letters nor a hash too short is taken.
+    #[test]
+    fn quick_select_finds_every_link_path_and_hash() {
+        let mut line = Line::from_text(
+            "see https://a.b/c, src/x.rs:12 at 1a2b3c4d; docs 1234567 defaced abc12",
+            72,
+            Style::DEFAULT,
+        );
+        line.links.push(Hyperlink { col: 44, len: 4, uri: "https://real/".to_owned() });
+        let found: Vec<((usize, u16), Found)> =
+            targets(&[&line]).into_iter().map(|t| (t.start, t.found)).collect();
+        assert_eq!(
+            found,
+            [
+                ((0, 4), Found::Link("https://a.b/c".to_owned())),
+                ((0, 19), Found::Path { path: "src/x.rs".to_owned(), line: Some(12) }),
+                ((0, 34), Found::Commit("1a2b3c4d".to_owned())),
+                ((0, 44), Found::Link("https://real/".to_owned())),
+            ]
+        );
+        let top = Line::from_text("at https://a.b/l", 16, Style::DEFAULT);
+        let mut below = Line::from_text("ong ok", 16, Style::DEFAULT);
+        below.flags.insert(slopty_grid::LineFlags::WRAPPED);
+        let wrapped = targets(&[&top, &below]);
+        assert_eq!(wrapped.len(), 1, "{wrapped:?}");
+        assert_eq!((wrapped[0].start, wrapped[0].end), ((0, 3), (1, 3)));
+        assert_eq!(Found::Path { path: "a".to_owned(), line: Some(3) }.text(), "a:3");
+    }
+
+    /// The banner's text cannot pass for another target: a host outside ASCII in punycode, a
+    /// path as it would open, and what is invisible spelled out.
+    #[test]
+    fn a_banner_shows_where_a_link_really_goes() {
+        assert_eq!(punycode("bücher").as_deref(), Some("bcher-kva"));
+        assert_eq!(punycode("münchen").as_deref(), Some("mnchen-3ya"));
+        assert_eq!(display("https://\u{430}pple.com/login"), "https://xn--pple-43d.com/login");
+        assert_eq!(
+            display("http://me@Bücher.example:8080/a?q=ü"),
+            "http://me@xn--bcher-kva.example:8080/a?q=ü"
+        );
+        assert_eq!(display("https://[::1]:3000/x"), "https://[::1]:3000/x");
+        assert_eq!(display("file:///tmp/a//b/../c"), "/tmp/a/c");
+        assert_eq!(display("./src/../lib.rs:9"), "lib.rs:9");
+        assert_eq!(display("../up/./x/"), "../up/x/");
+        assert_eq!(display("https://a.b/x\u{202e}gpj.exe"), "https://a.b/x\\u{202E}gpj.exe");
+        assert_eq!(display("https://a.b/\nnext"), "https://a.b/\\u{A}next");
     }
 
     /// A program's links go where the program runs: a `file://` link to its machine's path, with

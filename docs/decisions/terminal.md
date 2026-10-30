@@ -4128,3 +4128,91 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the update keep their old environment until they are started again. Tests: `slopty-pty`
   `pty::tests::a_child_with_no_locale_is_given_a_utf8_one`,
   `a_locale_the_environment_names_stays`, `a_locale_the_c_library_lacks_is_never_named`.
+
+- ✅ **The terminal's own craft (2026-10-30).** `docs/decisions/layout.md` rules what the
+  terminal does; this is how its view builds it, read off ghostty's macOS sources
+  (`.research/ghostty-main/macos/Sources`) and `.research/terminal-first-2026-10-30/`
+  (`terminal-craft.md` §4, §10, §13, "For Slopty" 2, 6, 8-11, 15; `rex.md` §12.1 #9).
+  - *The bottom moves, the view holds.* The client's mirror already held a scrolled view still
+    as output arrived. The view now notes where the bottom stood when it left it, per line
+    numbering (`view::follow`), and its foot says "↓ 12 new lines" for what arrived since,
+    nothing at the bottom and nothing for a view scrolled back with nothing new. A click on it,
+    ⇧⌘End or any keystroke goes home. The scroller overlays the grid and wakes only on the
+    person's own scrolling, never for output, fading after it as before. The "N lines below · back to live" pill
+    and its constant are gone.
+  - *Find is ghostty's card.* A floating card, 8 pt in from the top right: the field 180 wide
+    on a 10 % ink with the count inside it ("3/55", "-/55" before one is on show), then ↑ ↓
+    ×. The count runs from the newest, and ⏎, ⌘G and ↑ go up the history to the next hit, ⇧⏎,
+    ⇧⌘G and ↓ back down, as ghostty's next and previous do; before, ⏎ went to the newer hit and
+    wrapped from the newest straight to the oldest. Esc in the field gives the keys back to the
+    grid and keeps the hits on show (with the field empty it closes); Esc in the grid then closes
+    the card, ghostty's `end_search`. The card drags to whichever corner's quarter it is dropped
+    in. The query is the Mac's find pasteboard's: a card opens with it, an edit writes it, and the
+    window coming to the front takes up a query another app's find changed. The case, word and
+    pattern toggles keep their keys (⌥⌘C, ⌥⌘W, ⌥⌘R) and show in the field only while on, where
+    a click turns them off: a row of three chips was the GUI-first bar the card replaces. Hits
+    are ghostty's colours, black text on `#FFE082` and the one on show on `#F2A57E`, made by
+    restyling the hit's cells before the row is built (the hits are part of its key), not a
+    translucent wash under the program's own colours, so a hit reads on any theme and over any
+    colour a TUI chose.
+  - *A session that ended says how.* zeron's "[process exited 3]" trailer gave way to ghostty's
+    bar across the pane's foot: who ended, how quickly when it ran under 250 ms, and the code
+    when it was not 0 ("Claude Code exited after 120 ms, code 1"), on the pane's ground, or on
+    the danger colour at half over it for a failure; ↩ asks for it again
+    (`TerminalViewEvent::StartAgain`), which the workspace asks of the worker under the same id
+    (`TermRequest::Restart`), so its item, its row and its tab stay, and the close key closes
+    it; the bar steps aside while the pointer is over it. How long it ran comes from the shell
+    (`TerminalView::set_run`), since the stream says no exit time and a view attached to a
+    session long after it began sees only the end; with no start said, the length is unknown
+    and never tints. A run that starts again is timed from then.
+  - *Overlays that come and go.* A resize shows "120 ⨯ 40" in the middle for 750 ms, never on
+    the first layout nor within 500 ms of it or of the keyboard or the focus coming or going
+    (read as the view is drawn, so a focus that moves in the frame of the new size counts), as
+    ghostty suppresses a pane still finding its size. The link under the pointer shows in a banner flush
+    with the bottom left, half the pane at most, cut in the middle, and at the bottom right
+    while the pointer is over it. It shows where the link really goes (`url::display`): a host
+    label outside ASCII in punycode (an RFC 3492 encoder of ours, so no dependency for one
+    function), a path standardised as opening would resolve it, and a control, direction mark
+    or invisible character spelled `\u{…}` (ghostty's `UntrustedURL` list). A link the program
+    marked (OSC 8) underlines and shows on any hover, as ghostty's does; printed text is a link
+    only under ⌘, and either opens only with ⌘-click. The ⌘-only tooltip chip is gone.
+  - *One chord labels what is on screen.* ⇧⌘Space (WezTerm's QuickSelect chord with ⌘) labels
+    every link (OSC 8 first), file path and commit hash (7 to 40 lowercase hex digits with a
+    digit and a letter, so neither a number nor `defaced` is taken) on the visible lines, read
+    over each logical line. Labels come from WezTerm's alphabet, none the start of another and
+    the shortest for the target nearest the bottom, drawn on the target's first visible cell,
+    moved left to stay inside the grid and left out when wider than it. A label opens a path in
+    Files (`ViewFile`), a hash in Changes (`ViewCommit`) and a link where a transcript's web
+    link opens, the session's Browser or the person's browser (`Browse`, or the routes ⌘-click
+    already takes for `file://` and a page on the session's loopback); with ⇧ it copies. Until
+    Changes shows a single commit, the workspace copies the hash and says so. Esc or a key that is no label ends it, and none of its keys reaches the
+    program. The grid dims under the labels.
+  - *The program's background is the pane's.* The grid was already painted on the program's
+    OSC 11 background. Its padding now takes the colours a program painted at the grid's edges,
+    ghostty's `window-padding-color = extend` with its heuristics: each row's first and last
+    cell out to the sides, and the first and last rows up and down only when painted whole and
+    neither a prompt's nor one holding a Powerline glyph cut to its cell. A TUI that paints its
+    own screen reaches the pane's edge instead of sitting in a frame of the theme's. The padding
+    takes the program's colours, never find's hits restyling an edge cell. The view
+    says its ground (`TerminalView::ground`, `TerminalViewEvent::Ground` on each change) for the
+    titlebar to take, and the shell's hosted terminal carries it. The minimum-contrast pass
+    (`slopty_theme::Colors::text_over`) now moves only a colour's OKLCH lightness toward black
+    or white, keeping its hue and its chroma until sRGB runs out, where its mix toward the pole
+    washed a hue toward grey: navy lifted on black is a clear blue, not lavender.
+  - *Unfocused panes dim by brightness alone.* The shell sets `TerminalView::set_dimmed` on
+    every pane of a view but the one last worked in, while the view holds more than one, and the
+    element paints one black quad at 0.15 over the grid, last. The drawable is `BGRA8Unorm`,
+    blended in its encoded values, so that quad multiplies every channel by 0.85: HSB brightness
+    0.85 with hue and saturation untouched, WezTerm's inactive-pane transform at saturation 1.0,
+    one quad a frame. Ghostty's veil of 30 % background was rejected: it greys every hue toward
+    the ground.
+  - The screen's clear moved to ⌥⌘K: ⌘K is the picker in every session.
+  - Tests: `slopty-terminal` `view::tests::scrolled_away_the_pill_counts_the_new_lines_and_a_key_goes_home`,
+    `the_find_card_is_ghostty_s`, `shift_return_in_the_find_field_steps_back`,
+    `every_visible_hit_is_washed`, `an_ended_session_says_how_at_the_foot`,
+    `a_resize_shows_the_grid_s_size_once_settled`, `quick_select_labels_what_is_on_screen`,
+    `the_programs_background_is_the_panes`, `a_pane_beside_the_focused_one_dims_by_brightness_alone`;
+    `element::tests::a_hit_is_black_on_amber`, `a_painted_screen_reaches_the_pane_s_edge`,
+    `the_dim_lowers_brightness_alone`; `url::tests::quick_select_finds_every_link_path_and_hash`,
+    `a_banner_shows_where_a_link_really_goes`; `view::quick`, `view::overlays`, `view::ended`,
+    `view::find_card` and `view::find` unit tests.

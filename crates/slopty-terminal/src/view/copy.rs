@@ -169,7 +169,7 @@ impl TerminalView {
             id: "copy-mode",
             icon: slopty_shell::icons::KEYBOARD,
             words: SharedString::new_static(COPY_MODE),
-            act: COPY_MODE_DONE,
+            act: Some(COPY_MODE_DONE),
         };
         self.render_foot_pill(&pill, cx, |this, _window, cx| this.leave_copy_mode(cx))
     }

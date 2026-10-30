@@ -1,9 +1,9 @@
 //! What a terminal's find asks the worker for and what its bar says back: the query with its
-//! toggles, written as one regular expression, and the tally.
+//! toggles, written as one regular expression, and the count.
 //!
 //! After Ely GPUI Components (`src/editor/find.rs`), Copyright (c) 2026 Ely GPUI Component
-//! contributors, MIT OR Apache-2.0. The bar itself is drawn with the shell's parts
-//! ([`super::TerminalView::render_search`]).
+//! contributors, MIT OR Apache-2.0. The card itself is ghostty's, drawn with the shell's parts
+//! ([`super::TerminalView::render_find`]).
 
 /// What the find field says before anything is typed.
 pub(super) const PLACEHOLDER: &str = "Find";
@@ -19,13 +19,9 @@ pub(super) const CASE_FACE: &str = "Aa";
 pub(super) const WORD_FACE: &str = "W";
 /// A pattern's face: what a regular expression is written with.
 pub(super) const REGEX_FACE: &str = ".*";
-/// What the tally says when nothing matches.
-pub(super) const NO_MATCHES: &str = "No matches";
-/// What the tally says for a pattern that does not compile; the pattern's own word is its
+/// What the count says for a pattern that does not compile; the pattern's own word is its
 /// accessible value.
-pub(super) const BAD_PATTERN: &str = "Not a valid pattern";
-/// The bar's width: room for a word or two, the toggles, the tally and the steps.
-pub(super) const WIDTH: f32 = 380.0;
+pub(super) const BAD_PATTERN: &str = "Invalid";
 
 /// What a find asks for.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -100,16 +96,17 @@ pub(super) enum Toggle {
     Regex,
 }
 
-/// What the tally says.
+/// What the count says.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum Tally {
     /// Nothing typed.
     Quiet,
     /// The pattern does not compile: the pattern's own word on why.
     Bad(String),
-    /// The matches: the one on show (from 0) among `total`, `more` past a cap.
+    /// The matches: which is on show, counted from the newest at 1 as ghostty counts up the
+    /// history, among `total`, `more` past a cap.
     Found {
-        /// The match on show.
+        /// The match on show, 1 the newest.
         at: Option<usize>,
         /// How many.
         total: usize,
@@ -119,19 +116,15 @@ pub(super) enum Tally {
 }
 
 impl Tally {
-    /// The tally as the bar shows it.
+    /// The count as ghostty's card shows it: "3/55", and "-/55" before a match is on show.
     #[must_use]
     pub(super) fn words(&self) -> String {
         match self {
             Self::Quiet => String::new(),
             Self::Bad(_) => BAD_PATTERN.to_owned(),
-            Self::Found { total: 0, .. } => NO_MATCHES.to_owned(),
-            Self::Found { at: Some(at), total, more } => {
-                format!("{} of {total}{}", at.saturating_add(1), if *more { "+" } else { "" })
-            }
-            Self::Found { at: None, total: 1, more: false } => "1 match".to_owned(),
-            Self::Found { at: None, total, more } => {
-                format!("{total}{} matches", if *more { "+" } else { "" })
+            Self::Found { at, total, more } => {
+                let at = at.map_or_else(|| "-".to_owned(), |at| at.to_string());
+                format!("{at}/{total}{}", if *more { "+" } else { "" })
             }
         }
     }
@@ -163,11 +156,10 @@ mod tests {
     #[test]
     fn the_tally_reads_one_way() {
         assert_eq!(Tally::Quiet.words(), "");
-        assert_eq!(Tally::Found { at: Some(1), total: 4, more: false }.words(), "2 of 4");
-        assert_eq!(Tally::Found { at: Some(0), total: 10, more: true }.words(), "1 of 10+");
-        assert_eq!(Tally::Found { at: None, total: 0, more: false }.words(), NO_MATCHES);
-        assert_eq!(Tally::Found { at: None, total: 1, more: false }.words(), "1 match");
-        assert_eq!(Tally::Found { at: None, total: 3, more: false }.words(), "3 matches");
+        assert_eq!(Tally::Found { at: Some(3), total: 55, more: false }.words(), "3/55");
+        assert_eq!(Tally::Found { at: Some(1), total: 1000, more: true }.words(), "1/1000+");
+        assert_eq!(Tally::Found { at: None, total: 55, more: false }.words(), "-/55");
+        assert_eq!(Tally::Found { at: None, total: 0, more: false }.words(), "-/0");
         assert_eq!(Tally::Bad("error: x".into()).words(), BAD_PATTERN);
     }
 }

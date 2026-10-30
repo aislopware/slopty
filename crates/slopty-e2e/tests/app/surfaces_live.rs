@@ -38,11 +38,16 @@ fn node<'a>(dump: &'a Dump, role: &str, label: &str) -> Option<&'a A11yNode> {
     dump.a11y.iter().find(|n| n.role == role && n.label.as_deref() == Some(label))
 }
 
-/// The foot's "N lines below" pill.
-fn lines_below(dump: &Dump) -> Option<&A11yNode> {
-    dump.a11y.iter().find(|n| {
-        n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("lines below"))
-    })
+/// The foot's "N new lines" pill.
+fn new_lines(dump: &Dump) -> Option<&A11yNode> {
+    dump.a11y
+        .iter()
+        .find(|n| n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("new line")))
+}
+
+/// A terminal shows a line that is `text` alone, not a command line that names it.
+fn shows_line(dump: &Dump, text: &str) -> bool {
+    dump.terminals.iter().flat_map(|t| t.lines.iter()).any(|line| line.trim() == text)
 }
 
 /// `value` is `want` points, give or take half a point.
@@ -89,11 +94,12 @@ async fn the_terminal_dock_holds_a_shell_of_the_worker() {
     stack.shutdown().await;
 }
 
-/// What floats over the dock's terminal is the shell's own: a program's progress (`OSC 9;4`) on
-/// its tab while it runs, the lines-below pill (zeron's 30 pt jump pill), the find field (a 24 pt
-/// surface field), the right-click menu (the shell's menu rows, one height) and the dim trailer a
-/// program that ended leaves. Each decides on its numbers, and each state is a golden in both
-/// appearances.
+/// What floats over the dock's terminal: a program's progress (`OSC 9;4`) on its tab while it
+/// runs, the "N new lines" pill (the shell's 30 pt pill) when output arrives below a view
+/// scrolled back, ghostty's find card (a 28 pt field; Esc gives the keys back and keeps the
+/// card, Esc again closes it), the right-click menu (the shell's menu rows, one height), ⌥⌘K's
+/// clear and the bar a program that ended leaves at the pane's foot. Each decides on its
+/// numbers, and each state is a golden in both appearances.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_terminal_s_floats_wear_the_shell() {
@@ -129,34 +135,40 @@ async fn the_terminal_s_floats_wear_the_shell() {
     .await
     .unwrap();
 
-    // Scrolled up into its history, the foot counts the lines below on zeron's jump pill.
-    drv.type_text("seq 1 300").await.unwrap();
+    // Scrolled back while output arrives, the view stays where it was and the foot counts the
+    // lines that came below it; the pill takes it home. The 300 lines, then a pause to scroll in,
+    // then a dozen more, so the count is the same every run.
+    drv.type_text("seq 1 300; sleep 4; seq 301 312").await.unwrap();
     drv.keys("enter").await.unwrap();
-    drv.wait_for("the count", STEP, |d| {
-        !d.lines_containing("300").is_empty() && d.prompts_settled()
-    })
-    .await
-    .unwrap();
+    drv.wait_for("the first count", STEP, |d| shows_line(d, "300")).await.unwrap();
     let dump = drv.dump().await.unwrap();
     let [x, y, w, h] = dump.a11y.iter().find(|n| n.role == "Terminal").map(|n| n.bounds).unwrap();
     drv.scroll(x + w / 2.0, y + h / 2.0, 0.0, 40.0).await.unwrap();
-    let dump =
-        drv.wait_for("the lines-below pill", STEP, |d| lines_below(d).is_some()).await.unwrap();
-    let pill = lines_below(&dump).unwrap();
-    assert!(about(pill.bounds[3], 30.0), "the jump pill is 30 tall: {pill:?}");
+    let dump = drv
+        .wait_for("the new-lines pill, once the second count is in", STEP, |d| {
+            new_lines(d).is_some() && d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
+        })
+        .await
+        .unwrap();
+    let pill = new_lines(&dump).unwrap();
+    assert!(about(pill.bounds[3], 30.0), "the shell's pill is 30 tall: {pill:?}");
+    assert!(!shows_line(&dump, "312"), "the view stayed where it was scrolled to");
     goldens(drv, &renders, "surface-live-terminal-scrolled").await;
     let [px_, py, pw, ph] = pill.bounds;
     drv.click(px_ + pw / 2.0, py + ph / 2.0).await.unwrap();
-    drv.wait_for("back at the live end", STEP, |d| lines_below(d).is_none()).await.unwrap();
+    drv.wait_for("back at the live end", STEP, |d| new_lines(d).is_none() && shows_line(d, "312"))
+        .await
+        .unwrap();
 
-    // ⌘F opens the find bar: its field is a surface's 24 pt field, its words find their hits.
+    // ⌘F opens ghostty's find card with the keyboard in its field (whose 28 pt the view's own
+    // test measures), and its words find their hits.
     drv.keys("cmd-f").await.unwrap();
     let dump = drv
         .wait_for("the find field", STEP, |d| node(d, "SearchInput", "Find").is_some())
         .await
         .unwrap();
     let field = node(&dump, "SearchInput", "Find").unwrap();
-    assert!(field.bounds[3] <= 24.5, "the field sits in a 24 pt frame: {field:?}");
+    assert!(field.focused, "the find field holds the keyboard: {field:?}");
     let before = drv.dump().await.unwrap();
     println!("FOCUS terminal find opened: {} ({})", before.focus_path, before.focused);
     drv.type_text("29").await.unwrap();
@@ -177,8 +189,16 @@ async fn the_terminal_s_floats_wear_the_shell() {
         );
     }
     goldens(drv, &renders, "surface-live-terminal-find").await;
+    // Esc in the field gives the keys back to the grid and keeps the card and its hits.
     drv.keys("escape").await.unwrap();
-    drv.wait_for("the find bar closed", STEP, |d| node(d, "SearchInput", "Find").is_none())
+    let dump = drv
+        .wait_for("the keys back in the grid", STEP, |d| !d.focus_path.contains("TerminalSearch"))
+        .await
+        .unwrap();
+    assert!(node(&dump, "SearchInput", "Find").is_some(), "the card stays: {}", dump.focus_path);
+    // Esc again, in the grid, closes it.
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the find card closed", STEP, |d| node(d, "SearchInput", "Find").is_none())
         .await
         .unwrap();
 
@@ -199,14 +219,20 @@ async fn the_terminal_s_floats_wear_the_shell() {
         .await
         .unwrap();
 
-    // A shell that exits leaves zeron's dim trailer with its status.
-    drv.type_text("exit 3").await.unwrap();
-    drv.keys("enter").await.unwrap();
-    drv.wait_for("the exit trailer", STEP, |d| {
-        d.a11y.iter().any(|n| n.label.as_deref() == Some("[process exited 3]"))
+    // ⌥⌘K clears the screen and its history, the prompt kept (⌘K is the session picker's).
+    drv.keys("alt-cmd-k").await.unwrap();
+    drv.wait_for("the screen cleared", STEP, |d| {
+        !shows_line(d, "300") && !shows_line(d, "312") && d.prompts_settled()
     })
     .await
     .unwrap();
+
+    // A shell that exits leaves the bar at the pane's foot that says so, with its code.
+    drv.type_text("exit 3").await.unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the exit bar", STEP, |d| node(d, "Status", "The shell exited, code 3").is_some())
+        .await
+        .unwrap();
     goldens(drv, &renders, "surface-live-terminal-exited").await;
     stack.shutdown().await;
 }

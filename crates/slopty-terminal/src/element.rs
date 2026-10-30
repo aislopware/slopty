@@ -129,6 +129,10 @@ pub struct Prepared {
     font_size: Pixels,
     /// The visual bell's wash over the grid, while it rings.
     bell: Option<Hsla>,
+    /// Painted at [`UNFOCUSED_BRIGHTNESS`].
+    dimmed: bool,
+    /// The cell backgrounds carried out into the padding around the grid ([`Pad::extend`]).
+    edges: Vec<(Bounds<Pixels>, Hsla)>,
     /// The frame holds a blinking cursor or SGR 5 text: the view's blink clock must run.
     blinking: bool,
     /// Images the program placed (kitty graphics), clipped to the grid.
@@ -194,6 +198,20 @@ struct RowParts {
     /// It has decorations under the glyphs, and over them.
     under: bool,
     over: bool,
+    /// How far from the first column its backgrounds run unbroken, so a row wholly painted
+    /// reaches the grid's width; 0 for a row ghostty never carries out above or below the grid
+    /// (a prompt's, or one holding a Powerline glyph cut to fit its cell exactly).
+    reach: u16,
+    /// The program's own backgrounds, where find's hits restyled some of [`Self::quads`]: what
+    /// the padding carries out, since a hit is no colour of the program's.
+    ground: Option<Vec<(u16, u16, Hsla)>>,
+}
+
+impl RowParts {
+    /// The backgrounds the padding carries out: the program's own.
+    fn grounds(&self) -> &[(u16, u16, Hsla)] {
+        self.ground.as_deref().unwrap_or(&self.quads)
+    }
 }
 
 impl RowParts {
@@ -296,6 +314,8 @@ struct RowKey {
     blink_off: bool,
     /// Where a sprite's atlas tile lands on device pixels, which only a row with sprites minds.
     sprites: SpriteGeometry,
+    /// The find's hits on it ([`lit_hits`]), hashed; `None` without any.
+    hits: Option<u64>,
 }
 
 /// What the device-pixel size of a row's sprite tiles comes from: the grid's left edge (each
@@ -312,6 +332,7 @@ impl RowKey {
         self.frame == now.frame
             && self.prompt_end == now.prompt_end
             && self.guesses == now.guesses
+            && self.hits == now.hits
             && (!parts.blinks || self.blink_off == now.blink_off)
             && (parts.sprites.is_empty() || self.sprites == now.sprites)
     }
@@ -631,11 +652,18 @@ fn row_in_band(
     y + line_height + below > clip_top && y - above < clip_bottom
 }
 
+/// How bright an unfocused pane is painted, of its own brightness: `WezTerm`'s transform at
+/// brightness 0.85 and saturation 1.0 (`docs/decisions/terminal.md`, "Unfocused panes dim by
+/// brightness alone").
+pub const UNFOCUSED_BRIGHTNESS: f32 = 0.85;
+
 /// The element.
 #[derive(Debug)]
 pub struct TerminalElement {
     view: Entity<TerminalView>,
     focused: bool,
+    /// Painted at [`UNFOCUSED_BRIGHTNESS`]: a pane beside the one the person works in.
+    dimmed: bool,
     /// What a screen reader hears: the program's title and the cursor row's text. Filled by
     /// the view only while the accessibility tree is being built.
     a11y: Option<(SharedString, SharedString)>,
@@ -645,7 +673,15 @@ impl TerminalElement {
     /// Paint `view`.
     #[must_use]
     pub const fn new(view: Entity<TerminalView>, focused: bool) -> Self {
-        Self { view, focused, a11y: None }
+        Self { view, focused, dimmed: false, a11y: None }
+    }
+
+    /// Paint it at [`UNFOCUSED_BRIGHTNESS`], every channel scaled alike so each hue and its
+    /// saturation stay as they are and only the brightness drops.
+    #[must_use]
+    pub const fn dimmed(mut self, dimmed: bool) -> Self {
+        self.dimmed = dimmed;
+        self
     }
 
     /// The accessible label (the title) and value (the cursor row's text).
@@ -1059,6 +1095,34 @@ fn prompt_end(mark: slopty_grid::SemanticMark, typing_at: Option<u16>) -> Option
     mark.is_prompt().then(|| mark.input_col().or(typing_at).unwrap_or(u16::MAX))
 }
 
+/// A find's hit, as ghostty paints one: black text on amber, the hit on show on orange
+/// (`search-background`, `search-selected-background`).
+pub(crate) const HIT: Rgb = Rgb::hex(0xff_e082);
+/// The hit on show.
+pub(crate) const HIT_ON: Rgb = Rgb::hex(0xf2_a57e);
+
+/// `cells` with the find's `hits` on them (`(start, end, on show)`) restyled as ghostty paints
+/// hits: black text on [`HIT`] or [`HIT_ON`], in the cells' own weight and slant, so a hit
+/// reads the same on any theme and over any colour the program chose. `None` without hits.
+fn lit_hits(cells: &[Cell], hits: &[(u16, u16, bool)]) -> Option<Vec<Cell>> {
+    if hits.is_empty() {
+        return None;
+    }
+    let mut out = cells.to_vec();
+    for &(start, end, on) in hits {
+        let ground = if on { HIT_ON } else { HIT };
+        let end = usize::from(end).min(out.len());
+        for cell in out.get_mut(usize::from(start).min(end)..end).unwrap_or_default() {
+            cell.style.fg = slopty_grid::Color::Rgb(0, 0, 0);
+            cell.style.bg = slopty_grid::Color::Rgb(ground.r, ground.g, ground.b);
+            cell.style
+                .flags
+                .remove(StyleFlags::INVERSE | StyleFlags::FAINT | StyleFlags::INVISIBLE);
+        }
+    }
+    Some(out)
+}
+
 /// A prompt's cells before `end` set back with the faint attribute (SGR 2), where the shell
 /// drew them in the default colours: the prompt steps back and the command after it reads
 /// first, as Warp sets its prompt apart from the command. A prompt the shell coloured itself
@@ -1259,6 +1323,106 @@ fn graphic(c: char) -> bool {
         u32::from(c),
         0x2500..=0x259f | 0x1fb00..=0x1fbff | 0x1cc00..=0x1cebf | 0xe0b0..=0xe0d7
     )
+}
+
+/// A Powerline glyph cut to fit its cell exactly (ghostty's list in `renderer/row.zig`): a
+/// row holding one is a prompt's or a status line's, and its colours carried out past the
+/// grid would stand as a block beside the arrow's point.
+const fn cut_to_cell(c: char) -> bool {
+    matches!(c as u32, 0xe0b0..=0xe0c8 | 0xe0ca | 0xe0cc..=0xe0d2 | 0xe0d4)
+}
+
+/// The cells' backgrounds, as runs of columns of one colour; a cell on the default background
+/// paints none. A run of one colour resolves it once.
+fn backgrounds(cells: &[Cell], palette: &Colors) -> Vec<(u16, u16, Hsla)> {
+    let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
+    let mut last: Option<(slopty_grid::Color, bool, Hsla)> = None;
+    for (col, cell) in cells.iter().enumerate() {
+        let col = u16::try_from(col).unwrap_or(u16::MAX);
+        let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
+        let bg = if inverse { cell.style.fg } else { cell.style.bg };
+        if !inverse && matches!(bg, slopty_grid::Color::Default) {
+            continue;
+        }
+        let color = match last {
+            Some((slot, was_inverse, color)) if slot == bg && was_inverse == inverse => color,
+            _ => {
+                let color = hsla(palette.resolve(bg, !inverse));
+                last = Some((bg, inverse, color));
+                color
+            }
+        };
+        if let Some((_start, end, c)) = quads.last_mut()
+            && *end == col
+            && *c == color
+        {
+            *end = col.saturating_add(1);
+        } else {
+            quads.push((col, col.saturating_add(1), color));
+        }
+    }
+    quads
+}
+
+/// How far from column 0 the runs of cell backgrounds `quads` cover the row without a gap.
+fn reach(quads: &[(u16, u16, Hsla)]) -> u16 {
+    quads.iter().try_fold(0_u16, |at, &(start, end, _)| (start == at).then_some(end)).unwrap_or(0)
+}
+
+/// Where the grid sits in the element, for carrying the cells' backgrounds out into the
+/// padding around it ([`Pad::extend`]).
+#[derive(Clone, Copy, Debug)]
+struct Pad {
+    /// The element's bounds.
+    outer: Bounds<Pixels>,
+    /// The grid's left edge.
+    left: Pixels,
+    cell_width: Pixels,
+    cols: u16,
+}
+
+impl Pad {
+    /// A row's backgrounds carried into the padding, as ghostty's `window-padding-color =
+    /// extend` carries them: the first and last cells' out to the element's sides, and when
+    /// `beyond` names the band above the grid (the first row) or below it (the last), every
+    /// run of the row over that band, if the program painted the whole row and it is not a
+    /// prompt's. A program that paints its own screen keeps its colour to the pane's edge
+    /// rather than sitting in a frame of the theme's.
+    fn extend(
+        self,
+        parts: &RowParts,
+        y: Pixels,
+        height: Pixels,
+        beyond: Option<(Pixels, Pixels)>,
+        out: &mut Vec<(Bounds<Pixels>, Hsla)>,
+    ) {
+        let x_of = |col: u16| self.left + self.cell_width * f32::from(col);
+        let (left, right) = (self.outer.left(), self.outer.right());
+        let mut push = |from: Pixels, to: Pixels, top: Pixels, bottom: Pixels, color: Hsla| {
+            if to > from && bottom > top {
+                out.push((Bounds::from_corners(point(from, top), point(to, bottom)), color));
+            }
+        };
+        let grounds = parts.grounds();
+        if let Some(&(start, _, color)) = grounds.first()
+            && start == 0
+        {
+            push(left, x_of(0), y, y + height, color);
+        }
+        if let Some(&(_, end, color)) = grounds.last()
+            && end >= self.cols
+        {
+            push(x_of(self.cols), right, y, y + height, color);
+        }
+        let Some((top, bottom)) = beyond.filter(|_| parts.reach >= self.cols) else {
+            return;
+        };
+        for &(start, end, color) in grounds {
+            let from = if start == 0 { left } else { x_of(start) };
+            let to = if end >= self.cols { right } else { x_of(end) };
+            push(from, to, top, bottom, color);
+        }
+    }
 }
 
 /// [`cell_color`] with `held` taking the text colour and its background to the colour drawn.
@@ -1637,6 +1801,9 @@ impl Element for TerminalElement {
             // Rows above the oldest line the worker still has: a `~` filler, shaped once.
             let mut filler: Option<Rc<RowParts>> = None;
             let mut prepared_rows = Vec::with_capacity(rows_view.len());
+            let padding = Pad { outer: bounds, left: origin.x, cell_width, cols: grid_cols };
+            let last_row = rows_view.len().saturating_sub(1);
+            let mut edges = Vec::new();
             for (i, row) in rows_view.iter().enumerate() {
                 let screen_row = u16::try_from(i).unwrap_or(u16::MAX);
                 let y = origin.y + line_height * f32::from(screen_row);
@@ -1665,6 +1832,11 @@ impl Element for TerminalElement {
                     continue;
                 };
                 let typing_at = shell_cursor.filter(|c| c.row == screen_row).map(|c| c.col);
+                // Search hits: every one this row shows, a hit over a soft wrap on each row it
+                // runs onto, the current one in its own colour.
+                let index = row.index;
+                let hits: Vec<(u16, u16, bool)> =
+                    hit_marks(matches, current, index, grid_cols, hit_reach).collect();
                 let key = RowKey {
                     frame: row_frame,
                     prompt_end: prompt_end(line.mark, typing_at),
@@ -1674,6 +1846,11 @@ impl Element for TerminalElement {
                         origin_x: f32::from(origin.x).to_bits(),
                         height: device_span(y, line_height, scale),
                     },
+                    hits: (!hits.is_empty()).then(|| {
+                        let mut h = FxHasher::default();
+                        hits.hash(&mut h);
+                        h.finish()
+                    }),
                 };
                 let address = Arc::as_ptr(line).addr();
                 let kept = rows_before
@@ -1694,40 +1871,18 @@ impl Element for TerminalElement {
                     let cells: &[Cell] = guessed.as_deref().unwrap_or(&line.cells);
                     let prompt = key.prompt_end.and_then(|end| faint_prompt(cells, end));
                     let cells: &[Cell] = prompt.as_deref().unwrap_or(cells);
-                    let mut quads: Vec<(u16, u16, Hsla)> = Vec::new();
+                    let lit = lit_hits(cells, &hits);
+                    let ground = lit.is_some().then(|| backgrounds(cells, palette));
+                    let cells: &[Cell] = lit.as_deref().unwrap_or(cells);
+                    let quads = backgrounds(cells, palette);
                     let mut decorations: Vec<Decoration> = Vec::new();
                     let mut sprites: Vec<SpriteCell> = Vec::new();
                     let mut blinks = false;
-                    // The last background resolved: a run of one colour converts it once.
-                    let mut last_bg: Option<(slopty_grid::Color, bool, Hsla)> = None;
+                    let mut cut = false;
                     for (col, cell) in cells.iter().enumerate() {
                         let col = u16::try_from(col).unwrap_or(u16::MAX);
-                        let inverse = cell.style.flags.contains(StyleFlags::INVERSE);
-                        let bg = if inverse { cell.style.fg } else { cell.style.bg };
-                        let is_default_bg = !inverse && matches!(bg, slopty_grid::Color::Default);
-                        if !is_default_bg {
-                            let color = match last_bg {
-                                Some((slot, was_inverse, color))
-                                    if slot == bg && was_inverse == inverse =>
-                                {
-                                    color
-                                }
-                                _ => {
-                                    let color = hsla(palette.resolve(bg, !inverse));
-                                    last_bg = Some((bg, inverse, color));
-                                    color
-                                }
-                            };
-                            if let Some((_start, end, c)) = quads.last_mut()
-                                && *end == col
-                                && *c == color
-                            {
-                                *end = col.saturating_add(1);
-                            } else {
-                                quads.push((col, col.saturating_add(1), color));
-                            }
-                        }
                         let drawn = drawn_here(cell);
+                        cut |= drawn.is_some_and(cut_to_cell);
                         let struck = cell.style.flags.contains(StyleFlags::STRIKETHROUGH);
                         if drawn.is_none() && cell.style.underline == Underline::None && !struck {
                             // Its glyphs' colour is the shaped word's business.
@@ -1807,29 +1962,25 @@ impl Element for TerminalElement {
                             (col, shaped_word)
                         })
                         .collect();
+                    let carried = ground.as_deref().unwrap_or(&quads);
+                    let reach = if key.prompt_end.is_some() || cut { 0 } else { reach(carried) };
                     let parts = RowParts {
                         quads,
                         decorations,
                         segments,
                         sprites,
                         blinks,
+                        reach,
+                        ground,
                         ..RowParts::default()
                     };
                     Rc::new(parts.sealed(words.finish()))
                 };
                 blinking |= parts.blinks;
                 // The selection paints over cell backgrounds and under the text.
-                let index = row.index;
                 let mut marks = Vec::new();
                 if let Some(range) = selection.and_then(|s| s.columns(index, grid_cols)) {
                     marks.push((range.start, range.end, shell_look.selection));
-                }
-                // Search hits: every one this row shows, a hit over a soft wrap on each row it
-                // runs onto, the current one stronger.
-                for (start, end, on) in hit_marks(matches, current, index, grid_cols, hit_reach) {
-                    let color =
-                        if on { shell_look.search_current } else { shell_look.search_match };
-                    marks.push((start, end, color));
                 }
                 // A link wrapped over rows is underlined on each, edge to edge in between.
                 let link = link
@@ -1840,6 +1991,14 @@ impl Element for TerminalElement {
                             if last == index { end.min(grid_cols) } else { grid_cols },
                         )
                     });
+                let beyond = if i == 0 {
+                    Some((bounds.top(), y))
+                } else if i == last_row {
+                    Some((y + line_height, bounds.bottom()))
+                } else {
+                    None
+                };
+                padding.extend(&parts, y, line_height, beyond, &mut edges);
                 prepared_rows.push(PreparedRow { y, parts: Rc::clone(&parts), marks, link });
                 rows_after.0.insert(address, (Arc::clone(line), key, parts));
             }
@@ -1931,6 +2090,8 @@ impl Element for TerminalElement {
                 background: hsla(palette.theme.bg),
                 link: hsla(palette.theme.fg),
                 bell,
+                dimmed: self.dimmed,
+                edges,
                 overlay,
                 shown: predicted
                     .map(|guesses| guesses.pending.iter().map(|p| p.seq).collect())
@@ -2061,6 +2222,9 @@ impl Element for TerminalElement {
             }
         });
         window.paint_quad(fill(bounds, prepared.background));
+        for &(edge, color) in &prepared.edges {
+            window.paint_quad(fill(edge, color));
+        }
         // Each pass over the rows paints a row as a stretch under a key, which GPUI draws
         // again from the last frame while the key holds: a row that did not change, or only
         // moved, is copied rather than painted. What else a frame paints (the cursor, the
@@ -2210,6 +2374,13 @@ impl Element for TerminalElement {
         if let Some(wash) = prepared.bell {
             // The visual bell: the state wash laid thinly over the whole grid.
             window.paint_quad(fill(bounds, wash));
+        }
+        if prepared.dimmed {
+            // The frame is blended in its encoded values (a `BGRA8Unorm` drawable), so black at
+            // this alpha scales every channel of what lies under it alike: HSB brightness times
+            // `UNFOCUSED_BRIGHTNESS`, hue and saturation untouched, the text as sharp as before.
+            let shade = Hsla { h: 0.0, s: 0.0, l: 0.0, a: 1.0 - UNFOCUSED_BRIGHTNESS };
+            window.paint_quad(fill(bounds, shade));
         }
         // Keystroke → paint is timed when this frame reaches the glass, not now.
         if self.view.read(cx).latency_waiting() {
@@ -2467,6 +2638,108 @@ mod tests {
         assert_eq!(marks(7), [(0, 2, false)], "and on the row it wraps onto");
         assert!(marks(8).is_empty(), "a row with no hit");
         assert_eq!(marks(9), [(0, 1, false)]);
+    }
+
+    /// A hit is restyled black on ghostty's amber, the one on show on orange, whatever the
+    /// program painted there (inverse and faint dropped, bold kept); the cells around it keep
+    /// theirs, and a hit past the row's end stops at it.
+    #[test]
+    fn a_hit_is_black_on_amber() {
+        let bold = CellStyle {
+            fg: slopty_grid::Color::Palette(2),
+            flags: StyleFlags::BOLD | StyleFlags::INVERSE | StyleFlags::FAINT,
+            ..CellStyle::DEFAULT
+        };
+        let row: Vec<Cell> = "abcdef".chars().map(|c| Cell::narrow(c, bold)).collect();
+        assert!(lit_hits(&row, &[]).is_none(), "no hits, no copy");
+        let lit = lit_hits(&row, &[(1, 3, false), (5, 9, true)]).unwrap();
+        let black = slopty_grid::Color::Rgb(0, 0, 0);
+        let on = |rgb: Rgb| slopty_grid::Color::Rgb(rgb.r, rgb.g, rgb.b);
+        for (col, cell) in lit.iter().enumerate() {
+            let (fg, bg) = match col {
+                1 | 2 => (black, on(HIT)),
+                5 => (black, on(HIT_ON)),
+                _ => (bold.fg, bold.bg),
+            };
+            assert_eq!((cell.style.fg, cell.style.bg), (fg, bg), "column {col}");
+            assert!(cell.style.flags.contains(StyleFlags::BOLD), "column {col} keeps its weight");
+        }
+        assert!(!lit[1].style.flags.intersects(StyleFlags::INVERSE | StyleFlags::FAINT));
+        assert_eq!(lit[0].style, bold, "beside the hit, as it was");
+        assert_eq!(lit.len(), row.len(), "nothing past the row");
+    }
+
+    /// The padding takes the backgrounds a program painted at the grid's edges: each row's
+    /// first and last cells out to the sides, and the first and last rows up and down when the
+    /// program painted them whole; never a prompt's row or one holding a Powerline arrow, and
+    /// never a row with a cell left on the default background.
+    #[test]
+    fn a_painted_screen_reaches_the_pane_s_edge() {
+        let (red, blue) = (hsla(Rgb::hex(0xff_0000)), hsla(Rgb::hex(0x00_00ff)));
+        let outer = Bounds::new(point(px(0.0), px(0.0)), size(px(100.0), px(60.0)));
+        let pad = Pad { outer, left: px(4.0), cell_width: px(10.0), cols: 9 };
+        let parts = |quads: Vec<(u16, u16, Hsla)>| {
+            let reach = reach(&quads);
+            RowParts { quads, reach, ..RowParts::default() }
+        };
+        let mut out = Vec::new();
+        // A row painted whole, as the first: its sides and the band above.
+        let whole = parts(vec![(0, 4, red), (4, 9, blue)]);
+        pad.extend(&whole, px(4.0), px(10.0), Some((px(0.0), px(4.0))), &mut out);
+        let at = |b: &Bounds<Pixels>| (b.left(), b.top(), b.right(), b.bottom());
+        let got: Vec<_> = out.iter().map(|(b, c)| (at(b), *c)).collect();
+        assert_eq!(
+            got,
+            [
+                ((px(0.0), px(4.0), px(4.0), px(14.0)), red),
+                ((px(94.0), px(4.0), px(100.0), px(14.0)), blue),
+                ((px(0.0), px(0.0), px(44.0), px(4.0)), red),
+                ((px(44.0), px(0.0), px(100.0), px(4.0)), blue),
+            ]
+        );
+        // A gap on the default background: the sides only, no band.
+        out.clear();
+        let gapped = parts(vec![(0, 3, red), (4, 9, blue)]);
+        pad.extend(&gapped, px(4.0), px(10.0), Some((px(0.0), px(4.0))), &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
+        // A prompt's row (or one with a Powerline arrow) reaches nothing above or below.
+        out.clear();
+        let prompt = RowParts { reach: 0, ..parts(vec![(0, 9, red)]) };
+        pad.extend(&prompt, px(4.0), px(10.0), Some((px(0.0), px(4.0))), &mut out);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(cut_to_cell('\u{e0b0}') && cut_to_cell('\u{e0d4}') && !cut_to_cell('\u{e0c9}'));
+        // Nothing painted at the edges: nothing carried.
+        out.clear();
+        pad.extend(&parts(vec![(2, 5, red)]), px(4.0), px(10.0), None, &mut out);
+        assert_eq!(out, Vec::<(Bounds<Pixels>, Hsla)>::new());
+    }
+
+    /// The dim scales every channel by [`UNFOCUSED_BRIGHTNESS`], the blend a black quad at
+    /// `1 - 0.85` makes in the drawable's encoded values: HSB brightness drops by that much
+    /// and hue and saturation stay where they were, so no colour greys.
+    #[test]
+    fn the_dim_lowers_brightness_alone() {
+        let hsb = |[r, g, b]: [f32; 3]| {
+            let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+            let hue = if (max - min).abs() < f32::EPSILON {
+                0.0
+            } else if (max - r).abs() < f32::EPSILON {
+                ((g - b) / (max - min)).rem_euclid(6.0)
+            } else if (max - g).abs() < f32::EPSILON {
+                (b - r) / (max - min) + 2.0
+            } else {
+                (r - g) / (max - min) + 4.0
+            };
+            (hue, if max > 0.0 { (max - min) / max } else { 0.0 }, max)
+        };
+        for rgb in [[1.0, 0.5, 0.0], [0.2, 0.6, 0.9], [0.95, 0.95, 0.95], [0.3, 0.0, 0.4]] {
+            let shade = 1.0 - UNFOCUSED_BRIGHTNESS;
+            // Black over `c` at `shade`: `c * (1 - shade) + 0 * shade`.
+            let dimmed = rgb.map(|c: f32| c * (1.0 - shade));
+            let ((h0, s0, b0), (h1, s1, b1)) = (hsb(rgb), hsb(dimmed));
+            assert!((h0 - h1).abs() < 1e-5 && (s0 - s1).abs() < 1e-5, "{rgb:?}");
+            assert!(b0.mul_add(-UNFOCUSED_BRIGHTNESS, b1).abs() < 1e-5, "{rgb:?}");
+        }
     }
 
     /// The metrics of a grid laid out at `scale`, `Lilex` 13 pt: an 8 × 17

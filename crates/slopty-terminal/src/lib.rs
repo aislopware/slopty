@@ -23,14 +23,14 @@ mod sprite;
 pub mod url;
 mod view;
 
-pub use element::{CellMetrics, Prepared, TerminalElement, fits};
+pub use element::{CellMetrics, Prepared, TerminalElement, UNFOCUSED_BRIGHTNESS, fits};
 pub use view::{
-    BACK_TO_LIVE, COPY_MODE, COPY_MODE_DONE, CTX, ClearScreen, ClipHook, ClipPaste, CloseFind,
-    Copy, CopyBlockOutput, CopyLastOutput, CopyMode, Find, FindNext, FindPrev, GridFrame, Guesses,
-    KeyCommand, LinkArrival, NextPrompt, Paste, PlacedImage, PrevPrompt, RerunLast, SEARCH_CTX,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, Selection, SendEscape,
-    TerminalView, TerminalViewEvent, ToggleMatchCase, ToggleRegex, ToggleWholeWord, bindings,
-    commands, escape,
+    COPY_MODE, COPY_MODE_DONE, CTX, ClearScreen, ClipHook, ClipPaste, CloseFind, Copy,
+    CopyBlockOutput, CopyLastOutput, CopyMode, Find, FindNext, FindPrev, GridFrame, Guesses,
+    KeyCommand, LinkArrival, NextPrompt, Paste, PlacedImage, PrevPrompt, QuickSelect, RerunLast,
+    SEARCH_CTX, ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, Selection,
+    SendEscape, TerminalView, TerminalViewEvent, ToggleMatchCase, ToggleRegex, ToggleWholeWord,
+    bindings, commands, escape,
 };
 #[cfg(target_os = "macos")]
 pub use view::{DropHook, DropNews, SinkDropped};

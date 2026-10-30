@@ -18475,3 +18475,32 @@ off the network for 30 s is said lost after 5 s (the lease's idle timeout, exact
 then is refused in 0 ns, and back on the network it is linked and its board current 8 to 45 ms
 later. A mute server is given up 6 s after its last answer, exactly, and redialled 224 ms on.
 40 runs of the two, back to back, all passed.
+
+## 2026-10-30 — the new-lines pill and the unfocused pane's dim
+
+The scrolled terminal's pill counts the lines that arrived since the view left the bottom ("↓ 12
+new lines"), and a pane beside the focused one is dimmed by one black quad at 0.15 over its
+grid (`docs/decisions/terminal.md`, "The terminal's own craft"). `lines_below_cost` is
+`new_lines_and_dim_cost` now, with a third arm: following the output with the pane dimmed.
+mac-studio, release, headless GPUI, the 2026-10-16 setup otherwise: one 100 × 40 terminal at
+1000 × 900 pt flooding one line a frame, following, scrolled up 20 lines with the pill
+counting, and following dimmed, in alternating blocks of 50 frames, ten rounds (500 frames
+each). Five runs, load average 14 to 15 (other lanes building), p50 / p95 / p99 / max in µs:
+
+| run | following | scrolled, pill counting | following, dimmed |
+| --- | --- | --- | --- |
+| 1 | 41.4 / 51.3 / 107.1 / 208.9 | 32.8 / 41.5 / 67.3 / 133.5 | 41.4 / 51.5 / 103.3 / 227.8 |
+| 2 | 41.6 / 50.3 / 76.1 / 212.5 | 32.8 / 43.0 / 76.4 / 162.5 | 42.0 / 63.6 / 105.0 / 185.7 |
+| 3 | 41.3 / 47.8 / 68.6 / 206.0 | 33.2 / 42.4 / 64.9 / 165.4 | 41.8 / 50.3 / 91.7 / 205.8 |
+| 4 | 42.0 / 50.6 / 101.2 / 209.1 | 33.4 / 41.8 / 71.0 / 116.1 | 41.4 / 51.7 / 96.1 / 193.3 |
+| 5 | 41.9 / 49.9 / 89.5 / 220.4 | 33.3 / 45.4 / 81.0 / 128.9 | 42.3 / 56.0 / 97.8 / 195.4 |
+
+The dim costs nothing measurable: dimmed and undimmed frames are within 0.6 µs of each other at
+p50 in every run, and their tails cross from run to run. It is one quad over the grid, not a
+pass over its cells. A frame scrolled up with the pill counting costs about 33 µs at p50, a
+fifth less than one following the output, as on 2026-10-16 (30 µs there, at half this load):
+held still, it draws no new row, and counting the new lines is a subtraction per frame.
+
+```
+cargo test -p slopty-terminal --release --lib new_lines_and_dim_cost -- --ignored --nocapture
+```

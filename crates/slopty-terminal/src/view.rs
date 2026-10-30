@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use find::{Query, Tally, Toggle};
+use find::{Query, Toggle};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
@@ -61,8 +61,6 @@ const AUTOSCROLL_MAX: i64 = 8;
 const FLOAT_INSET: f32 = 8.0;
 /// How far the foot pills stand above the grid's foot: zeron's jump pill over a transcript.
 const FOOT_INSET: f32 = 12.0;
-/// The action on the pill that counts the lines below a view scrolled up into its history.
-pub const BACK_TO_LIVE: &str = "Back to live";
 /// What the pill of a view sized by another client says, and what a click on it does.
 const SIZED_ELSEWHERE: &str = "Sized for another screen";
 /// The action on that pill: this client's size becomes the PTY's.
@@ -95,9 +93,9 @@ mod actions {
             Paste,
             /// Open the search bar (or focus it).
             Find,
-            /// Go to the next (newer) hit.
+            /// Go up the history to the next hit (older), as ⏎ does in the find field.
             FindNext,
-            /// Go to the previous (older) hit.
+            /// Go back down the history to the hit after (newer), as ⇧⏎ does.
             FindPrev,
             /// Close the search bar.
             CloseFind,
@@ -127,11 +125,14 @@ mod actions {
             RerunLast,
             /// Copy the output of the selected command block (the last one with none selected).
             CopyBlockOutput,
-            /// Clear the screen and the history (⌘K, as in every Mac terminal).
+            /// Clear the screen and the history (⌥⌘K: ⌘K is the picker in every session).
             ClearScreen,
             /// Keyboard copy mode: a cursor of its own walks the history with vi's keys,
             /// selects and copies, and the program hears none of it.
             CopyMode,
+            /// Label every link, file path and commit hash on screen, to open or copy one by
+            /// typing its label.
+            QuickSelect,
             /// Escape, for a keyboard with no Esc key (an iPad's Magic Keyboard): ⌘. there,
             /// to the program in a terminal and to the app in a remote window.
             SendEscape,
@@ -140,7 +141,7 @@ mod actions {
 }
 pub use actions::{
     ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, CopyMode, Find, FindNext,
-    FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp,
+    FindPrev, NextPrompt, Paste, PrevPrompt, QuickSelect, RerunLast, ScrollPageDown, ScrollPageUp,
     ScrollToBottom, ScrollToTop, SelectAll, SendEscape, ToggleMatchCase, ToggleRegex,
     ToggleWholeWord,
 };
@@ -214,7 +215,10 @@ pub fn commands() -> Vec<KeyCommand> {
         // ⌘⇧↩ is the workspace's zoom-pane; "Rerun last command" is in the palette.
         c("rerun_last", RerunLast, &[], GRID),
         c("copy_block_output", CopyBlockOutput, &[], GRID),
-        c("clear_screen", ClearScreen, &["cmd-k"], GRID),
+        // ⌘K is the picker in every session (`docs/decisions/layout.md`).
+        c("clear_screen", ClearScreen, &["alt-cmd-k"], GRID),
+        // WezTerm's QuickSelect chord (⌃⇧Space), with ⌘ for ⌃ as every app chord here.
+        c("quick_select", QuickSelect, &["cmd-shift-space"], GRID),
     ];
     // An iPad's Magic Keyboard has no Esc key; ⌘. is the Mac's old Escape, and iPadOS gives
     // it no other meaning in an app that takes the keys.
@@ -415,6 +419,22 @@ pub enum TerminalViewEvent {
     /// ⌘V with files on the clipboard: the workspace sends them to the shell's directory and
     /// types their paths, as a drop does.
     PasteFiles(ClipFiles),
+    /// The pane's background changed ([`TerminalView::ground`]): the theme's, or the one the
+    /// program set (OSC 11). The titlebar over the pane takes it, as ghostty's does.
+    Ground(slopty_theme::Rgb),
+    /// ↩ on a session that ended: the workspace starts it again where it ran.
+    StartAgain,
+    /// A commit hash chosen in quick select: the workspace shows that commit in Changes.
+    ViewCommit {
+        /// The hash as printed, 7 to 40 hex digits.
+        hash: String,
+    },
+    /// A link chosen in quick select, to a page off the session's machine: the workspace opens
+    /// it in its Browser.
+    Browse {
+        /// The address as printed.
+        url: String,
+    },
 }
 
 /// What the clipboard holds for a shell's paste, as the workspace reads it.
@@ -653,6 +673,24 @@ pub struct TerminalView {
     restored_seen: bool,
     /// Waits for the link's other end to go, to say the worker is out of reach.
     link_watch: Option<gpui::Task<()>>,
+    /// Where the output's bottom stood when the view left it ([`follow`]).
+    away: Option<follow::Away>,
+    /// The grid size the last layout fitted and the "120 × 40" it shows ([`overlays`]).
+    resize: overlays::Resize,
+    /// The pointer is over the link banner at the grid's foot: it shows at the other corner.
+    banner_flipped: bool,
+    /// Dimmed as an unfocused pane of several ([`Self::set_dimmed`]).
+    dimmed: bool,
+    /// What runs here and how it ended, for the bar at the pane's foot ([`ended`]).
+    run: ended::Run,
+    /// Quick select's labels, while it is on ([`quick`]).
+    quick: Option<quick::Quick>,
+    /// The ground the host last heard of ([`TerminalViewEvent::Ground`]).
+    ground_told: Option<slopty_theme::Rgb>,
+    /// The corner the find card stands in ([`find_card`]).
+    find_corner: find_card::Corner,
+    /// The find card on its way to another corner.
+    find_drag: Option<find_card::Drag>,
 }
 
 impl std::fmt::Debug for TerminalView {
@@ -793,6 +831,15 @@ impl TerminalView {
             progress_told: None,
             restored_seen: false,
             link_watch: Some(Self::watch_link(&out_watch, cx)),
+            away: None,
+            resize: overlays::Resize::default(),
+            banner_flipped: false,
+            dimmed: false,
+            run: ended::Run::default(),
+            quick: None,
+            ground_told: None,
+            find_corner: find_card::Corner::START,
+            find_drag: None,
         }
     }
 
@@ -822,7 +869,7 @@ impl TerminalView {
         self.send(TermRequest::Paste { text, confirmed: true }, cx);
     }
 
-    /// ⌘F: open the search bar, or put the caret back in it with the text selected.
+    /// ⌘F: open the find card, or put the caret back in it with the text selected.
     pub fn find(&mut self, _: &Find, window: &mut Window, cx: &mut Context<Self>) {
         if self.search.is_none() {
             // The shell's own field, as the Files search draws it: one line, 11.5 pt.
@@ -836,7 +883,7 @@ impl TerminalView {
                 cx.subscribe_in(&input, window, |this, _input, event, window, cx| match event {
                     ComposerInputEvent::Edited => this.search_changed(cx),
                     ComposerInputEvent::Submitted | ComposerInputEvent::MentionAccept => {
-                        this.step_match(1, cx);
+                        this.step_match(-1, cx);
                     }
                     ComposerInputEvent::MentionDismiss => this.close_find(&CloseFind, window, cx),
                     _ => {}
@@ -854,6 +901,12 @@ impl TerminalView {
                 invalid: None,
                 _subscription: subscription,
             });
+            // The query every app's find shares, as a Mac find opens with.
+            if let Some(needle) = Self::shared_needle(cx)
+                && let Some(search) = &self.search
+            {
+                search.input.update(cx, |input, cx| input.set_text(needle, cx));
+            }
         }
         if let Some(search) = &self.search {
             let focus = search.input.focus_handle(cx);
@@ -892,22 +945,14 @@ impl TerminalView {
         });
     }
 
-    /// ⌘G / Enter.
+    /// ⌘G / ⏎: up the history to the next hit, as ghostty's next goes.
     pub fn find_next(&mut self, _: &FindNext, _window: &mut Window, cx: &mut Context<Self>) {
-        self.step_match(1, cx);
-    }
-
-    /// ⌘⇧G / ⇧Enter.
-    pub fn find_prev(&mut self, _: &FindPrev, _window: &mut Window, cx: &mut Context<Self>) {
         self.step_match(-1, cx);
     }
 
-    /// Esc in the search field: close it and give the keys back to the program.
-    pub fn close_find(&mut self, _: &CloseFind, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.take().is_some() {
-            self.focus.focus(window, cx);
-            cx.notify();
-        }
+    /// ⌘⇧G / ⇧⏎: back down the history.
+    pub fn find_prev(&mut self, _: &FindPrev, _window: &mut Window, cx: &mut Context<Self>) {
+        self.step_match(1, cx);
     }
 
     /// The hits to paint (oldest first) and which one is current.
@@ -922,6 +967,7 @@ impl TerminalView {
         if needle == search.query.needle() {
             return;
         }
+        Self::share_needle(&needle, cx);
         search.query = search.query.with_needle(needle);
         self.restart_search(cx);
     }
@@ -935,6 +981,8 @@ impl TerminalView {
         search.invalid = None;
         search.reveal = true;
         self.send_search(cx);
+        // The card shows the toggles and the cleared count at once, not with the answer.
+        cx.notify();
     }
 
     /// Flip one of the query's toggles; remembered for the next find bar.
@@ -1069,15 +1117,29 @@ impl TerminalView {
         self.selection
     }
 
-    /// The link to underline: the run under the pointer while ⌘ is held, as its first cell
-    /// and one past its last, on the rows it wraps over.
-    #[must_use]
-    pub fn link_highlight(&self) -> Option<((LineIndex, u16), (LineIndex, u16))> {
-        if !self.cmd_held {
+    /// The link or path under the pointer, with its logical line's first row: anything ⌘
+    /// would open while ⌘ is held, and without it only a link the program marked (OSC 8),
+    /// which is a link wherever the pointer finds it (ghostty underlines those on any hover).
+    fn hovered_link(&self) -> Option<(LineIndex, Under)> {
+        let (col, row) = self.hover?;
+        if !self.cmd_held && !self.marked_link_at(col, row) {
             return None;
         }
-        let (col, row) = self.hover?;
-        let (first, under) = self.under(self.state.index_at_row(row), col)?;
+        self.under(self.state.index_at_row(row), col)
+    }
+
+    /// Whether the cell at `col` of screen row `row` is in a link the program marked (OSC 8).
+    fn marked_link_at(&self, col: u16, row: u16) -> bool {
+        self.state
+            .line(self.state.index_at_row(row))
+            .is_some_and(|line| line.link_at(col).is_some())
+    }
+
+    /// The link to underline: the run of the link under the pointer, as its first cell and one
+    /// past its last, on the rows it wraps over.
+    #[must_use]
+    pub fn link_highlight(&self) -> Option<((LineIndex, u16), (LineIndex, u16))> {
+        let (first, under) = self.hovered_link()?;
         let (start, end) = match &under {
             Under::Link(span) => (span.start, span.end),
             Under::Path(span) => (span.start, span.end),
@@ -1143,16 +1205,12 @@ impl TerminalView {
         }
     }
 
-    /// Where the link under a ⌘-hover goes: the OSC 8 target or the URL as printed, or the
-    /// path (with its `:line`) — the text a click would act on, shown so an OSC 8 label
-    /// cannot hide its destination.
+    /// Where the link under the pointer goes: the OSC 8 target or the URL as
+    /// printed, or the path (with its `:line`) — the text a click would act on, shown so an
+    /// OSC 8 label cannot hide its destination.
     #[must_use]
     pub fn link_target(&self) -> Option<String> {
-        if !self.cmd_held {
-            return None;
-        }
-        let (col, row) = self.hover?;
-        match self.under(self.state.index_at_row(row), col)?.1 {
+        match self.hovered_link()?.1 {
             Under::Link(link) => Some(link.url),
             Under::Path(path) => {
                 Some(path.line.map_or_else(|| path.path.clone(), |n| format!("{}:{n}", path.path)))
@@ -1214,32 +1272,13 @@ impl TerminalView {
         )
     }
 
-    /// The ⌘-hovered link's target, at the grid's bottom-left in the shell's hint card.
-    fn render_link_preview(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
-        let target = self.link_target()?;
-        let theme = chrome::theme(cx);
-        Some(
-            div()
-                .debug_selector(|| "link-preview".to_owned())
-                .absolute()
-                .bottom(px(FLOAT_INSET))
-                .left(px(FLOAT_INSET))
-                .max_w_full()
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .font_family(theme.font_sans.clone())
-                .child(chrome::tooltip_card(target, theme))
-                .into_any_element(),
-        )
-    }
-
     /// The pointer's shape over the grid: a hand over the link ⌘ would open and in the gutter
     /// beside a block (a click selects it), the I-beam while ⇧ takes the mouse back from a
     /// program (as a click does), then the shape the program asked for (`OSC 22`), an arrow
     /// while a program has the mouse, and the I-beam over text.
     #[must_use]
     pub fn pointer(&self) -> CursorStyle {
-        if self.link_highlight().is_some()
+        if (self.cmd_held && self.link_highlight().is_some())
             || (self.pointer_in_gutter() && self.hovered_block().is_some())
         {
             return CursorStyle::PointingHand;
@@ -1266,15 +1305,22 @@ impl TerminalView {
         self.hover = self.hover_at(at, modifiers);
         self.cmd_held = modifiers.platform;
         self.shift_held = modifiers.shift;
+        if self.hover.is_none() {
+            // The banner goes with the link, and the next starts where banners start.
+            self.banner_flipped = false;
+        }
         if (self.link_highlight(), self.pointer()) != before {
             cx.notify();
         }
     }
 
-    /// The cell a pointer at `at` is over, kept only while ⌘ is down: nothing else draws it,
-    /// and a view that kept every cell crossed would be built again for every move over it.
+    /// The cell a pointer at `at` is over, kept only while ⌘ is down or it is in a link the
+    /// program marked: nothing else draws it, and a view that kept every cell crossed would be
+    /// built again for every move over it.
     fn hover_at(&self, at: gpui::Point<Pixels>, modifiers: gpui::Modifiers) -> Option<(u16, u16)> {
-        self.metrics.and_then(|m| m.cell_at(at)).filter(|_| modifiers.platform)
+        self.metrics
+            .and_then(|m| m.cell_at(at))
+            .filter(|&(col, row)| modifiers.platform || self.marked_link_at(col, row))
     }
 
     /// Whether the pointer at `at` with `modifiers` changes what [`Self::set_pointer`] keeps.
@@ -2097,6 +2143,7 @@ impl TerminalView {
             self.font_family = None;
         }
         self.theme = theme;
+        self.tell_ground(cx);
         cx.notify();
     }
 
@@ -2432,6 +2479,9 @@ impl TerminalView {
     pub fn apply(&mut self, event: TermEvent, cx: &mut Context<Self>) {
         let reconcile = matches!(event, TermEvent::Frame(_));
         let epoch_before = self.state.epoch();
+        // A view scrolled away since the last frame counts what arrives from where the bottom
+        // stands now.
+        self.note_away();
         if let TermEvent::Frame(frame) = &event {
             tracing::trace!(
                 session = %self.session,
@@ -2465,6 +2515,7 @@ impl TerminalView {
                 search.current = None;
             }
         }
+        self.note_away();
         if reconcile {
             self.refresh_search(cx);
         }
@@ -2496,7 +2547,10 @@ impl TerminalView {
                 Effect::Notification { title, body } => {
                     cx.emit(TerminalViewEvent::Notification { title, body });
                 }
-                Effect::Exited(status) => cx.emit(TerminalViewEvent::Exited(status)),
+                Effect::Exited(status) => {
+                    self.run_ended(cx);
+                    cx.emit(TerminalViewEvent::Exited(status));
+                }
                 Effect::ClipboardWrite(text) => {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
@@ -2543,7 +2597,61 @@ impl TerminalView {
             self.progress_told = progress;
             cx.emit(TerminalViewEvent::Progress);
         }
+        self.tell_ground(cx);
+        self.run_going(cx);
         cx.notify();
+    }
+
+    /// The pane's background: the one the program set (OSC 11), else the theme's. The grid is
+    /// painted on it edge to edge, and the titlebar over the pane takes it
+    /// ([`TerminalViewEvent::Ground`]).
+    #[must_use]
+    pub fn ground(&self) -> slopty_theme::Rgb {
+        self.state.colors().bg.map_or(self.theme.terminal.bg, |[r, g, b]| slopty_theme::Rgb {
+            r,
+            g,
+            b,
+        })
+    }
+
+    /// The program's default text colour on [`Self::ground`]: the one it set (OSC 10), else the
+    /// theme's.
+    pub(super) fn ground_ink(&self) -> slopty_theme::Rgb {
+        self.state.colors().fg.map_or(self.theme.terminal.fg, |[r, g, b]| slopty_theme::Rgb {
+            r,
+            g,
+            b,
+        })
+    }
+
+    /// [`Self::ground_ink`] to paint with.
+    pub(super) fn ground_text(&self) -> gpui::Hsla {
+        slopty_kit::colors::hsla(self.ground_ink())
+    }
+
+    /// The host hears the ground when it changes, and the first time there is one.
+    fn tell_ground(&mut self, cx: &mut Context<Self>) {
+        let ground = self.ground();
+        if self.ground_told != Some(ground) {
+            self.ground_told = Some(ground);
+            cx.emit(TerminalViewEvent::Ground(ground));
+        }
+    }
+
+    /// Paint the grid at [`crate::UNFOCUSED_BRIGHTNESS`], its brightness alone lowered: the
+    /// shell sets it on every pane of a view but the one the person last worked in, while the
+    /// view holds more than one (`docs/decisions/layout.md`, "splits on demand").
+    pub fn set_dimmed(&mut self, dimmed: bool, cx: &mut Context<Self>) {
+        if self.dimmed != dimmed {
+            self.dimmed = dimmed;
+            cx.notify();
+        }
+    }
+
+    /// Whether the grid is painted dimmed ([`Self::set_dimmed`]).
+    #[must_use]
+    pub const fn dimmed(&self) -> bool {
+        self.dimmed
     }
 
     /// The program's progress report (`OSC 9;4`), which the shell's tab draws; `None` while
@@ -2628,33 +2736,17 @@ impl TerminalView {
         self.state.view_offset()
     }
 
-    /// The pill at the foot of a view scrolled up: how many lines are below and a way back to
-    /// them, the whole pill one button (as ⇧⇲ is). In copy mode the foot says so instead
-    /// ([`Self::render_copy_mode`]); with the worker out of reach it says that
-    /// ([`Self::render_out_of_reach`]); following the output in a view another client sizes,
-    /// it offers to take the size ([`Self::render_take`]).
-    fn render_lines_below(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    /// What floats at the foot of the grid: that the worker is out of reach, that copy mode is
+    /// on, that new lines arrived below a view scrolled away ([`Self::render_new_lines`]), or,
+    /// in a view another client sizes, an offer to take the size ([`Self::render_take`]).
+    fn render_foot(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if let Some(away) = self.render_out_of_reach(cx) {
             return Some(away);
         }
         if self.copy_mode.is_some() {
             return Some(self.render_copy_mode(cx));
         }
-        let below = self.lines_below();
-        if below == 0 {
-            return self.render_take(cx);
-        }
-        let count: SharedString =
-            if below == 1 { "1 line below".into() } else { format!("{below} lines below").into() };
-        let pill = FootPill {
-            id: "lines-below",
-            icon: icons::ALT_ARROW_DOWN,
-            words: count,
-            act: BACK_TO_LIVE,
-        };
-        Some(self.render_foot_pill(&pill, cx, |this, window, cx| {
-            this.scroll_to_bottom(&ScrollToBottom, window, cx);
-        }))
+        self.render_new_lines(cx).or_else(|| self.render_take(cx))
     }
 
     /// The pill of a view whose PTY another client sizes, once it shows output: the grid is
@@ -2668,7 +2760,7 @@ impl TerminalView {
             id: "take-size",
             icon: icons::MONITOR,
             words: SIZED_ELSEWHERE.into(),
-            act: TAKE,
+            act: Some(TAKE),
         };
         Some(self.render_foot_pill(&pill, cx, |this, _window, cx| this.drive(cx)))
     }
@@ -2715,7 +2807,10 @@ impl TerminalView {
         click: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> gpui::AnyElement {
         let theme = chrome::theme(cx);
-        let label = SharedString::from(format!("{} · {}", pill.words, pill.act));
+        let label = pill.act.map_or_else(
+            || pill.words.clone(),
+            |act| SharedString::from(format!("{} · {act}", pill.words)),
+        );
         let (id, icon) = (pill.id, pill.icon);
         let shown = label.clone();
         let element = slopty_shell::live::floating_pill(
@@ -2756,49 +2851,11 @@ impl TerminalView {
             .absolute()
             .left_0()
             .right_0()
-            .bottom(px(pad + FOOT_INSET))
+            .bottom(px(pad + FOOT_INSET + self.ended_bar_height()))
             .flex()
             .justify_center()
             .child(pill)
             .into_any_element()
-    }
-
-    /// Zeron's dim trailer under a program that ended, "[process exited 3]", on the line
-    /// under the last it printed, while the view follows the output.
-    fn render_exit_trailer(&self, cx: &App) -> Option<gpui::AnyElement> {
-        let status = self.exited()?;
-        let m = self.metrics?;
-        if self.state.view_offset() != 0 {
-            return None;
-        }
-        let words = SharedString::from(exit_words(status));
-        let row = self.state.cursor().row.saturating_add(1).min(m.rows.saturating_sub(1));
-        let theme = &self.theme;
-        let family = self.font_family.clone().unwrap_or_else(|| {
-            theme.typography.mono_families.first().cloned().unwrap_or_default().into()
-        });
-        let look = slopty_shell::live::TerminalLook::from_theme(chrome::theme(cx));
-        Some(
-            div()
-                .id("terminal-exited")
-                .debug_selector(|| "terminal-exited".to_owned())
-                .role(gpui::Role::Status)
-                .aria_label(words.clone())
-                .absolute()
-                .left(px(self.pad()))
-                .top(px(self.pad()) + m.line_height * f32::from(row))
-                .h(m.line_height)
-                .flex()
-                .items_center()
-                .whitespace_nowrap()
-                .font_family(family)
-                .text_size(px(theme.typography.mono_size))
-                .text_color(look.faint)
-                // The grid's own background, so the trailer reads as a row of it.
-                .bg(slopty_kit::colors::hsla(theme.terminal.bg))
-                .child(words)
-                .into_any_element(),
-        )
     }
 
     /// The prompt row of the command block under the pointer: one with a typed command that
@@ -2908,6 +2965,7 @@ impl TerminalView {
     /// The element measured the grid: `cols × rows` fit, with these metrics. Measured while
     /// the window draws: a change is drawn in the next frame.
     pub fn fitted(&mut self, size: TermSize, metrics: CellMetrics, cx: &mut Context<Self>) {
+        self.note_size((size.cols, size.rows), cx);
         // The view lays itself out relative to the grid, so a grid that only moved is news
         // for it only where a still pointer now hovers another block. Anything else would
         // build every moving shell twice a frame.
@@ -3145,12 +3203,33 @@ impl TerminalView {
                 _ => self.cancel_pending(cx),
             }
         }
+        // Quick select takes every key the keymap left; a ⌘ chord stays the app's and ends it.
+        if self.quick.is_some() {
+            if keystroke.modifiers.platform {
+                self.quick = None;
+                cx.notify();
+            } else {
+                self.quick_key(&event.keystroke, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
         // Typing in the search field must never reach the program.
         if self
             .search
             .as_ref()
             .is_some_and(|s| s.input.read(cx).focus_handle(cx).is_focused(window))
         {
+            return;
+        }
+        // Esc in the grid with the find card open closes it (ghostty's `end_search`); the next
+        // Esc is the program's.
+        if self.search.is_some()
+            && keystroke.key == "escape"
+            && keystroke.modifiers == gpui::Modifiers::default()
+        {
+            self.end_find(window, cx);
+            cx.stop_propagation();
             return;
         }
         // Copy mode takes every key the keymap left: none reaches the program. ⌘ chords stay
@@ -3162,6 +3241,14 @@ impl TerminalView {
             } else if keys::natural_editing(&event.keystroke).is_some() {
                 cx.stop_propagation();
             }
+            return;
+        }
+        // ↩ once the program ended starts it again.
+        if event.keystroke.key == "enter"
+            && event.keystroke.modifiers == gpui::Modifiers::default()
+            && self.start_again(cx)
+        {
+            cx.stop_propagation();
             return;
         }
         // The Mac's line-editing chords, sent as readline's bytes (ghostty's macOS "natural
@@ -3482,6 +3569,9 @@ impl TerminalView {
     /// past the grid's top or bottom it keeps scrolling (`AUTOSCROLL_TICK`) at a pace set by
     /// how far past the pointer is.
     pub(super) fn drag_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if self.drag_find(event.position, cx) {
+            return;
+        }
         // A drag with a button whose press went to the program is the program's.
         if self.program_buttons != 0 {
             self.report_motion(event.pressed_button.and_then(proto_button), event, cx);
@@ -3560,6 +3650,8 @@ impl TerminalView {
     /// Scroll the viewport by `lines` (positive = up into history), fetching what is not
     /// cached.
     fn scroll_lines(&mut self, lines: i64, cx: &mut Context<Self>) {
+        // Leaving the bottom counts from where it stands now, not from an older departure.
+        self.note_away();
         for effect in self.state.scroll(lines) {
             if let Effect::Request(req) = effect {
                 self.send(req, cx);
@@ -3580,6 +3672,10 @@ impl TerminalView {
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if event.button == MouseButton::Left && self.drop_find(cx) {
+            cx.stop_propagation();
+            return;
+        }
         // A drag of files let go over a program that asks for drops is its drop. The tile's own
         // drop handling uploads the files next, unless the program refused them.
         if event.button == MouseButton::Left && cx.has_active_drag() && self.file_drag.is_some() {
@@ -3892,162 +3988,6 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
-impl TerminalView {
-    /// The find bar over the top-right corner of the grid: the shell's find card
-    /// (`popover::find_card`, the transcript's and the diff's), its search row holding the field,
-    /// the toggles as chips, the tally and the steps; each control names its key.
-    fn render_search(search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
-        use slopty_shell::settings::widgets::{ActionHint as _, Keys};
-        let tally = if search.query.needle().is_empty() {
-            Tally::Quiet
-        } else if let Some(why) = &search.invalid {
-            Tally::Bad(why.clone())
-        } else {
-            Tally::Found {
-                at: search.current,
-                total: usize::try_from(search.total).unwrap_or(usize::MAX),
-                more: search.total > SEARCH_MAX,
-            }
-        };
-        let theme = chrome::theme(cx).for_popup();
-        let words = tally.words();
-        let bad = matches!(tally, Tally::Bad(_));
-        let found = matches!(tally, Tally::Found { total, .. } if total > 0);
-        let value = match &tally {
-            Tally::Bad(why) => SharedString::from(why.clone()),
-            _ => SharedString::from(words.clone()),
-        };
-        let focus = search.input.focus_handle(cx);
-        let keys = |action: Box<dyn gpui::Action>| Keys::ActionIn(action, focus.clone());
-        let toggle = |name: &str,
-                      face: &'static str,
-                      label: &'static str,
-                      on: bool,
-                      which,
-                      action: Box<dyn gpui::Action>| {
-            let id = SharedString::from(format!("terminal-find-{name}"));
-            let selector = id.to_string();
-            chrome::chip(gpui::ElementId::Name(id), on, &theme)
-                .debug_selector(move || selector)
-                .aria_toggled(if on { gpui::Toggled::True } else { gpui::Toggled::False })
-                .w(px(chrome::CONTROL_SIZE))
-                .justify_center()
-                .text_size(px(11.5))
-                .action_hint(label, keys(action), cx)
-                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle_search(which, cx)))
-                .child(face)
-        };
-        // With nothing to go to, the steps dim and keep their names.
-        let step = |name: &str, icon: &'static str, label: &'static str, by: i64, action| {
-            let selector = format!("terminal-find-{name}");
-            popover::find_step(SharedString::from(selector.clone()), icon, found, &theme)
-                .debug_selector(move || selector)
-                .action_hint(label, keys(action), cx)
-                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .when(found, |el| {
-                    el.on_click(cx.listener(move |this, _ev, _window, cx| this.step_match(by, cx)))
-                })
-        };
-        let field_focus = focus.clone();
-        let field = div()
-            .id("terminal-find-field")
-            .debug_selector(|| "terminal-find-field".to_owned())
-            .flex_1()
-            .min_w_0()
-            .h(px(chrome::CONTROL_SIZE))
-            .flex()
-            .items_center()
-            .overflow_hidden()
-            .cursor_text()
-            // A press beside the text puts the caret in it too.
-            .on_mouse_down(MouseButton::Left, move |_ev, window, cx| {
-                window.focus(&field_focus, cx);
-                cx.stop_propagation();
-            })
-            .child(div().flex_1().min_w_0().child(search.input.clone()));
-        let count = popover::find_tally(&theme, words)
-            .debug_selector(|| "terminal-find-count".to_owned())
-            .when(bad, |el| el.text_color(theme.danger))
-            .aria_label("Matches")
-            .aria_value(value);
-        let close = popover::find_step("terminal-find-close", icons::CLOSE, true, &theme)
-            .debug_selector(|| "terminal-find-close".to_owned())
-            .action_hint("Close find", keys(Box::new(CloseFind)), cx)
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .on_click(cx.listener(|this, _ev, window, cx| {
-                this.close_find(&CloseFind, window, cx);
-            }));
-        let card = popover::find_card(&theme)
-            .id("terminal-find")
-            .debug_selector(|| "terminal-find".to_owned())
-            .role(gpui::Role::Search)
-            .aria_label("Find")
-            // The toggles trail the field, so the terminal's card is a little wider.
-            .w(px(find::WIDTH))
-            .max_w_full()
-            .font_family(theme.font_sans.clone())
-            // Over what it finds in: the pointer there is the bar's, not the text's.
-            .occlude()
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .child(field)
-            .child(toggle(
-                "case",
-                find::CASE_FACE,
-                find::MATCH_CASE,
-                search.query.is_on(Toggle::MatchCase),
-                Toggle::MatchCase,
-                Box::new(ToggleMatchCase),
-            ))
-            .child(toggle(
-                "word",
-                find::WORD_FACE,
-                find::WHOLE_WORD,
-                search.query.is_on(Toggle::WholeWord),
-                Toggle::WholeWord,
-                Box::new(ToggleWholeWord),
-            ))
-            .child(toggle(
-                "regex",
-                find::REGEX_FACE,
-                find::REGEX,
-                search.query.is_on(Toggle::Regex),
-                Toggle::Regex,
-                Box::new(ToggleRegex),
-            ))
-            .child(count)
-            .child(step("previous", icons::ALT_ARROW_UP, "Previous match", -1, Box::new(FindPrev)))
-            .child(step("next", icons::ALT_ARROW_DOWN, "Next match", 1, Box::new(FindNext)))
-            .child(close);
-        div()
-            .key_context(SEARCH_CTX)
-            .absolute()
-            .top(px(FLOAT_INSET))
-            // A phone-wide terminal can be wider than the screen; its left edge is the part
-            // that is on screen (the "take" pill sits there for the same reason).
-            .when(cfg!(target_os = "ios"), |el| el.left(px(FLOAT_INSET)))
-            .when(!cfg!(target_os = "ios"), |el| el.right(px(FLOAT_INSET)))
-            .on_action(cx.listener(Self::close_find))
-            .on_action(cx.listener(|this, _: &ToggleMatchCase, _, cx| {
-                this.toggle_search(Toggle::MatchCase, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleWholeWord, _, cx| {
-                this.toggle_search(Toggle::WholeWord, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
-                this.toggle_search(Toggle::Regex, cx);
-            }))
-            // ⇧↩ steps back, as ↩ steps on: the field is one line, so its newline is the
-            // previous match, taken before the field would put it in.
-            .capture_action(cx.listener(|this, _: &slopty_shell::composer::Newline, _, cx| {
-                cx.stop_propagation();
-                this.step_match(-1, cx);
-            }))
-            .child(popover::find_card_in("terminal-find-in", card))
-            .into_any_element()
-    }
-}
-
 impl popover::ScrollRailHost for TerminalView {
     fn rail_bar(&mut self) -> &mut popover::MenuScrollbarState {
         &mut self.rail
@@ -4122,6 +4062,7 @@ impl TerminalView {
         for req in std::mem::take(&mut self.rail_requests) {
             self.send(req, cx);
         }
+        self.note_away();
         let top = (self.state.view_offset() != 0).then(|| self.state.index_at_row(0));
         if top != self.shown_top {
             self.shown_top = top;
@@ -4147,17 +4088,22 @@ impl Render for TerminalView {
             });
         }
         let focused = self.focus.is_focused(window);
+        self.note_focus(focused, cx);
         #[cfg(any(test, feature = "e2e"))]
         {
             self.renders = self.renders.saturating_add(1);
             self.drawn_focused = Some(focused);
         }
-        let search = self.search.as_ref().map(|s| Self::render_search(s, cx));
-        let exited = self.render_exit_trailer(cx);
+        let search = self.search.as_ref().map(|s| self.render_find(s, cx));
+        let ended = self.render_ended(cx);
         let confirm = self.render_confirm(cx);
-        let foot = self.render_lines_below(cx);
-        let link = self.render_link_preview(cx);
+        let foot = self.render_foot(cx);
+        let link = self.render_banner(cx);
+        let resize = self.render_resize(cx);
+        let quick = self.render_quick(cx);
         let shell = chrome::theme(cx).clone();
+        // The scroller overlays the grid and wakes only on the person's own scrolling
+        // (`scroll_moves`), so output arriving at the bottom never brings it up.
         let rail = popover::rail(self, "terminal-scrollbar", &shell, cx);
         div()
             .id("terminal")
@@ -4185,6 +4131,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::scroll_to_bottom))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_mode))
+            .on_action(cx.listener(Self::quick_select))
             // The shell's Edit menu sends its text fields' actions to what has the keyboard; the
             // grid answers them as its own.
             .on_action(cx.listener(|this, _: &slopty_shell::composer::Copy, window, cx| {
@@ -4230,19 +4177,24 @@ impl Render for TerminalView {
             .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::mouse_up))
             .map(|el| {
                 let el = el.cursor(self.pointer());
-                let mut grid = TerminalElement::new(cx.entity(), focused);
+                // Quick select dims the grid under its labels as a pane beside the focused one
+                // is dimmed.
+                let dimmed = self.dimmed || self.quick.is_some();
+                let mut grid = TerminalElement::new(cx.entity(), focused).dimmed(dimmed);
                 if window.is_a11y_active() {
                     let label = self.title().unwrap_or("shell").to_owned();
                     grid = grid.a11y(label.into(), self.cursor_row_text().into());
                 }
                 el.child(grid).child(self.spot.element())
             })
-            .children(exited)
+            .children(ended)
             .children(search)
             .children(link)
             .children(confirm)
             .children(foot)
             .children(rail)
+            .children(resize)
+            .children(quick)
             .children(self.block_menu.get().map(|m| {
                 let closing = self.block_menu.closing_at(slopty_shell::clock::now(cx));
                 self.render_block_menu(m, closing, window, cx)
@@ -4407,13 +4359,8 @@ struct FootPill {
     icon: &'static str,
     /// What is so.
     words: SharedString,
-    /// What a click does.
-    act: &'static str,
-}
-
-/// What zeron's terminal writes under a program that ended.
-fn exit_words(status: Option<i32>) -> String {
-    status.map_or_else(|| "[process exited]".to_owned(), |code| format!("[process exited {code}]"))
+    /// What a click does, when the words do not say it.
+    act: Option<&'static str>,
 }
 
 /// A ⌘C waiting for history to arrive.
@@ -4525,9 +4472,14 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 }
 
 mod copy;
+mod ended;
 mod file_drag;
 mod find;
+mod find_card;
+mod follow;
 mod keyboard;
+mod overlays;
+mod quick;
 
 pub use copy::{COPY_MODE, COPY_MODE_DONE};
 #[cfg(target_os = "macos")]
@@ -4573,7 +4525,7 @@ mod tests {
         let chosen = |name: &str| match name {
             "find" => Some(vec!["cmd-shift-f".to_owned()]),
             "copy" => Some(Vec::new()),
-            "clear_screen" => Some(vec!["cmd-k".to_owned(), "hyper-x".to_owned()]),
+            "clear_screen" => Some(vec!["cmd-l".to_owned(), "hyper-x".to_owned()]),
             _ => None,
         };
         let (bound, wrong) = cx.update(|cx| bindings(chosen, cx));
@@ -4593,7 +4545,8 @@ mod tests {
         assert_eq!(chords(&Find), ["cmd-shift-f"]);
         assert_eq!(chords(&Copy), Vec::<String>::new(), "unbound");
         assert_eq!(chords(&Paste), ["cmd-v"], "the default");
-        assert_eq!(chords(&ClearScreen), ["cmd-k"]);
+        assert_eq!(chords(&ClearScreen), ["cmd-l"]);
+        assert_eq!(chords(&QuickSelect), ["cmd-shift-space"], "the default");
         assert_eq!(wrong, [r#"keys.terminal.clear_screen: "hyper-x" is no chord"#]);
     }
 
@@ -5178,16 +5131,46 @@ mod tests {
             view.set_pointer(at_cell(view, 5, 2), cmd, cx);
             assert_eq!(view.link_target().as_deref(), Some("src/main.rs:12"));
             view.set_pointer(at_cell(view, 5, 2), plain, cx);
-            assert_eq!(view.link_target(), None, "no ⌘, no preview");
+            assert_eq!(view.link_target(), None, "printed text is a link only with ⌘");
+            view.set_pointer(at_cell(view, 6, 0), plain, cx);
+            assert_eq!(view.link_target(), None, "a printed URL neither");
+            view.set_pointer(at_cell(view, 1, 1), plain, cx);
+            assert_eq!(
+                view.link_target().as_deref(),
+                Some("https://x.y/z"),
+                "a link the program marked is one on any hover"
+            );
+            assert_eq!(view.pointer(), CursorStyle::IBeam, "a click opens it only with ⌘");
         });
-        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, cmd);
-        cx.run_until_parked();
-        let chip = cx.debug_bounds("link-preview").expect("the chip is drawn");
+        // The banner stands at the bottom left, flush with the pane's corner; over it, the
+        // pointer sends it to the bottom right, and off it, back.
+        let plain_move = |cx: &mut VisualTestContext, at| {
+            cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+            cx.run_until_parked();
+        };
+        let link = cell_center(&view, cx, 1.0, 1.0);
+        plain_move(cx, link);
+        let banner = cx.debug_bounds("terminal-link").expect("the banner");
         let body = cx.debug_bounds("terminal").expect("the body");
-        assert!(chip.bottom() <= body.bottom() && chip.left() >= body.left(), "inside the body");
-        cx.simulate_mouse_move(cell_center(&view, cx, 1.0, 1.0), MouseButton::Left, plain);
+        assert_eq!((banner.left(), banner.bottom()), (body.left(), body.bottom()), "flush");
+        assert!(banner.size.width <= body.size.width * 0.5, "half the pane at most");
+        assert!(cx.debug_bounds("terminal-link-flipped").is_none());
+        plain_move(cx, banner.center());
+        let flipped = cx.debug_bounds("terminal-link-flipped");
+        assert!(flipped.is_none(), "over the banner the pointer is off the link");
+        // Over a link the banner covers, it flips to the other corner.
+        view.update(cx, |view, cx| {
+            view.hover = Some((1, 1));
+            view.banner_flipped = true;
+            cx.notify();
+        });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("link-preview").is_none(), "gone with ⌘");
+        let flipped = cx.debug_bounds("terminal-link-flipped").expect("flipped");
+        assert_eq!((flipped.right(), flipped.bottom()), (body.right(), body.bottom()));
+        let off = cell_center(&view, cx, 1.0, 0.0);
+        plain_move(cx, off);
+        assert!(cx.debug_bounds("terminal-link").is_none(), "off the link, no banner");
+        assert!(!view.read_with(cx, |v, _| v.banner_flipped), "the next starts at the left");
     }
 
     /// Text gets an I-beam; the link under a ⌘-hover a hand; a program that reports the
@@ -5473,9 +5456,9 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-c");
         assert_eq!(text(cx).as_deref(), Some("1\n2"), "blank tail trimmed, prompt rows excluded");
 
-        // ⌘K is the worker's to do: one request, nothing typed.
+        // ⌥⌘K is the worker's to do: one request, nothing typed (⌘K is the picker's).
         drain_words(&mut rx);
-        cx.simulate_keystrokes("cmd-k");
+        cx.simulate_keystrokes("alt-cmd-k");
         assert_eq!(drain_words(&mut rx), ["clear"]);
     }
 
@@ -5842,7 +5825,11 @@ mod tests {
         let keys = cx.update(|window, cx| {
             view.read(cx).shortcut(&Paste, window).zip(view.read(cx).shortcut(&ClearScreen, window))
         });
-        assert_eq!(keys, Some(("⌘V".to_owned(), "⌘K".to_owned())), "the bound keys, as a Mac says");
+        assert_eq!(
+            keys,
+            Some(("⌘V".to_owned(), "⌥⌘K".to_owned())),
+            "the bound keys, as a Mac says"
+        );
         assert!(drain_input(&mut rx).is_empty(), "a right click is not reported");
         pick(cx, "clear");
         assert_eq!(drain_words(&mut rx), ["clear"], "the worker clears, nothing typed");
@@ -6211,53 +6198,265 @@ mod tests {
         TermEvent::Frame(Frame { seq, full: seq == 1, ..frame })
     }
 
-    /// Scrolled up into its history, a view holds still while output arrives, and the pill
-    /// at its foot counts the lines below: a count read off the offset, growing with what
-    /// arrives. A click on it goes back to the output and the pill goes.
+    /// A frame of `rows` lines `cols` wide, the screen at the top of the stream.
+    fn wide_frame(cols: u16, rows: &[&str]) -> TermEvent {
+        let TermEvent::Frame(frame) = history_frame(0, rows) else { panic!("a frame") };
+        let updates = rows
+            .iter()
+            .enumerate()
+            .map(|(row, text)| RowUpdate {
+                row: u16::try_from(row).unwrap_or(0),
+                line: Line::from_text(text, cols, Style::DEFAULT).into(),
+            })
+            .collect();
+        TermEvent::Frame(Frame { cols, updates, ..frame })
+    }
+
+    /// What `view` tells the workspace from now on.
+    fn heard(
+        view: &Entity<TerminalView>,
+        cx: &mut VisualTestContext,
+    ) -> Rc<RefCell<Vec<TerminalViewEvent>>> {
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let into = Rc::clone(&heard);
+        cx.update(|_window, cx| {
+            cx.subscribe(view, move |_view, event, _cx| into.borrow_mut().push(event.clone()))
+                .detach();
+        });
+        heard
+    }
+
+    /// The black the dim lays over the whole grid, as the frame's quads list it.
+    fn dim_quad() -> String {
+        let shade = gpui::Hsla { h: 0.0, s: 0.0, l: 0.0, a: 1.0 - crate::UNFOCUSED_BRIGHTNESS };
+        format!("background: Solid({shade:?})")
+    }
+
+    /// Whether the last frame laid [`dim_quad`] over the grid.
+    fn painted_dim(cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window.painted_primitives().iter().any(|line| line.contains(&dim_quad()))
+        })
+    }
+
+    /// A pane beside the one the person works in is painted at 0.85 of its brightness, by the
+    /// element, once and over the whole grid, as long as the shell says so; quick select dims
+    /// the grid under its labels the same way. Undimmed, nothing is laid over it.
     #[gpui::test]
-    fn scrolled_up_the_pill_counts_the_lines_below_and_goes_back_to_live(cx: &mut TestAppContext) {
+    fn a_pane_beside_the_focused_one_dims_by_brightness_alone(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["a", "b"]), cx));
+        cx.run_until_parked();
+        assert!(!painted_dim(cx), "a lone pane");
+        view.update(cx, |view, cx| view.set_dimmed(true, cx));
+        assert!(painted_dim(cx), "dimmed");
+        assert!(view.read_with(cx, |v, _| v.dimmed()));
+        view.update(cx, |view, cx| view.set_dimmed(false, cx));
+        assert!(!painted_dim(cx), "focused again");
+    }
+
+    /// The grid's size shows in the middle after a resize, "120 ⨯ 40", for 750 ms; never on
+    /// the first layout, nor while a pane settles within 500 ms of it or of the keyboard coming
+    /// or going.
+    #[gpui::test]
+    fn a_resize_shows_the_grid_s_size_once_settled(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-resize").is_none(), "the first layout says nothing");
+        cx.executor().advance_clock(overlays::SETTLING);
+        cx.simulate_resize(size(px(500.0), px(300.0)));
+        cx.run_until_parked();
+        let shown = cx.debug_bounds("terminal-resize").expect("the size");
+        let body = cx.debug_bounds("terminal").expect("the body");
+        assert!((shown.center().x - body.center().x).abs() < px(1.0), "in the middle");
+        assert!((shown.center().y - body.center().y).abs() < px(1.0), "in the middle");
+        let (cols, rows) = view.read_with(cx, |v, _| {
+            let m = v.metrics.expect("laid out");
+            (m.cols, m.rows)
+        });
+        let said = format!("{cols} columns, {rows} rows");
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some(said.as_str()))), "{tree:#?}");
+        cx.executor().advance_clock(overlays::RESIZE_SHOWN);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-resize").is_none(), "750 ms, then gone");
+        // The keyboard leaves: the size laid out right after is the layout settling.
+        cx.executor().advance_clock(overlays::SETTLING);
+        cx.update(|window, cx| window.focus(&cx.focus_handle(), cx));
+        cx.run_until_parked();
+        cx.simulate_resize(size(px(450.0), px(300.0)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("terminal-resize").is_none(), "within 500 ms of focus");
+    }
+
+    /// ⇧⌘Space labels every link, path and commit hash on screen, the one nearest the bottom
+    /// with the first label, over a dimmed grid. A label opens a path in Files, a hash in
+    /// Changes and a link in the Browser; ⇧ with it copies; Esc leaves; a letter that is no
+    /// label is kept for nothing; and none of it reaches the program.
+    #[gpui::test]
+    fn quick_select_labels_what_is_on_screen(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let heard = heard(&view, cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                wide_frame(30, &["see https://a.b/c now", "at src/x.rs:12 ok", "commit 1a2b3c4d"]),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        drain_input(&mut rx);
+        let labels = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.quick_labels());
+        cx.simulate_keystrokes("cmd-shift-space");
+        cx.run_until_parked();
+        assert_eq!(
+            labels(cx),
+            Some(vec![("a".to_owned(), 2, 7), ("s".to_owned(), 1, 3), ("d".to_owned(), 0, 4)])
+        );
+        assert!(cx.debug_bounds("terminal-quick-select").is_some());
+        assert!(painted_dim(cx), "the grid under the labels dims");
+        cx.simulate_keystrokes("z");
+        assert!(labels(cx).is_some(), "no label: kept");
+        cx.simulate_keystrokes("s");
+        assert_eq!(labels(cx), None, "chosen: done");
+        cx.simulate_keystrokes("cmd-shift-space a");
+        cx.simulate_keystrokes("cmd-shift-space d");
+        cx.simulate_keystrokes("cmd-shift-space shift-a");
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
+        assert_eq!(copied.as_deref(), Some("1a2b3c4d"), "⇧ copies");
+        cx.simulate_keystrokes("cmd-shift-space escape");
+        assert_eq!(labels(cx), None, "Esc leaves");
+        let opened: Vec<String> = heard
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                TerminalViewEvent::ViewFile { path, line } => Some(format!("file {path}:{line:?}")),
+                TerminalViewEvent::ViewCommit { hash } => Some(format!("commit {hash}")),
+                TerminalViewEvent::Browse { url } => Some(format!("browse {url}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            opened,
+            ["file src/x.rs:Some(12)", "commit 1a2b3c4d", "browse https://a.b/c"],
+            "Files, Changes, the Browser"
+        );
+        assert!(drain_input(&mut rx).is_empty(), "nothing typed");
+    }
+
+    /// The pane's background is the program's: the colour it set (OSC 11) is what the grid is
+    /// painted on and what the workspace hears, once per change.
+    #[gpui::test]
+    fn the_programs_background_is_the_panes(cx: &mut TestAppContext) {
+        use slopty_proto::terminal::ColorOverrides;
+        let (view, _rx, cx) = terminal(cx);
+        let heard = heard(&view, cx);
+        let theme_bg = view.read_with(cx, |v, _| v.theme.terminal.bg);
+        assert_eq!(view.read_with(cx, |v, _| v.ground()), theme_bg, "the theme's, first");
+        view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["a"]), cx));
+        let grounds = |heard: &Rc<RefCell<Vec<TerminalViewEvent>>>| {
+            heard
+                .borrow()
+                .iter()
+                .filter_map(|e| match e {
+                    TerminalViewEvent::Ground(rgb) => Some(*rgb),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(grounds(&heard).is_empty(), "told when the view began, not again");
+        let dark = ColorOverrides { bg: Some([0x28, 0x2c, 0x34]), ..ColorOverrides::default() };
+        for _ in 0..2 {
+            view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Colors(dark.clone()), cx));
+        }
+        cx.run_until_parked();
+        let program = slopty_theme::Rgb::hex(0x28_2c34);
+        assert_eq!(grounds(&heard), [program], "once per change");
+        assert_eq!(view.read_with(cx, |v, _| v.ground()), program);
+        let painted = cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+            window.painted_primitives()
+        });
+        let fill = format!("background: Solid({:?})", slopty_kit::colors::hsla(program));
+        assert!(painted.iter().any(|line| line.contains(&fill)), "the grid on it");
+    }
+
+    /// Output never scrolls the person away: following, the view stays at the bottom and says
+    /// nothing; scrolled away, it holds still while output arrives, and a pill at its foot counts
+    /// the lines that came since it left (none for a view scrolled back with nothing new). A click
+    /// on the pill takes it home, and so does a keystroke.
+    #[gpui::test]
+    fn scrolled_away_the_pill_counts_the_new_lines_and_a_key_goes_home(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("lines-below").is_none(), "following: no pill");
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(2, 14, &["e", "f", "g"]), cx);
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("new-lines").is_none(), "at the bottom: no pill");
         view.update_in(cx, |view, _window, cx| view.scroll_lines(4, cx));
         cx.run_until_parked();
+        assert!(cx.debug_bounds("new-lines").is_none(), "scrolled back, nothing new: no pill");
         let label = |cx: &mut VisualTestContext| {
             cx.update(|window, _cx| window.set_a11y_active(true));
             cx.run_until_parked();
             let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
             tree.into_iter()
                 .find(|n| {
-                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("below"))
+                    n.role == "Button" && n.label.as_deref().is_some_and(|l| l.contains("new"))
                 })
                 .and_then(|n| n.label)
         };
-        assert_eq!(label(cx).as_deref(), Some("4 lines below · Back to live"));
         let top = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.state.index_at_row(0));
-        assert_eq!(top(cx), LineIndex(6));
+        assert_eq!(top(cx), LineIndex(10));
 
         view.update_in(cx, |view, _window, cx| {
-            view.apply(moved_frame(2, 15, &["f", "g", "h"]), cx);
+            view.apply(moved_frame(3, 15, &["f", "g", "h"]), cx);
         });
         cx.run_until_parked();
-        assert_eq!(top(cx), LineIndex(6), "the lines read hold still");
-        assert_eq!(label(cx).as_deref(), Some("9 lines below · Back to live"));
+        assert_eq!(top(cx), LineIndex(10), "the lines read hold still");
+        assert_eq!(label(cx).as_deref(), Some("1 new line"));
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(4, 21, &["l", "m", "n"]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(top(cx), LineIndex(10));
+        assert_eq!(label(cx).as_deref(), Some("7 new lines"), "counted from where it left");
+        // Scrolling further back is not new output.
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(2, cx));
+        cx.run_until_parked();
+        assert_eq!(label(cx).as_deref(), Some("7 new lines"));
 
-        let at = cx.debug_bounds("lines-below").expect("the pill is drawn").center();
+        let at = cx.debug_bounds("new-lines").expect("the pill is drawn").center();
         cx.simulate_click(at, gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.lines_below()), 0, "back to live");
-        assert!(cx.debug_bounds("lines-below").is_none(), "and the pill goes");
+        assert_eq!(view.read_with(cx, |v, _| v.lines_below()), 0, "home");
+        assert!(cx.debug_bounds("new-lines").is_none(), "and the pill goes");
         assert_eq!(view.read_with(cx, |v, _| v.selection), None, "the click selected nothing");
 
-        view.update_in(cx, |view, _window, cx| view.scroll_lines(1, cx));
+        // Back again: the count starts over, and a keystroke takes it home.
+        view.update_in(cx, |view, _window, cx| view.scroll_lines(3, cx));
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(5, 23, &["n", "o", "p"]), cx);
+        });
         cx.run_until_parked();
-        assert_eq!(label(cx).as_deref(), Some("1 line below · Back to live"));
-        cx.simulate_keystrokes("shift-end");
+        assert_eq!(label(cx).as_deref(), Some("2 new lines"));
+        cx.simulate_keystrokes("x");
         cx.run_until_parked();
-        assert!(cx.debug_bounds("lines-below").is_none(), "⇧⇲ goes back to live too");
+        assert_eq!(view.read_with(cx, |v, _| v.lines_below()), 0, "a key goes home");
+        assert!(cx.debug_bounds("new-lines").is_none());
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(moved_frame(6, 30, &["u", "v", "w"]), cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.lines_below()), 0, "following again");
+        assert!(cx.debug_bounds("new-lines").is_none(), "output at the bottom: no pill");
     }
 
     /// Sized by another client, a view showing output offers to take the size, and a click asks
@@ -6274,8 +6473,10 @@ mod tests {
         let at = cx.debug_bounds("take-size").expect("the pill is drawn").center();
         view.update(cx, |view, cx| view.scroll_lines(1, cx));
         cx.run_until_parked();
-        assert!(cx.debug_bounds("take-size").is_none(), "scrolled up: the lines below instead");
-        assert!(cx.debug_bounds("lines-below").is_some());
+        view.update(cx, |view, cx| view.apply(moved_frame(2, 12, &["c", "d", "e"]), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("take-size").is_none(), "new lines below: their pill instead");
+        assert!(cx.debug_bounds("new-lines").is_some());
         cx.simulate_keystrokes("shift-end");
         cx.run_until_parked();
         while rx.try_recv().is_ok() {}
@@ -8149,8 +8350,9 @@ mod tests {
         assert_eq!(view.read_with(cx, |v, _| v.selected_text()).as_deref(), Some("third"));
     }
 
-    /// Every hit on screen is washed where it stands, as the transcript's find washes its
-    /// matches, and the one the person is on stronger: none is left bare beside the current.
+    /// Every hit on screen is painted as ghostty paints hits, black on amber and the one on
+    /// show on orange, behind the program's own colours: none is left bare beside the current,
+    /// and its text reads on any theme.
     #[gpui::test]
     fn every_visible_hit_is_washed(cx: &mut TestAppContext) {
         use slopty_proto::terminal::SearchMatch;
@@ -8172,26 +8374,21 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        let (painted, look) = cx.update(|window, cx| {
+        let painted = cx.update(|window, cx| {
             window.refresh();
             window.draw(cx).clear(cx);
-            (
-                window.painted_primitives(),
-                slopty_shell::live::TerminalLook::from_theme(chrome::theme(cx)),
-            )
+            window.painted_primitives()
         });
-        let washed = |color: gpui::Hsla| {
-            let fill = format!("background: Solid({color:?})");
+        let washed = |color: slopty_theme::Rgb| {
+            let fill = format!("background: Solid({:?})", slopty_kit::colors::hsla(color));
             painted.iter().filter(|line| line.contains("Quad") && line.contains(&fill)).count()
         };
-        assert_eq!(washed(look.search_current), 1, "the current hit");
-        assert_eq!(washed(look.search_match), 2, "every other hit on screen");
-        assert!(look.search_match.a >= 0.2, "a wash that shows: {:?}", look.search_match);
-        assert!(look.search_current.a > look.search_match.a, "the current one stronger");
+        assert_eq!(washed(crate::element::HIT_ON), 1, "the current hit");
+        assert_eq!(washed(crate::element::HIT), 2, "every other hit on screen");
     }
 
-    /// In the find field ↩ steps to the next hit and ⇧↩ back to the one before, round the
-    /// ends; ⇧↩ puts no newline in the one-line field.
+    /// In the find field ↩ steps up the history to the next hit and ⇧↩ back down, as
+    /// ghostty's do, round the ends; ⇧↩ puts no newline in the one-line field.
     #[gpui::test]
     fn shift_return_in_the_find_field_steps_back(cx: &mut TestAppContext) {
         use slopty_proto::terminal::SearchMatch;
@@ -8208,17 +8405,17 @@ mod tests {
             let search = v.search.as_mut().expect("the find bar");
             search.matches =
                 (0..3).map(|line| SearchMatch { line: LineIndex(line), col: 0, len: 1 }).collect();
-            search.current = Some(0);
+            search.current = Some(2);
         });
         let current = |cx: &mut VisualTestContext| {
             view.read_with(cx, |v, _| v.search.as_ref().and_then(|s| s.current))
         };
         cx.simulate_keystrokes("enter");
-        assert_eq!(current(cx), Some(1), "\u{21a9} the next");
+        assert_eq!(current(cx), Some(1), "\u{21a9} up the history");
         cx.simulate_keystrokes("shift-enter");
-        assert_eq!(current(cx), Some(0), "\u{21e7}\u{21a9} the one before");
+        assert_eq!(current(cx), Some(2), "\u{21e7}\u{21a9} back down");
         cx.simulate_keystrokes("shift-enter");
-        assert_eq!(current(cx), Some(2), "round the top");
+        assert_eq!(current(cx), Some(0), "round the bottom");
         let text = view
             .read_with(cx, |v, cx| v.search.as_ref().map(|s| s.input.read(cx).text().to_owned()));
         assert_eq!(text.as_deref(), Some(""), "no newline in the field");
@@ -8824,22 +9021,23 @@ mod tests {
     }
 
     /// With the link to the worker gone, the foot says the worker is out of reach, with the
-    /// shell's spinner, in place of the lines below; relinked, the lines below are back. A
-    /// program that ended says so on its own trailer instead.
+    /// shell's spinner, in place of the new lines; relinked, the new lines are back. A program
+    /// that ended says so on its own bar instead.
     #[gpui::test]
-    fn out_of_reach_takes_the_place_of_the_lines_below(cx: &mut TestAppContext) {
+    fn out_of_reach_takes_the_place_of_the_new_lines(cx: &mut TestAppContext) {
         let (view, rx, cx) = terminal(cx);
         view.update_in(cx, |view, _window, cx| {
             view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
             view.scroll_lines(2, cx);
+            view.apply(moved_frame(2, 12, &["c", "d", "e"]), cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("lines-below").is_some());
+        assert!(cx.debug_bounds("new-lines").is_some());
         assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "the worker is there");
         drop(rx);
         cx.run_until_parked();
         let away = cx.debug_bounds("terminal-out-of-reach").expect("out of reach, told");
-        assert!(cx.debug_bounds("lines-below").is_none(), "in place of the lines below");
+        assert!(cx.debug_bounds("new-lines").is_none(), "in place of the new lines");
         let below = cx.debug_bounds("terminal").expect("the terminal").bottom();
         assert!(away.bottom() < below, "at the foot");
         cx.update(|window, _cx| window.set_a11y_active(true));
@@ -8850,44 +9048,86 @@ mod tests {
         view.update(cx, |view, cx| view.relink(tx, None, cx));
         cx.run_until_parked();
         assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "relinked");
-        assert!(cx.debug_bounds("lines-below").is_some(), "the lines below are back");
+        assert!(cx.debug_bounds("new-lines").is_some(), "the new lines are back");
     }
 
-    /// A program that ended leaves zeron's dim trailer under its last line, "[process exited
-    /// 3]", read as that by a screen reader, while the view follows the output.
+    /// A session that ended shows ghostty's bar across the pane's foot, saying who ended, how
+    /// quickly and with what code, tinted as an error for a code or a run under 250 ms, the
+    /// foot's pills above it; ↩ asks to start it again and nothing is typed. A long run that
+    /// ended well says only that, untinted. Nothing while it runs.
     #[gpui::test]
-    fn an_ended_program_leaves_its_trailer(cx: &mut TestAppContext) {
-        let (view, _rx, cx) = terminal(cx);
-        cx.update(|window, _cx| window.set_a11y_active(true));
+    fn an_ended_session_says_how_at_the_foot(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let again = Rc::new(std::cell::Cell::new(0_u32));
+        let heard = Rc::clone(&again);
+        cx.update(|window, cx| {
+            window.set_a11y_active(true);
+            cx.subscribe(&view, move |_view, event, _cx| {
+                if matches!(event, TerminalViewEvent::StartAgain) {
+                    heard.set(heard.get().saturating_add(1));
+                }
+            })
+            .detach();
+        });
         view.update_in(cx, |view, _window, cx| {
+            view.set_run("Claude Code", Duration::ZERO, cx);
             view.apply(moved_frame(1, 10, &["a", "b", "c"]), cx);
         });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("terminal-exited").is_none(), "still running");
-        assert_eq!(view.read_with(cx, |v, _| v.exited()), None);
+        assert!(cx.debug_bounds("terminal-ended").is_none(), "still running");
+        cx.simulate_keystrokes("enter");
+        assert_eq!(again.get(), 0, "↩ is the program's while it runs");
+        clock_ahead(cx, Duration::from_millis(120));
         view.update_in(cx, |view, _window, cx| {
-            view.apply(TermEvent::Exited { status: Some(3) }, cx);
+            view.apply(TermEvent::Exited { status: Some(1) }, cx);
         });
         cx.run_until_parked();
-        assert_eq!(view.read_with(cx, |v, _| v.exited()), Some(Some(3)));
-        let trailer = cx.debug_bounds("terminal-exited").expect("the trailer");
-        let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
-        assert_eq!(trailer.size.height, m.line_height, "one row");
+        let words = "Claude Code exited after 120 ms, code 1";
+        let bar = cx.debug_bounds("terminal-ended").expect("the bar");
+        let body = cx.debug_bounds("terminal").expect("the body");
+        assert_eq!(
+            (bar.left(), bar.right(), bar.bottom()),
+            (body.left(), body.right(), body.bottom())
+        );
         let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
-        assert!(tree.iter().any(|n| n.is("Status", Some("[process exited 3]"))), "{tree:#?}");
-        assert!(cx.debug_bounds("terminal-out-of-reach").is_none(), "ended, not away");
-        view.update_in(cx, |view, _window, cx| view.scroll_lines(2, cx));
+        assert!(tree.iter().any(|n| n.is("Status", Some(words))), "{tree:#?}");
+        let tinted = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                let fill =
+                    format!("background: Solid({:?})", chrome::theme(cx).danger.opacity(0.5));
+                window.painted_primitives().iter().any(|line| line.contains(&fill))
+            })
+        };
+        assert!(tinted(cx), "an error's tint");
+        drain_input(&mut rx);
+        cx.simulate_keystrokes("enter");
+        assert_eq!(again.get(), 1, "↩ starts it again");
+        assert!(drain_input(&mut rx).is_empty(), "nothing typed");
+
+        let (view, _rx, cx) = terminal(cx);
+        view.update_in(cx, |view, _window, cx| {
+            view.set_run("zsh", Duration::from_secs(60), cx);
+            view.apply(moved_frame(1, 10, &["a"]), cx);
+            view.apply(TermEvent::Exited { status: Some(0) }, cx);
+        });
         cx.run_until_parked();
-        assert!(cx.debug_bounds("terminal-exited").is_none(), "scrolled up: the history's");
-        assert_eq!(exit_words(None), "[process exited]");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| slopty_kit::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Status", Some("zsh exited"))), "{tree:#?}");
+        assert!(!tinted(cx), "a run that ended well");
     }
 
-    /// The find bar is the shell's: its field 24 tall in a frosted card at the top right, the
-    /// toggles chips, the steps and the close icon buttons, each with its name. Each toggle
-    /// asks again, its rule written into the pattern the worker compiles, and the next bar
-    /// opens with them.
+    /// The find card is ghostty's: at the top right 8 in, its field 28 tall with the count in
+    /// it, a toggle shown in the field only while it is on (its key turns it on, a click on it
+    /// off) and asked of the worker written into the pattern; Esc in the field gives the keys
+    /// back and keeps the card, Esc in the grid closes it, and the next card opens with the
+    /// toggles. A press on the card leaves the keys in the field. Dragged, it lands in the
+    /// nearest corner.
     #[gpui::test]
-    fn the_find_bars_toggles_ask_the_worker_again(cx: &mut TestAppContext) {
+    fn the_find_card_is_ghostty_s(cx: &mut TestAppContext) {
         let (view, mut rx, cx) = terminal(cx);
         let mut asked = move || {
             let mut last = None;
@@ -8899,33 +9139,61 @@ mod tests {
             }
             last
         };
+        // Where the card rests, once the shell's entry has slid it 2 pt down into place.
+        let settle = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            cx.executor().advance_clock(Duration::from_secs(1));
+            view.update(cx, |_, cx| cx.notify());
+            cx.run_until_parked();
+        };
         let ok = Query::default().with_needle("a.b");
         view.update_in(cx, |view, window, cx| view.find_with(&ok, window, cx));
-        cx.run_until_parked();
+        settle(cx);
         assert_eq!(asked(), Some((r"(?im)a\.b".to_owned(), true)), "text, any case");
         let field = cx.debug_bounds("terminal-find-field").expect("the field");
-        assert_eq!(field.size.height, px(chrome::CONTROL_SIZE), "the shell's field");
-        let (bar, grid) = (
-            cx.debug_bounds("terminal-find").expect("the bar"),
+        assert_eq!(field.size.height, px(28.0), "ghostty's field");
+        let (card, grid) = (
+            cx.debug_bounds("terminal-find").expect("the card"),
             cx.debug_bounds("terminal").expect("the terminal"),
         );
-        assert!(bar.right() < grid.right() && bar.top() > grid.top(), "inset at the top right");
-        for part in ["previous", "next", "close", "case", "word", "regex"] {
+        assert_eq!((card.right(), card.top()), (grid.right() - px(8.0), grid.top() + px(8.0)));
+        assert_eq!(card.size, find_card::CARD);
+        let count = cx.debug_bounds("terminal-find-count").expect("the count");
+        assert!(field.contains(&count.center()), "the count is in the field");
+        for part in ["case", "word", "regex"] {
             let selector: &'static str =
                 Box::leak(format!("terminal-find-{part}").into_boxed_str());
-            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{part}"));
-            assert_eq!(at.size.height, px(chrome::CONTROL_SIZE), "{part}: a toolbar control");
+            assert!(cx.debug_bounds(selector).is_none(), "{part}: off, not shown");
         }
-        for part in ["terminal-find-case", "terminal-find-word"] {
-            let at = cx.debug_bounds(part).expect("the toggle");
-            cx.simulate_click(at.center(), gpui::Modifiers::default());
-            cx.run_until_parked();
-        }
+        cx.simulate_keystrokes("alt-cmd-c alt-cmd-w");
+        cx.run_until_parked();
         assert_eq!(asked(), Some((r"(?m-i)\b(?:a\.b)\b".to_owned(), true)), "exact, whole words");
-        view.update_in(cx, |view, window, cx| {
-            view.close_find(&CloseFind, window, cx);
-            view.find(&Find, window, cx);
+        let case = cx.debug_bounds("terminal-find-case").expect("on, shown");
+        assert!(field.contains(&case.center()), "in the field");
+        cx.simulate_click(case.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(asked(), Some((r"(?im)\b(?:a\.b)\b".to_owned(), true)), "a click turns it off");
+        assert!(cx.debug_bounds("terminal-find-case").is_none());
+        cx.simulate_keystrokes("alt-cmd-c");
+        cx.run_until_parked();
+        asked();
+
+        let in_field = cx.update(|window, cx| {
+            let v = view.read(cx);
+            v.search.as_ref().is_some_and(|s| s.input.focus_handle(cx).is_focused(window))
         });
+        assert!(in_field, "a press on the card left the keys in the field");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        let (open, grid_keys) = cx.update(|window, cx| {
+            let v = view.read(cx);
+            (v.search.is_some(), v.focus.is_focused(window))
+        });
+        assert!(open && grid_keys, "Esc in the field: the keys back, the card kept");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.search.is_none()), "Esc in the grid closes it");
+        view.update_in(cx, |view, window, cx| view.find(&Find, window, cx));
         let kept = view.read_with(cx, |v, _| v.search_query().cloned());
         assert!(
             kept.is_some_and(|q| {
@@ -8933,6 +9201,19 @@ mod tests {
             }),
             "remembered"
         );
+        settle(cx);
+
+        // A press on the card's edge (not the field, not a step) drags it.
+        let card = cx.debug_bounds("terminal-find").expect("the card");
+        let grab = point(card.left() + px(3.0), card.center().y);
+        let drop = point(grid.left() + px(5.0), grid.bottom() - px(30.0));
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        let card = cx.debug_bounds("terminal-find").expect("the card");
+        assert_eq!((card.left(), card.bottom()), (grid.left() + px(8.0), grid.bottom() - px(8.0)));
+        assert!(view.read_with(cx, |v, _| v.selection.is_none()), "the drag selected nothing");
     }
 
     /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
@@ -8966,14 +9247,15 @@ mod tests {
         assert_eq!(searches(), 0, "nothing came since");
     }
 
-    /// What the lines-below pill costs a frame: a 100 × 40 shell flooding one line a frame,
-    /// drawn while following and scrolled up with the pill shown, in alternating blocks. Each
-    /// sample is the frame applied and drawn. Prints the numbers MEASUREMENTS records; run by
-    /// hand, in release:
-    /// `cargo test -p slopty-terminal --release --lib lines_below_cost -- --ignored --nocapture`.
+    /// What the new-lines pill and the unfocused dim cost a frame: a 100 × 40 shell flooding one
+    /// line a frame, drawn following the output, scrolled away with the pill counting, and
+    /// following dimmed, in alternating blocks. Each sample is the frame applied and drawn.
+    /// Prints the numbers MEASUREMENTS records; run by hand, in release:
+    /// `cargo test -p slopty-terminal --release --lib new_lines_and_dim_cost -- --ignored
+    /// --nocapture`.
     #[gpui::test]
     #[ignore = "measurement, run by hand"]
-    fn lines_below_cost(cx: &mut TestAppContext) {
+    fn new_lines_and_dim_cost(cx: &mut TestAppContext) {
         const ROWS: usize = 40;
         const BLOCK: usize = 50;
         const ROUNDS: u64 = 10;
@@ -9015,7 +9297,7 @@ mod tests {
         for _ in 0..60 {
             draw(cx);
         }
-        let (mut following, mut shown) = (Vec::new(), Vec::new());
+        let (mut following, mut shown, mut dimmed) = (Vec::new(), Vec::new(), Vec::new());
         for _ in 0..ROUNDS {
             view.update_in(cx, |view, _window, cx| view.scroll_lines(i64::MIN, cx));
             following.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
@@ -9025,7 +9307,13 @@ mod tests {
             let drawn = view.read_with(cx, |v, _| v.renders()).saturating_sub(renders);
             assert!(usize::try_from(drawn).is_ok_and(|d| d >= BLOCK), "every frame drew: {drawn}");
             // A release build draws no debug selectors: the count the pill shows stands for it.
-            assert!(view.read_with(cx, |v, _| v.lines_below()) > 0, "the pill is up");
+            assert!(view.read_with(cx, |v, _| v.new_lines()) > 0, "the pill is up");
+            view.update_in(cx, |view, _window, cx| {
+                view.scroll_lines(i64::MIN, cx);
+                view.set_dimmed(true, cx);
+            });
+            dimmed.extend(std::iter::repeat_with(|| draw(cx)).take(BLOCK));
+            view.update_in(cx, |view, _window, cx| view.set_dimmed(false, cx));
         }
         let row = |samples: &mut Vec<Duration>| {
             samples.sort_unstable();
@@ -9033,11 +9321,12 @@ mod tests {
             format!("{:?} / {:?} / {:?} / {:?}", at(50), at(95), at(99), at(100))
         };
         println!(
-            "MEASURE lines-below pill, frame applied and drawn (p50 / p95 / p99 / max, {} frames \
-             each): following {} · scrolled, pill shown {}",
+            "MEASURE new-lines pill and dim, frame applied and drawn (p50 / p95 / p99 / max, {} \
+             frames each): following {} · scrolled away, pill counting {} · following, dimmed {}",
             following.len(),
             row(&mut following),
             row(&mut shown),
+            row(&mut dimmed),
         );
     }
 

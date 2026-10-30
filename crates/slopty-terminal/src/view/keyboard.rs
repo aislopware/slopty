@@ -5,7 +5,8 @@
 //!
 //! The keyboard is this view's while its focus handle, or something inside it (its find bar),
 //! has the focus of a window in front. It is told on each change, and again on a new link,
-//! where the worker starts from nobody looking.
+//! where the worker starts from nobody looking. Coming back to the window, an open find card
+//! takes up a query changed in another app's find.
 
 use gpui::{AnyWindowHandle, Context, Subscription, Window};
 use slopty_proto::terminal::TermRequest;
@@ -32,16 +33,21 @@ impl TerminalView {
         let front = cx.observe_window_activation(window, |this, window, cx| {
             let held = window.is_window_active() && this.focus.contains_focused(window, cx);
             this.tell_keyboard(held, cx);
+            if window.is_window_active() {
+                this.find_came_back(cx);
+            }
         });
         self.keyboard_watch = Some((here, [came, went, front]));
         let held = window.is_window_active() && self.focus.contains_focused(window, cx);
         self.tell_keyboard(held, cx);
     }
 
-    /// The keyboard came or went: the worker hears it, on a change only.
+    /// The keyboard came or went: the worker hears it, on a change only, and a size laid out
+    /// soon after is the layout settling ([`super::overlays`]).
     fn tell_keyboard(&mut self, held: bool, cx: &Context<Self>) {
         if self.keyboard != held {
             self.keyboard = held;
+            self.focus_moved(cx);
             self.post(TermRequest::Focus { focused: held }, cx);
         }
     }
