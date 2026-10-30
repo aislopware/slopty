@@ -1502,10 +1502,6 @@ impl FilesSurface {
         let include_ignored = self.tree.include_ignored();
         let search_focus = self.search.focus_handle(cx);
         toolbar(theme)
-            // On a touch screen its button's press fits between its two 1 pt hairlines.
-            .when(crate::shell::touch_screen(), |el| {
-                el.h(px(crate::surface_chrome::TOUCH_TARGET + 2.0))
-            })
             .id("files-explorer-header")
             .debug_selector(|| "files-explorer-header".into())
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
