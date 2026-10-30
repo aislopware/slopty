@@ -1,7 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Where the keyboard goes back to: a press in the main column keeps it there, and a focus that
 //! goes away (an element unmounting) comes back to the pane with the keyboard.
-#![allow(clippy::needless_pass_by_ref_mut, reason = "shell lint migration: slice A")]
 use super::*;
 
 /// Capture establishes a fallback before child listeners run. Inputs can
@@ -42,7 +41,7 @@ pub(super) fn copy_transcript_selection(event: &gpui::KeyDownEvent, cx: &mut App
 
 impl Shell {
     /// A press in the main column keeps the keyboard in it, before what it lands on claims it.
-    pub(super) fn capture_navigation_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn capture_navigation_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         focus_navigation_scope(&self.main_focus, window, cx);
     }
 
@@ -51,7 +50,7 @@ impl Shell {
     /// on a touch screen with the session in front, nowhere a software keyboard would rise.
     pub(super) fn navigation_focus_fallback(
         &mut self,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> (FocusHandle, FocusHandle) {
         if matches!(self.route, Route::Settings(_)) {
             return (self.settings_focus.clone(), self.unfocused.clone());

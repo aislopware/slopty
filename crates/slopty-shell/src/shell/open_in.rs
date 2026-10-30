@@ -4,11 +4,6 @@
 //! `vscode-remote/ssh-remote+<host>` link, Zed's `zed://ssh/<host>`. Only the editors installed
 //! here are offered, Finder for a folder on this Mac. Every open goes through [`launch`], which an
 //! end-to-end run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
-#![allow(
-    clippy::format_push_string,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Pixels, Point, SharedString, Window, div, px};
@@ -117,12 +112,13 @@ pub fn open(editor: Editor, path: &str, ssh_host: Option<&str>) -> Option<Open> 
 
 /// `text` percent-encoded, letters, digits and `keep` left as they are.
 fn encode(text: &str, keep: &[u8]) -> String {
+    use std::fmt::Write as _;
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || keep.contains(&byte) {
             out.push(byte as char);
         } else {
-            out.push_str(&format!("%{byte:02X}"));
+            let _infallible = write!(out, "%{byte:02X}");
         }
     }
     out
@@ -244,7 +240,7 @@ impl Shell {
     }
 
     /// The Open in menu, while it is up.
-    pub(super) fn render_open_in_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_open_in_menu(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let OpenInMenu { chat_id, position } = self.open_in.get().cloned()?;
         let closing = self.open_in.closing_at(crate::clock::now(cx));
         let theme = Theme::of(cx).for_popup();

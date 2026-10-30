@@ -10,15 +10,6 @@
 //! carries it as its own only while it is not already the application's. The theme follows the
 //! application, never a window ([`crate::appearance`]), so a window's own appearance never turns
 //! the theme, and over no session the window wears the theme's appearance.
-#![allow(
-    missing_copy_implementations,
-    clippy::default_trait_access,
-    clippy::option_option,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{App, Hsla, Window, WindowAppearance};
 
@@ -28,17 +19,18 @@ use crate::theme::{Appearance, Theme};
 /// light when its luma (Rec. 601 weights on its sRGB components) is past half.
 pub fn of_ground(ground: Hsla) -> Appearance {
     let rgb = ground.to_rgb();
-    if 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b > 0.5 {
+    if 0.114_f32.mul_add(rgb.b, 0.299_f32.mul_add(rgb.r, 0.587 * rgb.g)) > 0.5 {
         Appearance::Light
     } else {
         Appearance::Dark
     }
 }
 
-/// The window's own appearance over `ground` (none: over no session), or `None` where the
-/// application's already is the one it wants. Over no session the window wants the theme's,
-/// which is the application's wherever the platform can set the application's (macOS); on iOS,
-/// where it cannot, a pinned theme against the system's style is the window's own.
+/// The window's own appearance over `ground` (none: over no session).
+///
+/// `None` where the application's already is the one it wants. Over no session the window wants the
+/// theme's, which is the application's wherever the platform can set the application's (macOS); on
+/// iOS, where it cannot, a pinned theme against the system's style is the window's own.
 pub fn own(ground: Option<Hsla>, theme: Appearance, app: Appearance) -> Option<WindowAppearance> {
     let wanted = ground.map_or(theme, of_ground);
     (wanted != app).then_some(match wanted {
@@ -48,9 +40,19 @@ pub fn own(ground: Option<Hsla>, theme: Appearance, app: Appearance) -> Option<W
 }
 
 /// What a window was last given, so a frame over the same ground asks the platform nothing.
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct WindowGround {
-    worn: Option<Option<WindowAppearance>>,
+    worn: Worn,
+}
+
+/// The appearance a window was last given.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Worn {
+    /// Nothing yet, so the first frame gives it one.
+    #[default]
+    Nothing,
+    /// Its own appearance, or with `None` the application's.
+    Given(Option<WindowAppearance>),
 }
 
 impl WindowGround {
@@ -60,8 +62,8 @@ impl WindowGround {
     /// each draw the window again.
     pub fn follow(&mut self, ground: Option<Hsla>, window: &Window, cx: &App) {
         let own = own(ground, Theme::of(cx).appearance, crate::appearance::app(cx));
-        if self.worn != Some(own) {
-            self.worn = Some(own);
+        if self.worn != Worn::Given(own) {
+            self.worn = Worn::Given(own);
             window.set_appearance(own);
         }
     }
@@ -78,11 +80,11 @@ mod tests {
 
     /// Solarized's two backgrounds: base03 #002b36 and base3 #fdf6e3.
     fn base03() -> Hsla {
-        gpui::rgb(0x002b36).into()
+        gpui::rgb(0x00_2b_36).into()
     }
 
     fn base3() -> Hsla {
-        gpui::rgb(0xfdf6e3).into()
+        gpui::rgb(0xfd_f6_e3).into()
     }
 
     /// A window that wears the ground it is handed, as the shell's does.
@@ -107,7 +109,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("a settings directory");
         cx.update(|cx| {
             gpui_base::init(cx);
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             appearance::init(
                 mode,
                 ThemeSelection::default(),
@@ -150,7 +152,11 @@ mod tests {
         let own_ground = cx.update(|_, cx| Theme::of(cx).terminal.background);
         show(&view, Some(own_ground), cx);
         assert_eq!(window_appearance(cx), Appearance::Light, "the theme's own ground clears it");
-        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Some(None), "nothing of its own");
+        assert_eq!(
+            view.read_with(cx, |view, _| view.worn.worn),
+            Worn::Given(None),
+            "nothing of its own"
+        );
     }
 
     /// A light program in a dark app lightens its window and leaves the theme dark; over no
@@ -164,7 +170,7 @@ mod tests {
 
         show(&view, None, cx);
         assert_eq!(window_appearance(cx), Appearance::Dark, "over no session, the app's");
-        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Some(None));
+        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Worn::Given(None));
     }
 
     /// The person's setting and the system's light and dark turn the theme, whatever the window
@@ -180,7 +186,7 @@ mod tests {
         cx.simulate_system_appearance(WindowAppearance::Dark);
         cx.run_until_parked();
         assert_eq!((theme(cx), window_appearance(cx)), (Appearance::Dark, Appearance::Dark));
-        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Some(None));
+        assert_eq!(view.read_with(cx, |view, _| view.worn.worn), Worn::Given(None));
 
         // The person pinning light turns the theme back, against the dark system, and the dark
         // program's window is dark of its own again.
@@ -189,7 +195,7 @@ mod tests {
         assert_eq!((theme(cx), window_appearance(cx)), (Appearance::Light, Appearance::Dark));
         assert_eq!(
             view.read_with(cx, |view, _| view.worn.worn),
-            Some(Some(WindowAppearance::Dark))
+            Worn::Given(Some(WindowAppearance::Dark))
         );
 
         // Following the system again is the system's dark.
@@ -205,9 +211,9 @@ mod tests {
         assert_eq!(of_ground(base03()), Appearance::Dark);
         assert_eq!(of_ground(base3()), Appearance::Light);
         // Pure blue is light by HSL's lightness (0.5) but dark by luma (0.114).
-        assert_eq!(of_ground(gpui::rgb(0x0000ff).into()), Appearance::Dark);
+        assert_eq!(of_ground(gpui::rgb(0x00_00_ff).into()), Appearance::Dark);
         // Pure yellow's luma is 0.886.
-        assert_eq!(of_ground(gpui::rgb(0xffff00).into()), Appearance::Light);
+        assert_eq!(of_ground(gpui::rgb(0xff_ff_00).into()), Appearance::Light);
         assert_eq!(
             own(Some(base03()), Appearance::Light, Appearance::Light),
             Some(WindowAppearance::Dark)

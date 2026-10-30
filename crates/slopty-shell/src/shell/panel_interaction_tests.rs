@@ -1,15 +1,11 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! The sidebar beside a session's panes, and the panes themselves, through Shell's actions and
 //! GPUI's real layout.
-#![allow(
-    clippy::field_reassign_with_default,
-    clippy::items_after_statements,
-    reason = "shell lint migration: slice A"
-)]
 use gpui::{Bounds, TestAppContext, VisualTestContext};
 
 use super::panes::Pane;
 use super::*;
+use crate::settings::SavedSurface;
 
 fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut VisualTestContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -17,8 +13,7 @@ fn setup(cx: &mut TestAppContext) -> (tempfile::TempDir, Entity<Shell>, &mut Vis
         gpui_base::init(cx);
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
-        let mut config = UiSettings::default();
-        config.sidebar_width = 300.0;
+        let config = UiSettings { sidebar_width: 300.0, ..UiSettings::default() };
         settings::init(config, dir.path(), cx);
     });
     let (shell, cx) = cx.add_window_view(|_, cx| {
@@ -277,7 +272,6 @@ fn a_subagent_shows_its_agents_panes_and_the_panes_come_back(cx: &mut TestAppCon
     change(&shell, cx, |shell, _, cx| shell.keep_tabs(cx));
     let kept = shell.read_with(cx, |shell, _| shell.settings.session_tabs.clone());
     assert_eq!(kept.keys().collect::<Vec<_>>(), ["a", "o"]);
-    use crate::settings::SavedSurface;
     assert_eq!(kept["a"].tabs, [SavedSurface::Diff, SavedSurface::Inspector]);
     assert_eq!(kept["a"].active, Some(1), "the inspector had the keyboard");
     assert_eq!(

@@ -2,13 +2,6 @@
 //! typed into that terminal, never one that runs an agent or a project action. A plain one-line
 //! command runs at once. A line of several lines, or one that asks for root or destroys (`sudo`,
 //! `rm`, a forced push…), is left at the prompt for the person to read and run with Enter.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::string_slice,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::App;
 
@@ -51,19 +44,19 @@ pub(super) fn read_first(line: &str) -> bool {
             // `env X=1 sudo …` and `VAR=1 rm …` act as their program does.
             let words: Vec<&str> =
                 words.into_iter().skip_while(|word| *word == "env" || word.contains('=')).collect();
-            let Some(program) = words.first() else { return false };
+            let Some((program, args)) = words.split_first() else { return false };
             let program = program.rsplit('/').next().unwrap_or(program);
             READ_FIRST.contains(&program)
                 || program.starts_with("mkfs.")
-                || (program == "git" && destroys_in_git(&words[1..]))
+                || (program == "git" && destroys_in_git(args))
         })
 }
 
 /// Whether `line` sends output onto a device (`> /dev/disk2`), past the harmless ones.
 fn writes_a_device(line: &str) -> bool {
     const HARMLESS: [&str; 4] = ["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"];
-    line.match_indices('>').any(|(at, _)| {
-        let target = line[at + 1..].trim_start_matches(['>', '&', '|']).trim_start();
+    line.split('>').skip(1).any(|after| {
+        let target = after.trim_start_matches(['&', '|']).trim_start();
         target.starts_with("/dev/") && !HARMLESS.iter().any(|ok| target.starts_with(ok))
     })
 }
@@ -102,7 +95,7 @@ mod tests {
     /// What the app's terminal was handed: its id, the line, and whether Enter followed.
     type Typed = Rc<RefCell<Vec<(String, String, bool)>>>;
 
-    fn serve(cx: &mut gpui::TestAppContext) -> Typed {
+    fn serve(cx: &gpui::TestAppContext) -> Typed {
         let typed: Typed = Rc::default();
         let kept = Rc::clone(&typed);
         cx.update(|cx| {
@@ -116,7 +109,7 @@ mod tests {
 
     /// A plain one-line command runs at once: typed, then Enter.
     #[gpui::test]
-    fn a_plain_line_runs_at_once(cx: &mut gpui::TestAppContext) {
+    fn a_plain_line_runs_at_once(cx: &gpui::TestAppContext) {
         let typed = serve(cx);
         for line in [
             "cargo test -p slopty-shell",
@@ -137,7 +130,7 @@ mod tests {
 
     /// Several lines, or a line that acts as root or destroys, waits at the prompt for Enter.
     #[gpui::test]
-    fn a_risky_or_long_line_waits_at_the_prompt(cx: &mut gpui::TestAppContext) {
+    fn a_risky_or_long_line_waits_at_the_prompt(cx: &gpui::TestAppContext) {
         let typed = serve(cx);
         let risky = [
             "cd src\ncargo build",

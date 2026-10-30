@@ -16,21 +16,6 @@
 //! reduced motion each state is drawn at once and the working ring stands still with its gaps.
 //! Its hues are the one table of the session states (`shell::marks`): at work blue, waiting
 //! amber, done green and failed red, each on light in the tone of itself that clears 3:1.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    trivial_casts,
-    clippy::assertions_on_constants,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::expect_used,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::return_self_not_must_use,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, Instant};
@@ -86,13 +71,14 @@ const SETTLE: Duration = Duration::from_millis(320);
 /// One turn of the working ring.
 pub const MARK_SPIN: MotionSpec = MotionSpec::new(2000, motion::EASE);
 
-/// The size of a mark in a sidebar row, and in a tray row or a session lane.
+/// The size of a mark in a sidebar row.
 pub const MARK_SMALL: f32 = 12.0;
+/// The size of a mark in a tray row or a session lane, and of one left unsized.
 pub const MARK_LARGE: f32 = 15.0;
 
 /// A status mark, drawn `size` square. It remembers, under `id`, the state it drew and when that
 /// changed, and morphs from it.
-#[derive(IntoElement)]
+#[derive(Debug, IntoElement)]
 pub struct StatusMark {
     id: ElementId,
     state: MarkState,
@@ -101,11 +87,13 @@ pub struct StatusMark {
 }
 
 impl StatusMark {
+    /// A mark of `state`, remembered under `id`, [`MARK_LARGE`] until sized.
     pub fn new(id: impl Into<ElementId>, state: MarkState) -> Self {
         Self { id: id.into(), state, size: MARK_LARGE, ground: None }
     }
 
     /// Its size in points ([`MARK_SMALL`], [`MARK_LARGE`]).
+    #[must_use]
     pub const fn size(mut self, size: f32) -> Self {
         self.size = size;
         self
@@ -113,6 +101,7 @@ impl StatusMark {
 
     /// The colour beneath it, which the done tick is drawn in, as if cut through the disc;
     /// the theme's page colour when unset.
+    #[must_use]
     pub const fn ground(mut self, ground: Hsla) -> Self {
         self.ground = Some(ground);
         self
@@ -224,7 +213,7 @@ pub(crate) fn mark_frame(
             if settled { 1.0 } else { ring },
         ),
         disc_radius,
-        disc_scale: 0.6 + 0.4 * disc_t,
+        disc_scale: 0.4_f32.mul_add(disc_t, 0.6),
         disc_opacity: disc_t,
         tick: drawn(MarkState::Done, TICK_DELAY, TICK),
         bang: drawn(MarkState::Failed, BANG_DELAY, BANG),
@@ -293,17 +282,17 @@ fn paint(frame: MarkFrame, ground: Hsla, size: f32, center: Point<Pixels>, windo
         let color = frame.color.opacity(frame.ring_opacity);
         // Six dashes of 36° and gaps of 24° that close to nothing; whole, one circle.
         let (dashes, dash) = if frame.closed >= 1.0 {
-            (1, TAU)
+            (1_u8, TAU)
         } else {
-            (6, (36.0 + 24.0 * frame.closed).to_radians())
+            (6, 24.0_f32.mul_add(frame.closed, 36.0).to_radians())
         };
         for k in 0..dashes {
-            let start = -FRAC_PI_2 + TAU * frame.turn + k as f32 * TAU / 6.0;
-            let steps = ((dash / TAU) * 48.0).ceil().max(2.0) as usize;
+            let start = TAU.mul_add(frame.turn, f32::from(k).mul_add(TAU / 6.0, -FRAC_PI_2));
+            let steps = steps_for(dash / TAU * 48.0);
             let mut path = PathBuilder::stroke(px(2.4 * unit));
             path.move_to(at(radius, start));
             for step in 1..=steps {
-                path.line_to(at(radius, start + dash * step as f32 / steps as f32));
+                path.line_to(at(radius, dash.mul_add(f32::from(step) / f32::from(steps), start)));
             }
             if let Ok(path) = path.build() {
                 window.paint_path(path, color);
@@ -314,8 +303,8 @@ fn paint(frame: MarkFrame, ground: Hsla, size: f32, center: Point<Pixels>, windo
         let radius = frame.disc_radius * unit * frame.disc_scale;
         let mut disc = PathBuilder::fill();
         disc.move_to(at(radius, 0.0));
-        for step in 1..=48 {
-            disc.line_to(at(radius, TAU * step as f32 / 48.0));
+        for step in 1_u8..=48 {
+            disc.line_to(at(radius, TAU * f32::from(step) / 48.0));
         }
         disc.close();
         if let Ok(path) = disc.build() {
@@ -367,8 +356,8 @@ fn paint(frame: MarkFrame, ground: Hsla, size: f32, center: Point<Pixels>, windo
 fn dot(middle: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window) {
     let mut path = PathBuilder::fill();
     path.move_to(point(middle.x + px(radius), middle.y));
-    for step in 1..=16 {
-        let theta = TAU * step as f32 / 16.0;
+    for step in 1_u8..=16 {
+        let theta = TAU * f32::from(step) / 16.0;
         path.line_to(point(
             middle.x + px(radius * theta.cos()),
             middle.y + px(radius * theta.sin()),
@@ -383,21 +372,36 @@ fn dot(middle: Point<Pixels>, radius: f32, color: Hsla, window: &mut Window) {
 /// The points of an arc about `center` of `radius`, from `from`° to `to`° (clockwise on screen
 /// as the angle grows), a point every 15° or so, its first point left out (the stroke is there).
 fn arc(points: &mut Vec<(f32, f32)>, center: (f32, f32), radius: f32, from: f32, to: f32) {
-    let steps = ((to - from).abs() / 15.0).ceil().max(2.0) as usize;
+    let steps = steps_for((to - from).abs() / 15.0);
     for step in 1..=steps {
-        let theta = (from + (to - from) * step as f32 / steps as f32).to_radians();
-        points.push((center.0 + radius * theta.cos(), center.1 + radius * theta.sin()));
+        let theta = (to - from).mul_add(f32::from(step) / f32::from(steps), from).to_radians();
+        points.push((radius.mul_add(theta.cos(), center.0), radius.mul_add(theta.sin(), center.1)));
     }
+}
+
+/// How many straight steps draw a curve that `ideal` steps would, rounded up: two at least, and
+/// at most a thousand, which no mark's curve comes near.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 2..=1000 first (a NaN casts to none)"
+)]
+const fn steps_for(ideal: f32) -> u16 {
+    ideal.ceil().clamp(2.0, 1000.0) as u16
 }
 
 /// The points of a cubic from the last point of `points` through `a` and `b` to `to`.
 fn cubic(points: &mut Vec<(f32, f32)>, a: (f32, f32), b: (f32, f32), to: (f32, f32)) {
-    let from = *points.last().expect("a cubic goes on from a point");
-    for step in 1..=8 {
-        let t = step as f32 / 8.0;
+    // A cubic goes on from a point; with none there is nothing to go on from.
+    let Some(&from) = points.last() else { return };
+    for step in 1_u8..=8 {
+        let t = f32::from(step) / 8.0;
         let u = 1.0 - t;
         let at = |p: f32, q: f32, r: f32, s: f32| {
-            u * u * u * p + 3.0 * u * u * t * q + 3.0 * u * t * t * r + t * t * t * s
+            (u * u * u).mul_add(
+                p,
+                (3.0 * u * u * t).mul_add(q, (3.0 * u * t * t).mul_add(r, t * t * t * s)),
+            )
         };
         points.push((at(from.0, a.0, b.0, to.0), at(from.1, a.1, b.1, to.1)));
     }
@@ -462,17 +466,18 @@ pub(super) fn stroke_part(
 ) {
     let length =
         |a: Point<Pixels>, b: Point<Pixels>| f32::from(b.x - a.x).hypot(f32::from(b.y - a.y));
-    let total: f32 = points.windows(2).map(|pair| length(pair[0], pair[1])).sum();
+    let Some(&first) = points.first() else { return };
+    let pairs = || points.iter().copied().zip(points.iter().copied().skip(1));
+    let total: f32 = pairs().map(|(a, b)| length(a, b)).sum();
     let mut left = total * share.clamp(0.0, 1.0);
     let mut path = PathBuilder::stroke(px(width));
-    path.move_to(points[0]);
-    for pair in points.windows(2) {
-        let span = length(pair[0], pair[1]);
+    path.move_to(first);
+    for (a, b) in pairs() {
+        let span = length(a, b);
         if left <= 0.0 || span <= 0.0 {
             break;
         }
         let t = (left / span).min(1.0);
-        let (a, b) = (pair[0], pair[1]);
         path.line_to(point(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
         left -= span;
     }
@@ -486,6 +491,9 @@ mod tests {
     use super::*;
 
     const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    /// How much of a need's glyph a frame has drawn.
+    type Drawn = fn(MarkFrame) -> f32;
 
     fn frame(from: MarkState, to: MarkState, ms: u64) -> MarkFrame {
         mark_frame(Some(from), to, MS(ms), 0.25, false, &Theme::dark())
@@ -515,12 +523,15 @@ mod tests {
     /// draw in; any other need a dot, smaller than the done disc, that fills to it when the run
     /// finishes.
     #[test]
+    #[expect(
+        clippy::float_cmp_const,
+        reason = "a settled frame lands exactly on the disc's radius"
+    )]
     fn a_need_draws_its_own_glyph() {
         let theme = Theme::dark();
-        for (need, drawn) in [
-            (MarkState::Approval, (|frame: MarkFrame| frame.hand) as fn(MarkFrame) -> f32),
-            (MarkState::Plan, |frame| frame.plan),
-        ] {
+        let needs: [(MarkState, Drawn); 2] =
+            [(MarkState::Approval, |frame| frame.hand), (MarkState::Plan, |frame| frame.plan)];
+        for (need, drawn) in needs {
             let mid = frame(MarkState::Working, need, 160);
             assert!(mid.ring_opacity < 0.5, "{need:?}: the ring fades as the glyph comes");
             assert!(
@@ -538,7 +549,7 @@ mod tests {
         let dot = frame(MarkState::Working, MarkState::Waiting, 400);
         assert_eq!((dot.ring_opacity, dot.disc_opacity, dot.disc_radius), (0.0, 1.0, DOT_RADIUS));
         assert_eq!((dot.tick, dot.ask, dot.hand, dot.plan), (0.0, 0.0, 0.0, 0.0));
-        assert!(DOT_RADIUS < DISC_RADIUS * 0.7, "a dot reads apart from the done disc");
+        const { assert!(DOT_RADIUS < DISC_RADIUS * 0.7, "a dot reads apart from the done disc") }
         let filling = frame(MarkState::Waiting, MarkState::Done, 100).disc_radius;
         assert!(
             filling > DOT_RADIUS && filling < DISC_RADIUS,

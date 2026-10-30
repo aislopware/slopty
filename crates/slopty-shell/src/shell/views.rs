@@ -3,7 +3,6 @@
 //! inspector, a remote window or desktop, and a page an agent showed. Each is a pane of the
 //! session's own view ([`super::panes`]), docked at the session's right when it opens; what it
 //! shows, what it is called, where its keyboard goes and what closing it lets go of are here.
-#![allow(clippy::needless_pass_by_ref_mut, reason = "shell lint migration: slice A")]
 
 use super::panes::Pane;
 use super::*;
@@ -123,7 +122,7 @@ impl Shell {
 
     /// Changes by its key (⌘R): the session's changes already beside it, or new ones, where its
     /// folder has git.
-    pub(super) fn summon_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn summon_changes(&mut self, window: &Window, cx: &mut Context<Self>) {
         let shown = self
             .panes_now(cx)
             .views()
@@ -137,7 +136,7 @@ impl Shell {
     }
 
     /// The session's changes beside it with the keyboard: those open, or new ones.
-    pub(super) fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_changes(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.active_chat.is_empty() {
             return;
         }
@@ -230,7 +229,7 @@ impl Shell {
                 self.diff_subs.remove(&id);
             }
             RightSurface::Screen(id) => self.close_screen_surface(id, cx),
-            RightSurface::Page(id) => self.close_page_pane(id, cx),
+            RightSurface::Page(id) => Self::close_page_pane(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(key).cloned() {
                     files.update(cx, FilesSurface::suspend_tree_interactions);
@@ -247,7 +246,7 @@ impl Shell {
     pub(super) fn view_pane(
         &mut self,
         view: RightSurface,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let handle = self.view_handle(view, cx);
@@ -272,7 +271,7 @@ impl Shell {
     pub(super) fn view_content(
         &mut self,
         view: RightSurface,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
@@ -307,7 +306,7 @@ impl Shell {
                 .map_or_else(|| Empty.into_any_element(), IntoElement::into_any_element),
             RightSurface::Inspector => self.inspector.clone().into_any_element(),
             RightSurface::Screen(id) => self.render_screen_surface(id, cx),
-            RightSurface::Page(id) => self.render_page_pane(id, cx),
+            RightSurface::Page(id) => Self::render_page_pane(id, cx),
             RightSurface::Files => {
                 if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
                     files.update(cx, |files, cx| {
@@ -373,11 +372,7 @@ impl Shell {
 
     /// The focus `view`'s pane holds, around what it shows: where its keyboard goes when it has
     /// none of its own, and how the shell knows the pane holds the keyboard.
-    pub(super) fn view_handle(
-        &mut self,
-        view: RightSurface,
-        cx: &mut Context<Self>,
-    ) -> FocusHandle {
+    pub(super) fn view_handle(&mut self, view: RightSurface, cx: &Context<Self>) -> FocusHandle {
         self.view_handles.entry(view).or_insert_with(|| cx.focus_handle()).clone()
     }
 
@@ -418,7 +413,7 @@ impl Shell {
                 (screen_chip_glyph(chosen.as_deref()), title)
             }
             RightSurface::Page(id) => {
-                (icons::GLOBE, self.page_pane_title(id, cx).unwrap_or_else(|| "Page".into()))
+                (icons::GLOBE, Self::page_pane_title(id, cx).unwrap_or_else(|| "Page".into()))
             }
         }
     }

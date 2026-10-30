@@ -1,15 +1,9 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
-//! How many subagents are running, on the titlebar's explorer toggle: a count badge on its
-//! corner. slopty: the "● 3" pill on the sidebar's chat rows is gone (Amp's prune): a subagent
-//! left at work reads as its agent's own work there, and the row's hover card counts them.
-#![allow(
-    let_underscore_drop,
-    rustdoc::private_intra_doc_links,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
+//! How many subagents are running, on the titlebar's explorer toggle.
+//!
+//! A count badge on its corner. slopty: the "● 3" pill on the sidebar's chat rows is gone (Amp's
+//! prune): a subagent left at work reads as its agent's own work there, and the row's hover card
+//! counts them.
 
 use gpui::prelude::*;
 use gpui::{
@@ -32,7 +26,7 @@ const BADGE: f32 = 13.0;
 /// Past this the count would outgrow the badge; it reads "99+".
 const COUNT_CAP: u32 = 99;
 
-/// The count as drawn: exact up to [`COUNT_CAP`], then "99+".
+/// The count as drawn: exact up to 99, then "99+".
 pub fn count_label(count: u32) -> SharedString {
     if count > COUNT_CAP { format!("{COUNT_CAP}+").into() } else { count.to_string().into() }
 }
@@ -87,10 +81,11 @@ fn digits_baseline(
     (baseline - baseline_in_box, baseline)
 }
 
-/// Marks a titlebar button while work runs behind it: a small count badge
-/// in the activity tone sits on its corner, drawn over the button so it
-/// keeps its size and position among the titlebar controls. It holds still;
-/// the count is the signal.
+/// Marks a titlebar button while work runs behind it.
+///
+/// A small count badge in the activity tone sits on its corner, drawn over
+/// the button so it keeps its size and position among the titlebar controls.
+/// It holds still; the count is the signal.
 pub fn mark_titlebar_button(
     button: gpui::Stateful<gpui::Div>,
     count: u32,
@@ -150,7 +145,11 @@ impl RenderOnce for CountBadge {
                     left + (f32::from(bounds.size.width) - text_width) / 2.0
                 };
                 let origin = point(px(snap(x)), px(line_top));
-                let _ = line.paint(origin, bounds.size.height, TextAlign::Left, None, window, cx);
+                if let Err(error) =
+                    line.paint(origin, bounds.size.height, TextAlign::Left, None, window, cx)
+                {
+                    tracing::debug!(%error, "paint the count badge");
+                }
             },
         )
         .w(px(width))

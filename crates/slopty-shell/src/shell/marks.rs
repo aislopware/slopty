@@ -21,11 +21,6 @@
 //! seen mark (`ThreadRow::seen`) is the last turn the person saw on any of them, the chat carries
 //! it as `last_seen_at`, and a finished or failed turn past it is what calls. Looking at a
 //! session moves it, from whichever device looked (`AppState::mark_chat_seen`, `Intent::Seen`).
-#![allow(
-    trivial_casts,
-    clippy::field_scoped_visibility_modifiers,
-    reason = "shell lint migration: slice A"
-)]
 
 use chrono::{DateTime, Utc};
 use gpui::prelude::*;
@@ -186,9 +181,9 @@ fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
 pub struct Need {
     /// A raised hand for an approval, a `?` for a question, a checklist for a plan to review,
     /// and a dot for any other need (`MarkState::{Approval, Question, Plan, Waiting}`).
-    pub(crate) glyph: MarkState,
+    pub glyph: MarkState,
     /// "Needs approval · run cargo test", "Has a question", "Plan ready for review".
-    pub(crate) words: SharedString,
+    pub words: SharedString,
 }
 
 /// What a session waiting on the person waits for, from the agent's records. A wait's kind is
@@ -328,7 +323,7 @@ mod tests {
         let first = Mark::NeedsYou(need(None));
         assert_eq!(loudest(&[first.clone(), asks]), Some(&first), "the first of equals");
         assert_eq!(loudest(&[Mark::AtRest, Mark::AtRest]), None);
-        assert_eq!(loudest(&[] as &[Mark]), None);
+        assert_eq!(loudest(std::iter::empty()), None);
     }
 
     /// One hue per state, at work blue whatever the accent and none at rest, each a hue and

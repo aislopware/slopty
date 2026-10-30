@@ -426,7 +426,7 @@ impl Render for BrowserSurface {
                         native.focus_chrome();
                     }
                     #[cfg(not(target_os = "macos"))]
-                    let _: &mut BrowserSurface = this;
+                    let _: &mut Self = this;
                 }),
             )
             .child(

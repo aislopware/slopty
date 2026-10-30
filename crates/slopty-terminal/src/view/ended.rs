@@ -142,7 +142,7 @@ impl TerminalView {
         let ground = self.ground();
         let fg = self.ground_text();
         let text = (f32::from(m.line_height) * 0.8).min(BAR_TEXT_MOST);
-        let again = slopty_shell::keys::stroke_text(&gpui::Modifiers::default(), "enter");
+        let again = slopty_shell::keys::stroke_text(gpui::Modifiers::default(), "enter");
         let close = slopty_shell::keys::for_action_anywhere(&slopty_shell::app_menus::CloseTab, cx);
         let hint = |key: String, what: &'static str| {
             div()

@@ -40,12 +40,8 @@ const CHORD_GAP: char = '\u{2009}';
 
 /// How a key reads in Slopty's chrome: Mac glyphs in ⌃⌥⇧⌘ order with no separators ("⇧⌘A"),
 /// Claude desktop's key names (⏎ ⌫ ⇥ ␣ ← → ↑ ↓, "Esc"); elsewhere "Ctrl+Shift+A".
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "shell lint migration: seam, callers in slopty-terminal"
-)]
-pub fn stroke_text(modifiers: &Modifiers, key: &str) -> String {
-    stroke_text_on(MOD_IS_COMMAND, *modifiers, key)
+pub fn stroke_text(modifiers: Modifiers, key: &str) -> String {
+    stroke_text_on(MOD_IS_COMMAND, modifiers, key)
 }
 
 /// [`stroke_text`] for an explicit platform, so both spellings are testable on any machine.
@@ -123,7 +119,7 @@ pub fn binding_text(binding: &KeyBinding) -> SharedString {
         if n > 0 {
             out.push(CHORD_GAP);
         }
-        out.push_str(&stroke_text_on(MOD_IS_COMMAND, *stroke.modifiers(), stroke.key()));
+        out.push_str(&stroke_text(*stroke.modifiers(), stroke.key()));
     }
     out.into()
 }

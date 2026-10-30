@@ -1,6 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Sonner-style toasts: transient feedback stacked in the window's
-//! bottom-right corner. slopty: never over a session's terminal, whose TUI
+//! bottom-right corner.
+//!
+//! slopty: never over a session's terminal, whose TUI
 //! draws its prompt and status there: the stack stands in the sidebar's foot,
 //! or at the top right with no sidebar ([`ToastPlace`]).
 //!
@@ -15,25 +17,6 @@
 //!
 //! Push from anywhere with [`error`], [`success`] or [`info`]; the shell
 //! mounts [`render_toaster`] once per window.
-#![allow(
-    let_underscore_drop,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::float_cmp,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::option_option,
-    clippy::or_fun_call,
-    clippy::redundant_else,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -71,11 +54,55 @@ const ACTION_PAD: f32 = 8.0;
 /// Sonner's `cubic-bezier(.215, .61, .355, 1)`.
 const EASE: CubicBezier = CubicBezier::new(0.215, 0.61, 0.355, 1.0);
 
+/// What a toast tells: its icon, and the role it says to assistive tech.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ToastKind {
+    /// Something failed.
     Error,
+    /// Something done.
     Success,
+    /// A neutral notice.
     Info,
+}
+
+/// What a toast says of something still under way.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Progress {
+    /// Under way with no measure: a spinner.
+    Spinning,
+    /// How far, 0 to 1: a ring filled that far.
+    Part(f32),
+}
+
+impl Progress {
+    /// How far, 0 to 1, or with `None` under way with no measure.
+    fn of(part: Option<f32>) -> Self {
+        part.map_or(Self::Spinning, |part| Self::Part(part.clamp(0.0, 1.0)))
+    }
+
+    /// How far in whole percents, where it has a measure.
+    const fn percent(self) -> Option<u8> {
+        match self {
+            Self::Part(part) => Some(percent(part)),
+            Self::Spinning => None,
+        }
+    }
+}
+
+/// A share, 0 to 1, in whole percents.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "clamped to 0..=1 first, so 0 to 100 (a NaN casts to 0)"
+)]
+const fn percent(share: f32) -> u8 {
+    (share.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+/// A toast's depth in the stack, or its index, as an `f32`.
+#[expect(clippy::cast_precision_loss, reason = "a stack of toasts stays far below 2^24")]
+const fn depth_f32(depth: usize) -> f32 {
+    depth as f32
 }
 
 /// A value easing from one target to the next, restarting from wherever it
@@ -133,8 +160,8 @@ struct Toast {
     detail: Option<SharedString>,
     // Its button, if any.
     action: Option<Action>,
-    // Something still under way: `Some(None)` spins, `Some(Some(f))` fills a ring to f.
-    progress: Option<Option<f32>>,
+    // Something still under way, which its lead shows in place of its kind's icon.
+    progress: Option<Progress>,
     created: Instant,
     /// Countdown left, and when it last resumed (`None` while paused).
     remaining: Duration,
@@ -170,8 +197,8 @@ impl Toast {
 
     fn deadline(&self) -> Option<Instant> {
         match (self.closing, self.resumed) {
-            (Some(at), _) => Some(at + EXIT),
-            (None, Some(since)) => Some(since + self.remaining),
+            (Some(at), _) => at.checked_add(EXIT),
+            (None, Some(since)) => since.checked_add(self.remaining),
             (None, None) => None,
         }
     }
@@ -189,7 +216,7 @@ struct ToastStore {
 
 impl Global for ToastStore {}
 
-fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
+fn push(cx: &mut App, kind: ToastKind, message: &str) {
     push_for(cx, kind, message, None, DURATION);
 }
 
@@ -197,7 +224,7 @@ fn push(cx: &mut App, kind: ToastKind, message: SharedString) {
 fn push_for(
     cx: &mut App,
     kind: ToastKind,
-    message: SharedString,
+    message: &str,
     action: Option<Action>,
     lasts: Duration,
 ) -> Option<u64> {
@@ -219,42 +246,40 @@ fn push_for(
         let id = front.id;
         cx.refresh_windows();
         return Some(id);
-    } else {
-        store.next_id += 1;
-        let id = store.next_id;
-        let hovered = store.hovered;
-        store.toasts.push(Toast {
-            id,
-            kind,
-            message,
-            detail: None,
-            action,
-            progress: None,
-            created: now,
-            remaining: lasts,
-            resumed: (!hovered).then_some(now),
-            closing: None,
-            height: 0.0,
-            bottom: None,
-            clip: None,
-            swipe: 0.0,
-            swipe_from: None,
-            action_below: false,
-        });
     }
+    store.next_id = store.next_id.saturating_add(1);
     let id = store.next_id;
+    let hovered = store.hovered;
+    store.toasts.push(Toast {
+        id,
+        kind,
+        message,
+        detail: None,
+        action,
+        progress: None,
+        created: now,
+        remaining: lasts,
+        resumed: (!hovered).then_some(now),
+        closing: None,
+        height: 0.0,
+        bottom: None,
+        clip: None,
+        swipe: 0.0,
+        swipe_from: None,
+        action_below: false,
+    });
     cx.refresh_windows();
     Some(id)
 }
 
 /// A toast of `kind`.
 pub fn show(cx: &mut App, kind: ToastKind, message: impl Into<SharedString>) {
-    push(cx, kind, message.into());
+    push(cx, kind, &message.into());
 }
 
 /// A failure toast.
 pub fn error(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Error, message.into());
+    push(cx, ToastKind::Error, &message.into());
 }
 
 // The words say what failed and what to do next; the raw reason rides behind Copy error.
@@ -264,7 +289,7 @@ pub fn error_with_detail(
     message: impl Into<SharedString>,
     detail: impl Into<SharedString>,
 ) {
-    let Some(id) = push_for(cx, ToastKind::Error, message.into(), None, DURATION) else { return };
+    let Some(id) = push_for(cx, ToastKind::Error, &message.into(), None, DURATION) else { return };
     let detail: SharedString = detail.into().trim().to_owned().into();
     if let Some(toast) =
         cx.global_mut::<ToastStore>().toasts.iter_mut().find(|toast| toast.id == id)
@@ -283,12 +308,12 @@ pub(crate) fn said(cx: &App) -> Vec<SharedString> {
 
 /// A confirmation toast ("Link copied").
 pub fn success(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Success, message.into());
+    push(cx, ToastKind::Success, &message.into());
 }
 
 /// A neutral notice.
 pub fn info(cx: &mut App, message: impl Into<SharedString>) {
-    push(cx, ToastKind::Info, message.into());
+    push(cx, ToastKind::Info, &message.into());
 }
 
 // A notice that waits on a choice: its button runs `run` and takes it down. It lasts
@@ -302,7 +327,7 @@ pub fn offer(
     run: impl Fn(&mut App) + 'static,
 ) -> Option<u64> {
     let action = Action { label: label.into(), run: Rc::new(run) };
-    push_for(cx, ToastKind::Info, message.into(), Some(action), lasts)
+    push_for(cx, ToastKind::Info, &message.into(), Some(action), lasts)
 }
 
 // A toast that moves in place: its words and progress change, it keeps its spot and
@@ -311,18 +336,14 @@ pub fn offer(
 /// for under way with no measure. A toast already gone is left gone.
 pub fn update(cx: &mut App, id: u64, message: impl Into<SharedString>, progress: Option<f32>) {
     let message: SharedString = message.into().trim().to_owned().into();
-    let progress = progress.map(|f| f.clamp(0.0, 1.0));
+    let progress = Progress::of(progress);
     let Some(store) = cx.try_global::<ToastStore>() else { return };
     let Some(toast) = store.toasts.iter().find(|t| t.id == id && t.closing.is_none()) else {
         return;
     };
     let same_words = message.is_empty() || toast.message == message;
     // Whole percents only: a redraw for a change no one can see is waste.
-    let same_progress = toast.progress.is_some_and(|was| match (was, progress) {
-        (Some(a), Some(b)) => (a * 100.0).round() == (b * 100.0).round(),
-        (None, None) => true,
-        _ => false,
-    });
+    let same_progress = toast.progress.is_some_and(|was| was.percent() == progress.percent());
     if same_words && same_progress {
         return;
     }
@@ -339,9 +360,9 @@ pub fn update(cx: &mut App, id: u64, message: impl Into<SharedString>, progress:
 // id moves it ([`update`]) or takes it down ([`withdraw`]).
 /// A neutral notice with a spinner, lasting `lasts`.
 pub fn working(cx: &mut App, message: impl Into<SharedString>, lasts: Duration) -> Option<u64> {
-    let id = push_for(cx, ToastKind::Info, message.into(), None, lasts)?;
+    let id = push_for(cx, ToastKind::Info, &message.into(), None, lasts)?;
     if let Some(toast) = cx.global_mut::<ToastStore>().toasts.iter_mut().find(|t| t.id == id) {
-        toast.progress = Some(None);
+        toast.progress = Some(Progress::Spinning);
     }
     Some(id)
 }
@@ -358,7 +379,7 @@ pub fn offer_progress(
 ) -> Option<u64> {
     let id = offer(cx, message, label, lasts, run)?;
     if let Some(toast) = cx.global_mut::<ToastStore>().toasts.iter_mut().find(|t| t.id == id) {
-        toast.progress = Some(progress.map(|f| f.clamp(0.0, 1.0)));
+        toast.progress = Some(Progress::of(progress));
     }
     Some(id)
 }
@@ -424,7 +445,10 @@ pub(crate) fn names_kept_whole(text: &str) -> String {
                     .checked_sub(1)
                     .and_then(|before| chars.get(before))
                     .is_some_and(|c| c.is_alphanumeric())
-                && chars.get(ix + 1).is_some_and(|next| next.is_alphanumeric());
+                && ix
+                    .checked_add(1)
+                    .and_then(|after| chars.get(after))
+                    .is_some_and(|next| next.is_alphanumeric());
             if joins { '\u{2011}' } else { c }
         })
         .collect()
@@ -550,7 +574,8 @@ fn schedule_wake(window: &Window, cx: &mut App) {
             let delay = at.saturating_duration_since(crate::clock::now(cx));
             let task = cx.spawn(async move |cx| {
                 cx.background_executor().timer(delay).await;
-                let _ = handle.update(cx, |_, window, _| window.refresh());
+                // A window closed meanwhile has no toasts left to wake.
+                let _gone = handle.update(cx, |_, window, _| window.refresh());
             });
             Some((at, task))
         }
@@ -559,11 +584,10 @@ fn schedule_wake(window: &Window, cx: &mut App) {
 }
 
 // A toast under way leads with its progress, not its kind.
-fn lead(kind: ToastKind, progress: Option<Option<f32>>, id: u64, theme: &Theme) -> AnyElement {
+fn lead(kind: ToastKind, progress: Option<Progress>, id: u64, theme: &Theme) -> AnyElement {
     match progress {
-        Some(Some(fraction)) => {
-            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..=100")]
-            let percent = (fraction * 100.0).round() as u8;
+        Some(Progress::Part(part)) => {
+            let percent = percent(part);
             div()
                 .flex_none()
                 .size(px(16.0))
@@ -578,7 +602,7 @@ fn lead(kind: ToastKind, progress: Option<Option<f32>>, id: u64, theme: &Theme) 
                 ))
                 .into_any_element()
         }
-        Some(None) => div()
+        Some(Progress::Spinning) => div()
             .flex_none()
             .size(px(16.0))
             .flex()
@@ -622,24 +646,38 @@ fn kind_icon(kind: ToastKind, theme: &Theme) -> AnyElement {
 /// How far over the chrome a toast stands that `lift` holds above the window's floor.
 const LIFT_GAP: f32 = 8.0;
 
-/// Where the toaster stands. A session's TUI draws its prompt box and status line in
-/// the window's bottom-right corner, so the stack keeps off the terminal (`docs/decisions/ui.md`,
-/// "Toasts keep off the terminal").
+/// Where the toaster stands.
+///
+/// A session's TUI draws its prompt box and status line in the window's bottom-right corner, so the
+/// stack keeps off the terminal (`docs/decisions/ui.md`, "Toasts keep off the terminal").
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ToastPlace {
     /// At the window's right, the stack's foot `lift` over its floor (a phone's tab bar and
     /// capsule, or the home indicator or the keyboard); 0 keeps the window's corner.
-    Floor { lift: f32 },
+    Floor {
+        /// How far over the window's floor the stack's foot stands.
+        lift: f32,
+    },
     /// In a column from `left`, `width` wide, the stack's foot `foot` over the window's floor:
     /// the sidebar's foot, above its bottom row.
-    Column { left: f32, width: f32, foot: f32 },
+    Column {
+        /// Where the column starts.
+        left: f32,
+        /// How wide it is.
+        width: f32,
+        /// How far over the window's floor the stack's foot stands.
+        foot: f32,
+    },
     /// At the window's right, the stack's head `top` under the window's top, newest on top and
     /// the older peeking under it.
-    Top { top: f32 },
+    Top {
+        /// How far under the window's top the stack's head stands.
+        top: f32,
+    },
 }
 
 /// The toaster for this window, or `None` when nothing is showing, stood where `place` says.
-pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> Option<AnyElement> {
+pub fn render_toaster(place: ToastPlace, window: &Window, cx: &mut App) -> Option<AnyElement> {
     let now = crate::clock::now(cx);
     let reduced = cx.reduce_motion();
     let active = window.is_window_active();
@@ -680,48 +718,41 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
     };
 
     // Newest first: index 0 is the front toast.
-    let order: Vec<usize> = (0..store.toasts.len()).rev().collect();
-    let live: Vec<usize> =
-        order.iter().copied().filter(|&ix| store.toasts[ix].closing.is_none()).collect();
-    let front_height = live
-        .first()
-        .map(|&ix| store.toasts[ix].height)
-        .filter(|height| *height > 0.0)
-        .unwrap_or(52.0);
+    let live: Vec<&Toast> =
+        store.toasts.iter().rev().filter(|toast| toast.closing.is_none()).collect();
+    let front_height =
+        live.first().map(|toast| toast.height).filter(|height| *height > 0.0).unwrap_or(52.0);
 
     // Targets: where each toast rests collapsed and fanned out.
     let mut targets: HashMap<u64, (f32, f32, usize)> = HashMap::new();
     let mut stacked = 0.0;
-    for (index, &ix) in live.iter().enumerate() {
-        let toast = &store.toasts[ix];
+    for (index, toast) in live.iter().enumerate() {
         let height = if toast.height > 0.0 { toast.height } else { front_height };
-        let collapsed = index as f32 * GAP;
+        let collapsed = depth_f32(index) * GAP;
         let fanned = stacked;
         stacked += height + GAP;
         let bottom = crate::motion::lerp(collapsed, fanned, expand);
         let clip = crate::motion::lerp(front_height, height, expand);
         targets.insert(toast.id, (bottom, clip, index));
     }
-    let stack_height = live
-        .iter()
-        .map(|&ix| {
-            let (bottom, clip, _) = targets[&store.toasts[ix].id];
-            bottom + clip
-        })
+    let stack_height = targets
+        .values()
+        .map(|(bottom, clip, _)| bottom + clip)
         .fold(0.0_f32, f32::max)
         .max(front_height);
 
     let mut moving = animating;
     let mut children: Vec<AnyElement> = Vec::new();
     // Paint oldest first so the front toast lands on top.
-    for &ix in order.iter().rev() {
-        let toast = &mut store.toasts[ix];
+    for toast in &mut store.toasts {
         let id = toast.id;
-        let (target_bottom, target_clip, index) = targets.get(&id).copied().unwrap_or((
-            toast.bottom.map_or(0.0, |glide| glide.to),
-            toast.clip.map_or(front_height, |glide| glide.to),
-            usize::MAX,
-        ));
+        let (target_bottom, target_clip, index) = targets.get(&id).copied().unwrap_or_else(|| {
+            (
+                toast.bottom.map_or(0.0, |glide| glide.to),
+                toast.clip.map_or(front_height, |glide| glide.to),
+                usize::MAX,
+            )
+        });
         let first = toast.bottom.is_none();
         let bottom = toast.bottom.get_or_insert_with(|| Glide::new(target_bottom, now));
         bottom.retarget(target_bottom, now, reduced || first);
@@ -740,7 +771,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                     .clamp(0.0, 1.0),
             )
         };
-        y -= (1.0 - enter) * (clip_height + OFFSET);
+        y = (enter - 1.0).mul_add(clip_height + OFFSET, y);
         let mut opacity = enter;
         // Exit: fade out, the front toast sinking as it goes.
         if let Some(at) = toast.closing {
@@ -748,7 +779,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                 .clamp(0.0, 1.0);
             opacity *= 1.0 - t;
             if toast.swipe.abs() < 0.5 && index == usize::MAX {
-                y -= t * GAP;
+                y = (-t).mul_add(GAP, y);
             }
         }
         // Past the visible count, toasts wait unseen behind the stack.
@@ -757,7 +788,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
         if hidden {
             opacity *= expand;
         }
-        let inset = WIDTH * STEP_SCALE * 0.5 * depth.min(VISIBLE) as f32 * (1.0 - expand);
+        let inset = WIDTH * STEP_SCALE * 0.5 * depth_f32(depth.min(VISIBLE)) * (1.0 - expand);
         let swipe = toast.swipe;
         if swipe > 0.0 {
             opacity *= (1.0 - swipe / (WIDTH * 0.6)).clamp(0.0, 1.0);
@@ -783,7 +814,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
                 crate::settings::widgets::ActionTone::Filled,
                 label.clone(),
             )
-            .id(("toast-action", id as usize))
+            .id(("toast-action", id))
             // The button says its name to assistive tech, not only on screen.
             .role(gpui::Role::Button)
             .aria_label(label.clone())
@@ -809,7 +840,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
         let has_copy = kind == ToastKind::Error;
         let measured = message.clone();
         let content = div()
-            .id(("toast-content", id as usize))
+            .id(("toast-content", id))
             .w_full()
             .flex()
             .flex_row()
@@ -917,7 +948,7 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
             .overflow_hidden()
             .child(content);
         let toast_el = div()
-            .id(("toast", id as usize))
+            .id(("toast", id))
             .debug_selector(move || format!("toast-{id}"))
             .role(match kind {
                 ToastKind::Error => gpui::Role::Alert,
@@ -925,8 +956,8 @@ pub fn render_toaster(place: ToastPlace, window: &mut Window, cx: &mut App) -> O
             })
             .aria_label(message);
         // How far a toast under way is, as its value ("42%").
-        let toast_el = match progress.flatten() {
-            Some(fraction) => toast_el.aria_value(format!("{}%", (fraction * 100.0).round())),
+        let toast_el = match progress.and_then(Progress::percent) {
+            Some(percent) => toast_el.aria_value(format!("{percent}%")),
             None => toast_el,
         };
         let toast_el = toast_el
@@ -1017,7 +1048,7 @@ fn stand(
     let right = |width: f32, gap: f32| window_width - gap - width;
     match place {
         ToastPlace::Floor { lift } => {
-            let width = WIDTH.min(window_width - 2.0 * OFFSET).max(0.0);
+            let width = WIDTH.min((-2.0_f32).mul_add(OFFSET, window_width)).max(0.0);
             let foot = if lift > 0.0 { lift + LIFT_GAP } else { OFFSET };
             (width, point(px(right(width, OFFSET)), px(window_height - foot - height)))
         }
@@ -1025,7 +1056,7 @@ fn stand(
             (width, point(px(left), px(window_height - foot - LIFT_GAP - height)))
         }
         ToastPlace::Top { top } => {
-            let width = WIDTH.min(window_width - 2.0 * LIFT_GAP).max(0.0);
+            let width = WIDTH.min((-2.0_f32).mul_add(LIFT_GAP, window_width)).max(0.0);
             (width, point(px(right(width, LIFT_GAP)), px(top + LIFT_GAP)))
         }
     }
@@ -1037,7 +1068,7 @@ fn stand(
 fn close_button(id: u64, theme: &Theme) -> AnyElement {
     let fade = SharedString::from(format!("toast-close-hover-{id}"));
     div()
-        .id(("toast-close", id as usize))
+        .id(("toast-close", id))
         .debug_selector(move || format!("toast-close-{id}"))
         .role(gpui::Role::Button)
         .aria_label(SharedString::from(CLOSE_LABEL))
@@ -1091,14 +1122,17 @@ fn line_width(text: &str, size: gpui::Rems, window: &Window) -> f32 {
 fn action_label_width(id: u64, window: &Window, cx: &App) -> Option<f32> {
     let store = cx.try_global::<ToastStore>()?;
     let action = store.toasts.iter().find(|toast| toast.id == id)?.action.as_ref()?;
-    Some(line_width(&action.label, crate::typography::ui_rems(12.0), window) + ACTION_PAD * 2.0)
+    Some(
+        ACTION_PAD
+            .mul_add(2.0, line_width(&action.label, crate::typography::ui_rems(12.0), window)),
+    )
 }
 
 /// Whether a toast `content` wide puts its button (`button` wide) under words `words`
 /// wide: when beside it, with the lead and a copy button, they would not fit on one line.
 fn action_goes_below(words: f32, content: f32, button: f32, copy: bool) -> bool {
     let copy = if copy { 24.0 + LEAD_GAP } else { 0.0 };
-    let room = content - PAD_X * 2.0 - LEAD - LEAD_GAP - copy - LEAD_GAP - button;
+    let room = PAD_X.mul_add(-2.0, content) - LEAD - LEAD_GAP - copy - LEAD_GAP - button;
     words > room
 }
 
@@ -1108,7 +1142,7 @@ fn error_copy_button(id: u64, copied: bool, theme: &Theme) -> impl IntoElement {
     let hover = theme.ink(0.05);
     let fade = SharedString::from(format!("toast-copy-hover-{id}"));
     div()
-        .id(("toast-copy", id as usize))
+        .id(("toast-copy", id))
         .debug_selector(move || format!("toast-copy-{id}"))
         .role(gpui::Role::Button)
         .aria_label(SharedString::from(label))
@@ -1162,7 +1196,7 @@ mod tests {
     }
 
     fn toast(store: &mut ToastStore, message: &str, now: Instant) {
-        store.next_id += 1;
+        store.next_id = store.next_id.saturating_add(1);
         store.toasts.push(Toast {
             id: store.next_id,
             kind: ToastKind::Error,
@@ -1304,12 +1338,12 @@ mod tests {
         let lasts = Duration::from_secs(20);
         cx.update(|_, cx| {
             offer(cx, "studio wants to open x.test", "Open", lasts, move |_| {
-                ran.set(ran.get() + 1);
+                ran.set(ran.get().saturating_add(1));
             });
         });
         cx.run_until_parked();
         let left = cx.update(|_, cx| cx.global::<ToastStore>().toasts[0].remaining);
-        assert!(left > DURATION * 4, "longer than a plain toast: {left:?}");
+        assert!(left > DURATION.saturating_mul(4), "longer than a plain toast: {left:?}");
         cx.run_until_parked();
         let button = cx.debug_bounds("toast-action-Open").expect("its button").center();
         cx.simulate_click(button, gpui::Modifiers::default());
@@ -1344,7 +1378,7 @@ mod tests {
         cx.update(|_, cx| {
             let store = cx.global::<ToastStore>();
             assert_eq!(store.toasts[0].id, id, "still the older one, not moved to the front");
-            assert_eq!(store.toasts[0].progress, Some(Some(0.42)));
+            assert_eq!(store.toasts[0].progress, Some(Progress::Part(0.42)));
             assert!(store.toasts[0].remaining > Duration::from_secs(30), "countdown kept");
             assert_eq!(messages(cx)[0], "Sending a.txt to studio · 42%");
         });
@@ -1352,7 +1386,7 @@ mod tests {
         cx.update(|_, cx| update(cx, id, "", Some(7.0)));
         cx.update(|_, cx| {
             let store = cx.global::<ToastStore>();
-            assert_eq!(store.toasts[0].progress, Some(Some(1.0)));
+            assert_eq!(store.toasts[0].progress, Some(Progress::Part(1.0)));
             assert_eq!(messages(cx)[0], "Sending a.txt to studio · 42%");
         });
         cx.update(|_, cx| withdraw(cx, id));
@@ -1360,11 +1394,11 @@ mod tests {
         cx.update(|_, cx| assert_eq!(messages(cx), ["Later news"], "a withdrawn toast stays gone"));
         // A spinner toast, and an id never shown, change nothing.
         let spin = cx.update(|_, cx| working(cx, "Waiting on studio", lasts).expect("shown"));
-        cx.update(|_, cx| update(cx, spin + 99, "nobody", None));
+        cx.update(|_, cx| update(cx, spin.saturating_add(99), "nobody", None));
         cx.update(|_, cx| {
             let store = cx.global::<ToastStore>();
             let toast = store.toasts.iter().find(|t| t.id == spin).expect("up");
-            assert_eq!(toast.progress, Some(None), "spins with no measure");
+            assert_eq!(toast.progress, Some(Progress::Spinning), "spins with no measure");
         });
     }
 
@@ -1475,7 +1509,7 @@ mod tests {
             .expect("the toast");
         let button = cx.debug_bounds("toast-action-Open").expect("its button");
         assert!(
-            f32::from(button.top()) > f32::from(toast.top()) + 13.0 + LINE_HEIGHT * 2.0,
+            f32::from(button.top()) > LINE_HEIGHT.mul_add(2.0, f32::from(toast.top()) + 13.0),
             "under the words: {button:?} in {toast:?}"
         );
         let words_start = f32::from(toast.left()) + PAD_X + LEAD + LEAD_GAP;

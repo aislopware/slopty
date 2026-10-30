@@ -5,13 +5,6 @@
 //! dock again at the session's right and the shells split beside it. A session's panes come back
 //! the first time it is shown, once the app is connected; a terminal that ended meanwhile does
 //! not.
-#![allow(
-    clippy::indexing_slicing,
-    clippy::match_same_arms,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{App, AppContext as _, Context, Window};
 
@@ -47,7 +40,8 @@ impl Shell {
     /// What opens `pane` again; `None` for one that is not kept.
     pub(super) fn kept_pane(&self, pane: Pane, cx: &App) -> Option<SavedSurface> {
         Some(match pane {
-            Pane::Session => return None,
+            // The session's own pane is no view, and an agent's page lives while it shows it.
+            Pane::Session | Pane::View(RightSurface::Page(_)) => return None,
             Pane::Shell(n) => {
                 let id = self.pane_shells.get(&n)?.read(cx).pane_terminal_id()?.to_owned();
                 SavedSurface::Terminal { id }
@@ -71,14 +65,12 @@ impl Shell {
             }
             Pane::View(RightSurface::Inspector) => SavedSurface::Inspector,
             Pane::View(RightSurface::Files) => SavedSurface::Files,
-            // An agent's page lives while it shows it.
-            Pane::View(RightSurface::Page(_)) => return None,
         })
     }
 
     /// Keep the panes of every view shown in this run once they changed, after the frame; those
     /// not shown yet stay as the last run left them.
-    pub(super) fn keep_tabs(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn keep_tabs(&mut self, cx: &Context<Self>) {
         let mut changed = false;
         let keys: Vec<String> = self.panes.keys().cloned().collect();
         for key in keys {
@@ -99,7 +91,8 @@ impl Shell {
             self.settings.session_tabs.remove(&key);
         }
         cx.spawn(async move |this, cx| {
-            this.update(cx, Self::schedule_save).ok();
+            // A shell gone meanwhile has nothing left to save.
+            let _gone = this.update(cx, Self::schedule_save);
         })
         .detach();
     }
@@ -122,8 +115,10 @@ impl Shell {
         // the chat.
         let ready = {
             let state = self.state.read(cx);
-            let connects = self.unrestored_tabs[&key].tabs.iter().any(|tab| {
-                matches!(tab, SavedSurface::Terminal { .. } | SavedSurface::Screen { .. })
+            let connects = self.unrestored_tabs.get(&key).is_some_and(|saved| {
+                saved.tabs.iter().any(|tab| {
+                    matches!(tab, SavedSurface::Terminal { .. } | SavedSurface::Screen { .. })
+                })
             });
             (!connects || state.engine().is_some()) && state.chats.iter().any(|chat| chat.id == key)
         };

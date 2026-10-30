@@ -2,13 +2,8 @@
 //! A session's explorer as the shell keeps it: the files opened lately, which explorer a file
 //! event may steer, explorers let go with their sessions, and the explorer following the file
 //! in front. Files itself is a view summoned beside the session (`views.rs`).
-#![allow(
-    clippy::needless_pass_by_ref_mut,
-    clippy::wildcard_imports,
-    reason = "shell lint migration: slice A"
-)]
 
-use super::*;
+use super::{App, Context, Entity, FilesSurface, RightSurface, Route, Shell};
 
 /// Files kept per chat for the command palette's Recent Files.
 const RECENT_FILES_PER_CHAT: usize = 20;
@@ -44,7 +39,7 @@ impl Shell {
     }
 
     /// Let go of the explorers of sessions that are gone.
-    pub(super) fn prune_file_explorers(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn prune_file_explorers(&mut self, cx: &Context<Self>) {
         let state = self.state.read(cx);
         if !state.chats_synced {
             return;
@@ -60,7 +55,7 @@ impl Shell {
 
     /// The explorer shows the file in front: the one with the keyboard among the session's
     /// views.
-    pub(super) fn sync_explorer_selection(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_explorer_selection(&self, cx: &mut Context<Self>) {
         let Some(RightSurface::File(id)) = self.front_view(cx) else {
             return;
         };
@@ -75,10 +70,11 @@ impl Shell {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{AppContext as _, TestAppContext};
 
     use super::super::panes::Pane;
-    use super::*;
+    use super::super::{AppState, EngineBootConfig, Theme};
+    use super::{RightSurface, Shell};
 
     /// Each session keeps its own explorer, made once; a file picked opens as a pane of its own
     /// beside the session, once however often it is picked; Files' key again hands the

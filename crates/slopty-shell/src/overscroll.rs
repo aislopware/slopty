@@ -27,16 +27,6 @@
 //! platforms don't deliver reliable touch phases), and off under reduced
 //! motion or while a drag is active (drag code maps the pointer through the
 //! container's unshifted bounds).
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::expect_used,
-    clippy::manual_midpoint,
-    clippy::suboptimal_flops,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -72,9 +62,11 @@ pub fn overscroll(
 }
 
 /// The scroll state the band reads the container's ends from.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum OverscrollSource {
+    /// A scrolling div's handle.
     Handle(ScrollHandle),
+    /// A list's state.
     List(ListState),
 }
 
@@ -150,14 +142,14 @@ impl Spring {
     /// Returns position and velocity.
     fn sample(self, now: Instant) -> (f32, f32) {
         let t = now.saturating_duration_since(self.start).as_secs_f32();
-        let b = self.velocity + SPRING_OMEGA * self.from;
-        let position = self.from + b * t;
+        let b = SPRING_OMEGA.mul_add(self.from, self.velocity);
+        let position = b.mul_add(t, self.from);
         let decay = (-SPRING_OMEGA * t).exp();
-        (position * decay, (b - SPRING_OMEGA * position) * decay)
+        (position * decay, (-SPRING_OMEGA).mul_add(position, b) * decay)
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Band {
     /// Shift applied to the child; positive pulls content down past the top.
     offset: f32,
@@ -270,7 +262,7 @@ impl Band {
         let velocity = dy / dt;
         self.fling_velocity =
             if self.fling_velocity != 0.0 && velocity.signum() == self.fling_velocity.signum() {
-                0.5 * (self.fling_velocity + velocity)
+                f32::midpoint(self.fling_velocity, velocity)
             } else {
                 velocity
             };
@@ -321,12 +313,25 @@ impl Band {
     }
 }
 
+/// A child that stretches past its container's ends ([`overscroll`]).
 pub struct Overscroll {
     id: ElementId,
     source: OverscrollSource,
     child: AnyElement,
 }
 
+impl std::fmt::Debug for Overscroll {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Overscroll")
+            .field("id", &self.id)
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What an [`Overscroll`]'s prepaint leaves its paint: the band and its hitbox while the
+/// stretch is on, and the shift the child was laid out at.
+#[derive(Debug)]
 pub struct OverscrollPrepaint {
     band: Option<(Rc<RefCell<Band>>, Hitbox)>,
     offset: f32,
@@ -363,14 +368,17 @@ impl Element for Overscroll {
         window: &mut Window,
         cx: &mut App,
     ) -> OverscrollPrepaint {
+        // GPUI hands an element that names an id (as `id` above does) its global one, so this
+        // is always there; without it the child lays out unstretched.
+        let Some(id) = id else {
+            self.child.prepaint(window, cx);
+            return OverscrollPrepaint { band: None, offset: 0.0 };
+        };
         let enabled = ENABLED && !crate::motion::reduced_motion(cx);
-        let band = window.with_element_state(
-            id.expect("overscroll has an element id"),
-            |band: Option<Rc<RefCell<Band>>>, _| {
-                let band = band.unwrap_or_default();
-                (band.clone(), band)
-            },
-        );
+        let band = window.with_element_state(id, |band: Option<Rc<RefCell<Band>>>, _| {
+            let band = band.unwrap_or_default();
+            (Rc::clone(&band), band)
+        });
         let offset = {
             let mut state = band.borrow_mut();
             state.viewport = f32::from(bounds.size.height);
@@ -472,8 +480,8 @@ mod tests {
     #[test]
     fn rubber_band_resists_and_inverts() {
         let mut previous = 0.0;
-        for step in 1..=50 {
-            let distance = step as f32 * 20.0;
+        for step in 1_u8..=50 {
+            let distance = f32::from(step) * 20.0;
             let shown = rubber_band(distance, 400.0);
             assert!(shown > previous && shown < distance && shown < 400.0);
             assert!((rubber_band_inverse(shown, 400.0) - distance).abs() < 0.5);
@@ -593,7 +601,7 @@ mod tests {
             band.tick(now + Duration::from_millis(ms));
             peak = peak.max(band.offset);
         }
-        assert!(peak > 10.0 && peak <= 400.0 * BOUNCE_MAX_FRACTION + 0.5);
+        assert!(peak > 10.0 && peak <= 400.0_f32.mul_add(BOUNCE_MAX_FRACTION, 0.5));
         assert!(!band.tick(now + Duration::from_secs(2)));
         assert_eq!(band.offset, 0.0);
     }
@@ -629,7 +637,7 @@ mod tests {
         }
         impl Render for Fixture {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-                let top = self.top.clone();
+                let top = Rc::clone(&self.top);
                 div().size(px(200.0)).child(overscroll(
                     "band",
                     OverscrollSource::Handle(self.scroll.clone()),
@@ -652,7 +660,7 @@ mod tests {
         let scroll = ScrollHandle::new();
         let top = Rc::new(RefCell::new(0.0));
         let (_, cx) =
-            cx.add_window_view(|_, _| Fixture { scroll: scroll.clone(), top: top.clone() });
+            cx.add_window_view(|_, _| Fixture { scroll: scroll.clone(), top: Rc::clone(&top) });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let mut wheel = |y: f32, phase| {
             cx.simulate_event(ScrollEvent {

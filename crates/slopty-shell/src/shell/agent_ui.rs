@@ -1,9 +1,10 @@
-//! An agent drives the person's window (`slopty ui`, the `ui_*` tools): it opens a
-//! shell, a file, a page or the changes in a pane beside the session (`docs/decisions/layout.md`,
-//! "No permanent right column"), shows or hides a region, puts a chat on screen, lays the panes
-//! at even shares, and reads what the window shows. Slopty's workspace hands each ask here through
-//! [`act`] once the shell's window is up ([`serve`]), and sends what [`act`] answers back to the
-//! agent.
+//! An agent drives the person's window (`slopty ui`, the `ui_*` tools).
+//!
+//! It opens a shell, a file, a page or the changes in a pane beside the session
+//! (`docs/decisions/layout.md`, "No permanent right column"), shows or hides a region, puts a chat
+//! on screen, lays the panes at even shares, and reads what the window shows. Slopty's workspace
+//! hands each ask here through [`act`] once the shell's window is up (`serve`), and sends what
+//! [`act`] answers back to the agent.
 //!
 //! The person stays in charge (`docs/decisions/agents.md`, "Agents drive the person's window
 //! through open verbs"). An ask never takes the keyboard: whatever had it has it after, and a
@@ -17,14 +18,6 @@
 //!
 //! Names stay open: a region, a place or a chat is a word, and one the window does not know is
 //! answered with the ones it does ([`Code::Unknown`]).
-#![allow(
-    rustdoc::private_intra_doc_links,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::too_long_first_doc_paragraph,
-    clippy::too_many_arguments,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -389,8 +382,13 @@ impl Shell {
         let did = match act {
             Act::State => Ok(None),
             Act::Terminal { folder, command } => {
-                let device = device.as_deref();
-                self.agent_terminal(folder, command, who, device, answered, cx);
+                let ask = TerminalAsk {
+                    folder: folder.as_deref(),
+                    command,
+                    who,
+                    device: device.as_deref(),
+                };
+                self.agent_terminal(ask, answered, cx);
                 return keep_keyboard(keyboard, window, cx);
             }
             Act::Open(target) => self.agent_open(&target, device.as_deref(), window, cx),
@@ -743,16 +741,9 @@ impl Shell {
 
     /// `slopty ui terminal`: a shell in a pane beside the chat on screen, in `folder`, where there
     /// is most room; `answered` hears once its shell is up and `command` typed.
-    fn agent_terminal(
-        &mut self,
-        folder: Option<String>,
-        command: Option<String>,
-        who: String,
-        device: Option<&str>,
-        answered: Answered,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(failure) = self.agent_chat_here(folder.as_ref().and(device), cx) {
+    fn agent_terminal(&mut self, ask: TerminalAsk<'_>, answered: Answered, cx: &mut Context<Self>) {
+        let TerminalAsk { folder, command, who, device } = ask;
+        if let Err(failure) = self.agent_chat_here(folder.and(device), cx) {
             return answered(Err(failure), cx);
         }
         if !self.splits_here() {
@@ -774,14 +765,14 @@ impl Shell {
         let id = format!("terminal/{}", self.add_shell_beside(&panes, panel.clone(), cx));
         let mut params = serde_json::json!({ "chatId": chat });
         if let Some(object) = params.as_object_mut() {
-            if let Some(folder) = &folder {
-                object.insert("cwd".into(), serde_json::Value::String(folder.clone()));
+            if let Some(folder) = folder {
+                object.insert("cwd".into(), serde_json::Value::String(folder.to_owned()));
             }
             if let Some(target) = &target {
                 object.insert("targetDeviceId".into(), serde_json::Value::String(target.clone()));
             }
         }
-        let did = match &folder {
+        let did = match folder {
             Some(folder) => format!("opened a terminal in {folder}"),
             None => "opened a terminal".to_owned(),
         };
@@ -851,6 +842,20 @@ impl Shell {
         })
         .detach();
     }
+}
+
+/// What a `slopty ui terminal` ask opens: where, what it types there, who asked, and on which
+/// machine.
+struct TerminalAsk<'a> {
+    /// The folder its shell starts in, absolute on the agent's machine; the chat's own when
+    /// `None`.
+    folder: Option<&'a str>,
+    /// A command line to type once its shell is up.
+    command: Option<String>,
+    /// Who asks, as the toast names them.
+    who: String,
+    /// The machine the agent runs on, whose paths `folder` is in.
+    device: Option<&'a str>,
 }
 
 /// What the served window shows, from a task outside the shell's own update.
@@ -933,7 +938,7 @@ mod tests {
     }
 
     /// Ask `act` of the window as the workspace does, from outside any update: its answer.
-    fn asked(cx: &mut VisualTestContext, ask: Ask) -> Result<Done, Failure> {
+    fn asked(cx: &VisualTestContext, ask: Ask) -> Result<Done, Failure> {
         let heard: Heard = Rc::default();
         let kept = Rc::clone(&heard);
         cx.cx
@@ -954,7 +959,7 @@ mod tests {
 
     /// With no shell window up, an ask hears that there is none, once.
     #[gpui::test]
-    fn with_no_window_an_ask_hears_there_is_none(cx: &mut TestAppContext) {
+    fn with_no_window_an_ask_hears_there_is_none(cx: &TestAppContext) {
         let heard: Heard = Rc::default();
         let kept = Rc::clone(&heard);
         cx.update(|cx| {

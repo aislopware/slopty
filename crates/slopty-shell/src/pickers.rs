@@ -5,14 +5,6 @@
 //!
 //! TUI-first (`docs/decisions/agents.md`), the composer's pickers (project, branch,
 //! agent and model, traits) are gone: an agent's TUI picks its own model and reasoning.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 
 use slopty_view_proto::{FolderListing, HarnessId, ReasoningLevel};
 
@@ -22,6 +14,7 @@ use crate::catalog::registry::HarnessDescriptor;
 // Pure: labels
 // ---------------------------------------------------------------------------
 
+/// A reasoning level's name, as a menu or a chip writes it.
 pub const fn reasoning_label(level: ReasoningLevel) -> &'static str {
     match level {
         ReasoningLevel::Minimal => "Minimal",
@@ -68,18 +61,13 @@ impl WindowsBrowserPath<'_> {
 fn windows_browser_path(path: &str) -> Option<WindowsBrowserPath<'_>> {
     let extended = path.starts_with(r"\\?\");
     let start = if extended { 4 } else { 0 };
-    let tail = &path[start..];
-    let bytes = tail.as_bytes();
-    if bytes.len() >= 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes.get(2).is_none_or(|b| *b == b'\\' || (!extended && *b == b'/'))
+    let tail = path.get(start..)?;
+    if let [letter, b':', after @ ..] = tail.as_bytes()
+        && letter.is_ascii_alphabetic()
+        && after.first().is_none_or(|b| *b == b'\\' || (!extended && *b == b'/'))
     {
-        return Some(WindowsBrowserPath {
-            root: &path[..start + 2],
-            rest: &path[start + 2..],
-            extended,
-        });
+        let (root, rest) = path.split_at_checked(start.checked_add(2)?)?;
+        return Some(WindowsBrowserPath { root, rest, extended });
     }
     let unc_start = if extended {
         tail.get(..4).filter(|prefix| prefix.eq_ignore_ascii_case("UNC\\"))?;
@@ -90,17 +78,19 @@ fn windows_browser_path(path: &str) -> Option<WindowsBrowserPath<'_>> {
         return None;
     };
     let is_separator = |ch| ch == '\\' || (!extended && ch == '/');
-    let server_end = unc_start + path[unc_start..].find(is_separator)?;
-    if server_end == unc_start {
+    let server = path.get(unc_start..)?.find(is_separator)?;
+    if server == 0 {
         return None;
     }
-    let share_start = server_end + 1;
-    let share_end =
-        path[share_start..].find(is_separator).map_or(path.len(), |at| share_start + at);
-    if share_end == share_start {
+    // The share starts past the server's separator, one byte.
+    let share_start = unc_start.checked_add(server)?.checked_add(1)?;
+    let share = path.get(share_start..)?;
+    let share_len = share.find(is_separator).unwrap_or(share.len());
+    if share_len == 0 {
         return None;
     }
-    Some(WindowsBrowserPath { root: &path[..share_end], rest: &path[share_end..], extended })
+    let (root, rest) = path.split_at_checked(share_start.checked_add(share_len)?)?;
+    Some(WindowsBrowserPath { root, rest, extended })
 }
 
 /// Drive- or UNC-rooted: separators are backslashes.
@@ -108,8 +98,9 @@ pub fn is_windows_path(path: &str) -> bool {
     windows_browser_path(path).is_some()
 }
 
-/// Lexical identity for browser rows, crumbs and existing spaces. Preserve
-/// POSIX spelling and directory casing (Windows directories can be case
+/// Lexical identity for browser rows, crumbs and existing spaces.
+///
+/// Preserve POSIX spelling and directory casing (Windows directories can be case
 /// sensitive). Prefix aliases are equivalent only for ordinary Windows names.
 pub fn folder_path_key(path: &str) -> String {
     let Some(windows) = windows_browser_path(path) else {
@@ -119,10 +110,10 @@ pub fn folder_path_key(path: &str) -> String {
     let ordinary_name = |name: &str| {
         let stem = name.split('.').next().unwrap_or_default();
         let reserved = matches!(stem.to_ascii_uppercase().as_str(), "CON" | "PRN" | "AUX" | "NUL")
-            || stem.get(..3).is_some_and(|prefix| {
+            || stem.split_at_checked(3).is_some_and(|(prefix, digit)| {
                 (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
                     && matches!(
-                        &stem[3..],
+                        digit,
                         "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
                     )
             });
@@ -134,11 +125,14 @@ pub fn folder_path_key(path: &str) -> String {
     let unc_root = windows.extended
         && windows.root.get(4..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\"));
     let ordinary_names = rest.split('\\').all(ordinary_name)
-        && (!unc_root || windows.root[8..].split('\\').all(ordinary_name));
+        && (!unc_root
+            || windows.root.get(8..).is_some_and(|names| names.split('\\').all(ordinary_name)));
     let root = if windows.extended && ordinary_names {
-        let tail = &windows.root[4..];
-        if tail.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC\\")) {
-            format!(r"\\{}", &tail[4..])
+        let tail = windows.root.strip_prefix(r"\\?\").unwrap_or(windows.root);
+        if let Some((prefix, share)) = tail.split_at_checked(4)
+            && prefix.eq_ignore_ascii_case("UNC\\")
+        {
+            format!(r"\\{share}")
         } else {
             tail.to_owned()
         }
@@ -157,14 +151,17 @@ pub fn folder_path_key(path: &str) -> String {
 /// `c:` → `C:`, also behind an extended `\\?\` prefix; other roots unchanged.
 fn uppercase_drive_letter(mut root: String) -> String {
     let drive = root.strip_prefix(r"\\?\").unwrap_or(&root);
-    let bytes = drive.as_bytes();
-    if bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_lowercase() {
-        let at = root.len() - 2;
-        root[at..=at].make_ascii_uppercase();
+    let lowercase = matches!(drive.as_bytes(), [letter, b':'] if letter.is_ascii_lowercase());
+    // The letter is the root's last byte but one.
+    if lowercase
+        && let Some(letter) = root.len().checked_sub(2).and_then(|at| root.get_mut(at..=at))
+    {
+        letter.make_ascii_uppercase();
     }
     root
 }
 
+/// Whether two browser paths name one folder ([`folder_path_key`]).
 pub fn same_folder_path(left: &str, right: &str) -> bool {
     folder_path_key(left) == folder_path_key(right)
 }
@@ -176,16 +173,16 @@ pub fn parent_path(path: &str) -> Option<String> {
         if rest.is_empty() {
             return None;
         }
-        let parent = rest.rfind('\\').map_or("", |at| &rest[..at]);
+        let parent = rest.rsplit_once('\\').map_or("", |(parent, _)| parent);
         return Some(format!("{}{parent}", windows.root_path()));
     }
     let trimmed = path.trim_end_matches('/');
     if trimmed.is_empty() {
         return None; // was "/" (or empty)
     }
-    match trimmed.rfind('/') {
-        Some(0) => Some("/".to_owned()),
-        Some(at) => Some(trimmed[..at].to_string()),
+    match trimmed.rsplit_once('/') {
+        Some(("", _)) => Some("/".to_owned()),
+        Some((parent, _)) => Some(parent.to_owned()),
         None => None,
     }
 }
@@ -202,9 +199,11 @@ pub fn child_path(base: &str, name: &str) -> String {
 }
 
 /// Byte length of `name`'s prefix matching `query`, compared char-for-char
-/// case-insensitively; `None` when `query` isn't a prefix of `name`. The
-/// length indexes into `name` (not `query`) so the completion suffix keeps
-/// the folder's real casing: `("Documents", "doc") → Some(3)` → `"uments"`.
+/// case-insensitively.
+///
+/// `None` when `query` isn't a prefix of `name`. The length indexes into `name` (not `query`) so
+/// the completion suffix keeps the folder's real casing: `("Documents", "doc") → Some(3)` →
+/// `"uments"`.
 pub fn completion_prefix_len(name: &str, query: &str) -> Option<usize> {
     let mut len = 0;
     let mut name_chars = name.chars();
@@ -213,13 +212,14 @@ pub fn completion_prefix_len(name: &str, query: &str) -> Option<usize> {
         if !nc.to_lowercase().eq(qc.to_lowercase()) {
             return None;
         }
-        len += nc.len_utf8();
+        len = nc.len_utf8().checked_add(len)?;
     }
     Some(len)
 }
 
-/// Resolve a typed path segment against folder `names` (slash-descend):
-/// exact match first — case-SENSITIVE before case-insensitive, so `GitHub/`
+/// Resolve a typed path segment against folder `names` (slash-descend).
+///
+/// Exact match first — case-SENSITIVE before case-insensitive, so `GitHub/`
 /// picks a `GitHub` sibling over `github` — then a unique case-insensitive
 /// prefix. Ambiguity resolves to `None`: the slash stays in the query.
 pub fn segment_target(names: &[&str], query: &str) -> Option<usize> {
@@ -241,8 +241,10 @@ pub fn is_typed_path(query: &str) -> bool {
     query.starts_with(['/', '~']) || is_windows_path(query)
 }
 
-/// Interpret a palette query as a typed path jump: absolute (`/disk2/projects`),
-/// drive-rooted (`D:\projects`) or home-relative (`~`, `~/github`). Returns the
+/// Interpret a palette query as a typed path jump.
+///
+/// Absolute (`/disk2/projects`), drive-rooted (`D:\projects`) or home-relative
+/// (`~`, `~/github`). Returns the
 /// absolute path to browse, trailing separator trimmed. `home` is the device's
 /// resolved home — `None` until the first listing lands, when `~` can't expand
 /// yet. A query like `~foo` is a folder name, not a path.
@@ -283,8 +285,9 @@ pub fn typed_path_target(query: &str, home: Option<&str>) -> Option<String> {
     None
 }
 
-/// A path as typed or pasted into the new-project path field: surrounding
-/// whitespace and one pair of matching quotes dropped, and shell escapes
+/// A path as typed or pasted into the new-project path field, cleaned.
+///
+/// Surrounding whitespace and one pair of matching quotes dropped, and shell escapes
 /// (`My\ Folder`, from a folder dragged into a terminal) undone — except on
 /// a `windows` device, whose backslashes are separators.
 pub fn clean_typed_path(text: &str, windows: bool) -> String {
@@ -325,7 +328,9 @@ pub fn is_home_relative(text: &str) -> bool {
 }
 
 /// Lexically resolve `.`, `..` and repeated separators in an absolute
-/// browser path. The device lists whatever spelling it is sent, so a typed
+/// browser path.
+///
+/// The device lists whatever spelling it is sent, so a typed
 /// `~/code/../notes` would otherwise open (and add) a project with `..` in
 /// its path. `..` stops at the root; extended (`\\?\`) paths are verbatim by
 /// definition and stay as they are.
@@ -354,7 +359,9 @@ pub fn normalize_browser_path(path: &str) -> String {
 }
 
 /// Where a path typed in the new-project path field points, absolute and
-/// normalized: `~` and `~/x` under the device's `home`, absolute and
+/// normalized.
+///
+/// `~` and `~/x` under the device's `home`, absolute and
 /// drive-rooted paths as typed, anything else relative to `base` (the open
 /// folder) — `../site`, `src`. On a `windows` device (or one whose paths
 /// say so) `/` is `\`, `\code` is on the open folder's drive and `D:code`
@@ -375,10 +382,7 @@ pub fn resolve_typed_path(
     if text.is_empty() {
         return None;
     }
-    let drive_relative = |text: &str| {
-        let bytes = text.as_bytes();
-        bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-    };
+    let drive_relative = |text: &str| matches!(text.as_bytes(), [letter, b':', _, ..] if letter.is_ascii_alphabetic());
     let target = match typed_path_target(&text, home) {
         Some(target) => target,
         None if is_home_relative(&text) => return None,
@@ -386,23 +390,26 @@ pub fn resolve_typed_path(
             let root = windows_browser_path(base?)?.root_path();
             child_path(&root, text.trim_start_matches('\\'))
         }
-        None if windows && drive_relative(&text) => format!(r"{}\{}", &text[..2], &text[2..]),
+        None if windows && drive_relative(&text) => {
+            let (drive, rest) = text.split_at_checked(2)?;
+            format!(r"{drive}\{rest}")
+        }
         None => child_path(base?, &text),
     };
     Some(normalize_browser_path(&target))
 }
 
-/// A typed path split at its last separator: the folder part as typed
-/// (separator included, empty for a bare name) and the name being typed
+/// A typed path split at its last separator.
+///
+/// The folder part as typed (separator included, empty for a bare name) and the name being typed
 /// after it. `\` separates only on a `windows` device or in a
 /// Windows-shaped path.
 pub fn split_typed_leaf(text: &str, windows: bool) -> (&str, &str) {
     let windows = windows || is_windows_path(text);
     let at = if windows { text.rfind(['/', '\\']) } else { text.rfind('/') };
-    match at {
-        Some(at) => (&text[..=at], &text[at + 1..]),
-        None => ("", text),
-    }
+    // A separator is one byte: the folder part ends just past it.
+    let split = at.and_then(|at| at.checked_add(1)).and_then(|cut| text.split_at_checked(cut));
+    split.unwrap_or(("", text))
 }
 
 /// Breadcrumb segments for a path: `(label, full path)`, root first.
@@ -467,8 +474,9 @@ fn mock_harness_enabled() -> bool {
     std::env::var("SLOPTY_HARNESS").ok().as_deref().map(str::trim) == Some("mock")
 }
 
-/// Production pickers AND chip resolution hide the mock harness — the
-/// registry always lists it, but it must never surface in real UI (neither in
+/// Production pickers AND chip resolution hide the mock harness.
+///
+/// The registry always lists it, but it must never surface in real UI (neither in
 /// the picker rail nor as the eager default the chips resolve against).
 /// `SLOPTY_HARNESS=mock` shows it; otherwise it only remains when it's
 /// literally all there is (a dev build with no real harness registered).
@@ -608,7 +616,7 @@ mod tests {
     fn completion_prefix_lengths() {
         // Case-insensitive; the length indexes into the NAME's bytes.
         assert_eq!(completion_prefix_len("Documents", "doc"), Some(3));
-        assert_eq!(&"Documents"[3..], "uments");
+        assert_eq!("Documents".get(3..), Some("uments"));
         assert_eq!(completion_prefix_len("slopty", "slopty"), Some(6)); // the renamed name is one longer.
         assert_eq!(completion_prefix_len("slopty", ""), Some(0));
         assert_eq!(completion_prefix_len("slopty", "dev"), None);
@@ -616,7 +624,7 @@ mod tests {
         assert_eq!(completion_prefix_len("dev", "devel"), None);
         // Multibyte names slice on a char boundary.
         assert_eq!(completion_prefix_len("héllo", "hé"), Some(3));
-        assert_eq!(&"héllo"[3..], "llo");
+        assert_eq!("héllo".get(3..), Some("llo"));
     }
 
     #[test]

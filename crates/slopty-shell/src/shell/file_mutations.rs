@@ -1,14 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! Coordinate structural changes across every editor of the affected workspace.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 use slopty_view_proto::{
     DeleteWorkspaceEntryRequest, MoveWorkspaceEntryRequest, WorkspaceMutationOutcome,
 };
@@ -19,7 +10,7 @@ use crate::files::mutations::MutationIntent;
 
 impl Shell {
     pub(super) fn start_file_mutation(
-        &mut self,
+        &self,
         source: Entity<FilesSurface>,
         intent: MutationIntent,
         cx: &mut Context<Self>,
@@ -31,7 +22,7 @@ impl Shell {
     /// guarded path as a single operation. The filesystem has no transaction,
     /// so the first failure stops the queue and completed entries stay applied.
     pub(super) fn start_file_mutations(
-        &mut self,
+        &self,
         source: Entity<FilesSurface>,
         intents: Vec<MutationIntent>,
         cx: &mut Context<Self>,
@@ -41,7 +32,7 @@ impl Shell {
     }
 
     fn run_file_mutation_queue(
-        &mut self,
+        &self,
         source: Entity<FilesSurface>,
         mut queue: std::collections::VecDeque<MutationIntent>,
         total: usize,
@@ -182,11 +173,13 @@ impl Shell {
                     surface.update(cx, |files, cx| files.finish_mutation(&intent, &result, cx));
             }
             if applied {
-                let _ = shell.update(cx, |shell, cx| {
+                // A shell gone meanwhile runs no more of the queue.
+                let _gone = shell.update(cx, |shell, cx| {
                     shell.run_file_mutation_queue(source, queue, total, cx);
                 });
             } else if total > 1 {
-                let completed = total - queue.len() - 1;
+                // Those before this one, which the queue no longer holds.
+                let completed = total.saturating_sub(queue.len()).saturating_sub(1);
                 source.update(cx, |files, cx| {
                     if let Some(message) = files.mutation_error() {
                         let message = batch_failure_message(&intent, completed, total, &message);
@@ -286,7 +279,7 @@ mod tests {
     fn a_tree_drag_moves_only_onto_a_folder(cx: &mut TestAppContext) {
         let (_shell, files, cx) = setup(cx);
         let events = Rc::new(RefCell::new(Vec::new()));
-        let recorded = events.clone();
+        let recorded = Rc::clone(&events);
         let _sub = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| recorded.borrow_mut().push(event.clone()))
         });

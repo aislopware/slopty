@@ -2,12 +2,6 @@
 //! "Open in pane" asks through [`PagePaneAsk`], and the view docks beside the session with the
 //! keyboard; "Bring back" (or closing the view) puts the page back in its card. Each piece is a
 //! call from the shell's own match on the view.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::collections::HashMap;
 
@@ -42,7 +36,7 @@ impl Shell {
                 let pane =
                     cx.new(|cx| PagePaneView::new(ask.page, ask.title, ask.chat, engine, cx));
                 let panes = cx.default_global::<PagePanes>();
-                panes.seq += 1;
+                panes.seq = panes.seq.saturating_add(1);
                 let id = panes.seq;
                 panes.tabs.insert(id, pane);
                 self.open_view(RightSurface::Page(id), cx);
@@ -59,7 +53,7 @@ impl Shell {
                 for key in keys {
                     self.drop_view(view, &key, cx);
                 }
-                self.close_page_pane(id, cx);
+                Self::close_page_pane(id, cx);
             }
             (false, None) => {}
         }
@@ -67,12 +61,12 @@ impl Shell {
     }
 
     /// The view's title: the page's.
-    pub(super) fn page_pane_title(&self, id: u64, cx: &App) -> Option<SharedString> {
+    pub(super) fn page_pane_title(id: u64, cx: &App) -> Option<SharedString> {
         Some(cx.try_global::<PagePanes>()?.tabs.get(&id)?.read(cx).title())
     }
 
     /// The view's body, nothing once it is gone.
-    pub(super) fn render_page_pane(&mut self, id: u64, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_page_pane(id: u64, cx: &App) -> AnyElement {
         match cx.try_global::<PagePanes>().and_then(|p| p.tabs.get(&id)).cloned() {
             Some(pane) => pane.into_any_element(),
             None => Empty.into_any_element(),
@@ -80,7 +74,7 @@ impl Shell {
     }
 
     /// The view closed: the page goes back to its card.
-    pub(super) fn close_page_pane(&mut self, id: u64, cx: &mut Context<Self>) {
+    pub(super) fn close_page_pane(id: u64, cx: &mut App) {
         if cx.has_global::<PagePanes>() {
             cx.global_mut::<PagePanes>().tabs.remove(&id);
         }

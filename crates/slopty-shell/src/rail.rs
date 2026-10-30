@@ -5,27 +5,16 @@
 //! the 48rem the rail of prompt ticks needed, so the rail went (`docs/decisions/ui.md`, "A
 //! session is its terminal, its inspector beside it"). What stays is the jump it made, which
 //! find and the held group's press take: a glide to a row on one eased timeline, landing marked.
-#![allow(
-    missing_copy_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{Context, ListOffset, px};
 
 use crate::motion;
 use crate::transcript::Transcript;
 
-/// How far below the list's top a row a jump lands on stands (slopty): past the scroll edge
-/// the transcript fades under at the top of its pane, at the inset a sent prompt is held at. The
-/// first row carries its own gap.
+/// How far below the list's top a row a jump lands on stands (slopty).
+///
+/// Past the scroll edge the transcript fades under at the top of its pane, at the inset a sent
+/// prompt is held at. The first row carries its own gap.
 pub const fn landing_inset(row: usize) -> f32 {
     if row == 0 { 0.0 } else { crate::transcript::OWN_SEND_TOP_INSET_PX }
 }
@@ -47,12 +36,39 @@ pub(crate) struct Glide {
 
 /// The most frames a glide takes before it lands exactly: [`motion::SCROLL_GLIDE`] at
 /// 120 Hz and room to spare, at the motion's own speed ([`glide_max_steps`]).
-const GLIDE_MAX_STEPS: usize = 240;
+const GLIDE_MAX_STEPS: u16 = 240;
 
 /// [`GLIDE_MAX_STEPS`] stretched by [`motion::speed_scale`], so a slowed motion glides
 /// its whole length rather than jumping at the bound.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "240 frames at least (a NaN scale counts as 1) and capped at u16::MAX first"
+)]
 fn glide_max_steps() -> usize {
-    (GLIDE_MAX_STEPS as f32 * motion::speed_scale().max(1.0)).ceil() as usize
+    let steps = (f32::from(GLIDE_MAX_STEPS) * motion::speed_scale().max(1.0))
+        .ceil()
+        .min(f32::from(u16::MAX));
+    usize::from(steps as u16)
+}
+
+/// A row index or a count of rows in item space, as an `f32`.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "exact below 2^24 (16.7 million), which no transcript's rows near"
+)]
+const fn count(rows: usize) -> f32 {
+    rows as f32
+}
+
+/// The whole row at or before `position` in item space, `last` at most.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "floored and kept at 0 or more; past usize the cast saturates, and `last` bounds it"
+)]
+fn row_at(position: f32, last: usize) -> usize {
+    (position.floor().max(0.0) as usize).min(last)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +87,7 @@ fn glide_max_steps() -> usize {
 /// timeline. When the estimate changes mid-flight (a row got measured, the
 /// bottom-aligned layout re-glued an anchor), the SAME timeline simply
 /// continues over the corrected remainder — no restart, no compensating jump.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct GlideTimeline {
     eased_prev: f32,
 }
@@ -83,6 +99,7 @@ impl Default for GlideTimeline {
 }
 
 impl GlideTimeline {
+    /// A timeline at its start.
     pub const fn new() -> Self {
         Self { eased_prev: 0.0 }
     }
@@ -134,7 +151,7 @@ impl Transcript {
     ///   back each frame, so a measurement correcting the estimate just re-enters the timeline;
     /// - once the target row is measured the glide is pixel-exact.
     ///
-    /// It steps once a display frame ([`Transcript::step_glide`], from the render's
+    /// It steps once a display frame (`Transcript::step_glide`, from the render's
     /// next-frame callback, as the stick spring does), not on a 16 ms timer, so a 120 Hz
     /// display glides at 120 Hz (#13).
     pub fn glide_to_row(&mut self, target: usize, flash: bool, cx: &mut Context<Self>) {
@@ -171,7 +188,7 @@ impl Transcript {
         let raw = (now.saturating_duration_since(glide.started).as_secs_f32()
             / total.as_secs_f32())
         .min(1.0);
-        glide.steps += 1;
+        glide.steps = glide.steps.saturating_add(1);
         let list = self.list_state().clone();
         // The timeline runs out (it shouldn't, on frames): land exactly.
         if raw >= 1.0 || glide.steps > glide_max_steps() {
@@ -201,18 +218,18 @@ impl Transcript {
         if viewport > 0.0 {
             let bottom = f32::from(list.viewport_bounds().bottom());
             let mut ix = top.item_ix;
-            let mut count = 0.0_f32;
+            let mut rows = 0.0_f32;
             while let Some(b) = list.bounds_for_item(ix) {
                 if f32::from(b.top()) >= bottom {
                     break;
                 }
-                count += 1.0;
-                ix += 1;
+                rows += 1.0;
+                ix = ix.saturating_add(1);
             }
-            if count > 0.0 {
-                let mean = viewport / count;
+            if rows > 0.0 {
+                let mean = viewport / rows;
                 let ema = glide.height_ema.get_or_insert(mean);
-                *ema += 0.5 * (mean - *ema);
+                *ema = f32::midpoint(*ema, mean);
             }
         }
         if glide.height_ema.is_none() {
@@ -223,11 +240,12 @@ impl Transcript {
         // space — read back per frame (self-correcting: an anchor
         // the layout adjusted or re-glued keeps its real remaining
         // distance and continues the same timeline).
-        let here = top.item_ix as f32
+        let here = count(top.item_ix)
             + top_height.map_or(0.0, |h| (f32::from(top.offset_in_item) / h).clamp(0.0, 1.0));
         if scroll_trace_enabled() {
             tracing::warn!(
-                ms = now.saturating_duration_since(glide.started).as_millis() as u64,
+                ms = u64::try_from(now.saturating_duration_since(glide.started).as_millis())
+                    .unwrap_or(u64::MAX),
                 eased,
                 here,
                 dist = self.distance_from_bottom(),
@@ -238,7 +256,7 @@ impl Transcript {
         if target < top.item_ix {
             // Above the viewport (unmeasured): progressive
             // item-space anchoring within the eased timeline.
-            let next = here - frac * (here - target as f32);
+            let next = frac.mul_add(count(target) - here, here);
             // Small steps ride `scroll_by` — the list keeps a
             // 320px measured leading overdraw, so a step that
             // fits inside it crosses rows at their TRUE heights
@@ -250,8 +268,8 @@ impl Transcript {
                 cx.notify();
                 return;
             }
-            let ix = (next.floor().max(0.0) as usize).min(top.item_ix);
-            let within = next - ix as f32;
+            let ix = row_at(next, top.item_ix);
+            let within = next - count(ix);
             let offset = if ix == top.item_ix {
                 // Same row as the current anchor: measured height,
                 // pixel-exact — and never below the current offset,
@@ -271,9 +289,9 @@ impl Transcript {
             list.scroll_by(px(frac * delta));
         } else {
             // Below but unmeasured: item space, same timeline.
-            let next = here + frac * (target as f32 - here);
-            let ix = (next.floor().max(0.0) as usize).min(target);
-            let within = next - ix as f32;
+            let next = frac.mul_add(count(target) - here, here);
+            let ix = row_at(next, target);
+            let within = next - count(ix);
             list.scroll_to(ListOffset {
                 item_ix: ix,
                 offset_in_item: px(within * height_ema.unwrap_or(0.0)),
@@ -297,12 +315,12 @@ mod tests {
         let mut timeline = GlideTimeline::new();
         let (start, target) = (1000.0_f32, 0.0_f32);
         let mut pos = start;
-        for i in 1..=60 {
-            let t = i as f32 / 60.0;
+        for i in 1_u8..=60 {
+            let t = f32::from(i) / 60.0;
             let eased = curve.eval(t);
             let frac = timeline.step(eased);
-            pos -= frac * (pos - target);
-            let absolute = start + eased * (target - start);
+            pos = frac.mul_add(target - pos, pos);
+            let absolute = eased.mul_add(target - start, start);
             assert!((pos - absolute).abs() < 0.05, "frame {i}: pos {pos} != absolute {absolute}");
         }
         assert_eq!(pos, target); // eased hits 1.0 → frac 1.0 → exact landing.
@@ -317,14 +335,14 @@ mod tests {
         let mut timeline = GlideTimeline::new();
         let mut pos = 500.0_f32;
         let mut prev_frac = 0.0_f32;
-        for i in 1..=60 {
-            let t = i as f32 / 60.0;
+        for i in 1_u8..=60 {
+            let t = f32::from(i) / 60.0;
             let frac = timeline.step(curve.eval(t));
             if i == 30 {
                 // The layout re-glued the anchor: remaining distance doubles.
                 pos *= 2.0;
             }
-            pos -= frac * pos;
+            pos = (-frac).mul_add(pos, pos);
             // Fractions depend only on the timeline — the re-estimate cannot
             // make a step consume a larger share than the curve dictates.
             assert!((0.0..=1.0).contains(&frac));

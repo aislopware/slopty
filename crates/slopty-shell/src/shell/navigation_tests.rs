@@ -1,14 +1,6 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
 //! The keyboard among a session's panes, through the shell's real panes and key dispatch,
 //! without booting an engine.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assertions_on_result_states,
-    clippy::cast_possible_wrap,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 use gpui::{TestAppContext, VisualTestContext};
 
 use super::panes::{Direction, Pane};
@@ -44,7 +36,7 @@ impl Render for NavigationHost {
                 )
                 // The window's own keys (`chrome_keys`), and the keys the root's own
                 // listeners take (Esc out of a view among them).
-                .map(|el| shell.chrome_actions(el, cx))
+                .map(|el| Shell::chrome_actions(el, cx))
                 .capture_key_down(cx.listener(Shell::on_key_down_capture))
                 .on_key_down(cx.listener(Shell::on_key_down))
                 .child(
@@ -90,7 +82,11 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                     .map(|(ix, id)| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                            "createdAt": Utc::now()
+                                .checked_sub_signed(chrono::Duration::minutes(
+                                    i64::try_from(ix).unwrap(),
+                                ))
+                                .unwrap(),
                         }))
                         .unwrap()
                     })
@@ -138,7 +134,7 @@ fn press(cx: &mut VisualTestContext, forward: bool) {
     draw(cx);
 }
 
-fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+fn selected(shell: &Entity<Shell>, cx: &VisualTestContext) -> Option<String> {
     shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
 }
 
@@ -288,7 +284,7 @@ fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
             [RightSurface::Diff(2), RightSurface::Diff(3)],
             "the diff is back"
         );
-        assert!(shell.closed_tabs.is_empty());
+        assert_eq!(shell.closed_tabs, []);
     });
     keyboard_in(&shell, cx, back);
     // Nothing more closed here: the key does nothing.
@@ -401,7 +397,7 @@ fn an_archive_is_undone_from_its_toast_or_cmd_z(cx: &mut TestAppContext) {
     // Nothing left to undo: ⌘Z goes on to whatever else takes it.
     cx.simulate_keystrokes(&platform_combo("mod-z"));
     cx.run_until_parked();
-    assert!(requests.try_recv().is_err());
+    assert_eq!(requests.try_recv().ok(), None, "nothing sent");
 }
 
 /// Whether the keyboard is in a Changes surface, whose context the diff's find keys are

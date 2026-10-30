@@ -3,19 +3,15 @@
 //! column"): whether the window has room for it, how wide it may be, and its glide when the
 //! window grows too narrow for it or wide enough again. Everything else beside the terminal is
 //! a pane of the session's own view (`panes.rs`), laid out in the room the sidebar leaves.
-#![allow(
-    clippy::field_scoped_visibility_modifiers,
-    clippy::or_fun_call,
-    clippy::wildcard_imports,
-    reason = "shell lint migration: slice A"
-)]
-use super::*;
+use super::{CHAT_PANEL_MIN, Context, Route, SIDEBAR_DEFAULT, SIDEBAR_MIN, Shell, sidebar};
 
 /// Whether the window has room for the sidebar this frame, and the widest it may be there.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct HorizontalPanelFit {
-    pub(super) sidebar: bool,
-    pub(super) sidebar_limit: f32,
+    /// Whether the sidebar has room beside the session.
+    pub sidebar: bool,
+    /// The widest the sidebar may be.
+    pub sidebar_limit: f32,
 }
 
 /// The sidebar fits while the session keeps [`CHAT_PANEL_MIN`] beside it at the sidebar's
@@ -140,7 +136,7 @@ impl Shell {
         if let Some(width) = self.compact_sidebar_width() {
             return width;
         }
-        self.fit_exit_content().unwrap_or(self.horizontal_fit().sidebar_limit)
+        self.fit_exit_content().unwrap_or_else(|| self.horizontal_fit().sidebar_limit)
     }
 
     /// Double-clicking the sidebar's seam brings it back to its default width, easing from what

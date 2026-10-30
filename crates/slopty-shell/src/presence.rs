@@ -8,12 +8,6 @@
 //! guest's window is in front or not as the guest's other apps decide, so a session the test has
 //! open read as seen on one run and unread on the next, and a frame taken of it differed by its
 //! sidebar row.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::{App, Global, Window};
 
@@ -59,11 +53,11 @@ mod tests {
 
     /// What is on screen is set once per change, so the app's notes hear each change once.
     #[gpui::test]
-    fn what_is_on_screen_is_said_once_per_change(cx: &mut TestAppContext) {
-        let heard = std::rc::Rc::new(std::cell::Cell::new(0));
+    fn what_is_on_screen_is_said_once_per_change(cx: &TestAppContext) {
+        let heard = std::rc::Rc::new(std::cell::Cell::new(0_u32));
         let _watch = cx.update(|cx| {
-            let heard = heard.clone();
-            cx.observe_global::<super::OnScreen>(move |_| heard.set(heard.get() + 1))
+            let heard = std::rc::Rc::clone(&heard);
+            cx.observe_global::<super::OnScreen>(move |_| heard.set(heard.get().saturating_add(1)))
         });
         cx.update(|cx| super::show(Some("a".into()), cx));
         cx.update(|cx| super::show(Some("a".into()), cx));

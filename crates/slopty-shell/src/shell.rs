@@ -4847,7 +4847,7 @@ impl Render for Shell {
                     this.open_add_space(cx);
                 }
             }));
-        let root = self.chrome_actions(root, cx);
+        let root = Self::chrome_actions(root, cx);
         let root = self.picker_actions(root, cx);
 
         // The ground the window shows, a session's, for the window to wear its appearance.

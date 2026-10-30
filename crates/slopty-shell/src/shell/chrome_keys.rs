@@ -22,19 +22,11 @@
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
 //! reads), and the browser keeps its own ⌘[ and ⌘]: those bind in their contexts, and this
 //! module's handlers let a key go on when a terminal has focus.
-#![allow(
-    missing_docs,
-    trivial_casts,
-    clippy::derive_partial_eq_without_eq,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{App, Context, KeyBinding, Window, actions};
+use gpui::{App, Context, KeyBinding, Window};
 
 use super::panes::Direction;
 use super::{Route, Shell};
@@ -44,39 +36,74 @@ use crate::transcript::{
     FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread,
 };
 
-actions!(
-    shell,
-    [
-        Find,
-        FindNext,
-        FindPrevious,
-        NavigateBack,
-        NavigateForward,
-        ReopenClosedTab,
-        UndoArchive,
-        NextNeedsYou,
-        // What needs the person, across sessions and machines (`inbox`).
-        Inbox,
-        OpenIn,
-        // ⌘I summons the session's inspector (`docs/decisions/layout.md`, "No permanent
-        // right column"): ⌘ is free of the terminal's keys and of every TUI's.
-        ToggleInspector,
-        // Views the palette summons beside the session.
-        OpenBrowser,
-        OpenRemoteWindow,
-        // A session's panes.
-        SplitRight,
-        SplitDown,
-        SplitAuto,
-        ZoomPane,
-        FocusPaneLeft,
-        FocusPaneRight,
-        FocusPaneUp,
-        FocusPaneDown,
-        NextPane,
-        PreviousPane
-    ]
-);
+mod actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    use gpui::actions;
+
+    actions!(
+        shell,
+        [
+            /// Open the find in the inspector's thread.
+            Find,
+            /// Step to the next match of the thread's find.
+            FindNext,
+            /// Step to the match before, or with no find open go on to Go to Directory.
+            FindPrevious,
+            /// Go back to the session shown before.
+            NavigateBack,
+            /// Go forward again through the sessions shown.
+            NavigateForward,
+            /// Open the view closed last again.
+            ReopenClosedTab,
+            /// Bring back the session archived last.
+            UndoArchive,
+            /// Show the next session that needs you.
+            NextNeedsYou,
+            /// Open the inbox: what needs you, across sessions and machines (`inbox`).
+            Inbox,
+            /// Open the session's folder in an editor.
+            OpenIn,
+            /// Summon the session's inspector, or put it away.
+            // ⌘I (`docs/decisions/layout.md`, "No permanent right column"): ⌘ is free of the
+            // terminal's keys and of every TUI's.
+            ToggleInspector,
+            /// Open a web page beside the session.
+            OpenBrowser,
+            /// Open a remote window beside the session.
+            OpenRemoteWindow,
+            /// Open a shell to the right of the focused pane.
+            SplitRight,
+            /// Open a shell under the focused pane.
+            SplitDown,
+            /// Open a shell beside the focused pane, where there is most room.
+            SplitAuto,
+            /// Fill the session's view with the focused pane, or lay it back among the rest.
+            ZoomPane,
+            /// Move the keyboard to the pane on the left.
+            FocusPaneLeft,
+            /// Move the keyboard to the pane on the right.
+            FocusPaneRight,
+            /// Move the keyboard to the pane above.
+            FocusPaneUp,
+            /// Move the keyboard to the pane below.
+            FocusPaneDown,
+            /// Move the keyboard to the next pane.
+            NextPane,
+            /// Move the keyboard to the pane before.
+            PreviousPane,
+        ]
+    );
+}
+
+pub use actions::{
+    Find, FindNext, FindPrevious, FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Inbox,
+    NavigateBack, NavigateForward, NextNeedsYou, NextPane, OpenBrowser, OpenIn, OpenRemoteWindow,
+    PreviousPane, ReopenClosedTab, SplitAuto, SplitDown, SplitRight, ToggleInspector, UndoArchive,
+    ZoomPane,
+};
 
 /// How long the toast that offers to undo an archive stays.
 const UNDO_LASTS: Duration = Duration::from_secs(8);
@@ -129,8 +156,9 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
         Some("Changes"),
         cx,
     ));
+    let reopen: Box<dyn gpui::Action> = Box::new(ReopenClosedTab);
     for (id, action) in [
-        (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
+        (ShortcutId::ReopenClosedTab, reopen),
         (ShortcutId::NextNeedsYou, Box::new(NextNeedsYou)),
         (ShortcutId::Inbox, Box::new(Inbox)),
     ] {
@@ -169,11 +197,7 @@ enum FindStep {
 
 impl Shell {
     /// `root` taking this module's actions.
-    pub(super) fn chrome_actions<E: InteractiveElement>(
-        &self,
-        root: E,
-        cx: &mut Context<Self>,
-    ) -> E {
+    pub(super) fn chrome_actions<E: InteractiveElement>(root: E, cx: &Context<Self>) -> E {
         root.on_action(cx.listener(|this, _: &Find, window, cx| {
             this.find(FindStep::Open, window, cx);
         }))
@@ -312,12 +336,7 @@ impl Shell {
     }
 
     /// The inspector's changed file: the chat's Changes in front, at that file.
-    pub(super) fn show_change_at(
-        &mut self,
-        path: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn show_change_at(&mut self, path: &str, window: &Window, cx: &mut Context<Self>) {
         crate::changes::show_file(path, cx);
         if matches!(self.route, Route::Chat) && !self.active_chat.is_empty() {
             self.show_changes(window, cx);
@@ -326,7 +345,7 @@ impl Shell {
 
     /// Hand a find key to the chat's thread (the diff's own bindings take it in the Changes
     /// surface).
-    fn find(&mut self, step: FindStep, window: &mut Window, cx: &mut Context<Self>) {
+    fn find(&self, step: FindStep, window: &mut Window, cx: &mut Context<Self>) {
         if in_own_find(window) || !matches!(self.route, Route::Chat) || self.overlay_owns_keyboard()
         {
             cx.propagate();

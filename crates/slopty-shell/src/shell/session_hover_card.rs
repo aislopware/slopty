@@ -12,14 +12,6 @@
 //! The card waits out a short dwell so sweeping the pointer down the list
 //! stays quiet. Once one has shown, the card is warm: the next row's card
 //! follows the pointer at once, until it rests off the list for a moment.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 use std::time::Instant;
 
 use super::*;
@@ -156,7 +148,8 @@ impl Shell {
             let target = target.clone();
             async move |this, cx| {
                 cx.background_executor().timer(DWELL).await;
-                let _ = this.update(cx, |this, cx| {
+                // A shell gone meanwhile has no card to settle.
+                let _gone = this.update(cx, |this, cx| {
                     if this.session_hover_card.settle(&target) {
                         cx.notify();
                     }
@@ -171,7 +164,7 @@ impl Shell {
 
     /// Keep the ports' watch on the card shown: started when a card shows, dropped when
     /// it goes or another shows.
-    fn watch_card_ports(&mut self, cx: &mut Context<Self>) {
+    fn watch_card_ports(&mut self, cx: &Context<Self>) {
         let shown = self.session_hover_card.shown.clone();
         let watched = self.session_hover_card.ports.as_ref().map(|(chat, ..)| chat.clone());
         if shown == watched {
@@ -524,7 +517,7 @@ mod tests {
         shell
     }
 
-    fn init_test(cx: &mut TestAppContext, dir: &std::path::Path) {
+    fn init_test(cx: &TestAppContext, dir: &std::path::Path) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
@@ -586,7 +579,7 @@ mod tests {
     }
 
     fn wait_for_card(cx: &mut VisualTestContext) {
-        cx.executor().advance_clock(DWELL + Duration::from_millis(1));
+        cx.executor().advance_clock(DWELL.saturating_add(Duration::from_millis(1)));
         redraw(cx);
     }
 

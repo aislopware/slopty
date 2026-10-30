@@ -4,11 +4,6 @@
 //! some field; a match scores its field's weight, plus half again when it
 //! starts a word. Archived threads score half, and ties go to the most
 //! recently active thread.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::string_slice,
-    reason = "shell lint migration: slice A"
-)]
 
 /// Field weights: a title hit outranks any number of metadata hits.
 const TITLE: u32 = 100;
@@ -53,10 +48,11 @@ pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]
     ];
     let mut total = 0;
     for term in terms {
-        total += haystacks
+        let best = haystacks
             .iter()
             .filter_map(|(haystack, weight)| field_score(haystack, term, *weight))
             .max()?;
+        total = best.saturating_add(total);
     }
     Some(if fields.archived { total / 2 } else { total })
 }
@@ -64,10 +60,12 @@ pub(super) fn score_session(fields: &ThreadFields, state: &str, terms: &[String]
 fn field_score(haystack: &str, term: &str, weight: u32) -> Option<u32> {
     let mut best = None;
     for (at, _) in haystack.match_indices(term) {
-        let starts_word =
-            haystack[..at].chars().next_back().is_none_or(|previous| !previous.is_alphanumeric());
+        let starts_word = haystack
+            .get(..at)
+            .and_then(|before| before.chars().next_back())
+            .is_none_or(|previous| !previous.is_alphanumeric());
         if starts_word {
-            return Some(weight + weight / 2);
+            return Some(weight.saturating_add(weight / 2));
         }
         best = Some(weight);
     }

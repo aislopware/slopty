@@ -4,11 +4,6 @@
 //! pay for the scan. The host evicts the index after it sits unused (15 min)
 //! or for capacity; refocusing the chat warms it again. Hosts that predate
 //! `WarmWorkspaceSearch` are skipped silently.
-#![allow(
-    clippy::assert_is_empty,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 
 use gpui::Context;
 
@@ -31,7 +26,7 @@ impl SearchWarm {
 
 impl Shell {
     /// Follow the selected chat: warm its index when it gains focus.
-    pub(super) fn sync_search_warm(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn sync_search_warm(&mut self, cx: &Context<Self>) {
         let (focused, engine) = {
             let state = self.state.read(cx);
             let focused = state.selected_chat.as_deref().and_then(|chat_id| {
@@ -93,7 +88,7 @@ mod tests {
 
     /// The chat ids of every `WarmWorkspaceSearch` sent so far, answering each.
     fn drain_warms(
-        cx: &mut gpui::TestAppContext,
+        cx: &gpui::TestAppContext,
         runtime: &tokio::runtime::Runtime,
         requests: &mut tokio::sync::mpsc::Receiver<String>,
         replies: &tokio::sync::mpsc::Sender<String>,
@@ -145,6 +140,6 @@ mod tests {
 
         // Unrelated state churn does not re-send.
         window.update(cx, |shell, _, cx| shell.state.update(cx, |_, cx| cx.notify())).unwrap();
-        assert!(drain_warms(cx, &runtime, &mut requests, &replies).is_empty());
+        assert_eq!(drain_warms(cx, &runtime, &mut requests, &replies), Vec::<String>::new());
     }
 }

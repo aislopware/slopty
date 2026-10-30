@@ -1,11 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Inline chat renames on the sidebar row, without booting an engine.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_wrap,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice A"
-)]
 use gpui::{Modifiers, TestAppContext, VisualTestContext};
 
 use super::*;
@@ -50,13 +44,12 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
                 state.workspace_scope = Some(WorkspaceScope::Local);
                 state.local_device_id = Some("local".into());
                 state.no_project = true;
-                state.chats = ["older", "newer"]
+                state.chats = [("older", 10), ("newer", 9)]
                     .into_iter()
-                    .enumerate()
-                    .map(|(ix, id)| {
+                    .map(|(id, minutes)| {
                         serde_json::from_value(serde_json::json!({
                             "id": id, "title": id, "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                            "createdAt": minutes_ago(minutes),
                         }))
                         .unwrap()
                     })
@@ -99,7 +92,7 @@ fn double_click(cx: &mut VisualTestContext, position: Point<Pixels>) {
 }
 
 /// A rename that reached `mutate` reports the missing engine on the sidebar.
-fn mutated(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+fn mutated(shell: &Entity<Shell>, cx: &VisualTestContext) -> bool {
     shell.read_with(cx, |shell, _| shell.sidebar_notice.is_some())
 }
 
@@ -176,18 +169,23 @@ fn rename(shell: &Entity<Shell>, cx: &mut VisualTestContext, chat_id: &str) {
     redraw(cx);
 }
 
-fn editing(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+fn editing(shell: &Entity<Shell>, cx: &VisualTestContext) -> Option<String> {
     shell.read_with(cx, |shell, _| shell.chat_rename.as_ref().map(|rename| rename.chat_id.clone()))
+}
+
+/// The moment `minutes` before now.
+fn minutes_ago(minutes: i64) -> DateTime<Utc> {
+    Utc::now().checked_sub_signed(chrono::Duration::minutes(minutes)).unwrap()
 }
 
 fn add_chats(shell: &Entity<Shell>, cx: &mut VisualTestContext, ids: &[&str], archived: bool) {
     shell.update(cx, |shell, cx| {
         shell.state.update(cx, |state, _| {
-            for (ix, id) in ids.iter().enumerate() {
+            for (minutes, id) in (30..).zip(ids) {
                 state.chats.push(
                     serde_json::from_value(serde_json::json!({
                         "id": id, "title": id, "deviceId": "local", "archived": archived,
-                        "createdAt": Utc::now() - chrono::Duration::minutes(30 + ix as i64),
+                        "createdAt": minutes_ago(minutes),
                     }))
                     .unwrap(),
                 );
