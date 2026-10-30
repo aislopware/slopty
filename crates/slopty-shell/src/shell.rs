@@ -79,14 +79,14 @@ use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_
 #[cfg(test)]
 mod panel_interaction_tests;
 #[cfg(test)]
-mod retention_tests; // slopty: the whole shell under retention against a frame from scratch
+mod retention_tests; // slopty: the whole shell under retention; the tests' shell window and tree
 #[cfg(test)]
 mod fuzz_tests; // slopty: seeded action sequences over the whole shell, shrunk on a failure
 pub(crate) mod project_icon;
 mod session_hover_card;
 pub(crate) mod marks; // the five states, their mark and hues, on every surface
 mod sidebar; // the sidebar column, its list, rows and the server foot
-mod sidebar_status; // slopty: status groups, reasons and the hover card
+mod sidebar_status; // slopty: the list's groups, its rows' times and the hover card's facts
 mod search_warm;
 pub(crate) mod spaces;
 mod thread_search;
@@ -1349,12 +1349,12 @@ pub struct Shell {
     /// expanded list ("Show more" reveals another page).
     pub(super) archived_open: bool,
     pub(super) archived_shown: usize,
-    // slopty: rows at rest each sidebar group shows before "Show more", by its collapse key
-    // (`sidebar_status::page_at_rest`); a group not named shows the first page.
+    // slopty: how many rows a paged sidebar group shows before "Show more", by its collapse key
+    // (`sidebar_status`); a group not named shows its first page.
     pub(super) sidebar_group_shown: std::collections::HashMap<String, usize>,
-    /// Ephemeral shut status groups, by collapse key (`status:<group>`).
+    /// Ephemeral shut sidebar groups, by collapse key (`sidebar_status`).
     pub(super) sidebar_collapsed_groups: std::collections::HashSet<String>,
-    /// In-flight disclosure tweens, shared by device groups, Pinned and Archived.
+    /// In-flight disclosure tweens of the sidebar's groups and Archived.
     pub(super) sidebar_disclosure_motion:
         std::collections::HashMap<String, SidebarDisclosureMotion>,
     /// Disclosures a reveal (an inline rename of a hidden row) just opened;
@@ -1790,11 +1790,7 @@ impl Shell {
             archived_open: true,
             archived_shown: 0,
             sidebar_group_shown: std::collections::HashMap::new(), // slopty
-            // slopty: Inactive starts shut (Amp's).
-            sidebar_collapsed_groups: std::collections::HashSet::from([format!(
-                "status:{}",
-                sidebar_status::StatusGroup::Inactive.key()
-            )]),
+            sidebar_collapsed_groups: sidebar_status::shut_at_first(), // slopty
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
@@ -11697,145 +11693,6 @@ mod settings_modal_regressions {
                 // slopty: appshots removed.
             })
             .unwrap();
-    }
-
-    /// What the window shows against the same state drawn from scratch, as the app's own check
-    /// judges a frame: the primitives only the frame shown paints, and only the scratch paints.
-    fn stale_sidebar(cx: &mut gpui::VisualTestContext) -> Option<String> {
-        cx.update(|window, cx| {
-            let mut shown = window.painted_primitives();
-            shown.sort_unstable();
-            window.refresh();
-            window.draw(cx).clear(cx);
-            let mut scratch = window.painted_primitives();
-            scratch.sort_unstable();
-            (shown != scratch).then(|| {
-                // What differs beyond the depths the differences push down.
-                let bare = |lines: &[String]| {
-                    let mut bare: Vec<String> = lines
-                        .iter()
-                        .map(|line| line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned()))
-                        .collect();
-                    bare.sort_unstable();
-                    bare
-                };
-                let (shown, scratch) = (bare(&shown), bare(&scratch));
-                let only = |a: &[String], b: &[String]| {
-                    let mut b = b.to_vec();
-                    a.iter()
-                        .filter(|line| match b.iter().position(|other| other == *line) {
-                            Some(at) => {
-                                b.remove(at);
-                                false
-                            }
-                            None => true,
-                        })
-                        .take(6)
-                        .map(|line| line.chars().take(420).collect::<String>())
-                        .collect::<Vec<_>>()
-                };
-                format!("shown only {:#?}\nscratch only {:#?}", only(&shown, &scratch), only(&scratch, &shown))
-            })
-        })
-    }
-
-    // slopty: the sidebar's rows say their times by the sidebar's clock, not the wall's, so a
-    // sidebar built again says what the one shown says; the clock ticks when a shown time next
-    // reads differently.
-    #[gpui::test]
-    fn the_sidebars_times_read_its_clock_and_tick_when_they_change(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        // A clock taken five minutes ago, a chat that moved half a minute before it.
-        let clock = Utc::now() - chrono::Duration::minutes(5);
-        let moved = clock - chrono::Duration::seconds(30);
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.splash = SplashPhase::Gone;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = vec![
-                    serde_json::from_value(serde_json::json!({
-                        "id": "a", "title": "Chat a", "deviceId": "local", "archived": false,
-                        "createdAt": moved, "lastMessageAt": moved,
-                    }))
-                    .unwrap(),
-                ];
-            });
-        });
-        cx.run_until_parked();
-        shell.update(cx, |shell, _| shell.sidebar_clock = clock);
-        cx.update(|window, cx| {
-            window.refresh();
-            window.draw(cx).clear(cx);
-        });
-        shell.read_with(cx, |shell, _| {
-            assert_eq!(shell.sidebar_time_ago(moved).as_ref(), "now", "the sidebar's clock, not 5m");
-            let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
-            assert_eq!(due, Some(moved + chrono::Duration::seconds(60)), "ticks when it reads 1m");
-        });
-    }
-
-    // slopty: the sidebar under a resting pointer draws as a frame from scratch would: on a row
-    // whose hover card comes up, and on the rows "Show more" brings under it.
-    #[gpui::test]
-    fn the_sidebar_under_a_resting_pointer_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
-        cx.update(|cx| cx.set_reduce_motion(true));
-        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
-        cx.simulate_resize(gpui::size(px(1320.0), px(1100.0)));
-        shell.update(cx, |shell, cx| {
-            shell.debug_gate = Some(GatePhase::Ready);
-            shell.splash = SplashPhase::Gone;
-            shell.state.update(cx, |state, _| {
-                state.workspace_scope = Some(WorkspaceScope::Local);
-                state.local_device_id = Some("local".into());
-                state.chats = (0..12)
-                    .map(|n| {
-                        serde_json::from_value(serde_json::json!({
-                            "id": format!("c{n}"), "title": format!("Say hello {n}"),
-                            "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::minutes(n),
-                        }))
-                        .unwrap()
-                    })
-                    .collect();
-            });
-            // The gate and splash are set behind the shell's back: it draws them on its next
-            // frame only when told.
-            cx.notify();
-        });
-        crate::motion::run_on(cx.executor());
-        let settle = |cx: &mut gpui::VisualTestContext, wait: std::time::Duration| {
-            cx.executor().advance_clock(wait);
-            cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            cx.run_until_parked();
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-        };
-        let mut stale = Vec::new();
-        settle(cx, std::time::Duration::ZERO);
-        stale.extend(stale_sidebar(cx).map(|s| format!("at rest: {s}")));
-        let row = cx.debug_bounds("chat-c0").expect("a sidebar row");
-        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-        settle(cx, std::time::Duration::from_millis(50));
-        stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
-        settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
-        stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
-        let more = cx.debug_bounds("sidebar-group-more-status:status:done");
-        if let Some(more) = more {
-            cx.simulate_click(more.center(), gpui::Modifiers::default());
-            settle(cx, std::time::Duration::from_millis(50));
-            stale.extend(stale_sidebar(cx).map(|s| format!("after Show more: {s}")));
-            settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
-            stale.extend(stale_sidebar(cx).map(|s| format!("a row under it: {s}")));
-        } else {
-            stale.push("no Show more drawn".to_owned());
-        }
-        assert!(stale.is_empty(), "{}", stale.join("\n\n"));
     }
 
     // slopty: voice removed.

@@ -5,8 +5,9 @@
 //! Compact rows drop all of that, so the card is where it lives on.
 //!
 //! slopty: it also says which machine (project @ machine), the agent and model, how long the
-//! chat has stood as it is, and how many subagents it has running (`sidebar_status::chat_card`);
-//! a chat with no project shows its folder. A screen reader reads it as a tooltip.
+//! chat has stood as it is, what it needs of the person in its agent's words, and how many
+//! subagents it has running (`sidebar_status::chat_card`); a chat with no project shows its
+//! folder. A screen reader reads it as a tooltip.
 //!
 //! The card waits out a short dwell so sweeping the pointer down the list
 //! stays quiet. Once one has shown, the card is warm: the next row's card
@@ -366,13 +367,63 @@ impl Shell {
             .children(pull_request)
             .children(agent)
             .children(subagents);
+        // slopty: what the agent wants of the person, in its records' words, beside the glyph its
+        // row wears for it (`marks`): the row has room for the glyph alone.
+        let need = facts.need.clone().map(|need| {
+            let words = need.words.clone();
+            let mark = super::marks::Mark::NeedsYou(need);
+            div()
+                .debug_selector({
+                    let chat_id = chat_id.to_owned();
+                    move || format!("session-hover-card-need-{chat_id}")
+                })
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(16.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .children(super::marks::mark_element(
+                            SharedString::from(format!("session-hover-card-mark-{chat_id}")),
+                            format!("session-hover-card-mark-{chat_id}"),
+                            &mark,
+                            crate::loaders::status_mark::MARK_SMALL,
+                            popover::surface_bg(&theme),
+                        )),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .line_height(px(16.0))
+                        .text_color(theme.text)
+                        .line_clamp(3)
+                        .child(words),
+                )
+        });
         // slopty: what a screen reader says of the card, a line per fact.
-        let spoken = [&facts.status, &facts.place, &facts.folder, &branch, &facts.agent, &facts.subagents]
-            .into_iter()
-            .flatten()
-            .map(SharedString::as_ref)
-            .collect::<Vec<&str>>()
-            .join("\n");
+        let need_words = facts.need.as_ref().map(|need| need.words.clone());
+        let spoken = [
+            &facts.status,
+            &need_words,
+            &facts.place,
+            &facts.folder,
+            &branch,
+            &facts.agent,
+            &facts.subagents,
+        ]
+        .into_iter()
+        .flatten()
+        .map(SharedString::as_ref)
+        .collect::<Vec<&str>>()
+        .join("\n");
 
         let card = div()
             .id(SharedString::from(format!("session-hover-card-body-{chat_id}")))
@@ -391,6 +442,7 @@ impl Shell {
             .bg(popover::surface_bg(&theme))
             .when(!theme.is_frost(), |card| card.shadow_lg())
             .child(header)
+            .children(need)
             .child(location);
         let card = div()
             .debug_selector({

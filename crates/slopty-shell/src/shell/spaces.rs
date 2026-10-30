@@ -10,7 +10,7 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
-use super::sidebar::sidebar_row_height;
+use super::sidebar::SIDEBAR_ROW_HEIGHT;
 use crate::pickers::{
     breadcrumbs, browser_rows, completion_prefix_len, escape_typed_path, folder_path_key,
     is_windows_path, parent_path, resolve_typed_path, same_folder_path, split_typed_leaf,
@@ -205,8 +205,6 @@ struct ActiveChatRow {
     status: ChatIndicator,
     chat: slopty_view_proto::Chat,
     group: Option<(String, String)>,
-    // slopty: the row says why it waits (`sidebar_status::reason`), which may take a line.
-    reason: bool,
 }
 
 // slopty: rows keep the order their sessions started in, newest first, so nothing moves on its
@@ -1900,8 +1898,7 @@ impl Shell {
         }
     }
 
-    /// An active session's row: its status group (Needs you, Working, Done) and whether it
-    /// says why it waits.
+    /// An active session's row and its status group (Needs you, Working, Done).
     fn sidebar_chat_data(
         &self,
         status: ChatIndicator,
@@ -1912,13 +1909,10 @@ impl Shell {
         let session = state.session_for(&chat.id);
         let group = super::sidebar_status::StatusGroup::of(status, &chat, session, now);
         let group = Some((group.key().to_owned(), group.label().to_owned()));
-        // slopty: as the row decides it (`Shell::render_chat_row`).
-        let reason = super::sidebar_status::reason(status, session, now).is_some();
         ActiveChatRow {
             status,
             chat: chat.clone(),
             group,
-            reason,
         }
     }
 
@@ -1947,7 +1941,7 @@ impl Shell {
         let Some(at) = self.sidebar_clock_next.take() else {
             return;
         };
-        // At least once a minute, as the shell's clock wakes: groups and reasons move with it.
+        // At least once a minute, as the shell's clock wakes: groups and times move with it.
         let at = at.min(crate::clock::utc(cx) + chrono::Duration::minutes(1));
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
@@ -2069,7 +2063,6 @@ impl Shell {
                     status,
                     chat,
                     group: _,
-                    reason,
                 } = row;
                 // slopty: how long the row has stood as it is (`sidebar_status::row_since`).
                 let time_ago = {
@@ -2083,7 +2076,7 @@ impl Shell {
                 };
                 let is_selected = selected.as_deref() == Some(chat.id.as_str());
                 let harness = chat.config.as_ref().map(|c| c.harness);
-                let height = sidebar_row_height(reason);
+                let height = SIDEBAR_ROW_HEIGHT;
                 // Only rows a jump slot can reach wear a chip; row 10 onward
                 // keeps its time-ago.
                 let jump_slot = visible_slots.get(&chat.id).copied();
@@ -2258,9 +2251,9 @@ impl Shell {
         let visible_count = total.min(shown);
         let has_more = total > shown;
         // "Show more" matches the row slot.
-        let more_height = sidebar_row_height(false);
+        let more_height = SIDEBAR_ROW_HEIGHT;
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-            + visible_count as f32 * sidebar_row_height(false)
+            + visible_count as f32 * SIDEBAR_ROW_HEIGHT
             + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
             + if has_more {
                 more_height + SIDEBAR_LIST_GAP

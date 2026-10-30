@@ -5,8 +5,11 @@
 //!
 //! - **at work**: a blue spinner. The agent works, or waits on work of its own (a background
 //!   command, a subagent it left running), which needs nothing from the person;
-//! - **needs you**: amber, with the need in words from the agent's records ("Needs approval",
-//!   "Has a question", "Plan ready for review");
+//! - **needs you**: amber, its glyph naming the need (a raised hand for an approval, a `?` for a
+//!   question, a checklist for a plan to review, a dot for any other), and the need in words from
+//!   the agent's records ("Needs approval · run cargo test") for the hover card, a screen reader,
+//!   the inbox and a notification, never on the row (`docs/decisions/layout.md`, "A state is a
+//!   glyph");
 //! - **failed**: red, until the person looks;
 //! - **done and not yet seen**: a green ✓, and the title in the heavier weight until the person
 //!   looks;
@@ -32,8 +35,8 @@ use crate::theme::Theme;
 pub(crate) enum Mark {
     /// The agent works, or waits on its own work.
     AtWork,
-    /// It waits on the person, for what the words say.
-    NeedsYou(SharedString),
+    /// It waits on the person, for what its need says.
+    NeedsYou(Need),
     /// Its run failed, and the person has not looked since.
     Failed,
     /// It finished, and the person has not looked since.
@@ -69,7 +72,7 @@ impl Mark {
     }
 
     /// The state in a word, as a row's status and a screen reader say it; the need itself is
-    /// the [`Self::NeedsYou`] words.
+    /// the [`Need`]'s words.
     pub(crate) fn word(&self) -> Option<&'static str> {
         match self {
             Self::AtWork => Some("Working"),
@@ -84,7 +87,7 @@ impl Mark {
     pub(crate) fn drawn(&self) -> Option<MarkState> {
         match self {
             Self::AtWork => Some(MarkState::Working),
-            Self::NeedsYou(_) => Some(MarkState::Waiting),
+            Self::NeedsYou(need) => Some(need.glyph),
             Self::Failed => Some(MarkState::Failed),
             Self::DoneUnseen => Some(MarkState::Done),
             Self::AtRest => None,
@@ -103,7 +106,9 @@ impl Mark {
 pub(crate) fn hue(state: MarkState, theme: &Theme) -> Hsla {
     let tint = match state {
         MarkState::Working => at_work_blue(theme),
-        MarkState::Waiting => theme.warning,
+        MarkState::Waiting | MarkState::Question | MarkState::Approval | MarkState::Plan => {
+            theme.warning
+        }
         MarkState::Failed => theme.danger,
         MarkState::Done => theme.success,
     };
@@ -146,22 +151,39 @@ fn live(session: Option<&Session>, now: DateTime<Utc>) -> Option<&Session> {
     })
 }
 
-/// What a session waiting on the person waits for, in the agent's records' words.
-pub(crate) fn need(wait: Option<&SessionWait>) -> SharedString {
-    let Some(wait) = wait else { return "Needs input".into() };
+/// What a session waiting on the person waits for: the glyph its mark draws and the words its
+/// agent's records give.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Need {
+    /// A raised hand for an approval, a `?` for a question, a checklist for a plan to review,
+    /// and a dot for any other need (`MarkState::{Approval, Question, Plan, Waiting}`).
+    pub(crate) glyph: MarkState,
+    /// "Needs approval · run cargo test", "Has a question", "Plan ready for review".
+    pub(crate) words: SharedString,
+}
+
+/// What a session waiting on the person waits for, from the agent's records. A wait's kind is
+/// an open word: the three glyphs name the needs every agent has, and any other kind draws the
+/// dot with its summary for words.
+pub(crate) fn need(wait: Option<&SessionWait>) -> Need {
+    let other = |words: SharedString| Need { glyph: MarkState::Waiting, words };
+    let Some(wait) = wait else { return other("Needs input".into()) };
     let summary = wait
         .summary
         .as_deref()
         .map(crate::transcript::single_line)
         .filter(|summary| !summary.trim().is_empty());
     match wait.kind.as_str() {
-        SessionWait::QUESTION => "Has a question".into(),
-        SessionWait::PLAN => "Plan ready for review".into(),
-        SessionWait::APPROVAL => match summary {
-            Some(summary) => format!("Needs approval \u{b7} {summary}").into(),
-            None => "Needs approval".into(),
+        SessionWait::QUESTION => Need { glyph: MarkState::Question, words: "Has a question".into() },
+        SessionWait::PLAN => Need { glyph: MarkState::Plan, words: "Plan ready for review".into() },
+        SessionWait::APPROVAL => Need {
+            glyph: MarkState::Approval,
+            words: match summary {
+                Some(summary) => format!("Needs approval \u{b7} {summary}").into(),
+                None => "Needs approval".into(),
+            },
         },
-        _ => summary.map_or_else(|| "Needs input".into(), SharedString::from),
+        _ => other(summary.map_or_else(|| "Needs input".into(), SharedString::from)),
     }
 }
 
@@ -204,20 +226,29 @@ mod tests {
         let now = Utc::now();
         let mark = |status, session: Option<&Session>| Mark::of(status, session, now);
         assert_eq!(mark(ChatIndicator::Working, None), Mark::AtWork);
+        // The need's glyph is its kind's, a dot for a kind no glyph names; its words the records'.
         let waits = [
-            ((SessionWait::QUESTION, None), "Has a question"),
-            ((SessionWait::APPROVAL, Some("run cargo test")), "Needs approval \u{b7} run cargo test"),
-            ((SessionWait::APPROVAL, Some("  ")), "Needs approval"),
-            ((SessionWait::PLAN, None), "Plan ready for review"),
-            (("sign-in", Some("Log in to GitHub")), "Log in to GitHub"),
+            ((SessionWait::QUESTION, None), MarkState::Question, "Has a question"),
+            (
+                (SessionWait::APPROVAL, Some("run cargo test")),
+                MarkState::Approval,
+                "Needs approval \u{b7} run cargo test",
+            ),
+            ((SessionWait::APPROVAL, Some("  ")), MarkState::Approval, "Needs approval"),
+            ((SessionWait::PLAN, None), MarkState::Plan, "Plan ready for review"),
+            (("sign-in", Some("Log in to GitHub")), MarkState::Waiting, "Log in to GitHub"),
+            (("sign-in", None), MarkState::Waiting, "Needs input"),
         ];
-        for (wait, words) in waits {
+        for (wait, glyph, words) in waits {
             let asking = session(SessionStatus::AwaitingInput, Some(wait), now);
             let need = mark(ChatIndicator::AwaitingInput, Some(&asking));
-            assert_eq!(need, Mark::NeedsYou(words.into()));
-            assert_eq!(need.word(), Some("Needs you"));
+            assert_eq!(need, Mark::NeedsYou(Need { glyph, words: words.into() }));
+            assert_eq!((need.word(), need.drawn()), (Some("Needs you"), Some(glyph)));
         }
-        assert_eq!(mark(ChatIndicator::AwaitingInput, None), Mark::NeedsYou("Needs input".into()));
+        assert_eq!(
+            mark(ChatIndicator::AwaitingInput, None),
+            Mark::NeedsYou(Need { glyph: MarkState::Waiting, words: "Needs input".into() })
+        );
         assert_eq!(mark(ChatIndicator::Errored, None), Mark::Failed);
         assert_eq!(mark(ChatIndicator::Completed, None), Mark::DoneUnseen);
         assert_eq!(mark(ChatIndicator::Idle, None), Mark::AtRest);
@@ -251,10 +282,14 @@ mod tests {
     #[test]
     fn one_hue_per_state() {
         for mut theme in [Theme::dark(), Theme::light()] {
-            let hues: Vec<Hsla> = [Mark::AtWork, Mark::NeedsYou("x".into()), Mark::Failed, Mark::DoneUnseen]
+            let hues: Vec<Hsla> = [Mark::AtWork, Mark::NeedsYou(need(None)), Mark::Failed, Mark::DoneUnseen]
                 .iter()
                 .map(|mark| mark.hue(&theme).unwrap())
                 .collect();
+            // Every need's glyph is needs you's one amber.
+            for glyph in [MarkState::Question, MarkState::Approval, MarkState::Plan] {
+                assert_eq!(hue(glyph, &theme), hues[1], "{glyph:?}");
+            }
             for (i, a) in hues.iter().enumerate() {
                 assert!(a.s > 0.3, "{a:?} is a hue, never a grey");
                 for b in &hues[i + 1..] {

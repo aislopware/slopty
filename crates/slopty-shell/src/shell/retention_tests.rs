@@ -2,9 +2,14 @@
 //! slopty: the whole shell drawn under gpui-fast's view retention against the same state drawn
 //! from scratch, through what the self-test's `dump` judges (`slopty_kit::retained::stale`): ⌘1
 //! opening a chat whose turn runs, and that turn's spinner going on. GPUI's retained check runs
-//! on every frame of them too (`Window::set_check_retained`).
+//! on every frame of them too (`Window::set_check_retained`). It also holds the shell window, the
+//! fixtures and the reading of the accessibility tree that the chrome's and the sidebar's tests
+//! share.
+use std::collections::HashMap;
+
 use super::*;
 use chrono::TimeDelta;
+use gpui::accesskit::{NodeId, Role};
 use gpui::{TestAppContext, VisualTestContext};
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry};
 use slopty_view_proto::{Session, SessionStatus};
@@ -234,6 +239,80 @@ pub(super) fn launch(cx: &mut TestAppContext, screen: Screen) -> (Entity<Shell>,
     cx.simulate_resize(gpui::size(px(screen.size.0), px(screen.size.1)));
     cx.run_until_parked();
     (shell, cx)
+}
+
+/// A node of the last frame's accessibility tree.
+#[derive(Debug, Clone)]
+pub(super) struct Node {
+    pub role: Role,
+    pub label: String,
+    pub expanded: Option<bool>,
+    pub disabled: bool,
+    pub bounds: gpui::Bounds<Pixels>,
+}
+
+pub(super) fn tree(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.set_a11y_active(true);
+        window.refresh();
+        window.draw(cx).clear(cx);
+        let Some(update) = window.a11y_tree() else { return HashMap::new() };
+        let scale = f64::from(window.scale_factor());
+        update
+            .nodes
+            .iter()
+            .map(|(id, node)| {
+                let r = node.bounds().unwrap_or_default();
+                let at = |v: f64| px((v / scale) as f32);
+                (
+                    *id,
+                    Node {
+                        role: node.role(),
+                        label: node.label().unwrap_or_default().to_owned(),
+                        expanded: node.is_expanded(),
+                        disabled: node.is_disabled(),
+                        bounds: gpui::Bounds::from_corners(
+                            gpui::point(at(r.x0), at(r.y0)),
+                            gpui::point(at(r.x1), at(r.y1)),
+                        ),
+                    },
+                )
+            })
+            .collect()
+    })
+}
+
+pub(super) fn find(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Option<Node> {
+    nodes.values().find(|node| node.role == role && node.label == label).cloned()
+}
+
+pub(super) fn find_starting(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Option<Node> {
+    nodes.values().find(|node| node.role == role && node.label.starts_with(label)).cloned()
+}
+
+pub(super) fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+}
+
+/// A project on the local device.
+pub(super) fn space(id: &str) -> slopty_view_proto::Space {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "deviceId": "local", "path": format!("/work/{id}"), "createdAt": Utc::now(),
+    }))
+    .unwrap()
+}
+
+/// The local device, as the server lists it.
+pub(super) fn device() -> slopty_view_proto::Device {
+    serde_json::from_value(serde_json::json!({
+        "id": "local", "name": "Studio", "platform": "macos", "createdAt": Utc::now(),
+    }))
+    .unwrap()
 }
 
 /// Frames delivered `dt` apart, as the display asks for them, until none is asked for or `cap`

@@ -1996,7 +1996,7 @@ mod tests {
     }
 
     // slopty: a row's status says what it asks of the person: "Needs you" for a chat waiting on
-    // them; an agent at rest waiting on its own command is at work, its reason line saying on
+    // them; an agent at rest waiting on its own command is at work, its hover card saying on
     // what (`marks`).
     #[gpui::test]
     fn a_rows_status_says_whom_it_waits_on(cx: &mut gpui::TestAppContext) {
@@ -2030,7 +2030,6 @@ mod tests {
             .collect();
         assert!(statuses.contains(&"Needs you"), "{statuses:?}");
         assert!(statuses.contains(&"Working"), "{statuses:?}");
-        assert!(read.iter().any(|(role, label)| *role == gpui::Role::Label && label == "Background work"), "{read:?}");
         assert!(!statuses.iter().any(|label| *label == "Input" || *label == "Waiting"), "{statuses:?}");
     }
 

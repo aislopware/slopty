@@ -1,177 +1,14 @@
 // slopty: Slopty's own tests (not in zeron).
-//! slopty: the app's chrome as a person and assistive tech meet it: the sidebar's headers, rows
-//! and filter, the palettes, the chat menu and the empty states. Each test draws the whole shell
-//! in a headless window (`retention_tests::launch`) and judges by its accessibility tree and its
-//! laid-out bounds.
+//! slopty: the app's chrome as a person and assistive tech meet it: the palettes, the chat menu
+//! and the empty states (the sidebar's own are `sidebar`'s). Each test draws the whole shell in a
+//! headless window (`retention_tests::launch`) and judges by its accessibility tree
+//! (`retention_tests::tree`) and its laid-out bounds.
 
-use std::collections::HashMap;
-
-use gpui::accesskit::{NodeId, Role};
+use gpui::accesskit::Role;
 use gpui::{TestAppContext, VisualTestContext};
 
-use super::retention_tests::{DESKTOP, launch, session_row};
+use super::retention_tests::{DESKTOP, device, draw, find, launch, space, tree};
 use super::*;
-
-/// A node of the last frame's accessibility tree.
-#[derive(Debug, Clone)]
-struct Node {
-    role: Role,
-    label: String,
-    expanded: Option<bool>,
-    disabled: bool,
-    bounds: gpui::Bounds<Pixels>,
-}
-
-fn tree(cx: &mut VisualTestContext) -> HashMap<NodeId, Node> {
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        window.set_a11y_active(true);
-        window.refresh();
-        window.draw(cx).clear(cx);
-        let Some(update) = window.a11y_tree() else { return HashMap::new() };
-        let scale = f64::from(window.scale_factor());
-        update
-            .nodes
-            .iter()
-            .map(|(id, node)| {
-                let r = node.bounds().unwrap_or_default();
-                let at = |v: f64| px((v / scale) as f32);
-                (
-                    *id,
-                    Node {
-                        role: node.role(),
-                        label: node.label().unwrap_or_default().to_owned(),
-                        expanded: node.is_expanded(),
-                        disabled: node.is_disabled(),
-                        bounds: gpui::Bounds::from_corners(
-                            gpui::point(at(r.x0), at(r.y0)),
-                            gpui::point(at(r.x1), at(r.y1)),
-                        ),
-                    },
-                )
-            })
-            .collect()
-    })
-}
-
-fn find(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Option<Node> {
-    nodes.values().find(|node| node.role == role && node.label == label).cloned()
-}
-
-fn find_starting(nodes: &HashMap<NodeId, Node>, role: Role, label: &str) -> Option<Node> {
-    nodes.values().find(|node| node.role == role && node.label.starts_with(label)).cloned()
-}
-
-fn draw(cx: &mut VisualTestContext) {
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        window.refresh();
-        window.draw(cx).clear(cx);
-    });
-}
-
-/// A project on the local device.
-fn space(id: &str) -> slopty_view_proto::Space {
-    serde_json::from_value(serde_json::json!({
-        "id": id, "deviceId": "local", "path": format!("/work/{id}"), "createdAt": Utc::now(),
-    }))
-    .unwrap()
-}
-
-/// The local device, as the server lists it.
-fn device() -> slopty_view_proto::Device {
-    serde_json::from_value(serde_json::json!({
-        "id": "local", "name": "Studio", "platform": "macos", "createdAt": Utc::now(),
-    }))
-    .unwrap()
-}
-
-/// A sidebar group's header is a button a screen reader names by its group and its count and
-/// hears open or shut, and a press folds it.
-#[gpui::test]
-fn a_sidebar_header_is_a_named_button_that_says_it_is_open(cx: &mut TestAppContext) {
-    let (_shell, cx) = launch(cx, DESKTOP);
-    let nodes = tree(cx);
-    let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
-    assert!(working.label["Working, ".len()..].parse::<usize>().is_ok(), "its count: {working:?}");
-    assert_eq!(working.expanded, Some(true), "open: {working:?}");
-    cx.simulate_click(working.bounds.center(), gpui::Modifiers::default());
-    let nodes = tree(cx);
-    let working = find_starting(&nodes, Role::Button, "Working, ").expect("the header, still");
-    assert_eq!(working.expanded, Some(false), "a press folds it: {working:?}");
-}
-
-/// slopty: a group heading reads 12 medium in the muted ink, its count (Amp's) and an open
-/// group's chevron (Claude desktop's caret) drawn only under the pointer.
-#[gpui::test]
-fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
-    let (_shell, cx) = launch(cx, DESKTOP);
-    let nodes = tree(cx);
-    let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
-    let key = "status:status:working";
-    let count = |cx: &mut VisualTestContext| {
-        draw(cx);
-        cx.debug_bounds("sidebar-header-count-status:status:working").expect("the count holds its place")
-    };
-    let resting = count(cx);
-    let header_key = format!("sidebar-header-{key}");
-    let rest = cx.update(|_, cx| {
-        let theme = Theme::of(cx);
-        crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
-    });
-    assert_eq!(rest.a, 0.0, "unseen at rest");
-    let chevron = |cx: &mut VisualTestContext| cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key));
-    assert_eq!(chevron(cx), 0.0, "an open group's chevron rests unseen with it");
-    // Settled at once, so the frame read is the faded-in one.
-    cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
-    cx.simulate_mouse_move(working.bounds.center(), None, gpui::Modifiers::default());
-    let hovered = count(cx);
-    assert_eq!(hovered, resting, "the count fades in where it stood: nothing moves");
-    let shown = cx.update(|_, cx| {
-        let theme = Theme::of(cx);
-        crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
-    });
-    assert!(shown.a > 0.9, "shown under the pointer: {shown:?}");
-    assert!(chevron(cx) > 0.9, "and its chevron");
-}
-
-/// slopty: a finished chat untouched for 72 hours folds into Inactive, the last group and shut
-/// at first (Amp's); with none in it, it says so.
-#[gpui::test]
-fn a_chat_untouched_for_three_days_folds_into_inactive(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, DESKTOP);
-    let nodes = tree(cx);
-    let inactive = find(&nodes, Role::Button, "Inactive, 0").expect("Inactive stands, empty");
-    let working = find_starting(&nodes, Role::Button, "Working, ").expect("Working");
-    assert!(inactive.bounds.top() > working.bounds.top(), "last");
-    assert_eq!(inactive.expanded, Some(false), "shut at first");
-    cx.simulate_click(inactive.bounds.center(), gpui::Modifiers::default());
-    draw(cx);
-    assert!(
-        cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_some(),
-        "opened, it says it holds none"
-    );
-    assert!(find(&tree(cx), Role::Status, super::sidebar_status::NO_INACTIVE).is_some());
-
-    // The finished chat goes untouched for three days: it leaves Done for Inactive.
-    shell.update(cx, |shell, cx| {
-        let now = Utc::now();
-        shell.state.update(cx, |state, _| {
-            let chat = state.chats.iter_mut().find(|chat| chat.id == "b").unwrap();
-            chat.created_at = now - chrono::TimeDelta::hours(80);
-            chat.last_message_at = Some(now - chrono::TimeDelta::hours(73));
-        });
-        shell.sidebar_clock = now;
-        cx.notify();
-    });
-    let nodes = tree(cx);
-    assert!(find(&nodes, Role::Button, "Inactive, 1").is_some(), "it holds the chat");
-    assert!(find_starting(&nodes, Role::Button, "Done, ").is_none(), "Done holds none now");
-    assert!(cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_none());
-    let row = cx.debug_bounds("chat-b").expect("its row, in the open group");
-    let header = find(&nodes, Role::Button, "Inactive, 1").unwrap();
-    assert!(row.top() > header.bounds.top(), "under its header");
-}
 
 /// slopty: a title the agent gives a chat rises in over the old on its sidebar row and in the
 /// titlebar (Amp's), on the house's roll; under Reduce Motion it is simply there.
@@ -205,38 +42,6 @@ fn a_chat_title_the_agent_gives_rolls_in(cx: &mut TestAppContext) {
     assert!(!rolls("titlebar-title-b", "Parse the lexer", cx));
 }
 
-/// A row at rest wears no mark: only a state worth a glance does (one that waits on the person),
-/// while its slot keeps the titles on one edge.
-#[gpui::test]
-fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, DESKTOP);
-    shell.update(cx, |shell, cx| {
-        let now = Utc::now();
-        shell.state.update(cx, |state, _| {
-            state.apply_sessions(vec![
-                session_row("a", slopty_view_proto::SessionStatus::AwaitingInput, now),
-                session_row("b", slopty_view_proto::SessionStatus::Idle, now),
-            ]);
-        });
-    });
-    draw(cx);
-    assert!(cx.debug_bounds("chat-mark-a").is_some(), "a row that needs you has its mark");
-    assert!(cx.debug_bounds("chat-mark-b").is_none(), "a row at rest has none");
-    shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, _| {
-            state.apply_sessions(vec![
-                session_row("a", slopty_view_proto::SessionStatus::Working, Utc::now()),
-                session_row("b", slopty_view_proto::SessionStatus::Idle, Utc::now()),
-            ]);
-        });
-    });
-    draw(cx);
-    assert!(cx.debug_bounds("chat-mark-a").is_some(), "the same mark, now working");
-    let (a, b) = (cx.debug_bounds("chat-status-a").unwrap(), cx.debug_bounds("chat-status-b").unwrap());
-    assert_eq!(a.left(), b.left(), "the slot stays");
-    assert_eq!(a.size, b.size, "the slot stays");
-}
-
 /// A selected row under the pointer goes a step past its selection, never back toward the
 /// plain hover, in both appearances.
 #[test]
@@ -248,57 +53,6 @@ fn a_selected_row_under_the_pointer_goes_past_its_selection() {
         assert!(hovered.a > selected.a, "darker than selected: {selected:?} {hovered:?}");
         assert_eq!((hovered.h, hovered.s, hovered.l), (selected.h, selected.s, selected.l), "the same ink");
     }
-}
-
-/// The sidebar's list is one keyboard stop, at the open chat's row; Up and Down walk the rows
-/// in the order they draw, and Enter opens the one with the keyboard.
-#[gpui::test]
-fn the_sidebar_list_is_one_stop_walked_with_up_and_down(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, DESKTOP);
-    shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
-    draw(cx);
-    let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
-    assert_eq!(order, ["a", "b"], "the rows as they draw");
-    shell.read_with(cx, |shell, _| {
-        assert!(shell.sidebar_keys.stops_at("a"), "Tab reaches the open chat's row");
-        assert!(!shell.sidebar_keys.stops_at("b"), "and only it");
-    });
-    let (a, b) = shell.update(cx, |shell, cx| (shell.sidebar_keys.focus("a", cx), shell.sidebar_keys.focus("b", cx)));
-    cx.update(|window, cx| window.focus(&a, cx));
-    draw(cx);
-    cx.simulate_keystrokes("down");
-    draw(cx);
-    cx.update(|window, _| assert!(b.is_focused(window), "Down moves to the row below"));
-    cx.simulate_keystrokes("up");
-    draw(cx);
-    cx.update(|window, _| assert!(a.is_focused(window), "Up moves back"));
-    cx.simulate_keystrokes("down");
-    draw(cx);
-    // A key press clicks as it comes up.
-    cx.simulate_keystrokes("enter");
-    cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
-    draw(cx);
-    assert_eq!(
-        shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).as_deref(),
-        Some("b"),
-        "Enter opens it"
-    );
-}
-
-/// The project filter says it opens a menu, what it filters to and whether the menu is open.
-#[gpui::test]
-fn the_project_filter_is_a_named_menu_button(cx: &mut TestAppContext) {
-    let (shell, cx) = launch(cx, DESKTOP);
-    shell.update(cx, |shell, cx| {
-        shell.state.update(cx, |state, _| state.spaces = vec![space("app")]);
-    });
-    let nodes = tree(cx);
-    let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
-    assert_eq!(filter.expanded, Some(false), "shut: {filter:?}");
-    cx.simulate_click(filter.bounds.center(), gpui::Modifiers::default());
-    let nodes = tree(cx);
-    let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
-    assert_eq!(filter.expanded, Some(true), "open: {filter:?}");
 }
 
 /// Before any project, the sidebar says so and offers no key that cannot make a chat, and the

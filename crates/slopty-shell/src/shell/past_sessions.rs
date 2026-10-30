@@ -75,7 +75,7 @@ fn header_height() -> f32 {
 }
 const LINE_HEIGHT: f32 = 28.0;
 /// A session row's height: one line, or two with its branch.
-// slopty: a chat row's (`sidebar_row_height`'s compact row), so History reads as the list's own.
+// slopty: a chat row's (`SIDEBAR_ROW_HEIGHT`), so History reads as the list's own.
 const ROW_HEIGHT: f32 = 29.0;
 const ROW_BRANCH_HEIGHT: f32 = 45.0;
 /// The space between History's rows, as the sidebar's list keeps.
@@ -1490,7 +1490,7 @@ mod tests {
             (inset - (Theme::SPACE_SM + ROW_SLOT + ROW_SLOT_GAP)).abs() < 0.5,
             "the words start where a chat row's do: {inset}"
         );
-        assert_eq!(f32::from(row.size.height), super::super::sidebar::sidebar_row_height(false));
+        assert_eq!(f32::from(row.size.height), super::super::sidebar::SIDEBAR_ROW_HEIGHT);
     }
 
     // slopty: History's times read the sidebar's clock, taken as History opens, and the clock

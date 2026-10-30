@@ -82,12 +82,9 @@ fn chat_row_height(shows_branch: bool, shows_pull_request: bool) -> f32 {
         47.0 + metadata_height
     }
 }
-// slopty: one sidebar row (Amp's prune of the view toggles): the status slot, the agent's mark,
-// the title and its trailing time on one 29 line, and a waiting row's reason on a line under it,
-// 14 tall, 2 apart.
-pub(super) fn sidebar_row_height(reason: bool) -> f32 {
-    29.0 + if reason { 16.0 } else { 0.0 }
-}
+// slopty: one sidebar row of one line (Amp's prune of the view toggles; `docs/decisions/
+// layout.md`, "A state is a glyph"): the status slot, the title and its trailing time, 29 tall.
+pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 29.0;
 
 pub(super) const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
@@ -333,7 +330,7 @@ impl Shell {
             .iter()
             .find(|chat| chat.id == id)
             .map(|chat| chat.device_id.clone());
-        // slopty: the sidebar draws one row (`sidebar_row_height`); the palette's copy spells out
+        // slopty: the sidebar draws one row (`SIDEBAR_ROW_HEIGHT`); the palette's copy spells out
         // where the chat runs, its branch and its pull request.
         let compact = search_query.is_none();
         let pr_surface = if search_query.is_some() {
@@ -369,9 +366,9 @@ impl Shell {
         let corner_hovered = self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let content_id = id.clone();
-        // slopty: the sidebar's rows read the sidebar's clock, as its groups and row heights do
-        // (`spaces::Shell::sidebar_chat_data`), so a row never draws a reason line its slot was
-        // not measured for; the palette's copy reads the shell's.
+        // slopty: the sidebar's rows read the sidebar's clock, as its groups do
+        // (`spaces::Shell::sidebar_chat_data`), so a row never draws a state its group was not
+        // sorted for; the palette's copy reads the shell's.
         let now = if search_query.is_none() { self.sidebar_clock } else { crate::clock::utc(cx) };
         // slopty: the row stands in one of the five states (`marks`): its word, its hue and its
         // mark, one mark that morphs between them (`loaders::status_mark`), the tick cut through
@@ -382,12 +379,12 @@ impl Shell {
         let status_label = mark.word();
         let status_color = mark.hue(theme).unwrap_or(theme.text_muted);
         let shows_metadata = branch.is_some() || change_request.is_some();
-        // slopty: why it stands as it does (`sidebar_status`): what a waiting agent waits on, or
-        // the work of its own it waits on.
-        let reason = (!archived && search_query.is_none())
-            .then(|| sidebar_status::reason(status, self.state.read(cx).session_for(&id), now))
-            .flatten()
-            .map(SharedString::from);
+        // slopty: a need's glyph says which need; its words are the hover card's and a screen
+        // reader's, never a line of the row (`docs/decisions/layout.md`, "A state is a glyph").
+        let need = match &mark {
+            super::marks::Mark::NeedsYou(need) => Some(need.words.clone()),
+            _ => None,
+        };
         let unread = mark.heavy() && !archived;
         let mark_ground = if selected {
             crate::theme::flatten(crate::theme::glass_selected_bg(), theme.bg)
@@ -453,6 +450,7 @@ impl Shell {
                 // slopty: a node needs a role to be one of the tree a screen reader reads; an idle
                 // row has nothing to say.
                 .when_some(status_label, |el, label| el.role(gpui::Role::Status).aria_label(label))
+                .when_some(need.clone(), |el, need| el.aria_description(need))
                 .child(glyph)
                 .into_any_element()
         });
@@ -607,7 +605,7 @@ impl Shell {
                 move || row_id.clone()
             })
             .h(px(if compact {
-                sidebar_row_height(reason.is_some())
+                SIDEBAR_ROW_HEIGHT
             } else {
                 chat_row_height(branch.is_some(), change_request.is_some())
             }))
@@ -803,26 +801,16 @@ impl Shell {
                         .flex_row()
                         .items_center()
                         .gap(px(Theme::SPACE_SM))
-                        // slopty: the machine's kind leads the place line, and stays when a
-                        // waiting reason takes the place's words.
+                        // slopty: the machine's kind leads the place line.
                         .children(machine.clone().map(|mark| machine_mark(mark, subline)))
                         .child(sidebar_faded_label(
                             format!("chat-device-{content_id}").into(),
                             true,
-                            // slopty: a waiting row says why in place of where; the hover card
-                            // keeps the place.
-                            match reason.clone() {
-                                Some(reason) => div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(theme.text_muted)
-                                    .child(reason),
-                                None => div()
-                                    .text_size(crate::typography::ui_rems(11.0))
-                                    .line_height(px(14.0))
-                                    .text_color(subline)
-                                    .child(popover::search_highlight(space_name, search_query, theme)),
-                            },
+                            div()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .line_height(px(14.0))
+                                .text_color(subline)
+                                .child(popover::search_highlight(space_name, search_query, theme)),
                         ))
                         .child(div().text_color(subline).children(corner.take())),
                 )
@@ -982,33 +970,6 @@ impl Shell {
                         )
                     }),
             )
-            // slopty: the reason line, where no location line carries it: under the title,
-            // past the status glyph.
-            .when_some(reason.filter(|_| compact), |row, reason| {
-                row.child(
-                    div()
-                        .id(SharedString::from(format!("{row_id}-reason")))
-                        .debug_selector({
-                            let id = id.clone();
-                            move || format!("chat-reason-{id}")
-                        })
-                        // slopty: why it waits, said to a screen reader too.
-                        .role(gpui::Role::Label)
-                        .aria_label(reason.clone())
-                        .w_full()
-                        // slopty: under the title, past the leading slot.
-                        .pl(px(SIDEBAR_LEADING_SLOT + SIDEBAR_LEADING_GAP))
-                        .child(sidebar_faded_label(
-                            format!("chat-reason-label-{content_id}").into(),
-                            true,
-                            div()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .line_height(px(14.0))
-                                .text_color(theme.text_muted)
-                                .child(reason),
-                        )),
-                )
-            })
             // Line 3 is structural, not reserved whitespace: compact states
             // omit it completely when both Branch and Pull request are hidden.
             .when(!compact && shows_metadata, |row| {
@@ -1640,6 +1601,10 @@ impl Shell {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::accesskit::Role;
+    use gpui::{TestAppContext, VisualTestContext};
+
+    use super::super::retention_tests::{DESKTOP, draw, find, find_starting, launch, session_row, space, tree};
 
     #[test]
     fn sidebar_sync_status_waits_for_grace_or_queued_changes() {
@@ -1775,4 +1740,341 @@ mod tests {
         assert_eq!(RESORT.curve, motion::EASE_RESORT);
     }
 
+    // ---- the whole sidebar drawn in a shell window ----
+
+    /// A sidebar group's header is a button a screen reader names by its group and its count and
+    /// hears open or shut, and a press folds it.
+    #[gpui::test]
+    fn a_sidebar_header_is_a_named_button_that_says_it_is_open(cx: &mut TestAppContext) {
+        let (_shell, cx) = launch(cx, DESKTOP);
+        let nodes = tree(cx);
+        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
+        assert!(working.label["Working, ".len()..].parse::<usize>().is_ok(), "its count: {working:?}");
+        assert_eq!(working.expanded, Some(true), "open: {working:?}");
+        cx.simulate_click(working.bounds.center(), gpui::Modifiers::default());
+        let nodes = tree(cx);
+        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the header, still");
+        assert_eq!(working.expanded, Some(false), "a press folds it: {working:?}");
+    }
+
+    /// slopty: a group heading reads 12 medium in the muted ink, its count (Amp's) and an open
+    /// group's chevron (Claude desktop's caret) drawn only under the pointer.
+    #[gpui::test]
+    fn a_sidebar_headers_count_shows_under_the_pointer(cx: &mut TestAppContext) {
+        let (_shell, cx) = launch(cx, DESKTOP);
+        let nodes = tree(cx);
+        let working = find_starting(&nodes, Role::Button, "Working, ").expect("the Working group's header");
+        let key = "status:status:working";
+        let count = |cx: &mut VisualTestContext| {
+            draw(cx);
+            cx.debug_bounds("sidebar-header-count-status:status:working").expect("the count holds its place")
+        };
+        let resting = count(cx);
+        let header_key = format!("sidebar-header-{key}");
+        let rest = cx.update(|_, cx| {
+            let theme = Theme::of(cx);
+            crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+        });
+        assert_eq!(rest.a, 0.0, "unseen at rest");
+        let chevron = |cx: &mut VisualTestContext| cx.update(|_, _| spaces::sidebar_hover_reveal(&header_key));
+        assert_eq!(chevron(cx), 0.0, "an open group's chevron rests unseen with it");
+        // Settled at once, so the frame read is the faded-in one.
+        cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        cx.simulate_mouse_move(working.bounds.center(), None, gpui::Modifiers::default());
+        let hovered = count(cx);
+        assert_eq!(hovered, resting, "the count fades in where it stood: nothing moves");
+        let shown = cx.update(|_, cx| {
+            let theme = Theme::of(cx);
+            crate::motion::hover_blend(&header_key, theme.text_muted.opacity(0.0), theme.text_muted)
+        });
+        assert!(shown.a > 0.9, "shown under the pointer: {shown:?}");
+        assert!(chevron(cx) > 0.9, "and its chevron");
+    }
+
+    /// slopty: a finished chat untouched for 72 hours folds into Inactive, the last group and shut
+    /// at first (Amp's); with none in it, it says so.
+    #[gpui::test]
+    fn a_chat_untouched_for_three_days_folds_into_inactive(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        let nodes = tree(cx);
+        let inactive = find(&nodes, Role::Button, "Inactive, 0").expect("Inactive stands, empty");
+        let working = find_starting(&nodes, Role::Button, "Working, ").expect("Working");
+        assert!(inactive.bounds.top() > working.bounds.top(), "last");
+        assert_eq!(inactive.expanded, Some(false), "shut at first");
+        cx.simulate_click(inactive.bounds.center(), gpui::Modifiers::default());
+        draw(cx);
+        assert!(
+            cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_some(),
+            "opened, it says it holds none"
+        );
+        assert!(find(&tree(cx), Role::Status, super::sidebar_status::NO_INACTIVE).is_some());
+
+        // The finished chat goes untouched for three days: it leaves Done for Inactive.
+        shell.update(cx, |shell, cx| {
+            let now = Utc::now();
+            shell.state.update(cx, |state, _| {
+                let chat = state.chats.iter_mut().find(|chat| chat.id == "b").unwrap();
+                chat.created_at = now - chrono::TimeDelta::hours(80);
+                chat.last_message_at = Some(now - chrono::TimeDelta::hours(73));
+            });
+            shell.sidebar_clock = now;
+            cx.notify();
+        });
+        let nodes = tree(cx);
+        assert!(find(&nodes, Role::Button, "Inactive, 1").is_some(), "it holds the chat");
+        assert!(find_starting(&nodes, Role::Button, "Done, ").is_none(), "Done holds none now");
+        assert!(cx.debug_bounds("sidebar-group-empty-status:status:inactive").is_none());
+        let row = cx.debug_bounds("chat-b").expect("its row, in the open group");
+        let header = find(&nodes, Role::Button, "Inactive, 1").unwrap();
+        assert!(row.top() > header.bounds.top(), "under its header");
+    }
+
+    /// A row at rest wears no mark: only a state worth a glance does (one that waits on the person),
+    /// while its slot keeps the titles on one edge.
+    #[gpui::test]
+    fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        shell.update(cx, |shell, cx| {
+            let now = Utc::now();
+            shell.state.update(cx, |state, _| {
+                state.apply_sessions(vec![
+                    session_row("a", slopty_view_proto::SessionStatus::AwaitingInput, now),
+                    session_row("b", slopty_view_proto::SessionStatus::Idle, now),
+                ]);
+            });
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-mark-a").is_some(), "a row that needs you has its mark");
+        assert!(cx.debug_bounds("chat-mark-b").is_none(), "a row at rest has none");
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| {
+                state.apply_sessions(vec![
+                    session_row("a", slopty_view_proto::SessionStatus::Working, Utc::now()),
+                    session_row("b", slopty_view_proto::SessionStatus::Idle, Utc::now()),
+                ]);
+            });
+        });
+        draw(cx);
+        assert!(cx.debug_bounds("chat-mark-a").is_some(), "the same mark, now working");
+        let (a, b) = (cx.debug_bounds("chat-status-a").unwrap(), cx.debug_bounds("chat-status-b").unwrap());
+        assert_eq!(a.left(), b.left(), "the slot stays");
+        assert_eq!(a.size, b.size, "the slot stays");
+    }
+
+    /// The sidebar's list is one keyboard stop, at the open chat's row; Up and Down walk the rows
+    /// in the order they draw, and Enter opens the one with the keyboard.
+    #[gpui::test]
+    fn the_sidebar_list_is_one_stop_walked_with_up_and_down(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        shell.update(cx, |shell, cx| shell.open_chat("a".into(), cx));
+        draw(cx);
+        let order = shell.update(cx, |shell, cx| shell.sidebar_visible_order(cx));
+        assert_eq!(order, ["a", "b"], "the rows as they draw");
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.sidebar_keys.stops_at("a"), "Tab reaches the open chat's row");
+            assert!(!shell.sidebar_keys.stops_at("b"), "and only it");
+        });
+        let (a, b) = shell.update(cx, |shell, cx| (shell.sidebar_keys.focus("a", cx), shell.sidebar_keys.focus("b", cx)));
+        cx.update(|window, cx| window.focus(&a, cx));
+        draw(cx);
+        cx.simulate_keystrokes("down");
+        draw(cx);
+        cx.update(|window, _| assert!(b.is_focused(window), "Down moves to the row below"));
+        cx.simulate_keystrokes("up");
+        draw(cx);
+        cx.update(|window, _| assert!(a.is_focused(window), "Up moves back"));
+        cx.simulate_keystrokes("down");
+        draw(cx);
+        // A key press clicks as it comes up.
+        cx.simulate_keystrokes("enter");
+        cx.simulate_event(gpui::KeyUpEvent { keystroke: gpui::Keystroke::parse("enter").unwrap() });
+        draw(cx);
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone()).as_deref(),
+            Some("b"),
+            "Enter opens it"
+        );
+    }
+
+    /// The project filter says it opens a menu, what it filters to and whether the menu is open.
+    #[gpui::test]
+    fn the_project_filter_is_a_named_menu_button(cx: &mut TestAppContext) {
+        let (shell, cx) = launch(cx, DESKTOP);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, _| state.spaces = vec![space("app")]);
+        });
+        let nodes = tree(cx);
+        let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
+        assert_eq!(filter.expanded, Some(false), "shut: {filter:?}");
+        cx.simulate_click(filter.bounds.center(), gpui::Modifiers::default());
+        let nodes = tree(cx);
+        let filter = find(&nodes, Role::Button, "Filter projects: All projects").expect("the filter");
+        assert_eq!(filter.expanded, Some(true), "open: {filter:?}");
+    }
+
+    fn init_settings_test(
+        saved: settings::UiSettings,
+        dir: &std::path::Path,
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            settings::init(saved, dir, cx);
+            // slopty: no History surface (ruled out).
+            gpui_base::init(cx);
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+        });
+    }
+
+    fn test_shell(dir: &std::path::Path, cx: &mut Context<Shell>) -> Shell {
+        let state = cx.new(|_| AppState::new());
+        Shell::new(
+            state,
+            EngineBootConfig {
+                data_dir: dir.into(),
+                // slopty: Slopty's server is the only backend.
+                default_harness: slopty_view_proto::HarnessId::MOCK,
+            },
+            cx,
+        )
+    }
+
+    /// What the window shows against the same state drawn from scratch, as the app's own check
+    /// judges a frame: the primitives only the frame shown paints, and only the scratch paints.
+    fn stale_sidebar(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update(|window, cx| {
+            let mut shown = window.painted_primitives();
+            shown.sort_unstable();
+            window.refresh();
+            window.draw(cx).clear(cx);
+            let mut scratch = window.painted_primitives();
+            scratch.sort_unstable();
+            (shown != scratch).then(|| {
+                // What differs beyond the depths the differences push down.
+                let bare = |lines: &[String]| {
+                    let mut bare: Vec<String> = lines
+                        .iter()
+                        .map(|line| line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned()))
+                        .collect();
+                    bare.sort_unstable();
+                    bare
+                };
+                let (shown, scratch) = (bare(&shown), bare(&scratch));
+                let only = |a: &[String], b: &[String]| {
+                    let mut b = b.to_vec();
+                    a.iter()
+                        .filter(|line| match b.iter().position(|other| other == *line) {
+                            Some(at) => {
+                                b.remove(at);
+                                false
+                            }
+                            None => true,
+                        })
+                        .take(6)
+                        .map(|line| line.chars().take(420).collect::<String>())
+                        .collect::<Vec<_>>()
+                };
+                format!("shown only {:#?}\nscratch only {:#?}", only(&shown, &scratch), only(&scratch, &shown))
+            })
+        })
+    }
+
+    // slopty: the sidebar's rows say their times by the sidebar's clock, not the wall's, so a
+    // sidebar built again says what the one shown says; the clock ticks when a shown time next
+    // reads differently.
+    #[gpui::test]
+    fn the_sidebars_times_read_its_clock_and_tick_when_they_change(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        // A clock taken five minutes ago, a chat that moved half a minute before it.
+        let clock = Utc::now() - chrono::Duration::minutes(5);
+        let moved = clock - chrono::Duration::seconds(30);
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = vec![
+                    serde_json::from_value(serde_json::json!({
+                        "id": "a", "title": "Chat a", "deviceId": "local", "archived": false,
+                        "createdAt": moved, "lastMessageAt": moved,
+                    }))
+                    .unwrap(),
+                ];
+            });
+        });
+        cx.run_until_parked();
+        shell.update(cx, |shell, _| shell.sidebar_clock = clock);
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(shell.sidebar_time_ago(moved).as_ref(), "now", "the sidebar's clock, not 5m");
+            let due = shell.sidebar_clock_tick.as_ref().map(|(due, _)| *due);
+            assert_eq!(due, Some(moved + chrono::Duration::seconds(60)), "ticks when it reads 1m");
+        });
+    }
+
+    // slopty: the sidebar under a resting pointer draws as a frame from scratch would: on a row
+    // whose hover card comes up, and on the rows "Show more" brings under it.
+    #[gpui::test]
+    fn the_sidebar_under_a_resting_pointer_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.simulate_resize(gpui::size(px(1320.0), px(1100.0)));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = (0..12)
+                    .map(|n| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": format!("c{n}"), "title": format!("Say hello {n}"),
+                            "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(n),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+            });
+            // The gate and splash are set behind the shell's back: it draws them on its next
+            // frame only when told.
+            cx.notify();
+        });
+        crate::motion::run_on(cx.executor());
+        let settle = |cx: &mut gpui::VisualTestContext, wait: std::time::Duration| {
+            cx.executor().advance_clock(wait);
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        let mut stale = Vec::new();
+        settle(cx, std::time::Duration::ZERO);
+        stale.extend(stale_sidebar(cx).map(|s| format!("at rest: {s}")));
+        let row = cx.debug_bounds("chat-c0").expect("a sidebar row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        settle(cx, std::time::Duration::from_millis(50));
+        stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
+        settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+        stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
+        let more = cx.debug_bounds("sidebar-group-more-status:status:done");
+        if let Some(more) = more {
+            cx.simulate_click(more.center(), gpui::Modifiers::default());
+            settle(cx, std::time::Duration::from_millis(50));
+            stale.extend(stale_sidebar(cx).map(|s| format!("after Show more: {s}")));
+            settle(cx, crate::settings::widgets::TOOLTIP_DELAY * 3);
+            stale.extend(stale_sidebar(cx).map(|s| format!("a row under it: {s}")));
+        } else {
+            stale.push("no Show more drawn".to_owned());
+        }
+        assert!(stale.is_empty(), "{}", stale.join("\n\n"));
+    }
 }

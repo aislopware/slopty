@@ -41,8 +41,8 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
     components inside the old right pane stay; the tab column that held them is deleted.
 - ✅ **One state vocabulary on every surface (2026-10-30).** Rex's five states, which iTerm2,
   herdr and cmux name alike (rex §4, §12.1 #4; agent-terminals §4.1; terminal-craft #1): at work
-  (a spinner, blue), needs you (amber, with the need in words: "Needs approval", "Has a
-  question", "Needs a sign-in", from the agent's records), failed (red), done and not yet seen
+  (a spinner, blue), needs you (amber, its glyph naming the need; "A state is a glyph" below),
+  failed (red), done and not yet seen
   (green ✓, title in the heavier weight until the person looks), and at rest (no mark). The same
   mark and hue sit on the sidebar row, the titlebar identity, a pane header, the picker, the
   inbox, a notification and the Dock badge. Seen is one state across the person's devices: a
@@ -158,14 +158,41 @@ behind it are in `.research/terminal-first-2026-10-30/`: `rex.md` (Superlogical 
   the view model's display status and session, one hue table that every mark
   `loaders::status_mark` draws takes (the inspector's, the subagent cards' and Add device's
   too), and the need in the words the agent's records give ("Has a question", "Plan ready for
-  review", "Needs approval · run cargo test"), which the row's reason line says as well.
+  review", "Needs approval · run cargo test"), for the tooltip, the hover card and the inbox.
   - At work is the Blue accent's own tone in each appearance, whatever the accent: an amber or
     green accent would read as needs you or done.
   - An agent at rest on its own work (a background command, a subagent it left running) is at
-    work: the row's clock glyph and its "Background work" status go, and its reason line says
+    work: the row's clock glyph and its "Background work" status go, and its hover card says
     what it waits on. The row's old dot hues go with them, so done unseen is green everywhere,
     no longer the accent's blue.
   - Tests: `shell::marks::tests::{every_status_reads_as_one_of_five_states, one_hue_per_state}`.
+
+- ✅ **A state is a glyph; its words stay off the row (2026-10-30).** The first build put the
+  need in words on a second line under the row's title ("Has a question", "Needs approval ·
+  …"), and the person found it cluttered: the references show a state as a glyph. Every
+  session list studied does:
+  - **T3 Code** draws a 9 pt dot whose hue names the state, with its label only in the tooltip
+    (`apps/web/src/components/ThreadStatusIndicators.tsx`, `ThreadStatusLabel` compact).
+  - **slop-desk** tints the row's title in the state's hue and adds a small trailing ring, with
+    no words (`Sources/SlopDeskWorkspaceModel/Reading/TabBadgeKind.swift`).
+  - **Otty** shows one glyph on a one-line row: an orange raised hand for needs you, a red
+    triangle, a green check (agent-terminals §2.13). **herdr** uses `×`, `◐`, `✓`, `○` (§2.1),
+    and **Orca** an amber `?` (§2.9).
+  - **Rex** writes the need in words only in its inbox popover, never in the list (rex §3.6).
+
+  So a row is one line, and its mark is a glyph. Colour says the state (the five states above).
+  For needs you, the glyph's shape says which need:
+  - a raised hand for an approval;
+  - a `?` for a question;
+  - a checklist for a plan to review;
+  - an amber dot for any other need the records name.
+
+  The need's words, from the agent's records, go in the row's tooltip, its hover card, the
+  inbox (two-line rows, as Rex's) and a notification, never on the row. The same glyphs sit on
+  the titlebar identity and a pane header.
+  - Tests: `loaders::status_mark::tests::{a_need_draws_its_own_glyph,
+    a_working_ring_closes_round_a_question}` and `shell::sidebar_status::tests::{
+    the_card_says_what_a_waiting_agent_waits_on, a_waiting_rows_need_is_its_status_description}`.
 
 - ✅ **The palette as built (2026-10-30)** (terminal-craft #7, rex §3.7). One list in sections,
   no tabs: with nothing typed, the recent files then the commands; typed, the commands, then

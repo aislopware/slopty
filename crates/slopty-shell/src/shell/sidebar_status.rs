@@ -6,15 +6,15 @@
 //!   their sessions started in, so nothing moves on its own while the person reads. A finished
 //!   chat nobody has touched for [`INACTIVE_AFTER_HOURS`] folds into Inactive, last and shut at
 //!   first (Amp's "Inactive last 72h"), so Done holds the work of the last days.
-//! - **Reasons.** A row that waits says why, from what the agent holds open, in the words its
-//!   mark's need says (`marks`): "Has a question", "Plan ready for review", "Needs approval ·
-//!   run cargo test"; an agent waiting on its own work says "Background work", or "1 subagent
-//!   running" for a subagent it left at work; one summarising its context says so.
+//! - **Needs.** A row that waits says so by its mark's glyph alone (`marks`; `docs/decisions/
+//!   layout.md`, "A state is a glyph"): the need's words ("Has a question", "Needs approval · run
+//!   cargo test") are its hover card's and a screen reader's, as are an agent's own work it waits
+//!   on and a context it summarises.
 //! - **Times.** A row's time says how long it has stood as it is ([`row_since`]): at work since
 //!   its turn began, waiting since it started to, at rest since its last answer.
 //! - **The hover card's facts.** zeron's session hover card (`session_hover_card`) also says
 //!   where a row runs (project @ machine), which agent and model, how long it has stood as it is,
-//!   and how many subagents it has running.
+//!   what it needs of the person, and how many subagents it has running.
 //! - **Show more.** A group shows its first [`REST_FIRST`] rows at rest, then "Show N more",
 //!   which adds [`REST_PAGE`] at a time, as desktop's groups and the Archived shelf do. A row that
 //!   needs the person or is at work always shows, and so does the open chat.
@@ -24,7 +24,7 @@ use gpui::{AnyElement, Context, IntoElement, SharedString, div, prelude::*, px};
 use slopty_view_proto::{Chat, ChatIndicator, Session, SessionStatus, SessionWait};
 
 use crate::icons::{self, icon};
-use crate::state::{AppState, SESSION_STALE_MS, format_time_ago, running_subagents};
+use crate::state::{AppState, SESSION_STALE_MS, format_time_ago};
 use crate::theme::Theme;
 
 /// An agent as the hover card names it.
@@ -196,7 +196,7 @@ pub(super) fn empty_group_row(
     open: bool,
     theme: &Theme,
 ) -> (String, f32, AnyElement) {
-    let height = super::sidebar::sidebar_row_height(false);
+    let height = super::sidebar::SIDEBAR_ROW_HEIGHT;
     let id = format!("sidebar-group-empty-{collapse_key}");
     let element = div()
         .id(SharedString::from(id.clone()))
@@ -216,6 +216,11 @@ pub(super) fn empty_group_row(
     (format!("empty:{collapse_key}"), height + super::SIDEBAR_LIST_GAP, element)
 }
 
+/// The groups the sidebar opens with shut, by their collapse keys: Inactive (Amp's).
+pub(super) fn shut_at_first() -> std::collections::HashSet<String> {
+    std::collections::HashSet::from([format!("status:{}", StatusGroup::Inactive.key())])
+}
+
 impl super::Shell {
     /// The "Show more" line under the sidebar group of `collapse_key`, when `hidden` rows wait:
     /// its key, its height with the list's gap above it, and the line, which shows another page.
@@ -230,7 +235,7 @@ impl super::Shell {
             return None;
         }
         // As the Archived shelf's: a row's height.
-        let height = super::sidebar::sidebar_row_height(false);
+        let height = super::sidebar::SIDEBAR_ROW_HEIGHT;
         let key = collapse_key.to_owned();
         let id = SharedString::from(format!("sidebar-group-more-{collapse_key}"));
         let element = show_more_row(id, hidden, height, theme)
@@ -368,30 +373,6 @@ impl super::Shell {
     }
 }
 
-/// Why a row with display status `status` stands as it does, when that is worth a line: what a
-/// waiting agent waits on, or that it summarises its context. `None` for a row whose status word
-/// says it all.
-pub(super) fn reason(status: ChatIndicator, session: Option<&Session>, now: DateTime<Utc>) -> Option<String> {
-    let session = live(session, now);
-    let wait = session.and_then(|s| s.waiting_on.as_ref());
-    match status {
-        ChatIndicator::AwaitingInput => Some(super::marks::need(wait).to_string()),
-        ChatIndicator::Working => wait
-            .filter(|wait| wait.kind == SessionWait::COMPACTING)
-            .map(|_| "Compacting its context".to_owned()),
-        ChatIndicator::Errored => None,
-        // slopty: the row's time says for how long (`row_since`), so the line says only what.
-        ChatIndicator::Completed | ChatIndicator::Idle => {
-            let session = session.filter(|_| super::marks::works_on_its_own(session, now))?;
-            Some(match (session.status, running_subagents(Some(session), now)) {
-                (SessionStatus::Waiting, _) | (_, 0) => "Background work".to_owned(),
-                (_, 1) => "1 subagent running".to_owned(),
-                (_, n) => format!("{n} subagents running"),
-            })
-        }
-    }
-}
-
 /// slopty: since when a row has stood as it is, which its time says: a turn at work since it
 /// began, an agent waiting (on the person or on its own work) since it started to, and a row at
 /// rest since its last answer. A turn's time is the agent's, never the last answer's: a chat at
@@ -426,6 +407,8 @@ pub(super) struct ChatCard {
     pub agent: Option<SharedString>,
     /// "Working for 3m", "Waiting on you since 14:02", "Done 5m ago"
     pub status: Option<SharedString>,
+    /// What it needs of the person, its glyph and its agent's words (`marks::need`).
+    pub need: Option<super::marks::Need>,
     /// "2 subagents running"
     pub subagents: Option<SharedString>,
 }
@@ -480,6 +463,10 @@ pub(super) fn chat_card(state: &AppState, chat_id: &str, now: DateTime<Utc>) -> 
         folder: folder.map(SharedString::from),
         agent: agent.map(SharedString::from),
         status: status_words(chat, status, session, now).map(SharedString::from),
+        need: match super::marks::Mark::of(status, session, now) {
+            super::marks::Mark::NeedsYou(need) => Some(need),
+            _ => None,
+        },
         subagents: (subagents > 0).then(|| {
             SharedString::from(if subagents == 1 {
                 "1 subagent running".to_owned()
@@ -515,6 +502,13 @@ fn status_words(chat: &Chat, status: ChatIndicator, session: Option<&Session>, n
     // slopty: a relative time also says when, which "2d ago" alone never does.
     let when = |words: String| format!("{words} \u{b7} {}", absolute_time(last, now));
     Some(match status {
+        ChatIndicator::Working
+            if session
+                .and_then(|s| s.waiting_on.as_ref())
+                .is_some_and(|wait| wait.kind == SessionWait::COMPACTING) =>
+        {
+            "Compacting its context".to_owned()
+        }
         ChatIndicator::Working => match since.map(ago) {
             Some(age) if age != "now" => format!("Working for {age}"),
             _ => "Working".to_owned(),
@@ -587,33 +581,42 @@ mod tests {
         Some(SessionWait { kind: kind.into(), summary: summary.map(str::to_owned) })
     }
 
-    // The reason line says what a waiting agent waits on, in the person's words.
+    // The hover card says what a waiting agent waits on, in its records' words, with the
+    // glyph its row wears for it; what an agent at work or on its own work does is its status.
     #[test]
-    fn a_waiting_row_says_why() {
+    fn the_card_says_what_a_waiting_agent_waits_on() {
+        use super::super::marks::Need;
+        use crate::loaders::status_mark::MarkState;
         let now = Utc::now();
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "a", "deviceId": "studio", "archived": false, "createdAt": now - TimeDelta::hours(1),
+        }))
+        .unwrap();
+        let mut state = AppState::new();
+        state.chats = vec![chat];
+        let card = |state: &mut AppState, session: Session| {
+            state.apply_sessions(vec![session]);
+            chat_card(state, "a", now).unwrap()
+        };
         let mut held = session("a", SessionStatus::AwaitingInput, now);
         held.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+        let need = card(&mut state, held.clone()).need;
         assert_eq!(
-            reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(),
-            Some("Needs approval \u{b7} run cargo test")
+            need,
+            Some(Need { glyph: MarkState::Approval, words: "Needs approval \u{b7} run cargo test".into() })
         );
         held.waiting_on = wait(SessionWait::QUESTION, None);
-        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Has a question"));
-        held.waiting_on = wait(SessionWait::PLAN, None);
-        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Plan ready for review"));
+        assert_eq!(card(&mut state, held.clone()).need.map(|need| need.glyph), Some(MarkState::Question));
         held.waiting_on = None;
-        assert_eq!(reason(ChatIndicator::AwaitingInput, Some(&held), now).as_deref(), Some("Needs input"));
+        assert_eq!(card(&mut state, held).need.map(|need| need.words), Some("Needs input".into()));
         let mut busy = session("a", SessionStatus::Working, now);
-        assert_eq!(reason(ChatIndicator::Working, Some(&busy), now), None, "the status word says it");
         busy.waiting_on = wait(SessionWait::COMPACTING, None);
-        assert_eq!(reason(ChatIndicator::Working, Some(&busy), now).as_deref(), Some("Compacting its context"));
-        let resting = session("a", SessionStatus::Waiting, now);
-        assert_eq!(reason(ChatIndicator::Idle, Some(&resting), now).as_deref(), Some("Background work"));
-        let done = session("a", SessionStatus::Done, now);
-        assert_eq!(reason(ChatIndicator::Completed, Some(&done), now), None);
-        let mut stale = resting.clone();
-        stale.updated_at = now - TimeDelta::minutes(2);
-        assert_eq!(reason(ChatIndicator::Idle, Some(&stale), now), None, "its machine went quiet");
+        let compacting = card(&mut state, busy);
+        assert_eq!(compacting.status.as_deref(), Some("Compacting its context"));
+        assert_eq!(compacting.need, None);
+        let resting = card(&mut state, session("a", SessionStatus::Waiting, now));
+        assert_eq!(resting.status.as_deref(), Some("Waiting on its own work for 4m"));
+        assert_eq!(resting.need, None);
     }
 
     // A row's time says how long it has stood as it is: a row at work since its turn began, not
@@ -639,9 +642,8 @@ mod tests {
         assert_eq!(row_since(ChatIndicator::Errored, &chat, None, now), now - TimeDelta::hours(16));
     }
 
-    // A subagent its agent left at work keeps the row at work on its own: in Working, saying so;
-    // a row at work or waiting on the person says what it does itself, and a machine gone quiet
-    // says nothing.
+    // A subagent its agent left at work keeps the row at work on its own, in Working; a row at
+    // work itself is at work for its own sake, and a machine gone quiet says nothing.
     #[test]
     fn a_subagent_left_running_keeps_its_row_at_work() {
         let now = Utc::now();
@@ -653,17 +655,14 @@ mod tests {
         done.running_subagents = 2;
         assert!(super::super::marks::works_on_its_own(Some(&done), now));
         assert_eq!(StatusGroup::of(ChatIndicator::Completed, &chat, Some(&done), now), StatusGroup::Working);
-        assert_eq!(reason(ChatIndicator::Completed, Some(&done), now).as_deref(), Some("2 subagents running"));
         done.running_subagents = 1;
-        assert_eq!(reason(ChatIndicator::Idle, Some(&done), now).as_deref(), Some("1 subagent running"));
+        assert_eq!(StatusGroup::of(ChatIndicator::Idle, &chat, Some(&done), now), StatusGroup::Working);
         let mut busy = session("a", SessionStatus::Working, now);
         busy.running_subagents = 1;
         assert!(!super::super::marks::works_on_its_own(Some(&busy), now), "at work itself");
-        assert_eq!(reason(ChatIndicator::Working, Some(&busy), now), None);
         let mut stale = done.clone();
         stale.updated_at = now - TimeDelta::minutes(2);
-        assert!(!super::super::marks::works_on_its_own(Some(&stale), now));
-        assert_eq!(reason(ChatIndicator::Completed, Some(&stale), now), None, "its machine went quiet");
+        assert!(!super::super::marks::works_on_its_own(Some(&stale), now), "its machine went quiet");
     }
 
     // Rows of one title say what tells them apart: the project when theirs differ, else the
@@ -879,10 +878,10 @@ mod tests {
         });
     }
 
-    // Grouped by status: Needs you over Working over Done, each waiting row with its reason, the
-    // unread result in the heavier weight; and ten republishes with fresh activity move nothing.
+    // Grouped by status: Needs you over Working over Done, each row one line whose waiting rows
+    // say why by their glyph alone; and ten republishes with fresh activity move nothing.
     #[gpui::test]
-    fn by_status_groups_say_why_and_never_reorder_on_republish(cx: &mut gpui::TestAppContext) {
+    fn by_status_groups_never_reorder_on_republish(cx: &mut gpui::TestAppContext) {
         let (shell, cx) = sidebar(cx);
         redraw(cx);
         let needs = [top(cx, "approval"), top(cx, "question")];
@@ -891,12 +890,12 @@ mod tests {
         assert!(working < finished, "Working before Done");
         // Within Needs you: the latest started first.
         assert!(needs[1] < needs[0], "question started after approval");
-        for id in ["approval", "question"] {
-            let selector: &'static str = Box::leak(format!("chat-reason-{id}").into_boxed_str());
-            assert!(cx.debug_bounds(selector).is_some(), "{id} says why");
+        // Every row one line: the words of a need are the hover card's, never a line of the row.
+        for id in ["approval", "question", "working", "finished"] {
+            let row: &'static str = Box::leak(format!("chat-{id}").into_boxed_str());
+            let height = f32::from(cx.debug_bounds(row).unwrap().size.height);
+            assert_eq!(height, super::super::sidebar::SIDEBAR_ROW_HEIGHT, "{id} is one line");
         }
-        assert!(cx.debug_bounds("chat-reason-working").is_none());
-        assert!(cx.debug_bounds("chat-reason-finished").is_none());
         let before: Vec<f32> = ["approval", "question", "working", "finished"].map(|id| top(cx, id)).into();
         for round in 0..10 {
             let now = Utc::now() + TimeDelta::seconds(round);
@@ -919,6 +918,45 @@ mod tests {
                 ["approval", "question", "working", "finished"].map(|id| top(cx, id)).into();
             assert_eq!(before, after, "republish {round} moved a row");
         }
+    }
+
+    // slopty: a screen reader hears a waiting row say "Needs you", then what it needs in its
+    // agent's words, as the status's description; no node of the row is named by those words,
+    // which stay off the row as its glyph says them (`docs/decisions/layout.md`, "A state is a
+    // glyph").
+    #[gpui::test]
+    fn a_waiting_rows_need_is_its_status_description(cx: &mut gpui::TestAppContext) {
+        let (_shell, cx) = sidebar(cx);
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.set_a11y_active(true);
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        let nodes: Vec<(gpui::Role, String, String)> = cx.update(|window, _| {
+            let tree = window.a11y_tree().expect("a tree");
+            tree.nodes
+                .iter()
+                .map(|(_, node)| {
+                    let label = node.label().unwrap_or_default().to_owned();
+                    (node.role(), label, node.description().unwrap_or_default().to_owned())
+                })
+                .collect()
+        });
+        let words = "Needs approval \u{b7} run cargo test";
+        let said = |description: &str| {
+            nodes.iter().any(|(role, label, said)| {
+                *role == gpui::Role::Status && label == "Needs you" && said == description
+            })
+        };
+        assert!(said(words), "the approval: {nodes:?}");
+        assert!(said("Has a question"), "the question: {nodes:?}");
+        assert!(
+            !nodes.iter().any(|(_, label, _)| label.starts_with("Needs approval") || label == "Has a question"),
+            "no node named by a need's words: {nodes:?}"
+        );
     }
 
     // slopty: a row draws one mark before its title (opencode's avatar slot): a result nobody
