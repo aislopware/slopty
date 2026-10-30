@@ -3047,3 +3047,20 @@ more full-window layer.
   - **The zeron adopt shows the base in a conflict** (`git merge-file --zdiff3`), so whoever
     settles it sees what each side changed. What the adopt took is in `docs/decisions/ui.md`,
     "zeron adopted to `369d428`".
+
+- ✅ **ghostty takes upstream `cf0ab14ae`, and the fork's pending wrap reads upstream's wrap
+  column** (2026-10-30, fork `c768af7d6`, libghostty-rs `efc54ea7`). Of upstream's 19 commits,
+  the ones under the watched paths are tmux control-mode work, which Slopty does not speak, and
+  `f761046d6`, upstream's fix for a pending wrap at the right margin, which met the fork's own
+  formatter fixes (aislopware/ghostty#15 and #16) in `src/terminal/formatter.zig`.
+  - **The two fixes.** The fork set a pending wrap again at the right margin from the
+    terminal's margins whenever the terminal was known, for the saved cursor too. Upstream does
+    it only when the output also restores the margins (the modes and scrolling-region extras):
+    without them the margins are not in force when the output replays, and the reprint leaves
+    the cursor a cell further on instead of before a wrap.
+  - **The merge.** It keeps the fork's helpers (`pendingWrapPin` for the cursor and the saved
+    cursor) and has them read upstream's `wrap_column`, which the terminal formatter now sets
+    whenever the margins replay, for any cursor rather than only one inside them.
+  - **Tests.** ghostty's `zig build test-lib-vt -Dtest-filter=vt`, upstream's "Terminal vt
+    cursor preserves pending wrap at the right margin" among them; `slopty-engine`, and the
+    fuzz regressions the gate replays.

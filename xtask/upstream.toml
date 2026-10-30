@@ -66,9 +66,9 @@ fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
 strategy = "merge"
-base = "df1c99c8a5ec32c73963e5dc3fad3c9df7a3d137"
-base_date = "2026-10-29"
-checked = "2026-10-29"
+base = "cf0ab14aed55315a53de668bc1bbcf4a13ce0ddd"
+base_date = "2026-10-30"
+checked = "2026-10-30"
 check_every_days = 1
 paths = [
     "src/terminal/",
