@@ -7487,7 +7487,8 @@ impl Transcript {
         .flex_row()
         .items_center()
         .gap(px(6.0))
-        .pr(px(4.0))
+        // No inset at its end: its time stands in the column of its steps' times, at the
+        // trailing edge every step row reaches ("A step's time is a lane").
         // A finger's row on a touch screen (#23).
         .h(px(tool_group_header_height()))
         .cursor_pointer()
@@ -9170,7 +9171,10 @@ fn chip_header_row(
             })
         })
         // A step that ended badly says so with its mark, and its time stands in its lane
-        // at the trailing edge (`inspector.md`, "A step row reads at a glance").
+        // at the trailing edge (`inspector.md`, "A step row reads at a glance"): the space
+        // before them grows, so sibling steps' times stand in one column whatever their
+        // results say, as a group line's do ("A step's time is a lane").
+        .when(activity, |row| row.child(div().flex_1()))
         .when(activity && step_failed(tool), |row| {
             row.child(
                 div().flex_none().child(

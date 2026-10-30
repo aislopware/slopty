@@ -292,6 +292,7 @@ impl ChipFacts {
         let tip = time.map(|time| lane_tip(time, &chrono::Local)).filter(|tip| !tip.is_empty());
         div()
             .id(SharedString::from(format!("{id}-time")))
+            .debug_selector(|| format!("{id}-time"))
             .w(px(TIME_LANE))
             .flex_none()
             .flex()

@@ -13,7 +13,7 @@ use gpui::prelude::*;
 use gpui::{Entity, IntoElement, Pixels, Point, Render, VisualTestContext, Window, div, point, px};
 use slopty_view_doc::{
     BlobLink, ExitCode, MessagePart, MessageRole, MessageStatus, NoteRow, SessionMessageEntry,
-    SubagentProgress, SubagentStatus, TaskRow, ToolFacts,
+    StepTime, SubagentProgress, SubagentStatus, TaskRow, ToolFacts,
 };
 use slopty_view_proto::ToolCall;
 
@@ -987,6 +987,54 @@ fn a_lone_call_shows_itself(cx: &mut gpui::TestAppContext) {
         cx,
     );
     assert!(find(&nodes, Role::Button, "Ran 2 commands").is_some(), "two calls fold");
+}
+
+/// A step's time is a lane: opened, a group's steps end their rows in one column with the
+/// group line's own time, however long the result before each one is (`inspector.md`, "A
+/// step's time is a lane").
+#[gpui::test]
+fn sibling_steps_keep_their_times_in_one_column(cx: &mut gpui::TestAppContext) {
+    let step = |id: &str, command: &str, result: &str, failed: bool| {
+        let mut call = exec(id, command, true, failed);
+        if let MessagePart::Tool { facts, .. } = &mut call {
+            let time = StepTime { started: 1_000, ended: Some(1_400), ..StepTime::default() };
+            *facts = Some(Box::new(ToolFacts {
+                result: Some(result.into()),
+                failed,
+                time: Some(time),
+                ..ToolFacts::default()
+            }));
+        }
+        call
+    };
+    let parts = vec![
+        step("one", "cargo fmt", "ok", false),
+        step("two", "cargo test --workspace", "Found 12 lines across 3 files in 2 folders", false),
+        step("three", "make release", "exit code 2", true),
+        text("Done."),
+    ];
+    let (_, cx) = open(cx, entry(MessageStatus::Complete, parts));
+    let nodes = draw(cx);
+    let group = nodes
+        .values()
+        .find(|node| node.role == Role::Button && node.label.starts_with("Ran 3 commands"))
+        .unwrap_or_else(|| {
+            let labels: Vec<&str> = nodes.values().map(|n| n.label.as_str()).collect();
+            panic!("the group's line: {labels:?}")
+        })
+        .clone();
+    cx.simulate_click(group.center, gpui::Modifiers::default());
+    settle(cx);
+    let right = |selector: &'static str, cx: &mut VisualTestContext| {
+        let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} drawn"));
+        f32::from(bounds.right())
+    };
+    let line = right("reply#g:one-time", cx);
+    let steps = [right("one-time", cx), right("two-time", cx), right("three-time", cx)];
+    assert!(
+        steps.iter().all(|step| (step - line).abs() <= 0.5),
+        "each step's time ends where its group line's does, {line}: {steps:?}"
+    );
 }
 
 /// A call pressed open says its result to assistive tech, whole: JSON as the tree it draws.
