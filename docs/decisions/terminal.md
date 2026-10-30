@@ -4216,3 +4216,44 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_dim_lowers_brightness_alone`; `url::tests::quick_select_finds_every_link_path_and_hash`,
     `a_banner_shows_where_a_link_really_goes`; `view::quick`, `view::overlays`, `view::ended`,
     `view::find_card` and `view::find` unit tests.
+
+- ✅ **libghostty-rs on upstream `575ed6b8c`: wasm support taken, and every target we build proven
+  to carry its layout checks (2026-10-30, lane K).** Upstream (`Uzaaft/libghostty-rs`) moved three
+  commits past `9ede35b8e`: vt-sys builds for `wasm32` and `wasm64` without an OS, a `wasm_rs`
+  browser example, and CI for both. Our fork (`aislopware/libghostty-rs` `e45d451eb`) is our 47
+  commits rebased onto it, still pinning ghostty `c768af7d6`. We track upstream continuously, so
+  a wasm-only move is taken too: the next bump stays small.
+  - What reaches our builds. gen-bindings writes the declarations every target shares to
+    `bindings.rs`, and each target's layout checks to a new `layouts.rs`. Each check module is
+    gated on the cfg rustc prints for its targets (arch, OS, env, vendor, ABI, pointer width,
+    endianness), and targets whose layouts come out identical share one module. bindgen now
+    parses with `-ffreestanding` and `-D__wasm__`, and the wasm-only functions are gated to
+    `target_family = "wasm"`. The zig invocations for macOS, iOS and Linux are unchanged:
+    `build.rs` only adds the two wasm targets, a static-link-only assert for them, and their
+    include directory.
+  - The rebase. Six of our commits conflicted in `bindings.rs`, and each took upstream's file,
+    because the sync regenerates both files against the pinned ghostty on its runner. Our commit
+    that only regenerated the bindings for `f7b096bdb` stays, empty, since upstream's file
+    already holds its two lines. `build.rs` and `flake.nix` merged on their own, and their net
+    change against the old fork head is exactly upstream's.
+  - A target the checks do not name is refused. A build whose cfg matched no generated module
+    would compile with no layout check at all, and nothing would say so: a toolchain printing a
+    target's cfg differently from the one that generated the file, or a target off the list.
+    gen-bindings now also emits `CHECKED`, gated on every checked target, and vt-sys requires
+    it, so such a build fails. It was already happening: upstream's file, generated under an
+    older rustc, gates the simulator's checks on `target_env = ""`, but rustc 1.99 prints
+    `target_env = "sim"` for `aarch64-apple-ios-sim`, so a simulator build of the crate carried
+    no layout check. The file regenerated under our toolchain names it. gen-bindings is a binary
+    of the crate it writes for, so the crate must build before the file can be generated: the
+    guard's commit added `CHECKED` to the old file by hand. Slopty builds vt-sys only where the
+    engine runs, the worker's macOS and Linux (no iOS crate depends on `slopty-engine`), and the
+    full check of `slopty-engine` builds it, guard included, for each: `aarch64-apple-darwin`
+    (host clippy and tests) and `x86_64` and `aarch64-unknown-linux-gnu` (Linux clippy).
+  - The sync tool. `take_bindings` takes exactly what gen-bindings writes (`bindings.rs`,
+    `layouts.rs`) and refuses anything else. The replay guard reads the fork's patches without
+    its merge commits, in topological order, as a rebase replays them: a fork with a merged pull
+    request could never match before.
+  - Tests: xtask `upstream::ghostty::tests::only_what_gen_bindings_writes_is_taken`,
+    `upstream::tests::{a_flat_replay_of_a_fork_with_a_merge_carries_every_patch,
+    a_replay_that_drops_a_patch_is_refused}`; the fork's `cargo check` and `cargo test -p
+    libghostty-vt` on the sync's runner; the `CHECKED` requirement in every build of vt-sys.
