@@ -51,6 +51,9 @@ mod past_sessions;
 mod planted;
 
 #[cfg(test)]
+#[path = "app/prompt_box.rs"]
+mod prompt_box;
+
 #[cfg(test)]
 #[path = "app/resume.rs"]
 mod resume;
