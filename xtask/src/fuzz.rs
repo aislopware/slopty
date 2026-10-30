@@ -14,11 +14,12 @@
 //! Linux), started from the committed corpus and the seeds: a second engine finds paths the
 //! first does not, and what it queued joins the grown corpus libFuzzer starts from next.
 //!
-//! `--keep <artifact>` minimises one of those inputs and files it under
-//! `fuzz/regressions/<target>/`. `--cmin` makes `fuzz/corpus/<target>` the fewest bytes, at most
-//! 2 MiB, that reach every edge its grown corpus, its committed one and its seeds reach
-//! together. The fuzz crate's `tests/regressions.rs` replays both on an ordinary build, in the
-//! gate: `--replay` runs exactly that, optimised, with no nightly and no instrumentation.
+//! `--keep <artifact>` minimises one of those inputs, to one that fails as it does (checked by a
+//! run of its own before it is written), and files it under `fuzz/regressions/<target>/`. `--cmin`
+//! makes `fuzz/corpus/<target>` the fewest bytes, at most 2 MiB, that reach every edge its grown
+//! corpus, its committed one and its seeds reach together. The fuzz crate's `tests/regressions.rs`
+//! replays both on an ordinary build, in the gate: `--replay` runs exactly that, optimised, with no
+//! nightly and no instrumentation.
 
 use std::fmt::Write as _;
 use std::process::{Command, Stdio};
@@ -464,7 +465,15 @@ fn stats(log: &Utf8Path) -> String {
         .join(", ")
 }
 
-/// Minimise `artifact` and file it under `fuzz/regressions/<target>/`.
+/// Minimise `artifact` and file it under `fuzz/regressions/<target>/`, as the smallest input
+/// [`minimise`] reaches that fails as the artifact does ([`Failure`]).
+///
+/// libFuzzer's own `-minimize_crash` takes any input whose run does not pass, and runs each with
+/// `-runs` as a repeat count: under `AddressSanitizer` the `terminal` target grows about 0.4 MB
+/// a run ([`rss_limit_mb`]), so 20 000 runs of an input that never panics passed the default
+/// 2 GB, and that out-of-memory was taken for the crash (2 bytes kept for a checkpoint panic).
+/// Here libFuzzer only offers the inputs, one step at a time, under the run's own limits, and
+/// each is run once on its own and taken only if it fails the same way.
 fn keep(sh: &Shell, root: &Utf8Path, targets: &[String], artifact: &Utf8Path) -> Result<()> {
     let target = artifact
         .parent()
@@ -476,23 +485,165 @@ fn keep(sh: &Shell, root: &Utf8Path, targets: &[String], artifact: &Utf8Path) ->
     let name = artifact.file_name().context("the artifact has no file name")?;
     let dir = root.join("fuzz/regressions").join(target);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {dir}"))?;
-    let kept = dir.join(name);
+    let work = root.join("target/fuzz/keep").join(target);
+    std::fs::create_dir_all(&work).with_context(|| format!("creating {work}"))?;
     build(sh)?;
     let bin = binary(root, target);
-    let exact = format!("-exact_artifact_path={kept}");
-    // `-minimize_crash` keeps cutting while the input still crashes; an input that does not
-    // crash (a timeout, an out-of-memory) is kept as it is.
-    let minimised = cmd!(sh, "nice -n 10 {bin} -minimize_crash=1 -runs=20000 {exact} {artifact}")
-        .quiet()
-        .ignore_status()
-        .output()
-        .context("minimising")?;
-    if !kept.exists() || !minimised.status.success() && std::fs::metadata(&kept)?.len() == 0 {
-        std::fs::copy(artifact, &kept).with_context(|| format!("copying to {kept}"))?;
-    }
-    let size = std::fs::metadata(&kept)?.len();
-    println!("✔ kept {kept} ({size} bytes); `cargo xtask fuzz --replay` replays it");
+    let input = std::fs::read(artifact).with_context(|| format!("reading {artifact}"))?;
+    let run_once = |bytes: &[u8]| -> Result<Option<Failure>> {
+        let file = work.join(format!("{name}.run"));
+        std::fs::write(&file, bytes).with_context(|| format!("writing {file}"))?;
+        let out = libfuzzer(root, &bin, target)
+            .arg(&file)
+            .output()
+            .with_context(|| format!("running {target} on {file}"))?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok((!out.status.success()).then(|| Failure::of(&text, &out.status.to_string())))
+    };
+    let failure = run_once(&input)?
+        .with_context(|| format!("{artifact} passes on a run of its own: nothing to keep"))?;
+    println!("▶ minimising {artifact} ({} bytes): {failure}", input.len());
+    let step = |bytes: &[u8], seed: u32| -> Result<Option<Vec<u8>>> {
+        let (from, offered) =
+            (work.join(format!("{name}.from")), work.join(format!("{name}.offer")));
+        std::fs::write(&from, bytes).with_context(|| format!("writing {from}"))?;
+        if offered.exists() {
+            std::fs::remove_file(&offered).with_context(|| format!("removing {offered}"))?;
+        }
+        // Mutations of the input, each smaller, until one does not pass, which it writes.
+        let status = libfuzzer(root, &bin, target)
+            .arg("-minimize_crash_internal_step=1")
+            .arg(format!("-exact_artifact_path={offered}"))
+            .arg(format!("-max_total_time={}", KEEP_STEP.as_secs()))
+            .arg(format!("-seed={seed}"))
+            .args(dictionary(root, target))
+            .arg(&from)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| format!("minimising with {target}"))?;
+        if status.success() || !offered.exists() {
+            return Ok(None);
+        }
+        Ok(Some(std::fs::read(&offered).with_context(|| format!("reading {offered}"))?))
+    };
+    let kept_bytes = minimise(input, &failure, KEEP_TIME, step, run_once)?;
+    let kept = dir.join(name);
+    std::fs::write(&kept, &kept_bytes).with_context(|| format!("writing {kept}"))?;
+    println!(
+        "✔ kept {kept} ({} bytes, {failure}); `cargo xtask fuzz --replay` replays it",
+        kept_bytes.len()
+    );
     Ok(())
+}
+
+/// How long `--keep` minimises.
+const KEEP_TIME: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long each of libFuzzer's steps within that offers smaller inputs.
+const KEEP_STEP: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How many offers in a row [`minimise`] refuses before it stops.
+const KEEP_REFUSALS: u32 = 5;
+
+/// `target`'s binary under `nice` with the limits a fuzz run gives it, on one input that follows.
+fn libfuzzer(root: &Utf8Path, bin: &Utf8Path, target: &str) -> Command {
+    let mut command = Command::new("nice");
+    command
+        .args(["-n", "10"])
+        .arg(bin)
+        .args(["-timeout=10", "-malloc_limit_mb=2048"])
+        .arg(format!("-rss_limit_mb={}", rss_limit_mb(target)))
+        .env_remove(CLAUDE_CONFIG_DIR)
+        .current_dir(root)
+        .stdin(Stdio::null());
+    command
+}
+
+/// The smallest input that fails as `failure` says, from `input`, which does: `step` offers a
+/// smaller one (from the input so far and a seed, the next each time), which is taken only when
+/// it is smaller and `check` (a run of its own) finds it fails the same way. It stops when `step`
+/// offers nothing, after [`KEEP_REFUSALS`] refusals in a row, or when `budget` is spent.
+fn minimise(
+    input: Vec<u8>,
+    failure: &Failure,
+    budget: std::time::Duration,
+    mut step: impl FnMut(&[u8], u32) -> Result<Option<Vec<u8>>>,
+    mut check: impl FnMut(&[u8]) -> Result<Option<Failure>>,
+) -> Result<Vec<u8>> {
+    let started = Instant::now();
+    let mut current = input;
+    let mut refused = 0;
+    for seed in 1..=u32::MAX {
+        if refused == KEEP_REFUSALS || started.elapsed() >= budget {
+            break;
+        }
+        let Some(offered) = step(&current, seed)? else { break };
+        if offered.len() < current.len() && check(&offered)?.as_ref() == Some(failure) {
+            current = offered;
+            refused = 0;
+        } else {
+            refused = refused.saturating_add(1);
+        }
+    }
+    Ok(current)
+}
+
+/// How a target's run of one input fails, as far as it tells one bug from another: a panic by its
+/// place and the first line of its message (the lines after are the values an assertion compared,
+/// which a smaller input changes), else the kind of error a sanitizer or libFuzzer reported, else
+/// the exit status.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    Panic { at: String, message: String },
+    Error(String),
+}
+
+impl Failure {
+    /// The failure a run's output tells, `status` when it tells none.
+    fn of(output: &str, status: &str) -> Self {
+        let mut lines = output.lines();
+        if let Some(at) =
+            lines.by_ref().find_map(|l| l.split_once(" panicked at ")).map(|(_, at)| at)
+        {
+            let message = lines.next().unwrap_or_default();
+            return Self::Panic {
+                at: at.trim_end_matches(':').to_owned(),
+                message: message.to_owned(),
+            };
+        }
+        let Some((tool, said)) = output
+            .lines()
+            .find_map(|l| l.split_once("ERROR: "))
+            .and_then(|(_, error)| error.split_once(": "))
+        else {
+            return Self::Error(status.to_owned());
+        };
+        // The kind before the numbers and addresses: `out-of-memory (used: …)`, `timeout after
+        // 10 seconds`, `heap-buffer-overflow on address …`, `detected memory leaks`.
+        let kind: Vec<&str> = said
+            .split_whitespace()
+            .take_while(|w| {
+                !w.starts_with('(')
+                    && !w.contains(|c: char| c.is_ascii_digit())
+                    && !matches!(*w, "on" | "after" | "in")
+            })
+            .collect();
+        Self::Error(format!("{tool}: {}", kind.join(" ")))
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Panic { at, message } => write!(f, "panicked at {at}: {message}"),
+            Self::Error(kind) => f.write_str(kind),
+        }
+    }
 }
 
 /// The most bytes a target's committed corpus may hold, as `fuzz/tests/regressions.rs` holds it.
@@ -1130,5 +1281,82 @@ mod tests {
         assert_eq!((cover.inputs.clone(), cover.reached, cover.edges), (vec![0, 2], 5, 6));
         assert_eq!(cheapest_cover(&runs, 0), Cover { inputs: vec![], reached: 0, edges: 6 });
         assert_eq!(cheapest_cover(&[], 100), Cover { inputs: vec![], reached: 0, edges: 0 });
+    }
+
+    /// A run's output, as the `terminal` target printed it, when its checkpoint relation fails
+    /// at `row`.
+    fn checkpoint_panic(row: u32) -> String {
+        format!(
+            "thread '<unnamed>' (22143837) panicked at src/terminal.rs:424:5:\n\
+             the checkpoint: the screen, (row, (replayed, truth)): [\n    (\n        {row},\n\
+             ==92391== ERROR: libFuzzer: deadly signal\nSUMMARY: libFuzzer: deadly signal\n"
+        )
+    }
+
+    /// The `terminal` target's out-of-memory under libFuzzer's default limit, which 20 000 runs
+    /// of any input reach.
+    const OUT_OF_MEMORY: &str = "==9073== ERROR: libFuzzer: out-of-memory (used: 2124Mb; \
+        limit: 2048Mb)\n   To change the out-of-memory limit use -rss_limit_mb=<N>\n";
+
+    #[test]
+    fn a_failure_is_its_panic_or_its_kind_of_error_not_the_values_it_printed() {
+        let panic = Failure::of(&checkpoint_panic(1), "signal: 6");
+        assert_eq!(
+            panic,
+            Failure::Panic {
+                at: "src/terminal.rs:424:5".to_owned(),
+                message: "the checkpoint: the screen, (row, (replayed, truth)): [".to_owned(),
+            }
+        );
+        assert_eq!(Failure::of(&checkpoint_panic(7), "signal: 6"), panic, "another row");
+        let elsewhere = "thread '<unnamed>' (2) panicked at src/terminal.rs:110:17:\n\
+            assertion `left == right` failed: the bytes a byte at a time told another state\n";
+        assert_ne!(Failure::of(elsewhere, "signal: 6"), panic, "another assertion");
+        for (output, kind) in [
+            (OUT_OF_MEMORY, "libFuzzer: out-of-memory"),
+            ("==1== ERROR: libFuzzer: timeout after 10 seconds\n", "libFuzzer: timeout"),
+            (
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x6020 at pc 0x1\n",
+                "AddressSanitizer: heap-buffer-overflow",
+            ),
+            (
+                "==1==ERROR: LeakSanitizer: detected memory leaks\n",
+                "LeakSanitizer: detected memory leaks",
+            ),
+            ("no line a failure tells\n", "exit status: 1"),
+        ] {
+            assert_eq!(Failure::of(output, "exit status: 1"), Failure::Error(kind.to_owned()));
+        }
+    }
+
+    /// `--keep` takes an offer only when it is smaller and a run of its own fails as the
+    /// artifact did: one that fails some other way (the out-of-memory libFuzzer's own
+    /// minimiser took for the crash) or passes is refused, and the refusals end it.
+    #[test]
+    fn a_kept_input_fails_as_the_artifact_did() {
+        let panic = Failure::of(&checkpoint_panic(1), "signal: 6");
+        let check = |bytes: &[u8]| -> Result<Option<Failure>> {
+            Ok(match bytes {
+                b"a" => Some(Failure::of(OUT_OF_MEMORY, "exit status: 1")),
+                b"abcd" => Some(Failure::of(&checkpoint_panic(3), "signal: 6")),
+                b"ab" => None,
+                b"abc" => Some(Failure::of("x panicked at src/terminal.rs:110:17:\nother\n", "")),
+                _ => Some(Failure::of(&checkpoint_panic(1), "signal: 6")),
+            })
+        };
+        let budget = std::time::Duration::from_secs(60);
+        let mut offers = [&b"a"[..], b"abcd", b"ab", b"abc", b"abcdefgh"].into_iter();
+        let step = |_: &[u8], _: u32| Ok(offers.next().map(<[u8]>::to_vec));
+        let kept = minimise(b"abcdef".to_vec(), &panic, budget, step, check).unwrap();
+        assert_eq!(kept, b"abcd", "the one offer that fails the same way, and smaller");
+
+        let mut asked = 0_u32;
+        let out_of_memory = |_: &[u8], _: u32| {
+            asked = asked.saturating_add(1);
+            Ok(Some(b"a".to_vec()))
+        };
+        let kept = minimise(b"abcdef".to_vec(), &panic, budget, out_of_memory, check).unwrap();
+        assert_eq!(kept, b"abcdef", "never an offer that fails another way");
+        assert_eq!(asked, KEEP_REFUSALS, "asked until the refusals ended it");
     }
 }
