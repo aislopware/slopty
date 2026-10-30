@@ -2839,6 +2839,7 @@ mod tests {
             capabilities: Vec::new(),
             actions: Vec::new(),
             ssh_host: None, // slopty: new field.
+            turned_away: None,
         }
     }
 
@@ -3994,6 +3995,7 @@ mod tests {
             capabilities: Vec::new(),
             actions: Vec::new(),
             ssh_host: None, // slopty: new field.
+            turned_away: None,
         }];
         assert!(s.device_version_at_least("d1", (0, 2, 12)));
         assert!(!s.device_version_at_least("d1", (0, 2, 13)));
@@ -4019,6 +4021,7 @@ mod tests {
                 capabilities: vec![slopty_view_proto::capabilities::MESSAGE_QUEUE_V1.into()],
                 actions: Vec::new(),
                 ssh_host: None, // slopty: new field.
+                turned_away: None,
             },
             Device {
                 id: "upstream".into(),
@@ -4031,6 +4034,7 @@ mod tests {
                 capabilities: Vec::new(),
                 actions: Vec::new(),
                 ssh_host: None, // slopty: new field.
+                turned_away: None,
             },
         ];
 

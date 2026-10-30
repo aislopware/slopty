@@ -39,6 +39,12 @@ pub struct Device {
     // person's own tools: an editor's SSH remote. None for this machine's own worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host: Option<String>,
+    // slopty: why the machine turns this device away, in words for its badge's tooltip (its
+    // tailnet policy grants this device no role there, or its allow ranges do not hold this
+    // device's address); None while it lets this device in. The badge retries with the row's
+    // `DeviceAction::REDIAL` action and never asks for a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turned_away: Option<String>,
 }
 
 // slopty: one thing the person can do to a machine or the server, named by the app.
@@ -49,6 +55,12 @@ pub struct DeviceAction {
     pub id: String,
     /// The button's words.
     pub label: String,
+}
+
+impl DeviceAction {
+    /// The id of what a machine that turns this device away offers ([`Device::turned_away`]),
+    /// its badge's click: dial it again now rather than when its link would next try.
+    pub const REDIAL: &'static str = "redial";
 }
 
 impl Device {

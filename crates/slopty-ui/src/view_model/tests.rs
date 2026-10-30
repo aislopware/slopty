@@ -26,6 +26,7 @@ fn device(
         capabilities: Vec::new(),
         actions: Vec::new(),
         ssh_host: None,
+        turned_away: None,
     }
 }
 
