@@ -40,10 +40,10 @@ const HELD_SAID: [&str; 1] = ["Startup spends most of its time loading fonts."];
 const LIVE: &str = "Say hello";
 
 /// When the TUI's sessions were first asked, in ms since the epoch: a day and an hour before the
-/// run, so History says "1d" of them on whatever day the run is.
-fn asked_at() -> u64 {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
-    u64::try_from(now.as_millis()).unwrap().saturating_sub(25 * 3_600_000)
+/// moment the stack pins the app's clock to ([`slopty_e2e::harness::PINNED_MS`]), so History
+/// says "1d" of them, at the same times of day, in every run.
+const fn asked_at() -> u64 {
+    slopty_e2e::harness::PINNED_MS.saturating_sub(25 * 3_600_000)
 }
 
 /// Claude Code's own records of session `id` in `folder`, under `home`: its transcript, one

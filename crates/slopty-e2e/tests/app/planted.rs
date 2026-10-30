@@ -147,7 +147,8 @@ fn records(turn: &Turn, n: usize, id: &str, folder: &str) -> Played {
 
 /// Plant `turns` as Claude Code's session `id` in `folder`, in the store under `home`, as the TUI
 /// leaves one: one transcript, each turn following the last (its first record's parent the
-/// previous turn's last), its moments laid end to end and ending an hour ago, its subagents'
+/// previous turn's last), its moments laid end to end and ending an hour before the moment the
+/// stack pins the app's clock to ([`slopty_e2e::harness::PINNED_MS`]), its subagents'
 /// transcripts beside it, and its first prompt in the prompt history.
 pub fn plant(home: &Path, folder: &Path, id: &str, turns: &[Turn]) {
     let cwd = folder.to_string_lossy().into_owned();
@@ -155,7 +156,8 @@ pub fn plant(home: &Path, folder: &Path, id: &str, turns: &[Turn]) {
     let mut played: Vec<Played> =
         turns.iter().enumerate().map(|(n, turn)| records(turn, n, id, &cwd)).collect();
     // Each turn's moments moved to start a minute after the last ended, then all of them to
-    // end an hour before now, so the session reads as one an hour old whatever day it runs.
+    // end an hour before the pinned now, so the session reads as one an hour old, at the same
+    // times of day, in every run.
     let moment = |record: &Value| record["timestamp"].as_str().and_then(epoch_ms);
     let mut cursor: u64 = 0;
     let mut shifts = Vec::new();
@@ -168,8 +170,7 @@ pub fn plant(home: &Path, folder: &Path, id: &str, turns: &[Turn]) {
             .unwrap_or(cursor)
             .saturating_add(60_000);
     }
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
-    let end = u64::try_from(now.as_millis()).unwrap().saturating_sub(3_600_000);
+    let end = slopty_e2e::harness::PINNED_MS.saturating_sub(3_600_000);
     let base = i128::from(end).saturating_sub(i128::from(cursor));
     let moved = |record: &mut Value, shift: i128| {
         if let Some(at) = moment(record) {

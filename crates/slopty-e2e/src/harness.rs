@@ -754,6 +754,8 @@ async fn spawn_app(
         // A panic on the main thread aborts the app inside AppKit's callback, where nothing
         // unwinds: its backtrace in the test's log is all that says where.
         .env("RUST_BACKTRACE", "1")
+        // A time of day it draws is the same on every runner, whatever zone the runner is in.
+        .env("TZ", "UTC")
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())
@@ -772,6 +774,33 @@ async fn spawn_app(
 /// The tailnet an app under test sees: up, with no node to try. What the machine's own tailnet
 /// answers (a worker of its own, a server) would otherwise land in the first-run goldens.
 const EMPTY_TAILNET: &str = r#"{"BackendState":"Running","Self":null,"Peer":null}"#;
+
+/// The moment an app beside the stand-in `claude` reads as now: 2026-10-13T09:00:00Z.
+///
+/// [`crate::Command::PinClock`] pins it, so a golden that shows an age or a date holds the same
+/// one in every run. It lies before every run, so what the daemons stamp by the system's clock (a
+/// session's lease, a machine's heartbeat) reads as fresh, never stale
+/// (`docs/decisions/testing.md`, "The stand-in's times are a fixture's").
+pub const PINNED_MS: u64 = 1_791_882_000_000;
+
+/// Where the stand-in's fixture clock starts: 2100-01-01T09:00:00Z.
+///
+/// It lies after every run, so the stand-in's records ([`slopty_testkit::claude_tui`]) come
+/// after the hooks the worker hears by the system's clock, as Claude Code's do, and a turn's done
+/// line says the same time and how long it worked in every run.
+pub const STUB_CLOCK_MS: u64 = 4_102_477_200_000;
+
+/// The daemons' environment that runs the stand-in of the run under `root` by the fixture's
+/// clock, its stand-ins numbered in `root/stub-clock`.
+fn stub_clock(root: &Path) -> [(&'static str, String); 2] {
+    let numbered = root.join("stub-clock").to_string_lossy().into_owned();
+    [("STUB_CLOCK", STUB_CLOCK_MS.to_string()), ("STUB_CLOCK_DIR", numbered)]
+}
+
+/// Pin the clock of the app `driver` reaches to [`PINNED_MS`].
+async fn pin_clock(driver: &mut Driver) -> Result<()> {
+    driver.ok(&crate::Command::PinClock { at_ms: Some(PINNED_MS) }).await
+}
 
 /// The appearance every app under test starts in, whatever the machine's is: the default
 /// (`system`) would make each golden depend on System Settings on the day it runs.
@@ -881,6 +910,7 @@ async fn spawn_simulator_app(
         .env(format!("SIMCTL_CHILD_{}", crate::WORKER_GRANTS_ENV), ALL_GRANTED)
         .env(format!("SIMCTL_CHILD_{CHECK_RETAINED}"), "record")
         .env(format!("SIMCTL_CHILD_{INVARIANTS}"), "panic")
+        .env("SIMCTL_CHILD_TZ", "UTC")
         .envs(env.iter().map(|(k, v)| (format!("SIMCTL_CHILD_{k}"), *v)))
         // A named pasteboard: the simulator's general one follows this Mac's clipboard.
         .env(format!("SIMCTL_CHILD_{PASTEBOARD_ENV}"), pasteboard_name(root, name))
@@ -1298,9 +1328,11 @@ impl Stack {
         let root = dir.path();
         let log = log_level();
         let path = if claude.is_some() { Some(stand_in_path(root).await?) } else { None };
+        let clock = claude.map(|_| stub_clock(root));
         let daemon_env: Vec<(&str, &str)> = path
             .iter()
             .map(|p| ("PATH", p.as_str()))
+            .chain(clock.iter().flatten().map(|(k, v)| (*k, v.as_str())))
             .chain(claude.unwrap_or_default().iter().copied())
             .collect();
         let Daemons { server, children, listed, .. } =
@@ -1308,7 +1340,10 @@ impl Stack {
         if follows {
             follow(&root.join("app"), &server)?;
         }
-        let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
+        let mut driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
+        if claude.is_some() {
+            pin_clock(&mut driver).await?;
+        }
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
         Ok(Self {
             dir,
@@ -2393,9 +2428,10 @@ pub async fn stand_in_path(root: &Path) -> Result<String> {
 
 /// The app with a server and one registered worker behind it, as agents across machines need.
 ///
-/// The worker runs with `slopty-stub-claude` first on its `PATH` as `claude` and a `HOME` of its
-/// own; the app starts at its first run, pointed at the server by its settings. Everything is
-/// killed on drop.
+/// The worker runs with `slopty-stub-claude` first on its `PATH` as `claude`, on the fixture's
+/// clock ([`STUB_CLOCK_MS`]), and a `HOME` of its own; the app starts at its first run, pointed
+/// at the server by its settings, its clock pinned ([`PINNED_MS`]). Everything is killed on
+/// drop.
 ///
 /// `root/server` is the server's data directory, `root/worker` the worker's, `root/cli` the
 /// CLI's and `root/app` the app's; `root/repo` is an empty directory for agents to work in.
@@ -2471,12 +2507,14 @@ impl ServedApp {
         std::fs::create_dir_all(root.join("repo"))?;
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", programs.display());
         let (home, path) = (home.to_string_lossy().into_owned(), path);
+        let clock = stub_clock(root);
         let mut env = vec![
             ("HOME", home.as_str()),
             ("PATH", path.as_str()),
             ("SLOPTY_BIND", "127.0.0.1"),
             ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
         ];
+        env.extend(clock.iter().map(|(k, v)| (*k, v.as_str())));
         env.extend(more_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let worker =
             Worker::start(&root.join("worker"), worker_name, Some(server.address()), &log, &env)
@@ -2498,6 +2536,7 @@ impl ServedApp {
         std::fs::write(app_dir.join("settings.toml"), following(&server))?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
+        pin_clock(&mut driver).await?;
         driver
             .wait_for("the worker the server lists", STARTUP, |d| {
                 d.workers.iter().any(|w| w.name == worker_name && w.status == "connected")
@@ -2530,12 +2569,14 @@ impl ServedApp {
         let home = std::fs::canonicalize(home)?;
         let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", self.path("programs").display());
         let home = home.to_string_lossy().into_owned();
+        let clock = stub_clock(self.dir.path());
         let mut all = vec![
             ("HOME", home.as_str()),
             ("PATH", path.as_str()),
             ("SLOPTY_BIND", "127.0.0.1"),
             ("BASH_SILENCE_DEPRECATION_WARNING", "1"),
         ];
+        all.extend(clock.iter().map(|(k, v)| (*k, v.as_str())));
         all.extend_from_slice(env);
         let worker =
             Worker::start(&self.path(name), name, Some(self.server.address()), &log_level(), &all)
@@ -2565,6 +2606,7 @@ impl ServedApp {
         follow(&root.join(name), &self.server)?;
         let (app, mut driver) = spawn_app(root, name, &log_level(), &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
+        pin_clock(&mut driver).await?;
         Ok((app, driver))
     }
 

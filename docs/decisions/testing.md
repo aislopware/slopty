@@ -1164,10 +1164,26 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   Since 2026-10-30 the shell's ages and dates read its own clock, `slopty_shell::clock::utc`,
   at the frame's moment, and the same command pins that one too. It had stopped obeying once the
   shell's clock moved to the frame's moment, so `settings-archived` said "now" or "1m" by how
-  long the steps before it took. That test pins the clock half a minute after it asks for the
-  agent whose row it archives. A surface that keeps the date it last read (a page's clock, the
+  long the steps before it took. The served stacks pin it before every case ("The stand-in's
+  times are a fixture's", below). A surface that keeps the date it last read (a page's clock, the
   session list's) takes the pin the next time it reads the clock, so a test pins before the step
   it draws.
+
+- ✅ **The stand-in's times are a fixture's** (2026-10-30). The inspector's done line ("Worked
+  for 2s · done 9:00 AM") moved from run to run: the stand-in `claude` stamped its records by the
+  system's clock, and the runner's time zone chose the hour. The served stacks now run every
+  stand-in by a fixture's clock (`STUB_CLOCK`, from 2100-01-01T09:00:00Z) that moves one second a
+  record, each stand-in of a run in a ten-minute stretch of its own in the order it started, so
+  no two sessions tie in a list sorted by time. The app runs with `TZ=UTC`, its clock pinned to
+  2026-10-13T09:00:00Z by `PinClock`. The records lie after every run and the pin before it, and
+  neither can move. The worker hears hooks by the system's clock, and it reads an interrupt as a
+  stop only when the transcript's record of it comes after the hook that began the turn: records
+  stamped in the past would leave a held turn working after Esc. The app counts a session's lease
+  and a machine's heartbeat, which the daemons stamp by the system's clock, fresh while they are
+  no older than its now: a pin after the run would read every live turn stale and every machine
+  offline. Against the pin a record reads "now", as a stamp from a clock ahead does, and the cases
+  that plant sessions an hour or a day old plant them before the pin. What the stand-in notes in
+  `STUB_RECORD` keeps the system's clock, since tests measure by it.
 
 
 - ✅ **The goldens that moved run to run hold still** (2026-10-05). Four goldens differed

@@ -98,8 +98,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
     let folder = repo.to_string_lossy().into_owned();
     let mut start = vec!["agent", "start", MACHINE, "--folder", &folder];
     start.extend(PROMPT.split(' '));
-    // No session the shell lists began before this.
-    let asked = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
     let started = stack.slopty(&start).await.unwrap();
     let agent = started["agent"].as_str().unwrap_or_default().to_owned();
     assert!(!agent.is_empty(), "an agent started: {started}");
@@ -206,12 +204,9 @@ async fn changes_files_and_settings_show_the_threads_work() {
         .unwrap();
 
     // Archived: the thread archived from the sidebar's shortcut is listed there, and comes
-    // back with Unarchive. Its row says its age by a clock pinned half a minute after the agent
-    // was asked for, before the archive builds the page, so it reads "now" in every run however
-    // long the steps before took.
+    // back with Unarchive. Its row says its age by the clock the stack pins before every run
+    // (`harness::PINNED_MS`), so it reads "now" in every run however long the steps before took.
     drv.keys("escape").await.unwrap();
-    let pinned = asked.saturating_add(Duration::from_secs(30)).as_millis();
-    drv.ok(&Command::PinClock { at_ms: u64::try_from(pinned).ok() }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
     drv.keys("cmd-shift-a").await.unwrap();
     drv.keys("cmd-,").await.unwrap();
@@ -222,7 +217,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
     tokio::time::sleep(SETTLE).await;
     // The archive's toast lasts a while of its own: it stays out of the golden.
     crate::served::goldens(drv, &renders, "settings-archived", &["Archived \u{201c}"]).await;
-    drv.ok(&Command::PinClock { at_ms: None }).await.unwrap();
     click(drv, "Button", "Unarchive").await;
     drv.wait_for("the thread back", STEP, |d| node(d, "Button", "Unarchive").is_none())
         .await
