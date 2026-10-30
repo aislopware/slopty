@@ -454,9 +454,12 @@ impl Colors {
     }
 
     /// The colour text `fg` is painted in over `bg`: itself, unless the theme's minimum
-    /// contrast says it would not read. Then it is moved toward black or white, whichever
-    /// contrasts more with `bg`, only as far as the minimum needs, so its hue survives: a
-    /// pale mint prompt on white turns teal, where ghostty's snap would turn it black.
+    /// contrast says it would not read. Then its lightness alone moves toward black or white,
+    /// whichever contrasts more with `bg`, in OKLCH and only as far as the minimum needs: its
+    /// hue is kept, and its chroma too until sRGB runs out of it, so no colour greys. A pale
+    /// mint prompt on white turns a saturated teal, and navy on black a clear blue, where
+    /// ghostty's snap would turn them black and white and a mix toward the pole would wash
+    /// them out (`docs/decisions/terminal.md`, "The program's background is the pane's").
     #[must_use]
     pub fn text_over(&self, fg: Rgb, bg: Rgb) -> Rgb {
         let least = f32::from(self.theme.minimum_contrast) / 100.0;
@@ -468,17 +471,21 @@ impl Colors {
         if pole.contrast(bg) <= least {
             return pole;
         }
-        // Contrast grows with the mix toward the pole: bisect for the least mix that reads.
+        // Contrast grows as the lightness moves toward the pole's: bisect for the least move
+        // that reads. At the end of the move it is the pole itself, which reads.
+        let start = fg.oklch();
+        let end = if pole == white { 1.0 } else { 0.0 };
+        let moved = |t: f32| Oklch { l: (end - start.l).mul_add(t, start.l), ..start }.rgb();
         let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
-        for _ in 0..12 {
+        for _ in 0..16 {
             let mid = f32::midpoint(lo, hi);
-            if fg.mix(pole, mid).contrast(bg) >= least {
+            if moved(mid).contrast(bg) >= least {
                 hi = mid;
             } else {
                 lo = mid;
             }
         }
-        fg.mix(pole, hi)
+        moved(hi)
     }
 }
 
@@ -2030,8 +2037,10 @@ mod tests {
         }
     }
 
+    /// Text under the minimum moves in lightness alone, toward black or white, as far as it
+    /// needs: its hue stays, and so does its chroma where sRGB has it.
     #[test]
-    fn text_under_the_minimum_contrast_moves_toward_black_or_white() {
+    fn text_under_the_minimum_contrast_keeps_its_hue() {
         let rgb = |r, g, b| Rgb { r, g, b };
         let (black, white) = (rgb(0, 0, 0), rgb(255, 255, 255));
         assert!((black.contrast(white) - 21.0).abs() < 0.01, "{}", black.contrast(white));
@@ -2046,10 +2055,17 @@ mod tests {
         assert!(lifted.contrast(black) >= 3.0, "{lifted:?}");
         assert!(lifted.contrast(black) < 3.2, "no further than it needs: {lifted:?}");
         assert!(lifted.b > lifted.r, "still blue: {lifted:?}");
+        let hue = |c: Rgb| c.oklch().h;
+        let near = |a: f32, b: f32| (a - b).abs().min(360.0 - (a - b).abs()) < 4.0;
+        assert!(near(hue(lifted), hue(navy)), "navy's hue: {lifted:?}");
+        let washed = navy.mix(white, 0.5).oklch().c;
+        assert!(lifted.oklch().c > washed, "not washed toward grey: {lifted:?}");
         assert_eq!(on.text_over(navy, white), navy, "navy on white reads");
         let mint = rgb(0x80, 0xff, 0xea);
         let teal = on.text_over(mint, white);
         assert!(teal.contrast(white) >= 3.0 && teal.g > teal.r, "mint on white: {teal:?}");
+        assert!(teal.contrast(white) < 3.2, "no further than it needs: {teal:?}");
+        assert!(near(hue(teal), hue(mint)), "mint's hue: {teal:?}");
         assert_eq!(on.text_over(theme.fg, theme.bg), theme.fg, "the theme itself reads");
         // A minimum past what black or white can give is as far as they go.
         theme.minimum_contrast = 2100;
