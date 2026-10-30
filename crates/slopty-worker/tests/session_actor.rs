@@ -44,6 +44,17 @@ mod actor {
         moves: Option<mpsc::UnboundedSender<SessionId>>,
         scrollback_lines: u32,
     ) -> (session::SessionHandle, slopty_pty::Child, mpsc::Receiver<Tap>) {
+        start_holding(command, checkpoint, moves, scrollback_lines, session::QUEUED_MAX_BYTES)
+    }
+
+    /// [`start_keeping`], holding `queued_max_bytes` for a viewer whose sink is full.
+    fn start_holding(
+        command: &[&str],
+        checkpoint: Vec<u8>,
+        moves: Option<mpsc::UnboundedSender<SessionId>>,
+        scrollback_lines: u32,
+        queued_max_bytes: usize,
+    ) -> (session::SessionHandle, slopty_pty::Child, mpsc::Receiver<Tap>) {
         let (tap, tap_rx) = mpsc::channel(64);
         let pty = Pty::open(size(40, 6)).unwrap();
         let slopty_pty::Spawned { child, term } = pty
@@ -63,6 +74,7 @@ mod actor {
             tap,
             size: size(40, 6),
             scrollback_lines,
+            queued_max_bytes,
             exited: None,
             port_hints: None,
             moves,
@@ -804,6 +816,7 @@ mod actor {
             tap,
             size: size(40, 6),
             scrollback_lines: 100,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
             exited: None,
             port_hints: None,
             moves: None,
@@ -2293,6 +2306,11 @@ done"#
     /// A viewer whose queue passed the cap while frames it had not confirmed waited in it
     /// (with the markers after them) is told everything again once it reads: what was dropped
     /// with the queue does not hold its frames back for good.
+    ///
+    /// The session holds 1 MiB for a viewer rather than a real one's 16 MiB, so four replies
+    /// pass it. Eighty passed the real cap, and under `ThreadSanitizer` each took 0.3 s to read
+    /// and encode: 24 s, so its deadline ran out before the viewer was told anything (every
+    /// Deep run from 2026-10-28 to 2026-10-30).
     #[tokio::test]
     async fn a_viewer_whose_queue_was_dropped_gets_frames_again_once_it_reads() {
         /// Reads the sink as the app does, answering the markers, until `done` holds of the
@@ -2330,7 +2348,8 @@ done"#
         let script = "stty -echo; read x; yes \"$(printf '%250s' '' | tr ' ' a)\" | head -n 100; \
                       read x; sleep 0.3; yes \"$(printf '%250s' '' | tr ' ' b)\" | head -n 100; \
                       read x; echo DONE; sleep 30";
-        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (session, mut child, _taps) =
+            start_holding(&["/bin/sh", "-c", script], Vec::new(), None, 1000, 1 << 20);
         let me = ClientId::new();
         let screen = size(250, 100);
         let (tx, mut rx) = mpsc::channel::<Outbound>(1);
@@ -2356,8 +2375,9 @@ done"#
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        // Replies past the cap: the queue, frames and markers with it, is dropped.
-        for _ in 0..80 {
+        // Replies past the cap, each some 200 lines of 250 cells (390 kB): the queue, frames
+        // and markers with it, is dropped.
+        for _ in 0..4 {
             session
                 .request(me, TermRequest::FetchLines { start: LineIndex(0), count: 4096 })
                 .unwrap();
@@ -3281,6 +3301,7 @@ exec cat > "$0/raw""#;
             tap,
             size: size(40, 6),
             scrollback_lines: 100,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
             exited: None,
             port_hints: None,
             moves: None,

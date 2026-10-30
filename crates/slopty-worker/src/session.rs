@@ -64,9 +64,11 @@ const MARKERS_KEPT: usize = 16;
 /// connection, and so the size of every terminal it drove, until the transport's idle timeout
 /// (45 s). A live client answers within a round trip and a frame.
 pub const DRIVER_SILENCE: Duration = Duration::from_secs(3);
-/// Events a viewer's sink had no room for wait in order, up to this many bytes. Past it they
-/// are dropped and the viewer is told everything again once its sink drains, as a joiner is.
-const QUEUED_MAX_BYTES: usize = 16 << 20;
+/// The bytes of events a full sink's viewer may have waiting for it in a real session.
+///
+/// They wait in order ([`SessionStart::queued_max_bytes`]); past them they are dropped and the
+/// viewer is told everything again once its sink drains, as a joiner is.
+pub const QUEUED_MAX_BYTES: usize = 16 << 20;
 /// PTY read buffer.
 const READ_BUF: usize = 64 << 10;
 /// Search hits sent back at most; the count still covers every hit.
@@ -603,6 +605,9 @@ pub struct SessionStart {
     pub size: TermSize,
     /// Scrollback lines to retain.
     pub scrollback_lines: u32,
+    /// The bytes of events that may wait for a viewer whose sink is full ([`QUEUED_MAX_BYTES`]
+    /// in a real session).
+    pub queued_max_bytes: usize,
     /// How the child ended, when it did before this worker adopted the session.
     pub exited: Option<Exit>,
     /// Where the session says its output named a local server, so its ports get scanned.
@@ -677,8 +682,8 @@ struct Viewer {
     queued_bytes: usize,
     /// A task waits for room in its sink.
     waiting: bool,
-    /// Its queue passed [`QUEUED_MAX_BYTES`] and was dropped: it is sent nothing until its
-    /// sink has room, then told everything again.
+    /// Its queue passed [`SessionStart::queued_max_bytes`] and was dropped: it is sent nothing
+    /// until its sink has room, then told everything again.
     lost: bool,
     /// Where its frames stand against the markers it answers ([`Reach`]).
     reach: Reach,
@@ -839,6 +844,8 @@ struct Actor {
     drained_rx: mpsc::UnboundedReceiver<(ClientId, ClientSink)>,
     /// Woken when a viewer's frame is done with ([`Credit`]).
     room: Arc<Notify>,
+    /// [`SessionStart::queued_max_bytes`].
+    queued_max_bytes: usize,
     /// A diff is waiting for a viewer that follows the diffs to have room for it.
     owed: bool,
     input: Input,
@@ -1074,6 +1081,7 @@ impl Actor {
             drained_tx,
             drained_rx,
             room: Arc::default(),
+            queued_max_bytes: start.queued_max_bytes,
             owed: false,
             burst: EchoBurst::default(),
             input: Input::default(),
@@ -1946,7 +1954,7 @@ impl Actor {
         };
         v.queued_bytes = v.queued_bytes.saturating_add(out.wire.len());
         v.queued.push_back(out);
-        if v.queued_bytes > QUEUED_MAX_BYTES {
+        if v.queued_bytes > self.queued_max_bytes {
             tracing::warn!(session = %self.id, client = %v.client, bytes = v.queued_bytes, "viewer not reading; told everything again once it drains");
             v.queued.clear();
             v.queued_bytes = 0;

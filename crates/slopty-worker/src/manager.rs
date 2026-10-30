@@ -509,6 +509,7 @@ impl Worker {
             tap: self.inner.tap.clone(),
             size: if attached.size == TermSize::default() { size } else { attached.size },
             scrollback_lines: SCROLLBACK_LINES,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
             exited,
             port_hints: Some(self.inner.port_hints.clone()),
             moves: Some(self.inner.moves.clone()),

@@ -100,6 +100,7 @@ mod orchestrate {
             tap,
             size,
             scrollback_lines: 1000,
+            queued_max_bytes: session::QUEUED_MAX_BYTES,
             exited: None,
             port_hints: None,
             moves: None,
