@@ -3,13 +3,6 @@
 //!
 //! Colors and GPUI runs deliberately stay outside this cache so appearance
 //! changes recolor existing spans without parsing again.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -17,18 +10,24 @@ use std::sync::Arc;
 use sha2::{Digest as _, Sha256};
 use slopty_syntax::{HighlightedDocument, LanguageId};
 
+/// The highlight queries' version: a change to them re-parses every cached document.
 pub const QUERY_GENERATION: u32 = 1;
 const MAX_DOCUMENTS: usize = 96;
 const MAX_RETAINED_BYTES: usize = 24 * 1024 * 1024;
 
+/// What a highlighted document is cached under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DocumentHighlightKey {
+    /// The language it was parsed as.
     pub language: LanguageId,
+    /// SHA-256 of its source.
     pub content_hash: [u8; 32],
+    /// The [`QUERY_GENERATION`] it was highlighted under.
     pub query_generation: u32,
 }
 
 impl DocumentHighlightKey {
+    /// The key for `source` parsed as `language` under today's queries.
     pub fn new(language: LanguageId, source: &str) -> Self {
         Self {
             language,
@@ -43,6 +42,7 @@ struct CachedDocument {
     document: Arc<HighlightedDocument>,
 }
 
+/// Highlighted documents by key, least recently used dropped first, bounded in count and bytes.
 #[derive(Default)]
 pub struct SyntaxHighlightCache {
     documents: HashMap<DocumentHighlightKey, CachedDocument>,
@@ -52,25 +52,46 @@ pub struct SyntaxHighlightCache {
     misses: u64,
 }
 
+impl std::fmt::Debug for SyntaxHighlightCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyntaxHighlightCache")
+            .field("documents", &self.documents.len())
+            .field("retained_bytes", &self.retained_bytes)
+            .field("hits", &self.hits)
+            .field("misses", &self.misses)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The cache's counters, for measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntaxCacheStats {
+    /// Lookups that found their document.
     pub hits: u64,
+    /// Lookups that did not.
     pub misses: u64,
+    /// Documents held.
     pub documents: usize,
+    /// Their estimated size in bytes.
     pub retained_bytes: usize,
 }
 
 impl SyntaxHighlightCache {
+    /// The document cached under `key`, now the most recently used.
     pub fn get(&mut self, key: &DocumentHighlightKey) -> Option<Arc<HighlightedDocument>> {
-        let Some(document) = self.documents.get(key).map(|entry| entry.document.clone()) else {
-            self.misses += 1;
+        let Some(document) = self.documents.get(key).map(|entry| Arc::clone(&entry.document))
+        else {
+            self.misses = self.misses.saturating_add(1);
             return None;
         };
-        self.hits += 1;
+        self.hits = self.hits.saturating_add(1);
         self.touch(*key);
         Some(document)
     }
 
+    /// Caches `document` under `key`, dropping the least recently used past the bounds.
+    ///
+    /// Returns whether it stayed: a document larger than the whole byte budget is never kept.
     pub fn insert(
         &mut self,
         key: DocumentHighlightKey,
@@ -103,6 +124,7 @@ impl SyntaxHighlightCache {
         self.recency.push_back(key);
     }
 
+    /// The counters so far.
     pub fn stats(&self) -> SyntaxCacheStats {
         SyntaxCacheStats {
             hits: self.hits,
@@ -112,11 +134,13 @@ impl SyntaxHighlightCache {
         }
     }
 
+    /// Documents held.
     #[cfg(test)]
     pub fn len(&self) -> usize {
         self.documents.len()
     }
 
+    /// Whether it holds none.
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.documents.is_empty()
@@ -163,7 +187,7 @@ mod tests {
             .unwrap(),
         );
         let mut cache = SyntaxHighlightCache::default();
-        assert!(cache.insert(key, document.clone()));
+        assert!(cache.insert(key, Arc::clone(&document)));
         assert!(Arc::ptr_eq(&cache.get(&key).unwrap(), &document));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.stats().hits, 1);

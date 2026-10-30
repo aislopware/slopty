@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
-//! A terminal pane: the session's own terminal in the main pane, or a shell opened beside it
-//! (`docs/decisions/layout.md`, "One session per view, splits on demand"). The session's panel
+//! A terminal pane: the session's own terminal in the main pane, or a shell opened beside it.
+//!
+//! See `docs/decisions/layout.md`, "One session per view, splits on demand". The session's panel
 //! shows each chat's session terminal as the chat is shown; a shell's panel opens one terminal
 //! for the chat it was opened in and shows it while that chat is shown.
 //!
@@ -8,23 +9,6 @@
 //! body is Slopty's own terminal view of it ([`crate::live`]), which owns the
 //! session's link, prediction, latency path, copy mode and scrollback. The
 //! panel hands the view the look ([`crate::live::TerminalLook`]).
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    trivial_casts,
-    clippy::arithmetic_side_effects,
-    clippy::default_trait_access,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::ref_option,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::used_underscore_binding,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::collections::HashMap;
 
@@ -52,17 +36,17 @@ impl gpui::EventEmitter<ShownChanged> for TerminalPanel {}
 
 /// Merge the `targetDeviceId` passthrough into RPC params (no-op for chats on
 /// the connected engine's own device).
-fn with_target(mut params: serde_json::Value, target: &Option<String>) -> serde_json::Value {
+fn with_target(mut params: serde_json::Value, target: Option<&str>) -> serde_json::Value {
     if let (Some(target), Some(object)) = (target, params.as_object_mut()) {
-        object.insert("targetDeviceId".into(), serde_json::Value::String(target.clone()));
+        object.insert("targetDeviceId".into(), serde_json::Value::String(target.to_owned()));
     }
     params
 }
 
 /// Active index after closing `closed` (given the new, shorter length).
 pub fn active_after_close(active: usize, closed: usize, len_after: usize) -> usize {
-    let shifted = if closed < active { active - 1 } else { active };
-    if len_after == 0 { 0 } else { shifted.min(len_after - 1) }
+    let shifted = if closed < active { active.saturating_sub(1) } else { active };
+    shifted.min(len_after.saturating_sub(1))
 }
 
 // ---------------------------------------------------------------------------
@@ -84,9 +68,17 @@ struct TerminalTab {
     /// row wears while this tab is the session's shown terminal.
     ground: Option<gpui::Hsla>,
     /// Hears the view's title and end.
-    _watch: Option<Subscription>,
+    watch: Option<Subscription>,
     /// The open; dropping it cancels it.
     _run: Option<Task<()>>,
+}
+
+impl TerminalTab {
+    /// Keeps the tab's open running for as long as the tab lives.
+    #[expect(clippy::used_underscore_binding, reason = "the open is kept, not read")]
+    fn hold(&mut self, run: Task<()>) {
+        self._run = Some(run);
+    }
 }
 
 #[derive(Default)]
@@ -95,6 +87,7 @@ struct ChatTabs {
     active: usize,
 }
 
+/// A pane of terminal tabs per chat: the session's own terminal, or shells beside it.
 pub struct TerminalPanel {
     state: Entity<AppState>,
     focus_handle: FocusHandle,
@@ -143,7 +136,19 @@ const UNFITTED: (u16, u16) = (80, 24);
 /// How long an open waits for the body's first draw before it opens at [`UNFITTED`].
 const FIT_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
 
+impl std::fmt::Debug for TerminalPanel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalPanel")
+            .field("session", &self.session)
+            .field("chats", &self.chats.len())
+            .field("last_selected", &self.last_selected)
+            .field("dimmed", &self.dimmed)
+            .finish_non_exhaustive()
+    }
+}
+
 impl TerminalPanel {
+    /// A panel that opens terminals only as it is asked to.
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let observe = cx.observe(&state, |this: &mut Self, _, cx| this.on_state_changed(cx));
         Self {
@@ -218,7 +223,7 @@ impl TerminalPanel {
     pub fn new_pane(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut panel = Self::new(state, cx);
         let chat = panel.selected_chat(cx);
-        panel.open_tab(chat, cx);
+        panel.open_tab(&chat, cx);
         panel.request_focus(cx);
         panel
     }
@@ -273,6 +278,7 @@ impl TerminalPanel {
         self.active_tab(cx)?.ground
     }
 
+    /// The handle the terminal body focuses through.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -325,7 +331,7 @@ impl TerminalPanel {
         title: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> u64 {
-        self.tab_seq += 1;
+        self.tab_seq = self.tab_seq.saturating_add(1);
         let key = self.tab_seq;
         let entry = self.chats.entry(chat).or_default();
         entry.tabs.push(TerminalTab {
@@ -338,10 +344,10 @@ impl TerminalPanel {
             exited: None,
             progress: None,
             ground: None,
-            _watch: None,
+            watch: None,
             _run: None,
         });
-        entry.active = entry.tabs.len() - 1;
+        entry.active = entry.tabs.len().saturating_sub(1);
         cx.notify();
         key
     }
@@ -353,7 +359,7 @@ impl TerminalPanel {
         key: u64,
         session: TerminalSession,
         target_device_id: Option<String>,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> bool {
         if self.tab_mut(chat, key).is_none() {
             return false;
@@ -372,7 +378,7 @@ impl TerminalPanel {
             cx,
         );
         if let Some(tab) = self.tab_mut(chat, key) {
-            tab._run = Some(run);
+            tab.hold(run);
             true
         } else {
             false
@@ -445,7 +451,7 @@ impl TerminalPanel {
         let open = Open::Session(terminal);
         let run = Self::spawn_session(chat.to_owned(), key, engine, target, None, None, open, cx);
         if let Some(tab) = self.tab_mut(chat, key) {
-            tab._run = Some(run);
+            tab.hold(run);
         }
         cx.notify();
     }
@@ -462,18 +468,23 @@ impl TerminalPanel {
 
     // ---- open / stream lifecycle ----
 
-    fn open_tab(&mut self, chat: String, cx: &mut Context<Self>) {
+    /// The title of the next tab chat `chat` opens.
+    fn next_tab_title(&self, chat: &str) -> String {
+        let tab_no = self.chats.get(chat).map_or(1, |entry| entry.tabs.len().saturating_add(1));
+        format!("Terminal {tab_no}")
+    }
+
+    fn open_tab(&mut self, chat: &str, cx: &mut Context<Self>) {
         let Some(engine) = self.engine(cx) else {
             return;
         };
-        let tab_no = self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1);
-        let key = self.reserve_tab_for_chat(chat.clone(), format!("Terminal {tab_no}"), cx);
-        let target = self.chat_target(&chat, cx);
-        let cwd = self.state.read(cx).terminal_open_cwd_for(&chat);
+        let key = self.reserve_tab_for_chat(chat.to_owned(), self.next_tab_title(chat), cx);
+        let target = self.chat_target(chat, cx);
+        let cwd = self.state.read(cx).terminal_open_cwd_for(chat);
         let run =
-            Self::spawn_session(chat.clone(), key, engine, target, None, cwd, Open::Fresh, cx);
-        if let Some(tab) = self.tab_mut(&chat, key) {
-            tab._run = Some(run);
+            Self::spawn_session(chat.to_owned(), key, engine, target, None, cwd, Open::Fresh, cx);
+        if let Some(tab) = self.tab_mut(chat, key) {
+            tab.hold(run);
         }
         cx.notify();
     }
@@ -483,14 +494,13 @@ impl TerminalPanel {
     pub fn reopen_tab_for_selected(&mut self, id: String, cx: &mut Context<Self>) -> Option<u64> {
         let chat = self.selected_chat(cx);
         let engine = self.engine(cx)?;
-        let title =
-            format!("Terminal {}", self.chats.get(&chat).map_or(1, |entry| entry.tabs.len() + 1));
+        let title = self.next_tab_title(&chat);
         let key = self.reserve_tab_for_chat(chat.clone(), title, cx);
         let target = self.chat_target(&chat, cx);
         let run =
             Self::spawn_session(chat.clone(), key, engine, target, None, None, Open::Again(id), cx);
         if let Some(tab) = self.tab_mut(&chat, key) {
-            tab._run = Some(run);
+            tab.hold(run);
         }
         Some(key)
     }
@@ -530,7 +540,7 @@ impl TerminalPanel {
         existing_session: Option<TerminalSession>,
         cwd: Option<String>,
         open: Open,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Task<()> {
         // A session's terminal is the agent's, never the tab's to end.
         let own = matches!(open, Open::Session(_));
@@ -567,14 +577,14 @@ impl TerminalPanel {
                     .client()
                     .call_as::<TerminalSession>(
                         methods::OPEN_TERMINAL,
-                        with_target(params, &target),
+                        with_target(params, target.as_deref()),
                     )
                     .await
                 {
                     Ok(session) => session,
                     // A terminal shown before that has ended goes with its tab.
                     Err(_) if again => {
-                        let _ = this.update(cx, |panel, cx| {
+                        let _gone = this.update(cx, |panel, cx| {
                             // A session's terminal is asked for again as it next moves.
                             if own {
                                 panel.session_asked.remove(&chat);
@@ -589,7 +599,7 @@ impl TerminalPanel {
                     }
                     Err(err) => {
                         tracing::warn!(error = %err, "OpenTerminal failed");
-                        let _ = this.update(cx, |panel, cx| {
+                        let _gone = this.update(cx, |panel, cx| {
                             if let Some(tab) = panel.tab_mut(&chat, key) {
                                 tab.failure =
                                     Some(format!("failed to open terminal: {err}").into());
@@ -604,18 +614,18 @@ impl TerminalPanel {
             let terminal_id = session.id.clone();
             let attached = this
                 .update(cx, |panel, cx| {
-                    panel.attach_view(&chat, key, terminal_id.clone(), target.clone(), cx)
+                    panel.attach_view(&chat, key, &terminal_id, target.clone(), cx)
                 })
                 .unwrap_or(false);
             if !attached && !own {
                 // Tab was closed before the open completed — release the PTY.
-                let _ = engine
+                let params = serde_json::json!({ "terminalId": terminal_id });
+                let closing = engine
                     .client()
-                    .call(
-                        methods::CLOSE_TERMINAL,
-                        with_target(serde_json::json!({ "terminalId": terminal_id }), &target),
-                    )
-                    .await;
+                    .call(methods::CLOSE_TERMINAL, with_target(params, target.as_deref()));
+                if let Err(error) = closing.await {
+                    tracing::debug!(%error, "CloseTerminal failed");
+                }
             }
         })
     }
@@ -626,16 +636,16 @@ impl TerminalPanel {
         &mut self,
         chat: &str,
         key: u64,
-        id: String,
+        id: &str,
         target: Option<String>,
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(tab) = self.tab_mut(chat, key) else {
             return false;
         };
-        tab.terminal_id = Some(id.clone());
+        tab.terminal_id = Some(id.to_owned());
         tab.target_device_id = target;
-        self.watch_view(chat, key, &id, cx);
+        self.watch_view(chat, key, id, cx);
         self.refresh_view(chat, key, cx);
         true
     }
@@ -648,13 +658,13 @@ impl TerminalPanel {
         let watch = live::watch(
             id,
             Box::new(move |cx| {
-                let _ = panel.update(cx, |panel, cx| panel.refresh_view(&heard, key, cx));
+                let _gone = panel.update(cx, |panel, cx| panel.refresh_view(&heard, key, cx));
             }),
             cx,
         );
         let watching = watch.is_some();
         if let Some(tab) = self.tab_mut(chat, key) {
-            tab._watch = watch;
+            tab.watch = watch;
         }
         watching
     }
@@ -669,7 +679,7 @@ impl TerminalPanel {
             .map(|tabs| {
                 tabs.tabs
                     .iter()
-                    .filter(|tab| tab._watch.is_none())
+                    .filter(|tab| tab.watch.is_none())
                     .filter_map(|tab| Some((tab.key, tab.terminal_id.clone()?)))
                     .collect()
             })
@@ -678,7 +688,7 @@ impl TerminalPanel {
             if self.watch_view(chat, key, &id, cx) {
                 let chat = chat.to_owned();
                 cx.spawn(async move |panel, cx| {
-                    let _ = panel.update(cx, |panel, cx| panel.refresh_view(&chat, key, cx));
+                    let _gone = panel.update(cx, |panel, cx| panel.refresh_view(&chat, key, cx));
                 })
                 .detach();
             }
@@ -727,13 +737,13 @@ impl TerminalPanel {
         tabs.active = active_after_close(tabs.active, ix, tabs.tabs.len());
         if let (Some(engine), Some(id)) = (engine, tab.terminal_id) {
             cx.spawn(async move |_, _| {
-                let _ = engine
+                let params = serde_json::json!({ "terminalId": id });
+                let closing = engine
                     .client()
-                    .call(
-                        methods::CLOSE_TERMINAL,
-                        with_target(serde_json::json!({ "terminalId": id }), &target),
-                    )
-                    .await;
+                    .call(methods::CLOSE_TERMINAL, with_target(params, target.as_deref()));
+                if let Err(error) = closing.await {
+                    tracing::debug!(%error, "CloseTerminal failed");
+                }
             })
             .detach();
         }
@@ -875,7 +885,7 @@ fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -
     let (left, width) = if let Some(share) = share {
         (0.0, share.clamp(0.0, 1.0))
     } else {
-        let leg = if sweep < 0.5 { sweep * 2.0 } else { 2.0 - sweep * 2.0 };
+        let leg = if sweep < 0.5 { sweep * 2.0 } else { sweep.mul_add(-2.0, 2.0) };
         (0.75 * crate::motion::EASE_IN_OUT.eval(leg), 0.25)
     };
     let fill = div()
@@ -994,7 +1004,7 @@ mod progress_tests {
         let painted = Rc::new(RefCell::new(None::<gpui::Hsla>));
         let heard: Heard = Rc::default();
         cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
             let (reported, painted, heard) =
@@ -1021,7 +1031,7 @@ mod progress_tests {
             );
         });
         let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
-            Arc::new(Machine) as Arc<dyn slopty_view_rpc::RpcService>,
+            Arc::new(Machine),
         ));
         let (panel, cx) = cx.add_window_view(|_, cx| {
             let state = cx.new(|_| {
@@ -1078,10 +1088,12 @@ mod progress_tests {
 
         // The program paints its own background (OSC 11): the tab keeps it as the shown ground,
         // and the chrome hears it once; the same ground said again is no news.
-        let told = Rc::new(std::cell::Cell::new(0));
+        let told = Rc::new(std::cell::Cell::new(0_u32));
         let _told = cx.update(|_, cx| {
             let told = Rc::clone(&told);
-            cx.subscribe(&panel, move |_, _: &ShownChanged, _| told.set(told.get() + 1))
+            cx.subscribe(&panel, move |_, _: &ShownChanged, _| {
+                told.set(told.get().saturating_add(1));
+            })
         });
         let dark = gpui::hsla(0.55, 0.4, 0.08, 1.0);
         *painted.borrow_mut() = Some(dark);
@@ -1120,7 +1132,7 @@ mod progress_tests {
         let _guard = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::default());
             crate::live::install(cx, |_, _, _| None, |_, _| None, |_, _, _| None);
@@ -1132,7 +1144,7 @@ mod progress_tests {
         });
         let asked = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::memory_client(
-            Arc::new(Asked(Arc::clone(&asked))) as Arc<dyn slopty_view_rpc::RpcService>,
+            Arc::new(Asked(Arc::clone(&asked))),
         ));
         let state = cx.new(|_| {
             let mut state = crate::state::AppState::new();

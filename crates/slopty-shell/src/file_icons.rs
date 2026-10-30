@@ -6,23 +6,13 @@
 //! syntax-language or MIME hint, and finally the generic file/folder icon. The
 //! authored SVG colors are preserved in light mode; dark mode lifts the
 //! palette's darker accents without replacing polychrome artwork with a tint.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::expect_used,
-    clippy::return_self_not_must_use,
-    clippy::same_name_method,
-    clippy::string_slice,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use embedded::EmbeddedFileIcons;
 use gpui::{AssetSource, Img, Result, SharedString, Styled as _, img};
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use slopty_syntax::LanguageId;
 
@@ -60,9 +50,17 @@ pub(crate) fn well_bg(theme: &Theme) -> gpui::Hsla {
     }
 }
 
-#[derive(RustEmbed)]
-#[folder = "assets/file-icons"]
-struct EmbeddedFileIcons;
+/// The icon files, compiled in.
+#[expect(
+    clippy::same_name_method,
+    reason = "RustEmbed's derive gives the type inherent `get` and `iter` beside its trait's"
+)]
+mod embedded {
+    /// The `assets/file-icons` folder.
+    #[derive(rust_embed::RustEmbed)]
+    #[folder = "assets/file-icons"]
+    pub(super) struct EmbeddedFileIcons;
+}
 
 /// File-icon half of the application's composite gpui asset source.
 pub(crate) struct Assets;
@@ -92,25 +90,35 @@ impl AssetSource for Assets {
     }
 }
 
+/// What a file-tree entry is, as far as its icon cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileIconKind {
+    /// A regular file.
     File,
+    /// A folder.
     Directory,
     /// The workspace protocol does not currently expose a symlink target kind,
     /// so links resolve by filename and otherwise use the generic file glyph.
     Symlink,
 }
 
+/// Everything an entry's icon is chosen from.
 #[derive(Debug, Clone, Copy)]
 pub struct FileIconIdentity<'a> {
+    /// File, folder or symlink.
     pub kind: FileIconKind,
+    /// The entry's path or basename; only the basename decides.
     pub name: &'a str,
+    /// A folder shown open.
     pub expanded: bool,
+    /// The syntax language, a hint when the name says nothing.
     pub language: Option<LanguageId>,
+    /// The MIME type, a hint after the language.
     pub mime_type: Option<&'a str>,
 }
 
 impl<'a> FileIconIdentity<'a> {
+    /// A regular file at `path`.
     pub const fn file(path: &'a str) -> Self {
         Self {
             kind: FileIconKind::File,
@@ -121,6 +129,7 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
+    /// A folder at `path`, open when `expanded`.
     pub const fn directory(path: &'a str, expanded: bool) -> Self {
         Self {
             kind: FileIconKind::Directory,
@@ -131,6 +140,7 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
+    /// A symlink at `path`.
     pub const fn symlink(path: &'a str) -> Self {
         Self {
             kind: FileIconKind::Symlink,
@@ -141,18 +151,22 @@ impl<'a> FileIconIdentity<'a> {
         }
     }
 
+    /// The same identity with a syntax-language hint.
+    #[must_use]
     pub const fn with_language(mut self, language: LanguageId) -> Self {
         self.language = Some(language);
         self
     }
 
+    /// The same identity with a MIME-type hint.
+    #[must_use]
     pub const fn with_mime_type(mut self, mime_type: &'a str) -> Self {
         self.mime_type = Some(mime_type);
         self
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct Manifest {
     #[serde(rename = "iconDefinitions")]
     icon_definitions: HashMap<String, IconDefinition>,
@@ -174,9 +188,15 @@ struct IconDefinition {
     icon_path: String,
 }
 
+/// The bundled manifest, compiled in.
+const MANIFEST_JSON: &str = include_str!("file-icons.json");
+
 static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| {
-    let mut manifest: Manifest = serde_json::from_str(include_str!("file-icons.json"))
-        .expect("bundled file-icon manifest must be valid");
+    // A test parses the bundle; were it broken, every entry would take the generic icon.
+    let mut manifest: Manifest = serde_json::from_str(MANIFEST_JSON).unwrap_or_else(|error| {
+        tracing::error!(%error, "the bundled file-icon manifest does not parse");
+        Manifest::default()
+    });
     manifest.file_extensions = lowercase_keys(manifest.file_extensions);
     manifest.file_names = lowercase_keys(manifest.file_names);
     manifest.folder_names = lowercase_keys(manifest.folder_names);
@@ -271,7 +291,7 @@ fn generic_file_asset() -> &'static str {
 
 fn compound_extensions(name: &str) -> impl Iterator<Item = &str> {
     name.match_indices('.')
-        .map(|(index, _)| &name[index + 1..])
+        .filter_map(|(index, _)| name.split_at_checked(index)?.1.strip_prefix('.'))
         .filter(|extension| !extension.is_empty())
 }
 
@@ -429,6 +449,12 @@ mod tests {
     }
 
     #[test]
+    fn the_bundled_manifest_parses() {
+        let manifest: Manifest = serde_json::from_str(MANIFEST_JSON).expect("a valid manifest");
+        assert!(!manifest.icon_definitions.is_empty());
+    }
+
+    #[test]
     fn every_manifest_reference_is_embedded_and_every_asset_is_svg() {
         let referenced_definitions = MANIFEST
             .file
@@ -475,7 +501,7 @@ mod tests {
                 "{asset} lacks intrinsic dimensions"
             );
         }
-        assert!(Assets.list("icons/").unwrap().is_empty());
+        assert_eq!(Assets.list("icons/").unwrap(), Vec::<SharedString>::new());
         assert!(Assets.load("file-icons/nope.svg").unwrap().is_none());
     }
 }

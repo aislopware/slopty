@@ -1,28 +1,24 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Stable conversation links shared by sidebar copy actions and inbound URL routing.
-#![allow(
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assertions_on_result_states,
-    clippy::default_trait_access,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::map_err_ignore,
-    reason = "shell lint migration: slice C"
-)]
 
 use sha2::{Digest as _, Sha256};
 use slopty_view_proto::{Chat, HarnessId, WorkspaceScope};
 
+/// A parsed `slopty://open/chat/…` link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationDeepLink {
+    /// The chat it opens.
     pub chat_id: String,
+    /// The [`workspace_locator`] of the workspace the chat lives in.
     pub workspace: String,
 }
 
+/// A link that opens a chat's conversation in its harness's own app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessConversationLink {
+    /// The copy action's words.
     pub label: &'static str,
+    /// The harness app's URL.
     pub url: String,
 }
 
@@ -36,9 +32,11 @@ pub fn workspace_locator(
     let identity = format!("device:{}", local_device_id?);
     let mut hash = Sha256::new();
     hash.update(format!("{scope:?}\0{identity}"));
-    Some(data_encoding::HEXLOWER.encode(&hash.finalize()[..8]))
+    let digest = hash.finalize();
+    Some(data_encoding::HEXLOWER.encode(digest.first_chunk::<8>()?))
 }
 
+/// The `slopty://` link that opens `chat_id` in the workspace `workspace` locates.
 pub fn slopty_conversation_link(chat_id: &str, workspace: &str) -> String {
     format!(
         "slopty://open/chat/{}?workspace={}",
@@ -47,6 +45,12 @@ pub fn slopty_conversation_link(chat_id: &str, workspace: &str) -> String {
     )
 }
 
+/// Reads a [`slopty_conversation_link`] back, or says why it is not one.
+///
+/// # Errors
+///
+/// When `url` is another scheme or path, lacks its workspace locator, or carries a malformed
+/// escape or id.
 pub fn parse_slopty_conversation_link(url: &str) -> Result<ConversationDeepLink, &'static str> {
     let rest = url.strip_prefix("slopty://open/chat/").ok_or("not a Slopty conversation link")?;
     let (chat_id, query) = rest.split_once('?').ok_or("missing workspace locator")?;
@@ -81,31 +85,34 @@ fn encode_component(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            out.push(byte as char);
+            out.push(char::from(byte));
         } else {
-            use std::fmt::Write as _;
-            let _ = write!(out, "%{byte:02X}");
+            out.push('%');
+            data_encoding::HEXUPPER.encode_append(&[byte], &mut out);
         }
     }
     out
 }
 
 fn decode_component(value: &str) -> Result<String, &'static str> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let encoded = bytes.get(index + 1..index + 3).ok_or("invalid URL escape")?;
-            let text = std::str::from_utf8(encoded).map_err(|_| "invalid URL escape")?;
-            out.push(u8::from_str_radix(text, 16).map_err(|_| "invalid URL escape")?);
-            index += 3;
+    let mut out = Vec::with_capacity(value.len());
+    let mut rest = value.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        rest = tail;
+        if byte == b'%' {
+            out.push(escaped_byte(&mut rest).ok_or("invalid URL escape")?);
         } else {
-            out.push(bytes[index]);
-            index += 1;
+            out.push(byte);
         }
     }
-    String::from_utf8(out).map_err(|_| "invalid UTF-8 in URL")
+    String::from_utf8(out).ok().ok_or("invalid UTF-8 in URL")
+}
+
+/// The byte a `%XX` escape names, its two hex digits taken off the front of `rest`.
+fn escaped_byte(rest: &mut &[u8]) -> Option<u8> {
+    let (hex, tail) = rest.split_at_checked(2)?;
+    *rest = tail;
+    u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()
 }
 
 #[cfg(test)]
@@ -126,7 +133,7 @@ mod tests {
                 harness,
                 model: None,
                 reasoning: None,
-                model_options: Default::default(),
+                model_options: serde_json::Map::default(),
                 sandbox: slopty_view_proto::SandboxLevel::WorkspaceWrite,
             }),
             last_message_preview: None,
@@ -157,9 +164,26 @@ mod tests {
 
     #[test]
     fn malformed_or_foreign_links_are_rejected() {
-        assert!(parse_slopty_conversation_link("https://example.com").is_err());
-        assert!(parse_slopty_conversation_link("slopty://open/chat/id").is_err());
-        assert!(parse_slopty_conversation_link("slopty://open/chat/%GG?workspace=x").is_err());
+        assert_eq!(
+            parse_slopty_conversation_link("https://example.com"),
+            Err("not a Slopty conversation link")
+        );
+        assert_eq!(
+            parse_slopty_conversation_link("slopty://open/chat/id"),
+            Err("missing workspace locator")
+        );
+        assert_eq!(
+            parse_slopty_conversation_link("slopty://open/chat/%GG?workspace=x"),
+            Err("invalid URL escape")
+        );
+        assert_eq!(
+            parse_slopty_conversation_link("slopty://open/chat/id?workspace=%4"),
+            Err("invalid URL escape")
+        );
+        assert_eq!(
+            parse_slopty_conversation_link("slopty://open/chat/%FF?workspace=x"),
+            Err("invalid UTF-8 in URL")
+        );
     }
 
     #[test]
