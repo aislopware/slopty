@@ -2311,7 +2311,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       `agent` is a `TermAgent`, the row's account of the agent: thread, agent, title, rung,
       phase, wait, ask and since. `EventFilter::AgentNeedsInput` reads that event.
       `ListTerminals` answers `Outcome::Terminals { terminals, agents }`, and `AgentStatus`
-      answers a `TermAgent`, on the worker too (`ThreadReads::at_terminal`). The project
+      answers a `TermAgent`, on the worker too (`ThreadReads::seated_at`). The project
       engine's seat statuses, its settling and its spend come from the rows, and `Spent::works`
       went with the event.
     - A client gets the agents on connect and after a lag from the ladder in the state. The
