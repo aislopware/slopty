@@ -3858,7 +3858,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   Slopty could not touch the window it ran beside: open a terminal, show a file, fold the
   sidebar. It now can, as `slopty ui …` for its shell and the `ui_*` tools of `slopty mcp`,
   the same six verbs named as the shell's own commands are: `state`, `terminal [--folder]
-  [--command] [--pane]` (the tab's id and its session back, as Orca's `terminal create` answers),
+  [--command]` (the pane's id and its session back, as Orca's `terminal create` answers),
   `open <file[:line] | url>` and `diff`, `show | hide | toggle | expand | collapse <region>`,
   `chat [id | prefix | title]` (resolved as zeron resolves a chat) and `split [target]`. Every
   answer is JSON: `did`, `made`, `ran` and the `window` after it (its page, the chat on screen,
@@ -3875,16 +3875,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     connected, none with a window, or none answering, the agent hears `no_window` and why; an
     ask that reached its window late (`LATE_AFTER`) is refused rather than done out of time.
   - The person stays in charge. No verb takes the keyboard: the window puts it back where it
-    was. What would move the chat or the keyboard from a draft being typed (`chat`, expanding the
-    pane over the composer), go past Settings, or hide the region the keyboard is in is `busy`.
+    was. What would move the chat or the keyboard from a draft being typed (`chat`), go past
+    Settings, or hide the region the keyboard is in is `busy`.
     Paths are the agent's machine's, so a file, a folder or the diff opens only beside a chat of
     that machine, else `elsewhere`; a loopback page is shown through the client's forward. Each
     change shows a notice naming the agent's chat ("<title>: opened …"). A verb never answers
     for the person and never reads or types a credential: a terminal's command that acts as
     root, destroys or spans lines waits at the prompt (`ran: false`), as the run buttons do.
-  - Open names: regions are words (`sidebar`, `pane`, `files`, `terminal`, with their common
-    aliases), and an unknown one is answered with the list the window has, so a later region is
-    a new word, not a new type. Claude desktop scopes its `preview_*` tools to the session's own
+  - Open names: regions are words (`sidebar`, `files`, `changes`, `inspector`, `terminal`, with
+    their common aliases), and an unknown one is answered with the list the window has, so a later
+    region is a new word, not a new type. Claude desktop scopes its `preview_*` tools to the session's own
     pane and answers in plain text; t3code keys previews by thread; here the window is one, so
     the verbs reach the whole window and answer in data an agent can act on.
   - Tests: e2e `app::agent_ui` (`an_agents_tools_lay_out_the_window`,
