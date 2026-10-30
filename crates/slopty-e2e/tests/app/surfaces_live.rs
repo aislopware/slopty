@@ -1,6 +1,6 @@
-//! The shell's live surfaces on a real stack: a shell of the stack's worker in the terminal dock
-//! (⌘J), drawn by Slopty's own terminal in the dock's chrome, and a window of the worker's drawn
-//! screen as a right-pane surface, chosen from the machine's list, then taking the whole window.
+//! The shell's live surfaces on a real stack: a shell of the stack's worker split beside the
+//! new-session canvas (⌘D), drawn by Slopty's own terminal, and a window of the worker's drawn
+//! screen as a view beside a session, chosen from the machine's list, then filling the view.
 //! Each state is a golden in light and in dark.
 
 use std::path::Path;
@@ -53,20 +53,12 @@ fn about(value: f32, want: f32) -> bool {
     (value - want).abs() <= 0.5
 }
 
-/// Click the middle of the button named `label`, once it is drawn.
-async fn click_button(drv: &mut Driver, label: &str) {
-    let what = format!("the button {label}");
-    let dump = drv.wait_for(&what, STEP, |d| node(d, "Button", label).is_some()).await.unwrap();
-    let [x, y, w, h] = node(&dump, "Button", label).map(|n| n.bounds).unwrap_or_default();
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-}
-
-/// ⌘J opens the dock on the new-session canvas with a shell of the stack's worker in it. It is
-/// Slopty's terminal of a worker session (the workspace lists it, with its rows), it takes the
-/// keyboard, and what is typed runs there.
+/// ⌘D splits a shell of the stack's worker beside the new-session canvas. It is Slopty's terminal
+/// of a worker session (the workspace lists it, with its rows), it takes the keyboard, and what
+/// is typed runs there.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_terminal_dock_holds_a_shell_of_the_worker() {
+async fn a_split_holds_a_shell_of_the_worker() {
     let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
     let renders = stack.path("");
     let drv = &mut stack.driver;
@@ -92,9 +84,9 @@ async fn the_terminal_dock_holds_a_shell_of_the_worker() {
     stack.shutdown().await;
 }
 
-/// What floats over the dock's terminal: a program's progress (`OSC 9;4`) on its tab while it
-/// runs, the "N new lines" pill (the shell's 30 pt pill) when output arrives below a view
-/// scrolled back, ghostty's find card (a 28 pt field; Esc gives the keys back and keeps the
+/// What floats over a split shell: a program's progress (`OSC 9;4`), a bar along its pane's top
+/// edge while it runs, the "N new lines" pill (the shell's 30 pt pill) when output arrives below a
+/// view scrolled back, ghostty's find card (a 28 pt field; Esc gives the keys back and keeps the
 /// card, Esc again closes it), the right-click menu (the shell's menu rows, one height), ⌥⌘K's
 /// clear and the bar a program that ended leaves at the pane's foot. Each decides on its
 /// numbers, and each state is a golden in both appearances.
@@ -113,13 +105,13 @@ async fn the_terminal_s_floats_wear_the_shell() {
     .await
     .unwrap();
 
-    // A program's progress shows on its tab, as a share a screen reader reads, while it runs
-    // (`read` holds it), and goes when the next prompt comes (`docs/decisions/terminal.md`, "The
-    // prompt ends it").
+    // A program's progress shows along its pane's top edge, as a share a screen reader reads,
+    // while it runs (`read` holds it), and goes when the next prompt comes
+    // (`docs/decisions/terminal.md`, "The prompt ends it").
     drv.type_text("printf '\\e]9;4;1;40\\a'; read -r answer").await.unwrap();
     drv.keys("enter").await.unwrap();
     let dump = drv
-        .wait_for("the tab's progress", STEP, |d| {
+        .wait_for("the pane's progress", STEP, |d| {
             node(d, "ProgressIndicator", "Progress").is_some()
         })
         .await
@@ -235,7 +227,7 @@ async fn the_terminal_s_floats_wear_the_shell() {
     stack.shutdown().await;
 }
 
-/// A page a program in the dock's shell asks to open at a local address (`$BROWSER` with a dev
+/// A page a program in a split shell asks to open at a local address (`$BROWSER` with a dev
 /// server's `localhost`) is offered, never opened unasked: a notice names the host and who asks
 /// ("Open localhost:5173 from … on …"), with Open, and the program is told where it went.
 #[tokio::test]
@@ -348,15 +340,15 @@ mod stream {
         drv.ok(&Command::Appearance { dark: false }).await.unwrap();
     }
 
-    /// A chat's right pane offers a remote window; its list holds the windows of the chat's
-    /// machine, and choosing one shows its stream as a surface, which the pane's expand button
-    /// then makes the whole window. The worker serves its drawn screen
+    /// The palette's Remote window opens one beside the session; its list holds the windows of
+    /// the chat's machine, and choosing one shows its stream as a view, which its pane's zoom
+    /// then makes fill the view. The worker serves its drawn screen
     /// (`SLOPTY_SYNTHETIC_SCREEN`): real video, encoded, sent and decoded as any worker's, with
     /// no Screen Recording grant and the same windows on every Mac. The picture scrolls, so the
     /// goldens hold the chrome round it.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e app"]
-    async fn a_remote_window_is_a_right_pane_surface_and_takes_the_window() {
+    async fn a_remote_window_is_a_view_beside_the_session_and_fills_it() {
         use crate::served::{open_thread, says, start, thread_until};
         const MACHINE: &str = "e2e-screen";
         let drawn = [("SLOPTY_SYNTHETIC_SCREEN", "1")];
@@ -370,12 +362,15 @@ mod stream {
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         open_thread(drv, 1).await;
 
-        // What the right pane offers, from the session's terminal.
-        drv.keys("cmd-t").await.unwrap();
-        let offer = |d: &Dump| crate::served::pane_offer(d, "Remote window").map(|n| n.bounds);
-        let menu = drv.wait_for("the pane's offer", STEP, |d| offer(d).is_some()).await.unwrap();
-        let [x, y, w, h] = offer(&menu).unwrap_or_default();
-        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+        // A remote window beside the session, from the palette.
+        drv.keys("cmd-shift-p").await.unwrap();
+        drv.type_text("Remote window").await.unwrap();
+        drv.wait_for("the palette's Remote window", STEP, |d| {
+            d.a11y.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("Remote window")))
+        })
+        .await
+        .unwrap();
+        drv.keys("enter").await.unwrap();
         let title = "Synthetic editor";
         let listed = drv
             .wait_for("the worker's windows", STEP, |d| {
@@ -401,16 +396,28 @@ mod stream {
         println!("MEASURE remote-window-surface: its picture {pane:?} px");
         goldens_masked(drv, &renders, "surface-live-screen", &[pane]).await;
 
-        click_button(drv, "Expand side pane").await;
-        drv.wait_for("the takeover", STEP, |d| node(d, "Button", "Restore side pane").is_some())
-            .await
-            .unwrap();
+        // The window's pane, at the right with the keyboard, fills the view by its header's zoom;
+        // filled, no pane wears a header.
+        let zooms = drv.dump().await.unwrap();
+        let [x, y, w, h] = zooms
+            .a11y
+            .iter()
+            .filter(|n| n.role == "Button" && n.label.as_deref() == Some("Fill the view"))
+            .max_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]))
+            .map(|n| n.bounds)
+            .expect("the window's pane's zoom");
+        drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+        drv.wait_for("the window filling the view", STEP, |d| {
+            node(d, "Button", "Fill the view").is_none()
+        })
+        .await
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(600)).await;
-        let whole = moving(drv, &renders).await.expect("the taken-over picture still moves");
+        let whole = moving(drv, &renders).await.expect("the filling picture still moves");
         assert!(
             u64::from(whole[2]).saturating_mul(u64::from(whole[3]))
                 > u64::from(pane[2]).saturating_mul(u64::from(pane[3])),
-            "the takeover draws the picture larger: {whole:?} against {pane:?}"
+            "filling the view draws the picture larger: {whole:?} against {pane:?}"
         );
         println!("MEASURE remote-window-takeover: its picture {whole:?} px");
         goldens_masked(drv, &renders, "surface-live-screen-takeover", &[whole]).await;

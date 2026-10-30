@@ -1415,7 +1415,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   must draw a larger picture than the pane. Real capture keeps its proof in the live desktop
   layer (`cargo xtask e2e screen`, the guest's `vm live`). The harness's idle window, which only
   this test used, is gone; `slopty-capture`'s geometry tests still start the binary.
-  - Test: `surfaces_live::a_remote_window_is_a_right_pane_surface_and_takes_the_window`.
+  - Test: `surfaces_live::a_remote_window_is_a_view_beside_the_session_and_fills_it`.
 
 - ✅ **Simulation, models and mutants carry the tests; e2e is a smoke set** (2026-10-29). The
   person asked for the heavy suites (e2e, integration), which can never reach every corner, to

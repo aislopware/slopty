@@ -11646,8 +11646,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the workspace opens as for any (`slopty.OpenScreen`), and the pane's expand gives it the whole
   window. The browser previews are the worker's forwarded ports (`proxy_port` 0: the preview's
   own `localhost:<local>`). Tests: `slopty-e2e`
-  `app::surfaces_live::{the_terminal_dock_holds_a_shell_of_the_worker,
-  screen_recording::a_remote_window_is_a_right_pane_surface_and_takes_the_window}`. Goldens:
+  `app::surfaces_live::{a_split_holds_a_shell_of_the_worker,
+  screen_recording::a_remote_window_is_a_view_beside_the_session_and_fills_it}`. Goldens:
   `surface-live-terminal`, `surface-live-screen` and `surface-live-screen-takeover`, each in
   light and dark.
 
@@ -12185,9 +12185,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `open -a` here, by the editor's SSH link at `Device::ssh_host` on another machine (VS Code and
   Cursor's `vscode-remote/ssh-remote+`, Zed's `zed://ssh/`), Finder only for this Mac; every open
   goes through one seam an e2e run points at a file. Tests: `slopty-shell`
-  `shell::navigation_tests::{a_closed_tab_comes_back_with_its_key, new_tab_and_history_keys,
+  `shell::navigation_tests::{a_closed_view_comes_back_with_its_key, the_history_keys_walk_back_and_forward,
   an_archive_is_undone_from_its_toast_or_cmd_z}`, `state::slow_calls::tests`,
-  `shell::open_in::tests`; e2e `app::interface::{a_closed_tab_comes_back_with_cmd_shift_t,
+  `shell::open_in::tests`; e2e `app::interface::{a_closed_view_comes_back_with_cmd_shift_t,
   open_in_hands_the_folder_to_an_editor}`.
 - ✅ **The sidebar says where each agent stands, after Claude desktop's Code sidebar
   (2026-10-16).** Values and behaviour only (`.research/claude-desktop-2026-10-16.md` items 3,
@@ -12905,7 +12905,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `settings::widgets::hint_tests`, `keys::tests`,
   `app_menus::tests::the_menu_bar_names_the_palette_commands_in_title_case`,
   `shell::command_palette::tests::the_palette_holds_the_menu_bars_commands`; e2e
-  `the_files_toggles_tooltip_names_its_key_under_it` (goldens `tooltip-files-toggle`); gpui-fast
+  `the_palette_button_s_tooltip_names_its_key_under_it` (goldens `tooltip-palette`); gpui-fast
   `fast::tests::focus_tooltip::{an_anchored_hover_tooltip_sits_under_its_control,
   the_next_tooltip_shows_at_once_while_warm}`, `fast::tests::a11y::a_disabled_control_says_so`.
 - ❌ **A loud hue means notice this; the default is quiet** (2026-10-17; superseded 2026-10-19 by
@@ -14490,7 +14490,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     categories when it makes its notifier, so none registered before stays on a note, and a
     press of anything but the note itself is passed over. The inbox's answers, the windowless
     answer and the delegate's owed completion handlers went with the buttons.
-  - **Proof.** The e2e `interface::{a_closed_tab_comes_back_with_cmd_shift_t,
+  - **Proof.** The e2e `interface::{a_closed_view_comes_back_with_cmd_shift_t,
     the_palette_lists_recent_files_at_once}` (⌘T and ⌘K from the session's terminal),
     `media::a_page_card_is_sandboxed_and_acts_for_the_person` (the pane's way back),
     `inspector::tests::a_changed_file_is_said_from_the_sessions_folder`,

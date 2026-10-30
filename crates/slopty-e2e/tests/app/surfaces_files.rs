@@ -1,7 +1,7 @@
 //! The shell's Changes and Files surfaces and its settings pages on a real stack: a thread of a
 //! stand-in Claude Code (`slopty-stub-claude`) working in a git repository on the stack's
-//! worker, the repository's uncommitted changes in the right pane, its tree in the files column,
-//! and the Agents, Appearance, Shortcuts, Devices and Archived pages. Every state is a
+//! worker, the repository's uncommitted changes and its tree in views summoned beside the
+//! session, and the Agents, Appearance, Shortcuts, Devices and Archived pages. Every state is a
 //! golden in light and in dark.
 
 use std::path::Path;
@@ -76,9 +76,9 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
 }
 
-/// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘T opens the right
-/// pane's new-tab menu, whose Changes surface shows the working tree's two changed files with
-/// their hunks; ⌘E opens the files column on the thread's folder, beside the session's terminal.
+/// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘R summons its
+/// changes beside the session's terminal, the working tree's two changed files with their hunks;
+/// ⌘E summons the files of the thread's folder beside them.
 /// Then ⌘, opens Settings, whose Providers page lists the machine's agents and the autonomy
 /// setting, its Appearance and Shortcuts pages,
 /// Devices with Add device's dialog, and Archived with the thread archived by ⌘⇧A, which Unarchive
@@ -118,19 +118,14 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
 
-    // What the right pane offers (⌘T, from the session's terminal), then the working tree's
-    // diff: its two files, its hunks.
-    drv.keys("cmd-t").await.unwrap();
-    let offer = |d: &Dump| crate::served::pane_offer(d, "Changes").map(|n| n.bounds);
-    let picker = drv.wait_for("the pane's offer", STEP, |d| offer(d).is_some()).await.unwrap();
-    let [x, y, w, h] = offer(&picker).unwrap();
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-    drv.wait_for("the diff surface", STEP, |d| node(d, "Button", "Close Changes").is_some())
+    // The changes summoned beside the session (⌘R, from its terminal): the working tree's diff,
+    // its two files, its hunks.
+    drv.keys("cmd-r").await.unwrap();
+    drv.wait_for("the changes beside the session", STEP, |d| node(d, "Group", "Changes").is_some())
         .await
         .unwrap();
-    // The worker's first diff of the tree. The diff opened under the pointer, which rests on a
-    // line and lights it: the pointer goes to the session's terminal, so the render is the
-    // surface alone.
+    // The worker's first diff of the tree. A pointer resting on a line of it would light it: the
+    // pointer goes to the session's terminal, so the render is the diff alone.
     tokio::time::sleep(SETTLE).await;
     let shown = drv.dump().await.unwrap();
     let terminal =
@@ -139,9 +134,9 @@ async fn changes_files_and_settings_show_the_threads_work() {
     drv.ok(&Command::Move { x: w.mul_add(0.5, x), y: h.mul_add(0.5, y) }).await.unwrap();
     goldens(drv, &renders, "surface-files-changes").await;
 
-    // The files column on the thread's folder, beside the diff.
+    // The files of the thread's folder, summoned beside the diff.
     drv.keys("cmd-e").await.unwrap();
-    drv.wait_for("the files column", STEP, |d| node(d, "Button", "Hide files panel").is_some())
+    drv.wait_for("the files beside the diff", STEP, |d| node(d, "Group", "Files").is_some())
         .await
         .unwrap();
     tokio::time::sleep(SETTLE).await;
@@ -225,9 +220,9 @@ async fn changes_files_and_settings_show_the_threads_work() {
     stack.shutdown().await;
 }
 
-/// A stand-in agent's thread in the repository, selected, with the files column open on its
-/// folder.
-async fn files_column() -> ServedApp {
+/// A stand-in agent's thread in the repository, selected, with its folder's files summoned beside
+/// it.
+async fn files_view() -> ServedApp {
     let mut stack = ServedApp::launch_rooted(MACHINE, &[], |_root| {
         vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
     })
@@ -255,19 +250,19 @@ async fn files_column() -> ServedApp {
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
     drv.keys("cmd-e").await.unwrap();
-    drv.wait_for("the files column", STEP, |d| node(d, "Button", "Hide files panel").is_some())
+    drv.wait_for("the files beside the session", STEP, |d| node(d, "Group", "Files").is_some())
         .await
         .unwrap();
     tokio::time::sleep(SETTLE).await;
     stack
 }
 
-/// A file picked in the files column opens in the editor beside the chat: its folder unfolds,
-/// and the file's text shows with its name on the editor's tab, in light and dark.
+/// A file picked in the files opens in the editor as a pane of its own: its folder unfolds, and
+/// the file's text shows with its name on the pane's header, in light and dark.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_file_picked_in_the_tree_opens_in_the_editor() {
-    let mut stack = files_column().await;
+    let mut stack = files_view().await;
     let renders = stack.path("");
     let drv = &mut stack.driver;
     click(drv, "TreeItem", "src").await;
@@ -307,17 +302,17 @@ fn ring_band(image: &image::RgbaImage, rect: [f32; 4], scale: f32) -> (usize, us
     (differs, x1.saturating_sub(x0) as usize)
 }
 
-/// The files column's hidden-files toggle, the stop the walk below looks for.
+/// The files' hidden-files toggle, the stop the walk below looks for.
 const TOGGLE: &str = "Show hidden files";
 
-/// Tab walks into the files column and reaches its controls, each wearing the shell's ring: 2
+/// Tab walks into the files and reaches their controls, each wearing the shell's ring: 2
 /// points of the accent 2 points clear of the control, drawn only while it has the keyboard, in
 /// light and in dark (`docs/decisions/ui.md`, "Every pane control is a keyboard stop with one
 /// ring"). The renders go to the artifacts for review.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_tab_walks_the_files_pane_with_a_ring() {
-    let mut stack = files_column().await;
+    let mut stack = files_view().await;
     let drv = &mut stack.driver;
 
     // The toggle at rest: no ring round it.
@@ -329,12 +324,12 @@ async fn a_tab_walks_the_files_pane_with_a_ring() {
         .iter()
         .find(|n| n.role == "Button" && n.label.as_deref() == Some(TOGGLE))
         .map(|n| n.bounds)
-        .expect("the files column's hidden-files toggle");
+        .expect("the files' hidden-files toggle");
     let (lit, read) = ring_band(&rest.image, toggle, rest.scale);
     assert!(lit * 10 <= read, "no ring at rest: {lit} of {read}");
 
-    // Tab walks the window's stops until the files column's toggle has the keyboard; each stop
-    // it passes in the column is one too.
+    // Tab walks the window's stops until the files' toggle has the keyboard; each stop it passes
+    // in the files is one too.
     let mut walked = Vec::new();
     let mut reached = false;
     for _ in 0..120 {
@@ -348,7 +343,7 @@ async fn a_tab_walks_the_files_pane_with_a_ring() {
             break;
         }
     }
-    assert!(reached, "Tab reached the files column's toggle; it walked:\n{}", walked.join("\n"));
+    assert!(reached, "Tab reached the files' toggle; it walked:\n{}", walked.join("\n"));
 
     for (dark, appearance) in [(false, "light"), (true, "dark")] {
         drv.ok(&Command::Appearance { dark }).await.unwrap();

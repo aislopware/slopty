@@ -224,34 +224,18 @@ pub async fn open_thread(drv: &mut Driver, nth: u8) -> Dump {
         .await
 }
 
-/// What the session's right pane offers to open as `label` after ⌘T: a row of its new-tab menu
-/// once it holds a tab, else of the list the empty pane shows (a session opens on its terminal
-/// alone, the pane holding nothing).
-pub fn pane_offer<'a>(dump: &'a Dump, label: &str) -> Option<&'a A11yNode> {
-    let edge = dump
-        .a11y
-        .iter()
-        .find(|n| n.role == "Terminal")
-        .map_or(0.0, |n| n.bounds[0] + n.bounds[2] - 1.0);
-    dump.a11y.iter().find(|n| {
-        n.label.as_deref() == Some(label)
-            && (n.role == "MenuItem" || (n.role == "Button" && n.bounds[0] >= edge))
-    })
-}
-
-/// Open the shown session's inspector as the person does, with ⌘I, once its titlebar's toggle
-/// is drawn: a session opens on its terminal alone (`docs/decisions/ui.md`, "A session opens on
-/// its terminal alone"). The frame that shows it.
+/// Summon the shown session's inspector as the person does, with ⌘I, once its terminal is drawn:
+/// a session opens on its terminal alone (`docs/decisions/ui.md`, "A session opens on its
+/// terminal alone"). The frame that shows it beside the session.
 pub async fn show_inspector(drv: &mut Driver) -> Dump {
-    let toggle = seen(drv, "the inspector's toggle", STEP, |d| {
-        node(d, "Button", "Show inspector").is_some()
-            || node(d, "Button", "Hide inspector").is_some()
-    })
-    .await;
-    if node(&toggle, "Button", "Show inspector").is_some() {
+    let session =
+        seen(drv, "the session's terminal", STEP, |d| d.a11y.iter().any(|n| n.role == "Terminal"))
+            .await;
+    if node(&session, "Group", "Inspector").is_none() {
         drv.keys("cmd-i").await.unwrap();
     }
-    seen(drv, "the inspector", STEP, |d| node(d, "Button", "Hide inspector").is_some()).await
+    seen(drv, "the inspector beside the session", STEP, |d| node(d, "Group", "Inspector").is_some())
+        .await
 }
 
 /// Type `text` into the open session's terminal, its TUI's prompt: the keyboard is the

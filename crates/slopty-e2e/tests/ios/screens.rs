@@ -161,7 +161,12 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
     read_until(&stack, &agent, "the typed words never reached the TUI", said(NEXT)).await;
 
     let drv = &mut stack.driver;
-    tap(drv, "Button", "Show inspector").await;
+    // On a phone a sheet a finger opens; on an iPad a pane ⌘I summons beside the session.
+    if phone {
+        tap(drv, "Button", "Show inspector").await;
+    } else {
+        drv.keys("cmd-i").await.unwrap();
+    }
     shown(drv, "the inspector reading the turn", |d| {
         (!phone || d.a11y_node("Dialog", Some("Inspector")).is_some())
             && inspector_says(d, &format!("Done: {NEXT}"))
@@ -181,9 +186,10 @@ async fn a_session_is_its_terminal_and_shows_its_inspector() {
 }
 
 /// A shell of the session's worker and the files of its folder open from the session on the
-/// device: the shell from ⌘J, the files a finger's reach away (on a phone the navigation bar's
-/// "Show files", a page over the session that leads back to it; on an iPad the titlebar's "Show
-/// files panel"). The shell runs what is typed; the files list the folder's own.
+/// device: on an iPad the shell split beside the session (⌘D), which a phone, one session at a
+/// time, never splits; the files on a phone from the navigation bar's "Show files", a page over
+/// the session that leads back to it, and on an iPad summoned beside the session (⌘E) and closed
+/// by a finger on their pane's ✕. The shell runs what is typed; the files list the folder's own.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e ios"]
 async fn a_chats_shell_and_its_files_open_on_the_device() {
@@ -208,25 +214,34 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
     open_chat(drv, phone, title).await;
     shown(drv, "the session's terminal", |d| d.a11y.iter().any(|n| n.role == "Terminal")).await;
 
-    drv.keys("cmd-d").await.unwrap();
-    shown(drv, "a shell at its prompt", |d| {
-        d.terminals.iter().any(|t| t.at_prompt) && d.prompts_settled()
-    })
-    .await;
-    drv.ui_insert_text("echo phone surface").await.unwrap();
-    drv.keys("enter").await.unwrap();
-    shown(drv, "the echo", |d| {
-        d.lines_containing("phone surface").len() >= 2 && d.prompts_settled()
-    })
-    .await;
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &dir, device, "terminal").await;
-    drv.keys("cmd-d").await.unwrap();
+    if !phone {
+        drv.keys("cmd-d").await.unwrap();
+        shown(drv, "a shell beside the session at its prompt", |d| {
+            d.a11y.iter().filter(|n| n.role == "Terminal").count() == 2
+                && d.terminals.iter().any(|t| t.at_prompt)
+                && d.prompts_settled()
+        })
+        .await;
+        drv.ui_insert_text("echo pad surface").await.unwrap();
+        drv.keys("enter").await.unwrap();
+        shown(drv, "the echo", |d| {
+            d.lines_containing("pad surface").len() >= 2 && d.prompts_settled()
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        goldens(drv, &dir, device, "terminal").await;
+        // ⌘W closes the shell's pane, the one with the keyboard.
+        drv.keys("cmd-w").await.unwrap();
+        shown(drv, "the session alone", |d| {
+            d.a11y.iter().filter(|n| n.role == "Terminal").count() == 1
+        })
+        .await;
+    }
 
     if phone {
         tap(drv, "Button", "Show files").await;
     } else {
-        tap(drv, "Button", "Show files panel").await;
+        drv.keys("cmd-e").await.unwrap();
     }
     shown(drv, "the folder's files", |d| {
         (!phone || d.a11y_node("Heading", Some("Files")).is_some())
@@ -244,7 +259,8 @@ async fn a_chats_shell_and_its_files_open_on_the_device() {
         })
         .await;
     } else {
-        tap(drv, "Button", "Hide files panel").await;
+        tap(drv, "Button", "Close Files").await;
+        shown(drv, "the session alone", |d| d.a11y_node("Group", Some("Files")).is_none()).await;
     }
     stack.shutdown().await;
 }

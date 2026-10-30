@@ -251,15 +251,20 @@ async fn a_finger_over_a_live_page_scrolls_the_chat_or_the_page() {
     drv.wait_for("the session's terminal", STEP, |d| d.a11y.iter().any(|n| n.role == "Terminal"))
         .await
         .unwrap();
-    // The turn's pages are in its inspector, which a finger opens: on a phone a sheet over the
-    // session, taken to the whole screen; on an iPad the pane beside the session.
-    crate::compact::tap(drv, "Button", "Show inspector").await;
+    // The turn's pages are in its inspector: on a phone a sheet a finger opens over the session,
+    // taken to the whole screen; on an iPad a pane ⌘I summons beside the session.
     if phone {
+        crate::compact::tap(drv, "Button", "Show inspector").await;
         crate::compact::tap(drv, "Button", "Expand inspector").await;
+    } else {
+        drv.keys("cmd-i").await.unwrap();
     }
     let up = |d: &Dump| {
-        let open = if phone { "Collapse inspector" } else { "Hide inspector" };
-        d.a11y_node("Button", Some(open)).is_some()
+        if phone {
+            d.a11y_node("Button", Some("Collapse inspector")).is_some()
+        } else {
+            d.a11y_node("Group", Some("Inspector")).is_some()
+        }
     };
     drv.wait_for("the inspector", STEP, up).await.unwrap();
     tokio::time::sleep(Duration::from_millis(600)).await;

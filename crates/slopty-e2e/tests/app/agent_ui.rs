@@ -55,6 +55,11 @@ fn region<'a>(window: &'a Value, name: &str) -> &'a Value {
         .unwrap_or(&Value::Null)
 }
 
+/// The terminals drawn: the session's, and each shell split beside it.
+fn terminals(dump: &Dump) -> usize {
+    dump.a11y.iter().filter(|n| n.role == "Terminal").count()
+}
+
 /// Whether any node, of any role, says `words`.
 fn says_anywhere(dump: &Dump, words: &str) -> bool {
     dump.a11y.iter().any(|n| {
@@ -91,12 +96,11 @@ async fn ui(stack: &ServedApp, cwd: &Path, args: &[&str]) -> (bool, Value) {
 
 /// An agent's tools drive the window: the stand-in's `ui_region` hides the sidebar (the toggle
 /// then offers to show it), and in its next turn `ui_region` expands it again, `ui_terminal`
-/// opens a terminal tab in its folder in the drawer, `ui_open` shows its README in the side pane,
-/// each change shown in place with no notice over it, since the agent's chat is the one on screen
-/// (a chat off screen is marked with one, `shell::agent_ui::tests`), and `ui_state` reports that
-/// layout: the sidebar, the pane
-/// and the terminal shown, the README's tab and the terminal's, with its session, and nobody
-/// typing.
+/// opens a shell in its folder in a pane beside the session, `ui_open` shows its README in a pane
+/// of its own, each change shown in place with no notice over it, since the agent's chat is the
+/// one on screen (a chat off screen is marked with one, `shell::agent_ui::tests`), and `ui_state`
+/// reports that layout: the sidebar and the shells shown, the README's pane and the shell's, with
+/// its session, and nobody typing.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn an_agents_tools_lay_out_the_window() {
@@ -144,22 +148,17 @@ async fn an_agents_tools_lay_out_the_window() {
     tell(&mut stack, ARRANGE).await;
     thread_until(&stack, &agent, "arranged the window", |r| says(r, "Done: Arrange the window"))
         .await;
-    let laid = seen(&mut stack.driver, "the sidebar, a terminal tab and the README", STEP, |d| {
-        node(d, "Button", "Hide sidebar").is_some()
-            && node(d, "Button", "Hide terminal").is_some()
-            && d.a11y.iter().any(|n| {
-                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.ends_with("README.md"))
-            })
-    })
+    let laid = seen(
+        &mut stack.driver,
+        "the sidebar, a shell and the README beside the session",
+        STEP,
+        |d| {
+            node(d, "Button", "Hide sidebar").is_some()
+                && terminals(d) >= 2
+                && node(d, "Group", "README.md").is_some()
+        },
+    )
     .await;
-    assert!(
-        laid.a11y.iter().filter(|n| n.role == "Tab").any(|tab| {
-            let close = format!("Close {}", tab.label.as_deref().unwrap_or_default());
-            node(&laid, "Button", &close).is_some()
-        }),
-        "a terminal tab in the drawer:\n{}",
-        slopty_e2e::frame_text(&laid.a11y)
-    );
     // The chat on screen shows what its agent did; no notice says it again over the pane.
     let readme_mark = format!(": opened {}", repo.join("README.md").display());
     assert!(!says_anywhere(&laid, &readme_mark), "no notice over the README");
@@ -179,7 +178,7 @@ async fn an_agents_tools_lay_out_the_window() {
     assert_eq!(window["page"], "chat", "{window}");
     assert_eq!(window["typing"], false, "{window}");
     assert_eq!(window["chat"]["machine"], MACHINE, "{window}");
-    for name in ["sidebar", "pane", "terminal"] {
+    for name in ["sidebar", "terminal"] {
         assert_eq!(region(window, name)["shown"], true, "{name} shows: {window}");
     }
     let tabs = window["tabs"].as_array().cloned().unwrap_or_default();
@@ -197,9 +196,9 @@ async fn an_agents_tools_lay_out_the_window() {
 /// chat` puts the other chat on screen while nobody types (its terminal holding the keyboard is
 /// someone watching); once the person types a draft in the session's terminal, the same ask
 /// is busy, the chat and the keyboard stay, and an ask that moves nothing the person is in
-/// (`show terminal`, the dock) goes through with the keyboard still the session's. A region, a
-/// file or a chat the window does not know is unknown, its message naming what it does know;
-/// with the app gone, no window is reached.
+/// (`show terminal`, a shell split beside the session) goes through with the keyboard still the
+/// session's. A region, a file or a chat the window does not know is unknown, its message naming
+/// what it does know; with the app gone, no window is reached.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_window_stays_the_persons_and_says_why_it_refuses() {
@@ -232,10 +231,9 @@ async fn the_window_stays_the_persons_and_says_why_it_refuses() {
     let (ok, typing) = ui(&stack, &repo, &["state"]).await;
     assert!(ok && typing["window"]["typing"] == true, "{typing}");
     assert_eq!(typing["window"]["chat"]["title"], other, "the chat stayed: {typing}");
-    let (ok, drawer) = ui(&stack, &repo, &["show", "terminal"]).await;
-    assert!(ok, "{drawer}");
-    seen(&mut stack.driver, "the drawer", STEP, |d| node(d, "Button", "Hide terminal").is_some())
-        .await;
+    let (ok, split) = ui(&stack, &repo, &["show", "terminal"]).await;
+    assert!(ok, "{split}");
+    seen(&mut stack.driver, "a shell beside the session", STEP, |d| terminals(d) >= 2).await;
     let kept = stack.driver.dump().await.unwrap();
     assert_eq!(kept.focused, session, "the session's terminal kept the keyboard");
 
