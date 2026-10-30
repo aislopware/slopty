@@ -235,8 +235,9 @@ struct Followed {
 /// What a followed session's task is told.
 #[derive(Debug)]
 enum Say {
-    /// A hook said this of the session, at this time.
-    Signal(Signal, WallMs),
+    /// A hook said this of the session, at this time, in the turn of this prompt (its
+    /// `prompt_id`, which a `Stop` ends).
+    Signal(Signal, WallMs, Option<String>),
     /// Its record says its name now.
     Named(String),
     /// Its record says it waits on the person for this (`None`: no longer), since this time.
@@ -440,7 +441,7 @@ impl Watch {
                 tracing::info!(%terminal, session = native, source = ?hook.source, "a Claude Code's session, by its hook");
                 let (version, since) = (term.version.clone(), term.since);
                 self.follow(Begin { terminal, native, cwd, version, transcript, since });
-                self.say(terminal, Say::Signal(Signal::Began, at));
+                self.say(terminal, Say::Signal(Signal::Began, at, hook.prompt_id));
             }
             (Signal::Ended, Some(native)) if current.as_deref() == Some(native.as_str()) => {
                 tracing::info!(%terminal, session = native, reason = ?hook.reason, "a Claude Code's session ended");
@@ -455,12 +456,12 @@ impl Watch {
                 let transcript = hook.transcript_path.map(PathBuf::from).unwrap_or_default();
                 let (version, since) = (term.version.clone(), term.since);
                 self.follow(Begin { terminal, native, cwd, version, transcript, since });
-                self.say(terminal, Say::Signal(signal, at));
+                self.say(terminal, Say::Signal(signal, at, hook.prompt_id));
             }
             (_, Some(native)) if current.as_deref() != Some(native.as_str()) => {
                 tracing::debug!(%terminal, session = native, event = hook.event, "a hook of a session not followed here");
             }
-            _ => self.say(terminal, Say::Signal(signal, at)),
+            _ => self.say(terminal, Say::Signal(signal, at, hook.prompt_id)),
         }
     }
 
@@ -842,11 +843,11 @@ impl Reader {
 
     fn say(&mut self, host: &Host, say: Say) {
         let outs = match say {
-            Say::Signal(signal, at) => {
+            Say::Signal(signal, at, prompt) => {
                 self.hooked = true;
                 self.asked = false;
                 self.open.clear();
-                self.signal(signal, at)
+                self.signal(signal, prompt.as_deref(), at)
             }
             Say::Waits(wait, at) => self.waits(wait, at),
             Say::Named(name) => self.history.named(&name),
@@ -899,7 +900,9 @@ impl Reader {
         Wait { kind: kind.to_owned(), text: asks_for(&open.name, &open.input) }
     }
 
-    fn signal(&mut self, signal: Signal, at: WallMs) -> Vec<Out> {
+    /// What hook `signal` heard at `at` says, of the turn of `prompt` (the hook's `prompt_id`):
+    /// a `Stop` ends that turn, whenever the transcript shows it.
+    fn signal(&mut self, signal: Signal, prompt: Option<&str>, at: WallMs) -> Vec<Out> {
         let live = Liveness::Live;
         match signal {
             Signal::Began => self.history.status(Phase::Idle, None, live, at),
@@ -908,14 +911,15 @@ impl Reader {
                 let wait = Wait { kind: kind.to_owned(), text };
                 self.history.status(Phase::NeedsYou, Some(wait), live, at)
             }
-            // The turn ends with its Stop: the records that close it come after the hook.
+            // The turn of the prompt it names ends with its Stop, before or after the records
+            // that close it.
             Signal::Done => {
-                let mut outs = self.history.ended(&End::Complete, at);
+                let mut outs = self.history.turn_ended(prompt, &End::Complete, at);
                 outs.extend(self.history.status(Phase::Done, None, live, at));
                 outs
             }
             Signal::Failed(_) => {
-                let mut outs = self.history.ended(&End::Failed(None), at);
+                let mut outs = self.history.turn_ended(prompt, &End::Failed(None), at);
                 outs.extend(self.history.status(Phase::Failed, None, live, at));
                 outs
             }

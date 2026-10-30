@@ -713,8 +713,8 @@ mod hooks {
     use std::time::Duration;
 
     use serde_json::Value;
-    use slopty_core::SessionId;
-    use slopty_proto::thread::{Status, ThreadState, TurnId};
+    use slopty_core::{SessionId, WallMs};
+    use slopty_proto::thread::{Status, ThreadState, TurnId, TurnState};
     use slopty_worker::thread::Host;
     use slopty_worker::thread::claude::{Claude, Place};
     use slopty_worker::thread::log::Limits;
@@ -737,9 +737,12 @@ mod hooks {
         transcript_after: bool,
     }
 
+    /// A turn as it settled: which, how it ended, and when.
+    type Settled = (TurnId, TurnState, Option<WallMs>);
+
     /// What the thread of scenario `name` settles on when its hooks arrive as `arrival` says:
     /// its status, and its turns.
-    async fn settled(name: &str, arrival: Arrival) -> (Status, Vec<TurnId>) {
+    async fn settled(name: &str, arrival: Arrival) -> (Status, Vec<Settled>) {
         let scenario = fixtures().join(name);
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
@@ -792,7 +795,8 @@ mod hooks {
         let (state, _cursor): (ThreadState, _) = host.state(thread).expect("the thread");
         drop(claude);
         watching.abort();
-        (state.status, state.turns.iter().map(|turn| turn.id).collect())
+        let turns = state.turns.iter().map(|t| (t.id, t.state.clone(), t.ended_ms)).collect();
+        (state.status, turns)
     }
 
     #[tokio::test(start_paused = true)]
