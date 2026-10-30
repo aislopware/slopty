@@ -4,9 +4,10 @@
 //!
 //! A machine on an older build offers Update (Cancel update while one runs); one installed from
 //! here offers Remove, which asks to be pressed again; one the server lists as away offers Wake
-//! and Forget; a Mac's linked machines offer Show in Finder. The server offers Update when it is
-//! older, Update all when more than one thing is, and Copy grant while its tailnet policy turns
-//! this device away.
+//! and Forget; a Mac's linked machines offer Show in Finder; one that turns this device away
+//! offers Retry (the interface puts it on the row beside the badge), which dials it now and
+//! never asks for a credential. The server offers Update when it is older, Update all when more
+//! than one thing is, and Copy grant while its tailnet policy turns this device away.
 
 use gpui::{App, Context};
 use slopty_client::WorkerKey;
@@ -26,6 +27,7 @@ mod id {
     pub(super) const FINDER: &str = "finder";
     pub(super) const UPDATE_ALL: &str = "update-all";
     pub(super) const COPY_GRANT: &str = "copy-grant";
+    pub(super) const REDIAL: &str = slopty_view_proto::DeviceAction::REDIAL;
 }
 
 /// An action named `id`, its button saying `label`.
@@ -138,6 +140,7 @@ impl Workspace {
             }
             (id::WAKE, _) => self.wake_worker(worker, cx),
             (id::FORGET, _) => self.forget_worker(worker, cx),
+            (id::REDIAL, _) => self.connect_now(worker),
             (id::FINDER, _) => self.show_workers_in_finder(cx),
             (other, _) => tracing::warn!(other, "no such machine action, or not now"),
         }
