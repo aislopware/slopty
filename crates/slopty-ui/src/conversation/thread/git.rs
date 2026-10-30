@@ -121,6 +121,9 @@ pub struct Repo {
     /// Branches' commits since they left another, as committed, by the base and the branch
     /// ([`GitOp::Range`]): a project's finished goal, checked out nowhere.
     pub ranges: HashMap<(String, String), Arc<Review>>,
+    /// Single commits as committed, against their first parents, by the hash asked
+    /// ([`GitOp::Show`]): a hash the person picked on a terminal's screen.
+    pub commits: HashMap<String, Arc<Review>>,
     /// The branches a new worktree of it could start from, as last read.
     pub branches: Option<Arc<Branches>>,
     /// Its open pull request's review still open, as last read: asked whenever the pull request
@@ -350,6 +353,9 @@ fn repo_done(repo: &mut Repo, request: RequestId, done: GitDone, push: bool, the
             ReviewScope::Range { base, head } => {
                 repo.ranges.insert((base, head), Arc::from(review));
             }
+            ReviewScope::Commit { commit } => {
+                repo.commits.insert(commit, Arc::from(review));
+            }
         },
         GitDone::Branches(branches) => repo.branches = Some(Arc::from(branches)),
         // Another branch checked out: what the clone holds is read again.
@@ -414,6 +420,16 @@ fn missed(
             };
             repo.ranges.insert((base.clone(), head.clone()), Arc::new(review));
         }
+        GitOp::Show { commit } => {
+            let review = Review {
+                scope: ReviewScope::Commit { commit: commit.clone() },
+                from: None,
+                to: None,
+                files: Vec::new(),
+                absent: Some(words),
+            };
+            repo.commits.insert(commit.clone(), Arc::new(review));
+        }
         // Branches that could not be read (not a repository, out of reach) leave a start's
         // place as words: there is no worktree to make of it.
         GitOp::Branches => {}
@@ -455,6 +471,7 @@ const fn changes(op: &GitOp) -> bool {
             | GitOp::PullComments { .. }
             | GitOp::Changes { .. }
             | GitOp::Range { .. }
+            | GitOp::Show { .. }
             | GitOp::Branches
             | GitOp::Worktrees
             | GitOp::Scripts
