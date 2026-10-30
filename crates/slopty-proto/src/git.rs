@@ -186,6 +186,15 @@ pub enum GitOp {
         /// The branch, with no remote's prefix.
         branch: String,
     },
+    /// One commit as committed, against its first parent (the empty tree for a root commit),
+    /// with no checkout and no working tree ([`GitDone::Changes`], scoped
+    /// [`crate::thread::wire::ReviewScope::Commit`]): a hash the person picked on a terminal's
+    /// screen. Nothing in the repository moves.
+    Show {
+        /// The commit, in hex as the screen showed it, whole or abbreviated: never a ref, a
+        /// range or an option.
+        commit: String,
+    },
 }
 
 /// What a person's review of a pull request says of the whole ([`GitOp::PullReview`]).

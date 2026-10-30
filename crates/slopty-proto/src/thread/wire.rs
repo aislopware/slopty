@@ -320,6 +320,11 @@ pub enum ReviewScope {
         /// The branch reviewed.
         head: String,
     },
+    /// One commit as committed, against its first parent (`crate::git::GitOp::Show`).
+    Commit {
+        /// The commit, in hex as it was asked.
+        commit: String,
+    },
 }
 
 /// What a working tree's review compares it with ([`ReviewScope::WorkingTree`]).

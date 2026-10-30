@@ -363,6 +363,16 @@ mod golden_git {
             absent: None,
         };
         snap("worker_git_range", &done(11, goal));
+        let commit = "4f2a9c1".to_owned();
+        snap("client_git_show", &ask(12, GitOp::Show { commit: commit.clone() }));
+        let picked = Review {
+            scope: ReviewScope::Commit { commit },
+            from: Some(TreeRef("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_owned())),
+            to: Some(TreeRef("9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d".to_owned())),
+            files: Vec::new(),
+            absent: None,
+        };
+        snap("worker_git_show", &done(12, picked));
     }
 
     /// A clone asked of a worker straight, how far it has come, and how it went.
