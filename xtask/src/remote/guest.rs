@@ -1206,6 +1206,8 @@ fn simulator(home: &Path, guest: &str, sim: crate::ios::SimKind, app: &Path) -> 
     };
     // Boots it if it is not yet (a spare its process has not booted yet), else waits for it.
     simctl(home, guest, &["bootstatus", &udid, "-b"])?;
+    // As a phone with no keyboard: GameController would count the simulator's virtual one.
+    simctl(home, guest, &crate::ios::no_hardware_keyboard(&udid))?;
     simctl(home, guest, &["install", &udid, app.as_str()])?;
     let installed = started.elapsed();
     let sim = sim.name();

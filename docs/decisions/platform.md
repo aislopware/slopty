@@ -1547,8 +1547,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - A change while the app is away may go unheard, so each resume on iOS (a return to the
     front among them) reads `hardware_keyboard_attached` again. The launch reads it once, as
     before. The settings tick no longer asks.
-  - The e2e build's `SLOPTY_HARDWARE_KEYBOARD` still decides over both, so a golden never
-    depends on when the simulator reports the Mac's keyboard.
+  - A simulator the e2e boots reports no keyboard at all (`testing.md`, "A simulator the e2e
+    boots has no hardware keyboard"), so a golden never depends on one.
   - The module builds on macOS too, where a Mac always has a keyboard, only so the main-thread
     harness can post the notifications.
   - Test: `tests/main_thread.rs` `a_keyboard_is_heard_as_it_comes_and_goes` (slopty-platform).

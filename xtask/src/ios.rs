@@ -644,8 +644,28 @@ fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String>
     // A device created a moment ago is still booting; `launch` on it blocks for minutes.
     // Headless: simctl boots and drives it, and nothing needs Simulator.app's window.
     step("simctl bootstatus", &cmd!(sh, "xcrun simctl bootstatus {udid} -b"))?;
+    let keyboard = no_hardware_keyboard(&udid);
+    step("simctl: no hardware keyboard", &cmd!(sh, "xcrun simctl {keyboard...}"))?;
     step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))?;
     Ok(udid)
+}
+
+/// The Darwin notification whose state says `CoreDevice`'s `dtuhidd` carries the host's keys,
+/// buttons and touches into a simulator.
+const HID_FROM_HOST: &str = "com.apple.coredevice.dtuhidd.active";
+
+/// `simctl`'s arguments that leave the booted simulator `udid` with no hardware keyboard, as a
+/// phone with none (`docs/decisions/testing.md`, "A simulator the e2e boots has no hardware
+/// keyboard"). Its UIKit already has none: only a key from the host (`Simulator.app`'s)
+/// attaches one, and the soft keyboard comes up. But the simulator's HID plugin
+/// (`CoreSimulator`'s `SimulatorHID`) connects a virtual external keyboard at boot, which
+/// `GameController` counts, so `GCKeyboard.coalescedKeyboard` was there in every simulator and
+/// the phone's key row stayed away over the soft keyboard. While `HID_FROM_HOST` is set the
+/// plugin disconnects it, with the screen's buttons and digitizer, which carry only the host's
+/// events (the tests' touches and keys go in through the app). The state lives in the
+/// simulator's own `notifyd`, so every boot sets it, before the app starts.
+pub const fn no_hardware_keyboard(udid: &str) -> [&str; 8] {
+    ["spawn", udid, "notifyutil", "-s", HID_FROM_HOST, "1", "-p", HID_FROM_HOST]
 }
 
 /// Boot the simulator, install and launch with the console attached.

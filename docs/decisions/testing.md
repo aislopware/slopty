@@ -33,7 +33,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   simulator (created on first use), installs the bundle and runs `crates/slopty-e2e/tests/ios.rs`
   (gate `SLOPTY_IOS_E2E`): ptyd and the worker start on the Mac as for `e2e app`, the app is
   launched with `simctl launch` and `SIMCTL_CHILD_*` variables for its socket, data dir,
-  `SLOPTY_PREDICT` and `SLOPTY_HARDWARE_KEYBOARD`, and binds the socket on the shared file system (a simulator process is a
+  `SLOPTY_PREDICT` (and `SLOPTY_HARDWARE_KEYBOARD` until 2026-10-30), and binds the socket on the shared file system (a simulator process is a
   Mac process; the sandbox does not stop it). `Stack::launch_on_simulator` shares the daemon
   code with `launch`; shutdown sends `quit` and `simctl terminate`. The test pins the one
   behaviour that differs by screen: the worker places a desktop-sized terminal and the client
@@ -65,9 +65,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   terminal golden differed by 1.7 % between two runs — one 140-pt band at the bottom and every
   text row. GameController reports the Mac's keyboard to the simulator about a second after
   launch, the poll hides the key bar and the terminal is refitted, so the frame depended on
-  which side of that poll the render landed. The e2e build reads `SLOPTY_HARDWARE_KEYBOARD`
-  (`0|1`) before asking the platform and the harness launches the simulator app with `0`:
-  goldens are the glass-only layout, key bar in frame, whatever the simulator has attached.
+  which side of that poll the render landed. The e2e build read `SLOPTY_HARDWARE_KEYBOARD`
+  (`0|1`) before asking the platform and the harness launched the simulator app with `0`:
+  goldens were the glass-only layout, key bar in frame, whatever the simulator had attached.
+  The override went with the TUI-first change on 2026-10-30; since 2026-10-31 the simulator
+  itself has no keyboard ("A simulator the e2e boots has no hardware keyboard", below).
 
 - ✅ **Headless UI tests read the scene like a DOM** (2026-09-05). Item roots carry
   `.debug_selector("item-<uuid>")` and the canvas root `"canvas"`; `cx.debug_bounds` gives
@@ -1911,3 +1913,41 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   threads spawning long ones, at load 53, never had a pipe held past their exit. What is left is
   the run's own lateness under load, so the window widens past it; a test whose output closes in
   time waits for none of it.
+
+- ✅ **A simulator the e2e boots has no hardware keyboard** (2026-10-31). On the iPhone the key
+  row never stood after a finger tapped a session's terminal. The soft keyboard was up: a focus
+  change into the terminal makes `gpui_ios`'s text input view first responder (the terminal's
+  press asks for the keyboard too), and UIKit showed it, since a simulator's UIKit attaches a
+  hardware keyboard only on the host's first key (`SimulatorHID`'s
+  `_IndigoHIDUpdateKeyboardType`), which a headless one never gets. The row asks
+  GameController, which counts any HID keyboard, and the simulator's HID plugin
+  (CoreSimulator's `SimHIDVirtualServiceManager`, loaded into backboardd) connects a virtual
+  external keyboard at every boot, so `GCKeyboard.coalescedKeyboard` was there about a second
+  after each launch: the keyboard the September entry above took for the Mac's. Its override
+  hid that until it went, the day the row arrived. Ruled:
+  - Every simulator xtask boots for a run, in the guest (`remote::guest::simulator`) and here
+    (`ios::boot_and_install`), is given `simctl spawn <udid> notifyutil -s
+    com.apple.coredevice.dtuhidd.active 1 -p …` once booted, before the app starts. While that
+    state is set (CoreDevice's `dtuhidd` carrying the host's input) the plugin disconnects its
+    virtual keyboard, the screen's buttons and its digitizer, each until the host sends it an
+    event. The tests' touches and keys go in through the app, never from the host, so both UIKit
+    and GameController see a phone with no keyboard.
+  - Simulator.app's `ConnectHardwareKeyboard` is not the lever: the guest runs no Simulator.app,
+    and the preference decides only whether Simulator.app sends that first key.
+  - The state lives in the simulator's own `notifyd`, so each boot sets it again.
+  - On a device GameController and UIKit agree, and the row keeps its rule (`layout.md`, "The
+    iPhone as built").
+  - With the row standing, the same case showed two faults of the product, fixed with it:
+    - The soft keyboard was up before the tap: since the panes (2026-10-30) a session switch
+      handed the keyboard back to the session's terminal on every device (`ui.md`, "On a touch
+      screen the shell never raises the soft keyboard").
+    - The grid's size flashed in the middle as the keyboard rose, and the frame checker caught
+      it drawn stale: it went when a frame passed its 750 ms, not when its timer ran (`ui.md`,
+      "A word that turns with the clock turns when its timer runs"). Its timer now takes it
+      away. And the soft keyboard coming or going settles a size as a focus change does: it
+      rises some frames after the focus that asked for it, and the key row's hide keyboard key
+      sends it down with the focus kept, so a slow rise flashed the size and every hide did
+      (`slopty-terminal`
+      `view::tests::a_frame_before_the_sizes_timer_draws_it_as_one_from_scratch`,
+      `overlays::tests::a_resize_shows_only_once_the_layout_has_settled`).
+  - Proof: e2e `ios::screens::a_session_is_its_terminal_and_shows_its_inspector` on the iPhone.
