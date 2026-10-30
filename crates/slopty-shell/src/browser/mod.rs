@@ -28,8 +28,7 @@ gpui::actions!(
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     use crate::settings::{ShortcutId, parse_combo, platform_combo};
-    // Existing customized app chords win. In particular old settings may
-    // already assign mod-shift-r to the right pane.
+    // A chord the person gave a window command wins: Changes' key on ⇧⌘R, say.
     let available = |combo: &str, own: Option<ShortcutId>| {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
@@ -116,8 +115,6 @@ pub struct BrowserSurface {
     presentation: Presentation,
     #[cfg(target_os = "macos")]
     resize_inset: gpui::Pixels,
-    #[cfg(any(target_os = "macos", windows))]
-    right_occlusion: gpui::Pixels,
     _input_sub: Subscription,
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     native: Option<native::NativePage>,
@@ -199,8 +196,6 @@ impl BrowserSurface {
             presentation: Presentation::Hidden,
             #[cfg(target_os = "macos")]
             resize_inset: gpui::px(0.0),
-            #[cfg(any(target_os = "macos", windows))]
-            right_occlusion: gpui::px(0.0),
             _input_sub: input_sub,
             #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             native: None,
@@ -258,15 +253,6 @@ impl BrowserSurface {
     pub fn set_resize_inset(&mut self, inset: gpui::Pixels, cx: &mut Context<Self>) {
         if self.resize_inset != inset {
             self.resize_inset = inset;
-            cx.notify();
-        }
-    }
-
-    /// Crop a GPUI overlay out of both native painting and native hit testing.
-    #[cfg(any(target_os = "macos", windows))]
-    pub fn set_right_occlusion(&mut self, width: gpui::Pixels, cx: &mut Context<Self>) {
-        if self.right_occlusion != width {
-            self.right_occlusion = width;
             cx.notify();
         }
     }

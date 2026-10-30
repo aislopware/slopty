@@ -4,24 +4,29 @@
 //!   ⌘⇧G step through the matches. The finding itself is the transcript's and the diff's own
 //!   (`transcript::FindInThread`, `FindNext`, `FindPrevious`; `changes::FindInDiff`,
 //!   `FindNextInDiff`, `FindPreviousInDiff` in the `Changes` context).
-//! - ⌘[ and ⌘] walk the history, as the titlebar's arrows do.
-//! - ⌘T opens the right pane's new tab menu, and ⌘⇧T the tab closed last (`closed_tabs`).
+//! - A session's panes (`docs/decisions/layout.md`, "One session per view, splits on demand"):
+//!   ⌘D opens a shell to the right, ⇧⌘D one below, ⌘⏎ one where there is most room; ⇧⌘⏎ fills
+//!   the view with the focused pane; ⌥⌘ arrows walk focus by direction, ⌘] and ⌘[ in reading
+//!   order. ⌘W closes the focused pane (`app_menus::CloseTab`).
+//! - Views beside the session: ⌘I the inspector, and the palette's Browser and Remote window.
+//! - ⌥⌘[ and ⌥⌘] walk the history, as the mouse's side buttons do; ⌘⇧T opens the view closed
+//!   last again (`closed_tabs`).
 //! - ⌘Z undoes the archive just made, while its toast is up.
 //! - ⇧⌘O opens "Resume a session…", the picker of Claude Code's past sessions (`past_sessions`).
 //! - ⌘. opens the next chat that needs the person, across projects and machines, then the
 //!   finished ones nobody has seen (`sidebar_status::needing_you`).
-//! - ⌥⌘O opens Open in under its button, ⇧⌘\\ expands the side pane over the chat, and ⌘I shows
-//!   or hides the chat's details card (each its titlebar button's key).
+//! - ⌥⌘O opens Open in under its button.
 //!
 //! A terminal keeps every key it takes for itself (its own find, and anything its program
-//! reads), and the browser keeps its own ⌘T, ⌘[ and ⌘]: those bind in their contexts, and this
+//! reads), and the browser keeps its own ⌘[ and ⌘]: those bind in their contexts, and this
 //! module's handlers let a key go on when a terminal has focus.
 
 use std::time::Duration;
 
 use gpui::{App, Context, KeyBinding, Window, actions, prelude::*};
 
-use super::{RightSurface, Route, Shell};
+use super::panes::Direction;
+use super::{Route, Shell};
 use crate::changes::{FindInDiff, FindNextInDiff, FindPreviousInDiff};
 use crate::settings::{KeymapConfig, ShortcutId, parse_combo, platform_combo};
 use crate::transcript::{FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread};
@@ -34,7 +39,6 @@ actions!(
         FindPrevious,
         NavigateBack,
         NavigateForward,
-        NewRightTab,
         ReopenClosedTab,
         UndoArchive,
         ResumeSession,
@@ -42,10 +46,23 @@ actions!(
         // slopty: what needs the person, across sessions and machines (`inbox`).
         Inbox,
         OpenIn,
-        ToggleExpandPane,
-        // slopty: ⌘I shows or hides the session's inspector (`docs/decisions/ui.md`, "The
-        // Inspector reads the session"): ⌘ is free of the terminal's keys and of every TUI's.
-        ToggleInspector
+        // slopty: ⌘I summons the session's inspector (`docs/decisions/layout.md`, "No permanent
+        // right column"): ⌘ is free of the terminal's keys and of every TUI's.
+        ToggleInspector,
+        // slopty: views the palette summons beside the session.
+        OpenBrowser,
+        OpenRemoteWindow,
+        // slopty: a session's panes.
+        SplitRight,
+        SplitDown,
+        SplitAuto,
+        ZoomPane,
+        FocusPaneLeft,
+        FocusPaneRight,
+        FocusPaneUp,
+        FocusPaneDown,
+        NextPane,
+        PreviousPane
     ]
 );
 
@@ -71,13 +88,21 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-f", Find);
     fixed!("mod-g", FindNext);
     fixed!("mod-shift-g", FindPrevious);
-    fixed!("mod-[", NavigateBack);
-    fixed!("mod-]", NavigateForward);
-    fixed!("mod-t", NewRightTab);
+    fixed!("alt-mod-[", NavigateBack);
+    fixed!("alt-mod-]", NavigateForward);
     fixed!("mod-z", UndoArchive);
     fixed!("alt-mod-o", OpenIn);
-    fixed!("mod-shift-\\", ToggleExpandPane);
     fixed!("mod-i", ToggleInspector);
+    fixed!("mod-d", SplitRight);
+    fixed!("mod-shift-d", SplitDown);
+    fixed!("mod-enter", SplitAuto);
+    fixed!("mod-shift-enter", ZoomPane);
+    fixed!("alt-mod-left", FocusPaneLeft);
+    fixed!("alt-mod-right", FocusPaneRight);
+    fixed!("alt-mod-up", FocusPaneUp);
+    fixed!("alt-mod-down", FocusPaneDown);
+    fixed!("mod-]", NextPane);
+    fixed!("mod-[", PreviousPane);
     // The diff's own find, where the Changes surface has the keyboard.
     bindings.push(crate::keys::binding(&platform_combo("mod-f"), FindInDiff, Some("Changes"), cx));
     bindings.push(crate::keys::binding(&platform_combo("mod-g"), FindNextInDiff, Some("Changes"), cx));
@@ -154,11 +179,6 @@ impl Shell {
                 this.navigate_forward(cx);
             }
         }))
-        .on_action(cx.listener(|this, _: &NewRightTab, window, cx| {
-            if in_own_keys(window) || !this.open_new_right_tab(cx) {
-                cx.propagate();
-            }
-        }))
         .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
             if !matches!(this.route, Route::Chat) || !this.reopen_closed_tab(window, cx) {
                 cx.propagate();
@@ -194,50 +214,84 @@ impl Shell {
                 cx.propagate();
             }
         }))
-        .on_action(cx.listener(|this, _: &ToggleExpandPane, window, cx| {
-            if in_own_keys(window) || !this.right_pane_shown(cx) {
-                cx.propagate();
-                return;
-            }
-            this.toggle_right_pane_expand(cx);
-        }))
         // slopty: from the terminal too, which never takes ⌘I.
-        .on_action(cx.listener(|this, _: &ToggleInspector, window, cx| {
-            if !matches!(this.route, Route::Chat) || this.overlay_owns_keyboard() {
+        .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
+            if !this.view_keys_live() {
                 cx.propagate();
                 return;
             }
-            this.toggle_inspector(window, cx);
+            this.toggle_inspector(cx);
+        }))
+        .on_action(cx.listener(|this, _: &OpenBrowser, window, cx| {
+            if this.view_keys_live() {
+                this.add_browser_surface(None, window, cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &OpenRemoteWindow, _, cx| {
+            if this.view_keys_live() {
+                this.add_screen_surface(cx);
+            }
+        }))
+        .on_action(cx.listener(|this, _: &SplitRight, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.split_pane(Some(Direction::Right), cx));
+        }))
+        .on_action(cx.listener(|this, _: &SplitDown, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.split_pane(Some(Direction::Down), cx));
+        }))
+        .on_action(cx.listener(|this, _: &SplitAuto, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.split_pane(None, cx));
+        }))
+        .on_action(cx.listener(|this, _: &ZoomPane, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.toggle_pane_zoom(cx));
+        }))
+        .on_action(cx.listener(|this, _: &FocusPaneLeft, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.focus_pane_toward(Direction::Left, cx));
+        }))
+        .on_action(cx.listener(|this, _: &FocusPaneRight, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.focus_pane_toward(Direction::Right, cx));
+        }))
+        .on_action(cx.listener(|this, _: &FocusPaneUp, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.focus_pane_toward(Direction::Up, cx));
+        }))
+        .on_action(cx.listener(|this, _: &FocusPaneDown, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.focus_pane_toward(Direction::Down, cx));
+        }))
+        .on_action(cx.listener(|this, _: &NextPane, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.cycle_pane(true, cx));
+        }))
+        .on_action(cx.listener(|this, _: &PreviousPane, window, cx| {
+            this.pane_key(window, cx, |this, _, cx| this.cycle_pane(false, cx));
         }))
     }
 
-    /// The chat's Changes surface in front, opened when it is not up.
-    fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.route, Route::Chat) || self.active_chat.is_empty() {
-            return;
+    /// Whether a view's key works now: on a session's page, under no overlay that holds the
+    /// keyboard.
+    fn view_keys_live(&self) -> bool {
+        matches!(self.route, Route::Chat) && !self.active_chat.is_empty() && !self.overlay_owns_keyboard()
+    }
+
+    /// Run a pane key on a session's page or the new-session canvas, under no overlay that holds
+    /// the keyboard, while the focus is not in a web page, which keeps its own ⌘[ and ⌘];
+    /// elsewhere the key goes on.
+    fn pane_key(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        run: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        if matches!(self.route, Route::Chat) && !self.overlay_owns_keyboard() && !in_own_keys(window) {
+            run(self, window, cx);
+        } else {
+            cx.propagate();
         }
-        self.set_surfaces_open(true, cx);
-        let key = self.panel_key(cx);
-        let shown = self
-            .right_tabs
-            .get(&key)
-            .and_then(|tabs| tabs.iter().find(|tab| matches!(tab, RightSurface::Diff(_))).copied());
-        match shown {
-            Some(diff) => {
-                self.set_right_active(diff, cx);
-                if let RightSurface::Diff(id) = diff {
-                    self.focus_diff(id, cx);
-                }
-            }
-            None => self.open_diff_surface(window, cx),
-        }
-        cx.notify();
     }
 
     /// slopty: the inspector's changed file: the chat's Changes in front, at that file.
     pub(super) fn show_change_at(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         crate::changes::show_file(path, cx);
-        self.show_changes(window, cx);
+        if matches!(self.route, Route::Chat) && !self.active_chat.is_empty() {
+            self.show_changes(window, cx);
+        }
     }
 
     /// Hand a find key to the chat's thread (the diff's own bindings take it in the Changes
@@ -254,24 +308,6 @@ impl Shell {
             FindStep::Previous => Box::new(FindPreviousInThread),
         };
         window.dispatch_action(action, cx);
-    }
-
-    /// ⌘T: the right pane's new tab menu, the pane opened first; with no tab yet the pane's own
-    /// picker is the menu. Whether there was a chat to do it for.
-    fn open_new_right_tab(&mut self, cx: &mut Context<Self>) -> bool {
-        if !matches!(self.route, Route::Chat)
-            || self.active_chat.is_empty()
-            || self.overlay_owns_keyboard()
-        {
-            return false;
-        }
-        self.set_surfaces_open(true, cx);
-        let key = self.panel_key(cx);
-        if self.right_tabs.get(&key).is_some_and(|tabs| !tabs.is_empty()) {
-            self.right_plus.open(());
-        }
-        cx.notify();
-        true
     }
 
     /// After an archive: a toast that offers to undo it, and ⌘Z while it is up.

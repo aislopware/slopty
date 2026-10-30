@@ -35,7 +35,8 @@ impl Shell {
             return;
         };
 
-        let panel = self.terminal_panel(cx);
+        // Its run shows in a shell's pane beside the session, the keyboard left where it is.
+        let panel = cx.new(|cx| crate::terminal::panel::TerminalPanel::new(self.state.clone(), cx));
         let title = format!("{} (setup)", run.action_name);
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(chat_id.clone(), title, cx)
@@ -47,16 +48,7 @@ impl Shell {
             self.show_notice(crate::toast::ToastKind::Error, "The setup action runs, but Slopty couldn\u{2019}t show its terminal. Run it again from the chat\u{2019}s actions to see it.", cx);
         }
 
-        let selected = self.active_chat == chat_id;
-        self.panels
-            .update(&chat_id, |panels| panels.terminal_open = true);
-        if selected {
-            self.terminal_tween = None;
-            self.terminal_tween_task = None;
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
-            panel.update(cx, |panel, cx| panel.select_tab_by_key(tab, cx));
-        }
-        cx.notify();
+        self.add_shell_beside(&chat_id, panel, cx);
     }
 
     fn project_action_context(&self, cx: &App) -> Option<ProjectActionContext> {
@@ -422,18 +414,13 @@ impl Shell {
         };
         self.close_project_actions_menu(cx);
 
-        let panel = self.terminal_panel(cx);
+        // Its run shows in a shell's pane beside the session, the keyboard left where it is.
+        let panel = cx.new(|cx| crate::terminal::panel::TerminalPanel::new(self.state.clone(), cx));
         let tab = panel.update(cx, |panel, cx| {
             panel.reserve_tab_for_chat(context.chat_id.clone(), action.name.clone(), cx)
         });
-        self.panels
-            .update(&context.chat_id, |panels| panels.terminal_open = true);
-        self.terminal_tween = None;
-        self.terminal_tween_task = None;
-        panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.select_tab_by_key(tab, cx);
-        });
+        let key = self.panel_key(cx);
+        self.add_shell_beside(&key, panel.clone(), cx);
 
         let mut params = project_action_params(
             serde_json::json!({

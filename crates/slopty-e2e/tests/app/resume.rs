@@ -81,7 +81,7 @@ async fn a_resume_brings_a_dead_link_back_at_once() {
     drv.wait_for("the worker", STEP, |d| status(d) == "connected").await.unwrap();
     drv.keys("cmd-d").await.unwrap();
     let d =
-        drv.wait_for("the dock's shell with a prompt", STEP, |d| live_after(d, 0)).await.unwrap();
+        drv.wait_for("the split's shell with a prompt", STEP, |d| live_after(d, 0)).await.unwrap();
 
     // A live link: probed (its tiles set back at once after a wake), it answers, and nothing is
     // dialled again.

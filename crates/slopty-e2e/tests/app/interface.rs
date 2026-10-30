@@ -382,51 +382,32 @@ async fn a_rows_hover_card_names_where_it_runs() {
     stack.shutdown().await;
 }
 
-// The window's own keys and Open in, on a stand-in agent's thread: a closed tab comes back with
-// ⌘⇧T, and Open in hands the thread's folder to an editor through the app's one open seam, which
+// The window's own keys and Open in, on a stand-in agent's thread: a closed view comes back with
+// ⇧⌘T, and Open in hands the thread's folder to an editor through the app's one open seam, which
 // a run points at a file (`SLOPTY_E2E_OPEN_LOG`) so nothing is launched.
 
-/// The tab-close buttons in `dump`: one per tab in the right pane, each named for its tab.
-fn tab_closes(dump: &slopty_e2e::Dump) -> Vec<[f32; 4]> {
-    dump.a11y
-        .iter()
-        .filter(|n| {
-            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Close "))
-        })
-        .map(|n| n.bounds)
-        .collect()
-}
-
-/// ⌘T, from the session's terminal, opens the right pane on what it can show (a session opens
-/// on its terminal alone, so the pane holds no tab yet); a Changes tab closed comes back, in
-/// front, with ⌘⇧T.
+/// ⌘R, from the session's terminal, summons its changes beside it with the keyboard; closed by
+/// the ✕ on their pane's header, they come back with ⇧⌘T.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_closed_tab_comes_back_with_cmd_shift_t() {
+async fn a_closed_view_comes_back_with_cmd_shift_t() {
     let mut stack = agent_stack().await;
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
-    drv.keys("cmd-t").await.unwrap();
-    let offer = |d: &slopty_e2e::Dump| crate::served::pane_offer(d, "Changes").map(|n| n.bounds);
-    let picker = drv.wait_for("the pane's surfaces", STEP, |d| offer(d).is_some()).await.unwrap();
-    let diffs = offer(&picker).unwrap();
-    drv.click(diffs[0] + diffs[2] / 2.0, diffs[1] + diffs[3] / 2.0).await.unwrap();
-    // The Changes tab's own close, the pane's only tab: closed, it takes the pane with it, and
-    // ⌘⇧T brings both back.
-    let changes = |d: &slopty_e2e::Dump| d.a11y_node("Button", Some("Close Changes")).is_some();
-    let open = drv.wait_for("the Changes tab", STEP, changes).await.unwrap();
-    let tabs = tab_closes(&open).len();
+    drv.keys("cmd-r").await.unwrap();
+    let changes = |d: &slopty_e2e::Dump| d.a11y_node("Group", Some("Changes")).is_some();
+    let open = drv
+        .wait_for("the changes beside the session", STEP, |d| {
+            changes(d) && d.a11y_node("Button", Some("Close Changes")).is_some()
+        })
+        .await
+        .unwrap();
     let [x, y, w, h] = open.a11y_node("Button", Some("Close Changes")).unwrap().bounds;
     drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-    drv.wait_for("the tab closed", STEP, |d| !changes(d) && tab_closes(d).len() == tabs - 1)
-        .await
-        .unwrap();
+    drv.wait_for("the changes closed", STEP, |d| !changes(d)).await.unwrap();
     drv.keys("cmd-shift-t").await.unwrap();
-    let back = drv
-        .wait_for("the tab back", STEP, |d| changes(d) && tab_closes(d).len() == tabs)
-        .await
-        .unwrap();
+    let back = drv.wait_for("the changes back", STEP, changes).await.unwrap();
     println!("A11Y reopened {}", slopty_e2e::frame_text(&back.a11y));
     stack.shutdown().await;
 }
@@ -600,58 +581,59 @@ async fn a_pages_icon_shows_on_its_tab() {
     drv.wait_for("the thread open", STEP, |d| d.a11y_node("Button", Some("Open in…")).is_some())
         .await
         .unwrap();
-    // What the right pane offers (⌘T, from the session's terminal), its Browser, and the page's
-    // address.
-    drv.keys("cmd-t").await.unwrap();
-    let offer = |d: &slopty_e2e::Dump| crate::served::pane_offer(d, "Browser").map(|n| n.bounds);
-    let picker = drv.wait_for("the pane's picker", STEP, |d| offer(d).is_some()).await.unwrap();
-    let [x, y, w, h] = offer(&picker).unwrap();
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
+    // A browser beside the session, from the palette, and the page's address.
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.type_text("Browser").await.unwrap();
+    drv.wait_for("the palette's Browser", STEP, |d| labelled(d, "Browser").is_some())
+        .await
+        .unwrap();
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the browser beside the session", STEP, |d| {
+        d.a11y_node("Group", Some("Browser")).is_some()
+    })
+    .await
+    .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     drv.type_text(&format!("http://127.0.0.1:{port}/")).await.unwrap();
     drv.keys("enter").await.unwrap();
     let shown = drv
-        .wait_for("the page's icon on its tab", STEP, |d| {
+        .wait_for("the page's icon on its pane's header", STEP, |d| {
             d.a11y_node("Image", Some("Page icon")).is_some()
         })
         .await
         .unwrap();
     let [_, _, w, h] = shown.a11y_node("Image", Some("Page icon")).unwrap().bounds;
-    assert!((w - 14.0).abs() < 1.0 && (h - 14.0).abs() < 1.0, "the strip's 14 pt glyph: {w}x{h}");
+    assert!((w - 13.0).abs() < 1.0 && (h - 13.0).abs() < 1.0, "the header's 13 pt glyph: {w}x{h}");
     stack.shutdown().await;
 }
 
 /// A control's tooltip names its action and key, centred under it clear of the pointer
-/// (`docs/decisions/ui.md`, "Tooltips name the action and its key"): the chat's files toggle.
+/// (`docs/decisions/ui.md`, "Tooltips name the action and its key"): the titlebar's palette.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_files_toggles_tooltip_names_its_key_under_it() {
+async fn the_palette_button_s_tooltip_names_its_key_under_it() {
     let mut stack = agent_stack().await;
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
-    let toggle = |d: &slopty_e2e::Dump| {
-        d.a11y
-            .iter()
-            .find(|n| n.role == "Button" && n.label.as_deref() == Some("Show files panel"))
-            .map(|n| n.bounds)
-    };
+    let button =
+        |d: &slopty_e2e::Dump| d.a11y_node("Button", Some("Command palette")).map(|n| n.bounds);
     // The reply is in the session's terminal: its titlebar has every control it will have.
     let middle = |d: &slopty_e2e::Dump| {
         d.lines_containing(&format!("Done: {PROMPT}")).first()?;
-        toggle(d).map(|[x, y, w, h]| (x + w / 2.0, y + h / 2.0))
+        button(d).map(|[x, y, w, h]| (x + w / 2.0, y + h / 2.0))
     };
     let tip = rest_on(drv, "its tooltip", middle, |d| d.a11y_node("Tooltip", None).is_some()).await;
-    let [x, y, w, h] = toggle(&tip).unwrap();
+    let [x, y, w, h] = button(&tip).unwrap();
     let pointer = (x + w / 2.0, y + h / 2.0);
     let words = slopty_e2e::frame_text(&tip.a11y);
-    assert!(words.contains("Show files panel") && words.contains("⌘E"), "{words}");
+    assert!(words.contains("Command palette") && words.contains("⇧⌘P"), "{words}");
     let [tx, ty, tw, _] = tip.a11y_node("Tooltip", None).unwrap().bounds;
     assert!(ty >= y + h + 3.5, "under the control, the pointer clear of it: {ty} vs {}", y + h);
     // Centred under the control, or held 8 px inside the window where centring would cross it.
     let held = (tx - 8.0).abs() <= 0.5 || (tx + tw - (WINDOW.0 - 8.0)).abs() <= 0.5;
     assert!(((tx + tw / 2.0) - pointer.0).abs() <= 1.0 || held, "centred: {tx} {tw}");
-    goldens_both(drv, &dir, "tooltip-files-toggle").await;
+    goldens_both(drv, &dir, "tooltip-palette").await;
     stack.shutdown().await;
 }

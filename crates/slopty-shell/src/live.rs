@@ -299,6 +299,29 @@ pub fn fit(size: Size<Pixels>, window: &mut Window, cx: &mut App) -> Option<(u16
     Some(fit(size, window, cx))
 }
 
+type GridFn = dyn Fn(&mut Window, &mut App) -> (Size<Pixels>, Pixels);
+
+/// How the app says a terminal's cell.
+#[derive(Clone)]
+struct GridOf(Rc<GridFn>);
+
+impl Global for GridOf {}
+
+/// Install how a terminal's cell is known: `grid` gives the cell a terminal view draws, in the
+/// look [`terminal`] gives it, and the inset around its grid on each side.
+pub fn serve_grid(cx: &mut App, grid: impl Fn(&mut Window, &mut App) -> (Size<Pixels>, Pixels) + 'static) {
+    cx.set_global(GridOf(Rc::new(grid)));
+}
+
+/// The cell a terminal view draws and what its pane takes besides whole cells along each axis
+/// (the inset on both sides): what a split snaps a terminal's pane to (`docs/decisions/
+/// layout.md`, "One session per view, splits on demand"). `None` with no host.
+pub fn grid(window: &mut Window, cx: &mut App) -> Option<(Size<Pixels>, Size<Pixels>)> {
+    let grid = cx.try_global::<GridOf>()?.0.clone();
+    let (cell, inset) = grid(window, cx);
+    Some((cell, Size { width: inset * 2.0, height: inset * 2.0 }))
+}
+
 /// How much narrower and shorter than its bounds each held terminal view fits its grid, by the
 /// view's entity ([`hold_fit`]).
 #[derive(Default)]

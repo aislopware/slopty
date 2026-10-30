@@ -761,7 +761,7 @@ impl Shell {
             this.close_chat_menu(cx);
             // slopty: the inspector's sheet is the session's, and goes with it.
             if this.inspector_shown(cx) {
-                this.set_surfaces_open(false, cx);
+                this.put_away_view(super::RightSurface::Inspector, cx);
             }
             cx.notify();
         };
@@ -859,14 +859,8 @@ impl Shell {
                 .items_center()
                 .gap(px(4.0))
                 .child(
-                    nav_icon("compact-files", icons::FOLDER_TREE, "Show files", &theme).on_click(cx.listener(
-                        |this, _, window, cx| {
-                            if !this.files_panel_open(cx) {
-                                this.add_files_surface(window, cx);
-                            }
-                            cx.notify();
-                        },
-                    )),
+                    nav_icon("compact-files", icons::FOLDER_TREE, "Show files", &theme)
+                        .on_click(cx.listener(|this, _, window, cx| this.summon_files(window, cx))),
                 )
                 .when(inspects, |trail| {
                     trail.child(
@@ -880,7 +874,7 @@ impl Shell {
                         } else {
                             gpui::accesskit::Toggled::False
                         })
-                        .on_click(cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)))
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
                         // The session's running subagents, counted as the titlebar's toggle counts
                         // them.
                         .when(running_lanes > 0, |button| {
@@ -909,12 +903,13 @@ impl Shell {
         Some(crate::frost::frosted(0.0, crate::frost::MENU_BLUR, bar).into_any_element())
     }
 
-    /// slopty: a phone's page over its session for what an iPad shows beside it: the right
-    /// pane's surface (a file, the changes, a page) when it is open, else the files explorer,
-    /// under a bar whose back goes to the files a file was opened from, else to the inspector
-    /// the session's strip holds (a change opened from it), else to the session. The inspector
-    /// itself is a sheet over the session ([`Self::render_compact_inspector`]). `None` off a
-    /// phone or with neither open.
+    /// slopty: a phone's page over its session for the view in front of it (`docs/decisions/
+    /// layout.md`, "iPhone is a list, then the terminal"): a file, Files, the changes, a page,
+    /// under a bar whose back closes it and names what comes forward then, as on a Mac the
+    /// pane beside it would take the keyboard: the files a file was opened from, the inspector
+    /// changes were opened from, else the session. A phone's views are its page stack. The
+    /// inspector itself is a sheet over the session ([`Self::render_compact_inspector`]).
+    /// `None` off a phone or with the session in front.
     pub(super) fn render_compact_side(
         &mut self,
         window: &mut Window,
@@ -923,52 +918,21 @@ impl Shell {
         if !self.compact() || self.compact_sessions_up(cx) || self.active_chat.is_empty() {
             return None;
         }
-        let active = self.resolved_right_active(cx);
-        let surface = self.right_pane_open(cx) && active != super::RightSurface::Inspector;
-        let files = self.files_panel_open(cx);
-        if !surface && !files {
-            return None;
-        }
-        let to_inspector = surface
-            && !files
-            && crate::inspector::inspects(self.state.read(cx), &self.active_chat)
-            && self.right_surface_rows(cx).iter().any(|(s, ..)| *s == super::RightSurface::Inspector);
-        let theme = Theme::of(cx).clone();
-        let (title, body, back_to): (SharedString, AnyElement, &'static str) = if surface {
-            let title = match active {
-                super::RightSurface::File(id) => self
-                    .file_surfaces
-                    .get(&id)
-                    .map_or_else(|| "File".into(), |file| file.read(cx).tab_title()),
-                super::RightSurface::Diff(_) => "Changes".into(),
-                super::RightSurface::Terminal(_) => "Terminal".into(),
-                super::RightSurface::Browser(_) => "Browser".into(),
-                super::RightSurface::Inspector => "Inspector".into(),
-                super::RightSurface::Screen(_) => "Screen".into(),
-                super::RightSurface::Page(_) => "Page".into(),
-                super::RightSurface::Picker => "Open".into(),
-            };
-            let back_to = if to_inspector {
-                "Inspector"
-            } else if files {
-                "Files"
-            } else {
-                "Session"
-            };
-            (title, self.right_surface_content(cx), back_to)
-        } else {
-            let key = self.panel_key(cx);
-            let Some(explorer) = self.files.get(&key).cloned() else {
-                // A pane kept open across launches has its flag, not its explorer yet.
-                cx.defer_in(window, |shell, window, cx| shell.add_files_surface(window, cx));
-                return None;
-            };
-            explorer.update(cx, |files, cx| {
-                files.ensure_loaded(cx);
-                files.ensure_git_status(cx);
-            });
-            ("Files".into(), explorer.into_any_element(), "Session")
+        let panes = self.panes_now(cx);
+        let view = match panes.focused() {
+            super::panes::Pane::View(view) if view != super::RightSurface::Inspector => view,
+            _ => return None,
         };
+        let mut after = panes;
+        after.close(super::panes::Pane::View(view));
+        let back_to: SharedString = match after.focused() {
+            super::panes::Pane::View(under) => self.view_identity(under, cx).1,
+            _ => "Session".into(),
+        };
+        self.settle_pane_keyboard(window, cx);
+        let theme = Theme::of(cx).clone();
+        let title = self.view_identity(view, cx).1;
+        let body = self.view_pane(view, window, cx);
         let page_label = title.clone();
         let back = div()
             .id("compact-side-back")
@@ -983,16 +947,7 @@ impl Shell {
             .items_center()
             .gap(px(2.0))
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if to_inspector {
-                    this.set_right_active(super::RightSurface::Inspector, cx);
-                } else if surface {
-                    this.set_surfaces_open(false, cx);
-                } else {
-                    this.close_files_panel(cx);
-                }
-                cx.notify();
-            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.close_view(view, cx)))
             .child(icon(icons::ALT_ARROW_LEFT).size(px(22.0)).text_color(theme.text))
             .child(div().text_size(ui_rems(16.0)).text_color(theme.text).child(back_to));
         let bar = div()
@@ -1130,7 +1085,7 @@ impl Shell {
                     // Sinking from where the finger left it.
                     sheet.up = false;
                     sheet.glide = glide.then_some(Glide { from, at, away: true });
-                    self.set_surfaces_open(false, cx);
+                    self.put_away_view(super::RightSurface::Inspector, cx);
                 }
             }
         }
@@ -1215,8 +1170,7 @@ impl Shell {
         let dim = if medium > large { ((medium - top) / (medium - large)).clamp(0.0, 1.0) } else { 0.0 };
         let theme = Theme::of(cx).clone();
         let put_away = |this: &mut Self, cx: &mut Context<Self>| {
-            this.set_surfaces_open(false, cx);
-            cx.notify();
+            this.put_away_view(super::RightSurface::Inspector, cx);
         };
         // What the full sheet dims takes no press but the one that puts it away.
         let scrim = (up && dim > 0.01).then(|| {
@@ -1860,22 +1814,26 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
+        // The chrome's controls, and those of a view summoned beside the session: its pane's
+        // header, the outermost at the window's edge.
         let ours = [
             "Hide sidebar",
+            "Settings",
+            "Inbox",
             "Command palette",
             "New session",
-            "Sidebar view options",
-            "Show chat details",
-            "Show files panel",
-            "Show side pane",
-            "Settings",
+            "Fill the view",
+            "Close Files",
         ];
         // Under Reduce Motion every entrance has landed: the controls stand where they rest.
         cx.update(|_, cx| crate::motion::set_reduced_motion(cx, true));
+        buttons(cx);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.summon_files(window, cx)));
         let touch = buttons(cx);
         let mine: Vec<_> = touch.iter().filter(|(label, _, _)| ours.contains(&label.as_str())).collect();
         let small: Vec<_> = mine.iter().filter(|(_, w, h)| w.min(*h) < 43.9).collect();
-        assert!(mine.len() >= 6, "the shell's controls drawn: {touch:?}");
+        let missing: Vec<_> = ours.iter().filter(|label| !mine.iter().any(|(drawn, _, _)| drawn == *label)).collect();
+        assert!(missing.is_empty(), "{missing:?} not drawn: {touch:?}");
         assert!(small.is_empty(), "under a finger's 44 pt: {small:?}");
         FORCE_COMPACT.with(|force| force.set(false));
         let mac = buttons(cx);

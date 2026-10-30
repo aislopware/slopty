@@ -2,9 +2,9 @@
 //! the stack's app (`a`) and a second app process with its own data directory and identity,
 //! following the same server.
 //!
-//! The terminal dock (⌘J) of the same place is the same shell on both: what is typed on either
-//! runs once, in the order it was typed, and shows on both. A client that dies leaves the other's
-//! shell live.
+//! A shell split beside the same place (⌘D) is the same shell on both: the second client finds
+//! the one the first opened there, kept by its worker, so what is typed on either runs once, in
+//! the order it was typed, and shows on both. A client that dies leaves the other's shell live.
 
 use std::time::Duration;
 
@@ -14,17 +14,17 @@ use slopty_e2e::{Driver, Dump};
 /// How long a worker round trip (open a shell, run a command) may take.
 const STEP: Duration = Duration::from_secs(30);
 
-/// The session of the dock's shell, once it is at its prompt.
+/// The session of the split's shell, once it is at its prompt.
 fn shell(d: &Dump) -> Option<String> {
     d.terminals.iter().find(|t| t.at_prompt).map(|t| t.session.clone())
 }
 
-/// ⌘J's shell on `drv`, at its prompt; its session.
-async fn dock_shell(drv: &mut Driver, who: &str) -> String {
+/// ⌘D's shell on `drv`, at its prompt; its session.
+async fn split_shell(drv: &mut Driver, who: &str) -> String {
     drv.wait_for(&format!("{who}: the worker"), STEP, |d| d.status == "connected").await.unwrap();
     drv.keys("cmd-d").await.unwrap();
     let d = drv
-        .wait_for(&format!("{who}: the dock's shell at its prompt"), STEP, |d| {
+        .wait_for(&format!("{who}: the split's shell at its prompt"), STEP, |d| {
             shell(d).is_some() && d.focused.starts_with("terminal:")
         })
         .await
@@ -43,15 +43,15 @@ async fn run_seen(drv: &mut Driver, on: &mut Driver, line: &str, shown: &str) {
     .unwrap();
 }
 
-/// The dock of the same place opens the same shell on both clients; a command typed on either
+/// A split beside the same place opens the same shell on both clients; a command typed on either
 /// runs there and shows on both, and their output stands in the order they were typed. With B
 /// killed, A's shell still answers.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_dock_s_shell_is_one_shell_on_both_clients() {
+async fn a_split_shell_is_one_shell_on_both_clients() {
     let mut pair = Stack::launch_pair("e2e-pair").await.unwrap();
-    let a_session = dock_shell(&mut pair.stack.driver, "a").await;
-    let b_session = dock_shell(&mut pair.b.driver, "b").await;
+    let a_session = split_shell(&mut pair.stack.driver, "a").await;
+    let b_session = split_shell(&mut pair.b.driver, "b").await;
     assert_eq!(a_session, b_session, "one shell, not one each");
 
     let (a, b) = (&mut pair.stack.driver, &mut pair.b.driver);

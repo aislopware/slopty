@@ -1,25 +1,34 @@
-//! slopty: the right pane's surface tabs kept across launches. Each chat's pane comes back as it
-//! was when the app quit, its tabs in their order and the one in front: its terminals on the
-//! same sessions (they live on in their machine), its inspector, files, pages, diffs and
-//! remote windows. A chat's tabs come back the first time it is shown, once the
-//! app is connected; a terminal that ended meanwhile does not.
+//! slopty: the panes beside each session kept across launches (`docs/decisions/layout.md`, "No
+//! permanent right column"). A session's view comes back as it was when the app quit: its shells
+//! on the same terminals (they live on in their machine), its inspector, files, pages, changes and
+//! remote windows, and the pane that had the keyboard. Where each stood is not kept: the views
+//! dock again at the session's right and the shells split beside it. A session's panes come back
+//! the first time it is shown, once the app is connected; a terminal that ended meanwhile does
+//! not.
 
-use gpui::{App, Context, Window};
+use gpui::{App, AppContext as _, Context, Window};
 
+use super::panes::Pane;
 use super::{RightSurface, Shell};
 use crate::settings::{SavedSurface, SavedTabs};
+use crate::terminal::panel::TerminalPanel;
 
-/// How many chats' tabs are kept.
+/// How many sessions' panes are kept.
 const KEPT: usize = 500;
 
 impl Shell {
-    /// The tabs of the pane `key` as kept; `None` when it keeps none.
+    /// The panes of the view `key` as kept, in reading order; `None` when it keeps none.
     pub(super) fn kept_tabs(&self, key: &str, cx: &App) -> Option<SavedTabs> {
-        let front = self.panels.get(key).right_active;
+        // The new-session canvas's shells live while the app runs.
+        if key.starts_with(crate::state::CANVAS_PANEL_PREFIX) {
+            return None;
+        }
+        let panes = self.panes.get(key)?;
+        let focused = panes.focused();
         let mut saved = SavedTabs::default();
-        for surface in self.right_tabs.get(key)? {
-            if let Some(kept) = self.kept_surface(key, *surface, cx) {
-                if *surface == front {
+        for pane in panes.panes() {
+            if let Some(kept) = self.kept_pane(pane, cx) {
+                if pane == focused {
                     saved.active = Some(saved.tabs.len());
                 }
                 saved.tabs.push(kept);
@@ -28,42 +37,43 @@ impl Shell {
         (!saved.tabs.is_empty()).then_some(saved)
     }
 
-    /// What opens `surface` of the pane `key` again; `None` for one that is not kept.
-    pub(super) fn kept_surface(&self, key: &str, surface: RightSurface, cx: &App) -> Option<SavedSurface> {
-        Some(match surface {
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal.as_ref()?.read(cx);
-                let id = panel.terminal_id(key, tab)?.to_owned();
+    /// What opens `pane` again; `None` for one that is not kept.
+    pub(super) fn kept_pane(&self, pane: Pane, cx: &App) -> Option<SavedSurface> {
+        Some(match pane {
+            Pane::Session => return None,
+            Pane::Shell(n) => {
+                let id = self.pane_shells.get(&n)?.read(cx).pane_terminal_id()?.to_owned();
                 SavedSurface::Terminal { id }
             }
-            RightSurface::File(id) => {
+            Pane::View(RightSurface::File(id)) => {
                 let path = self.file_surface_paths.get(&id)?.clone();
                 let chat = self.file_surfaces.get(&id)?.read(cx).chat_id().to_owned();
                 SavedSurface::File { chat, path }
             }
-            RightSurface::Browser(id) => {
+            Pane::View(RightSurface::Browser(id)) => {
                 let url = self.browsers.get(&id)?.read(cx).url()?.to_owned();
                 SavedSurface::Browser { url }
             }
-            RightSurface::Diff(id) => {
+            Pane::View(RightSurface::Diff(id)) => {
                 self.diffs.get(&id)?;
                 SavedSurface::Diff
             }
-            RightSurface::Screen(id) => {
+            Pane::View(RightSurface::Screen(id)) => {
                 let (screen, title) = self.screen_surface_chosen(id, cx)?;
                 SavedSurface::Screen { screen, title }
             }
-            RightSurface::Inspector => SavedSurface::Inspector,
+            Pane::View(RightSurface::Inspector) => SavedSurface::Inspector,
+            Pane::View(RightSurface::Files) => SavedSurface::Files,
             // slopty: an agent's page lives while it shows it.
-            RightSurface::Page(_) | RightSurface::Picker => return None,
+            Pane::View(RightSurface::Page(_)) => return None,
         })
     }
 
-    /// Keep the tabs of every pane shown in this run once they changed, after the frame; those
+    /// Keep the panes of every view shown in this run once they changed, after the frame; those
     /// not shown yet stay as the last run left them.
     pub(super) fn keep_tabs(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
-        let keys: Vec<String> = self.right_tabs.keys().cloned().collect();
+        let keys: Vec<String> = self.panes.keys().cloned().collect();
         for key in keys {
             match self.kept_tabs(&key, cx) {
                 Some(saved) if self.settings.session_tabs.get(&key) != Some(&saved) => {
@@ -87,8 +97,8 @@ impl Shell {
         .detach();
     }
 
-    /// Bring back the tabs the shown chat's pane had when the app last ran, once it is
-    /// connected and knows the chat; a pane given tabs in this run keeps its own.
+    /// Bring back the panes the shown session's view had when the app last ran, once it is
+    /// connected and knows the session; a view given panes in this run keeps its own.
     pub(super) fn restore_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.active_chat.is_empty() || self.unrestored_tabs.is_empty() {
             return;
@@ -97,7 +107,7 @@ impl Shell {
         if !self.unrestored_tabs.contains_key(&key) {
             return;
         }
-        if self.right_tabs.get(&key).is_some_and(|tabs| !tabs.is_empty()) {
+        if self.panes.get(&key).is_some_and(|panes| panes.len() > 1) {
             self.unrestored_tabs.remove(&key);
             return;
         }
@@ -114,63 +124,63 @@ impl Shell {
         let Some(saved) = ready.then(|| self.unrestored_tabs.remove(&key)).flatten() else {
             return;
         };
-        let open = self.panels.get(&key).changes_open;
-        let mut made = Vec::new();
-        for surface in saved.tabs {
-            made.push(self.restore_surface(&key, surface, window, cx));
+        let mut front = None;
+        for (at, surface) in saved.tabs.into_iter().enumerate() {
+            // Each comes back beside the session: the views docked at its right in one column,
+            // the shells split beside the terminal.
+            self.panes_mut(cx).focus(Pane::Session);
+            let made = self.restore_pane(&key, surface, window, cx);
+            if saved.active == Some(at) {
+                front = made;
+            }
         }
-        // Opening a file opens the pane; it stays as the person left it.
-        self.panels.update(&key, |panels| panels.changes_open = open);
-        let front = saved.active.and_then(|at| made.get(at).copied().flatten());
-        if let Some(front) = front.or_else(|| made.iter().rev().find_map(|made| *made)) {
-            self.set_right_active(front, cx);
-        }
+        self.panes_mut(cx).focus(front.unwrap_or(Pane::Session));
+        self.pane_keyboard_pending = true;
         cx.notify();
     }
 
-    /// Open `surface` again in the pane `key`, the shown chat's: the tab it made.
-    pub(super) fn restore_surface(
+    /// Open `surface` again beside the session of the view `key`, the shown one: the pane it
+    /// made.
+    pub(super) fn restore_pane(
         &mut self,
         key: &str,
         surface: SavedSurface,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<RightSurface> {
+    ) -> Option<Pane> {
         match surface {
             SavedSurface::Terminal { id } => {
-                let panel = self.right_terminal_panel(cx);
-                let tab = panel.update(cx, |panel, cx| {
-                    panel.set_open(true, cx);
-                    panel.reopen_tab_for_selected(id, cx)
-                })?;
-                let surface = RightSurface::Terminal(tab);
-                self.right_tabs.entry(key.to_owned()).or_default().push(surface);
-                Some(surface)
+                let state = self.state.clone();
+                let shell = cx.new(|cx| TerminalPanel::new(state, cx));
+                shell.update(cx, |shell, cx| shell.reopen_tab_for_selected(id, cx))?;
+                Some(Pane::Shell(self.add_shell_beside(key, shell, cx)))
             }
             SavedSurface::File { chat, path } => {
                 let owner = self
                     .link_owner(&chat, cx)
                     .unwrap_or_else(|| (chat.clone(), self.state.clone()));
                 self.add_file_surface_at(owner, path, None, window, cx);
-                Some(self.panels.get(key).right_active)
+                self.front_view(cx).map(Pane::View)
             }
             SavedSurface::Browser { url } => {
                 self.add_browser_surface(Some(url), window, cx);
-                Some(RightSurface::Browser(self.browser_seq))
+                Some(Pane::View(RightSurface::Browser(self.browser_seq)))
             }
             SavedSurface::Diff => {
                 self.add_diff_surface(window, cx);
-                Some(RightSurface::Diff(self.diff_seq))
+                Some(Pane::View(RightSurface::Diff(self.diff_seq)))
             }
             SavedSurface::Screen { screen, title } => {
-                Some(self.reopen_screen_surface(screen, title, cx))
+                Some(Pane::View(self.reopen_screen_surface(screen, title, cx)))
             }
             SavedSurface::Inspector => {
-                let tabs = self.right_tabs.entry(key.to_owned()).or_default();
-                if !tabs.contains(&RightSurface::Inspector) {
-                    tabs.push(RightSurface::Inspector);
-                }
-                Some(RightSurface::Inspector)
+                self.open_view(RightSurface::Inspector, cx);
+                Some(Pane::View(RightSurface::Inspector))
+            }
+            SavedSurface::Files => {
+                self.ensure_explorer(window, cx);
+                self.open_view(RightSurface::Files, cx);
+                Some(Pane::View(RightSurface::Files))
             }
         }
     }

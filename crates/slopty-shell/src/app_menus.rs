@@ -109,22 +109,21 @@ fn close_window(_: &CloseWindow, cx: &mut App) {
     cx.defer(|cx| close_active_window(false, cx));
 }
 
-// slopty: a focused terminal closes its own tab before this runs (`terminal::panel`, the browser
-// its page); here ⌘W closes the side pane's tab, and the window only when no tab is open.
+// slopty: ⌘W closes the focused pane of the session's view (a split shell, a view summoned beside
+// it), and the window only when the session's own pane is all there is.
 fn close_tab(_: &CloseTab, cx: &mut App) {
     cx.defer(|cx| close_active_window(true, cx));
 }
 
-/// Close the active window, or with `tab_first` the side pane's tab in front when it has one.
-fn close_active_window(tab_first: bool, cx: &mut App) {
+/// Close the active window, or with `pane_first` the focused pane when it is not the session's.
+fn close_active_window(pane_first: bool, cx: &mut App) {
     if let Some(window) = cx.active_window() {
         if let Some(window) = window.downcast::<shell::Shell>() {
             window
                 .update(cx, |shell, window, cx| {
-                    // ⌘W closes the right pane's active surface first (the tab
-                    // the user just opened); an empty or closed pane falls
-                    // through to the window close, unsaved-file gate and all.
-                    if tab_first && shell.close_active_surface(window, cx) {
+                    // ⌘W closes the focused pane first; the session's own pane falls through
+                    // to the window close, unsaved-file gate and all.
+                    if pane_first && shell.close_focused_pane(cx) {
                         return;
                     }
                     if shell.prepare_window_close(cx) {
@@ -212,27 +211,32 @@ macro_rules! command {
     };
 }
 
-/// slopty: the File menu's tab commands.
-pub(crate) const TAB_COMMANDS: [WindowCommand; 2] = [
-    command!("New tab", crate::icons::PLUS, shell::NewRightTab),
-    command!("Reopen closed tab", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab),
+/// slopty: the File menu's view commands.
+pub(crate) const TAB_COMMANDS: [WindowCommand; 1] = [
+    command!("Reopen closed view", crate::icons::WINDOW_RESTORE, shell::ReopenClosedTab),
 ];
 
-/// slopty: the View menu's panes.
-pub(crate) const VIEW_COMMANDS: [WindowCommand; 6] = [
+/// slopty: the View menu: the sidebar, a session's panes and the views summoned beside it
+/// (`docs/decisions/layout.md`, "One session per view, splits on demand").
+pub(crate) const VIEW_COMMANDS: [WindowCommand; 9] = [
     command!("Toggle sidebar", crate::icons::SPLIT_COLUMNS, shell::ToggleSidebar),
-    command!("Toggle side pane", crate::icons::SPLIT_COLUMNS, shell::ToggleChanges),
-    command!("Expand side pane", crate::icons::EXPAND_ARROWS, shell::ToggleExpandPane),
-    command!("Toggle files panel", crate::icons::FOLDER_TREE, shell::ToggleFiles),
-    command!("Toggle terminal", crate::icons::TERMINAL, crate::terminal::panel::ToggleTerminal),
+    command!("Split right", crate::icons::SPLIT_COLUMNS, shell::SplitRight),
+    command!("Split down", crate::icons::SPLIT_COLUMNS, shell::SplitDown),
+    command!("Zoom pane", crate::icons::WINDOW_MAXIMIZE, shell::ZoomPane),
+    command!("Changes", crate::icons::FILE_DIFF, shell::ToggleChanges),
+    command!("Files", crate::icons::FOLDER_TREE, shell::ToggleFiles),
     // slopty: steps in time, as a trace reads; the eye is the inbox's (`layout.md`).
     command!("Inspector", crate::icons::SORT_BY_TIME, shell::ToggleInspector),
+    command!("Browser", crate::icons::GLOBE, shell::OpenBrowser),
+    command!("Remote window", crate::icons::MONITOR, shell::OpenRemoteWindow),
 ];
 
 /// slopty: the Go menu's moves.
-pub(crate) const GO_COMMANDS: [WindowCommand; 6] = [
+pub(crate) const GO_COMMANDS: [WindowCommand; 8] = [
     command!("Back", crate::icons::ARROW_LEFT, shell::NavigateBack),
     command!("Forward", crate::icons::ARROW_RIGHT, shell::NavigateForward),
+    command!("Next pane", crate::icons::ALT_ARROW_RIGHT, shell::NextPane),
+    command!("Previous pane", crate::icons::ALT_ARROW_LEFT, shell::PreviousPane),
     command!("Next session", crate::icons::ALT_ARROW_DOWN, shell::NextSession),
     command!("Previous session", crate::icons::ALT_ARROW_UP, shell::PrevSession),
     command!("Next session that needs you", crate::icons::BELL, shell::NextNeedsYou),
@@ -312,7 +316,7 @@ pub fn app_menus() -> Vec<Menu> {
             .chain(TAB_COMMANDS.iter().map(WindowCommand::menu_item))
             .chain([
                 MenuItem::separator(),
-                MenuItem::action("Close Tab", CloseTab),
+                MenuItem::action("Close", CloseTab),
                 MenuItem::action("Save", shell::SaveFile),
             ]),
         ),
@@ -345,11 +349,14 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Dark", AppearanceDark),
         ])),
     ])));
-    let [back, forward, next, previous, needs_you, inbox] =
+    let [back, forward, next_pane, previous_pane, next, previous, needs_you, inbox] =
         GO_COMMANDS.map(|command| command.menu_item());
     let mut go = vec![
         back,
         forward,
+        MenuItem::separator(),
+        next_pane,
+        previous_pane,
         MenuItem::separator(),
         next,
         previous,
@@ -367,7 +374,7 @@ pub fn app_menus() -> Vec<Menu> {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
-            MenuItem::action("Close Tab", CloseTab),
+            MenuItem::action("Close", CloseTab),
             MenuItem::action("Close Window", CloseWindow),
         ]));
     }
@@ -484,7 +491,7 @@ mod tests {
 
     #[test]
     fn the_menu_bar_names_the_palette_commands_in_title_case() {
-        assert_eq!(title_case("Reopen closed tab"), "Reopen Closed Tab");
+        assert_eq!(title_case("Reopen closed view"), "Reopen Closed View");
         assert_eq!(title_case("Next session or side pane tab"), "Next Session or Side Pane Tab");
         let menus = app_menus();
         let view = menus.iter().find(|m| m.name.as_ref() == "View").expect("View menu");
@@ -526,7 +533,7 @@ mod tests {
             Some(combo("cmd-,"))
         );
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
-        // slopty: ⌘W closes the tab, ⇧⌘W the window.
+        // slopty: ⌘W closes the focused pane, ⇧⌘W the window.
         assert_eq!(find(&macos, CloseTab.name()), Some(combo("cmd-w")));
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));

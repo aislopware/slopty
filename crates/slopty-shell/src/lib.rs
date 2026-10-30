@@ -222,7 +222,6 @@ pub fn start(
             cx,
         );
         composer::init(cx);
-        terminal::panel::init(cx);
         app_menus::init(cx);
         // slopty: no self-updater; Slopty updates through its own builds.
         cx.register_url_scheme("slopty").detach();

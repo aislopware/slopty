@@ -1,7 +1,7 @@
 //! slopty: an agent drives the person's window (`slopty ui`, the `ui_*` tools): it opens a
-//! terminal tab, a file, a page or the diff in the side pane, shows, hides, expands or collapses
-//! a region, puts a chat on screen, lays the chat and the side pane side by side, and reads what
-//! the window shows. Slopty's workspace hands each ask here through [`act`] once the shell's
+//! shell, a file, a page or the changes in a pane beside the session (`docs/decisions/layout.md`,
+//! "No permanent right column"), shows or hides a region, puts a chat on screen, lays the panes
+//! at even shares, and reads what the window shows. Slopty's workspace hands each ask here through [`act`] once the shell's
 //! window is up ([`serve`]), and sends what [`act`] answers back to the agent.
 //!
 //! The person stays in charge (`docs/decisions/agents.md`, "Agents drive the person's window
@@ -21,12 +21,13 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui::{AnyWindowHandle, App, Context, FocusHandle, Global, WeakEntity, Window};
+use gpui::{AnyWindowHandle, App, AppContext as _, Context, FocusHandle, Global, WeakEntity, Window};
 use slopty_view_proto::TerminalSession;
 use slopty_view_rpc::methods;
 
-use super::{NavEntry, RightSurface, Route, Shell, WidthTween};
-use crate::motion::{self, RESIZE};
+use super::panes::Pane;
+use super::{NavEntry, RightSurface, Route, Shell};
+use crate::terminal::panel::TerminalPanel;
 
 /// How long a fresh terminal's shell is waited for before its command is given up on.
 const SHELL_WITHIN: Duration = Duration::from_secs(10);
@@ -34,8 +35,9 @@ const SHELL_WITHIN: Duration = Duration::from_secs(10);
 /// How often a terminal still coming up is asked again to take its command.
 const ASK_EVERY: Duration = Duration::from_millis(50);
 
-/// The regions an agent names, as [`WindowState::regions`] lists them.
-pub const REGIONS: [&str; 4] = ["sidebar", "pane", "files", "terminal"];
+/// The regions an agent names, as [`WindowState::regions`] lists them: the sidebar, the views
+/// it can summon beside the session, and the shells split beside it.
+pub const REGIONS: [&str; 5] = ["sidebar", "files", "changes", "inspector", "terminal"];
 
 /// One ask of the window: what to do and who asks.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,16 +58,16 @@ pub struct Ask {
 pub enum Act {
     /// Say what the window shows.
     State,
-    /// A terminal tab for the chat on screen.
+    /// A shell in a pane beside the chat on screen.
     Terminal {
         /// The folder it starts in, absolute on the agent's machine; the chat's own when `None`.
         folder: Option<String>,
         /// A command line to type once its shell is up.
         command: Option<String>,
-        /// `terminal` (the drawer, the default) or `pane`.
+        /// Where it opens: `terminal` or `pane`, both a pane beside the session.
         region: Option<String>,
     },
-    /// Something in the side pane.
+    /// Something in a pane beside the session.
     Open(Target),
     /// One region shown, hidden, expanded or collapsed.
     Region {
@@ -76,11 +78,11 @@ pub enum Act {
     },
     /// A chat on screen: by id, id prefix or title; the agent's own when `None`.
     Chat(Option<String>),
-    /// The chat and the side pane side by side at even widths, `target` shown there first.
+    /// The session's panes at even shares, `target` opened beside it first.
     Split(Option<Target>),
 }
 
-/// What the side pane shows for an agent.
+/// What a pane beside the session shows for an agent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     /// A file, as a transcript's file link names it (`file:///w/a.rs#L12`).
@@ -100,9 +102,9 @@ pub enum Change {
     Hide,
     /// The other of the two.
     Toggle,
-    /// As large as it goes: the side pane over the chat; any other region shown.
+    /// As large as it goes: shown.
     Expand,
-    /// Back to its share: the side pane beside the chat; any other region hidden.
+    /// Back out of the way: hidden.
     Collapse,
 }
 
@@ -128,7 +130,7 @@ pub struct WindowState {
     pub chat: Option<ChatShown>,
     /// Each region and whether it shows.
     pub regions: Vec<Region>,
-    /// The chat's tabs: the side pane's, then the terminal drawer's.
+    /// The panes beside the session, in reading order.
     pub tabs: Vec<Tab>,
     /// The person is typing a draft.
     pub typing: bool,
@@ -152,22 +154,22 @@ pub struct Region {
     pub name: String,
     /// On screen.
     pub shown: bool,
-    /// Taking the chat's room.
+    /// Its pane fills the session's view (zoomed).
     pub expanded: bool,
 }
 
-/// One tab of the window.
+/// One pane beside the session.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tab {
-    /// `pane/<kind>/<n>` or `terminal/<n>`.
+    /// `pane/<kind>/<n>` for a view, `terminal/<n>` for a shell.
     pub id: String,
     /// What it shows.
     pub kind: String,
     /// Its title.
     pub title: String,
-    /// Its region.
+    /// The region it belongs to, one of [`REGIONS`], or `pane` for a view of no region.
     pub region: String,
-    /// The one its region shows.
+    /// It has the keyboard.
     pub selected: bool,
     /// A terminal's session id.
     pub terminal: Option<String>,
@@ -285,9 +287,10 @@ fn region_named(name: &str) -> Option<&'static str> {
     let name = name.trim().to_ascii_lowercase().replace(['-', '_'], " ");
     Some(match name.as_str() {
         "sidebar" | "side bar" | "sessions" | "chats" => "sidebar",
-        "pane" | "side pane" | "right" | "right pane" | "surfaces" => "pane",
-        "files" | "files panel" | "explorer" => "files",
-        "terminal" | "drawer" | "terminal drawer" | "bottom" => "terminal",
+        "files" | "explorer" => "files",
+        "changes" | "diff" | "git" => "changes",
+        "inspector" | "trace" => "inspector",
+        "terminal" | "terminals" | "shell" | "shells" => "terminal",
         _ => return None,
     })
 }
@@ -324,18 +327,29 @@ fn chat_named<'a>(
     by(titled).unwrap_or_else(|| fail(Code::Unknown, format!("no chat is called {key}")))
 }
 
-/// What a pane tab is, by its surface: its kind and number.
-const fn surface_kind(surface: RightSurface) -> Option<(&'static str, u64)> {
-    Some(match surface {
-        RightSurface::Picker => return None,
-        RightSurface::File(n) => ("file", n),
-        RightSurface::Browser(n) => ("browser", n),
-        RightSurface::Diff(n) => ("diff", n),
-        RightSurface::Terminal(n) => ("terminal", n),
-        RightSurface::Inspector => ("inspector", 0),
-        RightSurface::Screen(n) => ("screen", n),
-        RightSurface::Page(n) => ("page", n),
-    })
+/// What a view is, by its kind and number, and the region it belongs to.
+const fn view_kind(view: RightSurface) -> (&'static str, u64, &'static str) {
+    match view {
+        RightSurface::Files => ("files", 0, "files"),
+        RightSurface::File(n) => ("file", n, "pane"),
+        RightSurface::Browser(n) => ("browser", n, "pane"),
+        RightSurface::Diff(n) => ("diff", n, "changes"),
+        RightSurface::Inspector => ("inspector", 0, "inspector"),
+        RightSurface::Screen(n) => ("screen", n, "pane"),
+        RightSurface::Page(n) => ("page", n, "pane"),
+    }
+}
+
+/// Whether `pane` belongs to `region`.
+const fn in_region(pane: Pane, region: &str) -> bool {
+    match pane {
+        Pane::View(view) => matches!(
+            (view, region.as_bytes()),
+            (RightSurface::Files, b"files") | (RightSurface::Diff(_), b"changes") | (RightSurface::Inspector, b"inspector")
+        ),
+        Pane::Shell(_) => matches!(region.as_bytes(), b"terminal"),
+        Pane::Session => false,
+    }
 }
 
 impl Shell {
@@ -401,57 +415,73 @@ impl Shell {
                 title: row.title.clone(),
                 machine: state.device_name(&row.device_id).map(str::to_owned),
             });
-        let fit = self.horizontal_fit();
-        let region = |name: &str, shown: bool, expanded: bool| Region {
-            name: name.to_owned(),
-            shown,
-            expanded,
-        };
-        let regions = vec![
-            region("sidebar", !self.settings.sidebar_collapsed && fit.sidebar, false),
-            region("pane", self.right_pane_shown(cx), self.right_pane_expanded),
-            region("files", self.files_panel_open(cx) && fit.files, false),
-            region("terminal", self.terminal_open(cx), false),
-        ];
-        let key = self.panel_key(cx);
-        let active = self.resolved_right_active(cx);
-        let mut tabs: Vec<Tab> = self
-            .right_surface_rows(cx)
-            .into_iter()
-            .filter_map(|(surface, title, _, target)| {
-                let (kind, n) = surface_kind(surface)?;
-                let terminal = match surface {
-                    RightSurface::Terminal(tab) => self
-                        .right_terminal
-                        .as_ref()
-                        .and_then(|panel| panel.read(cx).terminal_id(&key, tab).map(str::to_owned)),
-                    _ => None,
+        let panes = self.panes_now(cx);
+        let zoomed = panes.zoomed();
+        let regions = REGIONS
+            .iter()
+            .map(|&name| {
+                let (shown, expanded) = if name == "sidebar" {
+                    (!self.settings.sidebar_collapsed && self.horizontal_fit().sidebar, false)
+                } else {
+                    let shown = panes.panes().into_iter().any(|pane| in_region(pane, name));
+                    (shown, zoomed.is_some_and(|pane| in_region(pane, name)))
                 };
-                Some(Tab {
-                    id: format!("pane/{kind}/{n}"),
-                    kind: kind.to_owned(),
-                    title: title.to_string(),
-                    region: "pane".to_owned(),
-                    selected: surface == active,
-                    terminal,
-                    target: target.map(|t| t.to_string()),
-                })
+                Region { name: name.to_owned(), shown, expanded }
             })
             .collect();
-        if let Some(panel) = &self.terminal {
-            let panel = panel.read(cx);
-            let drawer = state.panel_session_key();
-            tabs.extend(panel.tab_summaries(cx).into_iter().map(|(n, title, _)| Tab {
-                id: format!("terminal/{n}"),
-                kind: "terminal".to_owned(),
-                title: title.to_string(),
-                region: "terminal".to_owned(),
-                selected: false,
-                terminal: panel.terminal_id(&drawer, n).map(str::to_owned),
-                target: None,
-            }));
-        }
+        let focused = panes.focused();
+        let tabs = panes
+            .panes()
+            .into_iter()
+            .filter_map(|pane| {
+                let selected = pane == focused;
+                match pane {
+                    Pane::Session => None,
+                    Pane::Shell(n) => {
+                        let shell = self.pane_shells.get(&n)?.read(cx);
+                        Some(Tab {
+                            id: format!("terminal/{n}"),
+                            kind: "terminal".to_owned(),
+                            title: shell.shown_title(cx).unwrap_or_else(|| "Shell".into()).to_string(),
+                            region: "terminal".to_owned(),
+                            selected,
+                            terminal: shell.pane_terminal_id().map(str::to_owned),
+                            target: None,
+                        })
+                    }
+                    Pane::View(view) => {
+                        let (kind, n, region) = view_kind(view);
+                        let target = match view {
+                            RightSurface::File(id) => self.file_surface_paths.get(&id).cloned(),
+                            RightSurface::Browser(id) => {
+                                self.browsers.get(&id).and_then(|page| page.read(cx).url().map(str::to_owned))
+                            }
+                            _ => None,
+                        };
+                        Some(Tab {
+                            id: format!("pane/{kind}/{n}"),
+                            kind: kind.to_owned(),
+                            title: self.view_identity(view, cx).1.to_string(),
+                            region: region.to_owned(),
+                            selected,
+                            terminal: None,
+                            target,
+                        })
+                    }
+                }
+            })
+            .collect();
         WindowState { page, chat, regions, tabs, typing: self.agent_sees_typing(window, cx) }
+    }
+
+    /// Do `open` as an agent's ask does: what it opens beside the session stands there, and the
+    /// keyboard, and the pane that has it, stay where they were.
+    fn agent_beside(&mut self, cx: &mut Context<Self>, open: impl FnOnce(&mut Self, &mut Context<Self>)) {
+        let had = self.panes_now(cx).focused();
+        open(self, cx);
+        self.panes_mut(cx).focus(had);
+        self.pane_keyboard_pending = false;
+        cx.notify();
     }
 
     /// Whether the person is typing: the keyboard in the session's terminal with words typed
@@ -491,7 +521,7 @@ impl Shell {
         )
     }
 
-    /// `slopty ui open`: a file, a page or the diff in the side pane.
+    /// `slopty ui open`: a file, a page or the changes in a pane beside the session.
     fn agent_open(
         &mut self,
         target: &Target,
@@ -503,15 +533,18 @@ impl Shell {
             Target::File(link) => {
                 self.agent_chat_here(device, cx)?;
                 let chat = self.active_chat.clone();
-                if !self.open_workspace_file_link(&chat, link, window, cx) {
+                let mut opened = false;
+                self.agent_beside(cx, |this, cx| {
+                    opened = this.open_workspace_file_link(&chat, link, window, cx);
+                });
+                if !opened {
                     return fail(Code::Unknown, format!("the window cannot open {link}"));
                 }
                 Ok(Some(format!("opened {}", shown_file(link))))
             }
             Target::Page(url) => {
                 self.agent_chat_here(None, cx)?;
-                self.set_surfaces_open(true, cx);
-                self.add_browser_surface(Some(url.clone()), window, cx);
+                self.agent_beside(cx, |this, cx| this.add_browser_surface(Some(url.clone()), window, cx));
                 Ok(Some(format!("opened {url}")))
             }
             Target::Diff => {
@@ -519,9 +552,8 @@ impl Shell {
                 if !self.space_git_detected(cx) {
                     return fail(Code::Unknown, "the chat's folder is not a git repository");
                 }
-                self.set_surfaces_open(true, cx);
-                self.add_diff_surface(window, cx);
-                Ok(Some("opened the diff".to_owned()))
+                self.agent_beside(cx, |this, cx| this.show_changes(window, cx));
+                Ok(Some("opened the changes".to_owned()))
             }
         }
     }
@@ -543,106 +575,61 @@ impl Shell {
         let state = self.agent_window(window, cx);
         let now = state.regions.iter().find(|r| r.name == region).cloned().unwrap_or_default();
         let show = shows(change, now.shown);
-        let busy = |what: &str| fail(Code::Busy, format!("the person is typing in the {what}"));
+        if show == now.shown {
+            return Ok(None);
+        }
+        let named = match region {
+            "sidebar" => "the sidebar",
+            "files" => "Files",
+            "changes" => "the changes",
+            "inspector" => "the inspector",
+            _ => "the shells",
+        };
+        let did = Some(format!("{} {named}", if show { "showed" } else { "hid" }));
+        if region == "sidebar" {
+            if show && !self.settings.sidebar_collapsed {
+                return fail(Code::Failed, "the window is too narrow for the sidebar beside the session");
+            }
+            self.toggle_sidebar(cx);
+            return Ok(did);
+        }
+        if !show {
+            // A view closed opens again as it was; a shell's pane closing ends what runs in it,
+            // which only the person decides.
+            if region == "terminal" {
+                return fail(Code::Failed, "closing a shell ends what runs in it; the person closes their shells");
+            }
+            let panes: Vec<Pane> =
+                self.panes_now(cx).panes().into_iter().filter(|pane| in_region(*pane, region)).collect();
+            if panes.iter().any(|pane| self.pane_holds_keyboard(*pane, window, cx)) {
+                return fail(Code::Busy, format!("the person is working in {named}"));
+            }
+            for pane in panes {
+                self.close_pane(pane, cx);
+            }
+            return Ok(did);
+        }
+        self.agent_chat_here(None, cx)?;
         match region {
-            "sidebar" => {
-                if show == now.shown {
-                    return Ok(None);
+            "files" => self.agent_beside(cx, |this, cx| {
+                this.ensure_explorer(window, cx);
+                this.open_view(RightSurface::Files, cx);
+            }),
+            "changes" => {
+                if !self.space_git_detected(cx) {
+                    return fail(Code::Unknown, "the chat's folder is not a git repository");
                 }
-                if show && !self.settings.sidebar_collapsed {
-                    self.promote_hidden_panel(super::panel_layout::AuxiliaryPanel::Sidebar, cx);
-                } else if !show && !now.shown {
-                    self.settings.sidebar_collapsed = true;
-                } else {
-                    self.toggle_sidebar(cx);
-                }
-                Ok(Some(format!("{} the sidebar", if show { "showed" } else { "hid" })))
+                self.agent_beside(cx, |this, cx| this.show_changes(window, cx));
             }
-            "pane" => {
-                // Collapsing the pane puts it back beside the chat; it stays as shown as it was.
-                let show = if matches!(change, Change::Collapse) { now.shown } else { show };
-                if show {
-                    self.agent_chat_here(None, cx)?;
-                }
-                let expand = match change {
-                    Change::Expand => Some(true),
-                    Change::Collapse if now.shown => Some(false),
-                    _ => None,
-                };
-                if !show && self.navigation_focus.in_right(window, cx) {
-                    return busy("side pane");
-                }
-                if expand == Some(true) && !now.expanded && state.typing {
-                    return fail(
-                        Code::Busy,
-                        "the person is typing a draft, which the expanded side pane would cover",
-                    );
-                }
-                let mut did = None;
-                if show != now.shown {
-                    self.set_surfaces_open(show, cx);
-                    did = Some(if show { "showed the side pane" } else { "hid the side pane" });
-                }
-                if let Some(expand) = expand
-                    && self.right_pane_expanded != expand
-                    && self.right_pane_shown(cx)
-                {
-                    self.toggle_right_pane_expand(cx);
-                    did = Some(if expand { "expanded the side pane" } else { "put the side pane beside the chat" });
-                }
-                Ok(did.map(str::to_owned))
-            }
-            "files" => {
-                if show == now.shown {
-                    return Ok(None);
-                }
-                if show {
-                    self.agent_chat_here(None, cx)?;
-                    self.add_files_surface(window, cx);
-                } else {
-                    self.close_files_panel(cx);
-                }
-                Ok(Some(format!("{} the files panel", if show { "showed" } else { "hid" })))
-            }
+            "inspector" => self.agent_beside(cx, |this, cx| this.open_view(RightSurface::Inspector, cx)),
             _ => {
-                if show == now.shown {
-                    return Ok(None);
+                if !self.splits_here() {
+                    return fail(Code::Failed, "this window is too narrow to split");
                 }
-                let typing_there = self
-                    .terminal
-                    .as_ref()
-                    .is_some_and(|panel| panel.read(cx).focus_handle().contains_focused(window, cx));
-                if !show && typing_there {
-                    return busy("terminal");
-                }
-                self.agent_drawer(show, cx);
-                Ok(Some(format!("{} the terminal", if show { "showed" } else { "hid" })))
+                self.agent_beside(cx, |this, cx| this.split_pane(None, cx));
             }
         }
-    }
-
-    /// Open or close the terminal drawer as Cmd+J does, the keyboard left where it is.
-    fn agent_drawer(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.terminal_open(cx) == open {
-            return;
-        }
-        let from = self.terminal_geometry.get().height;
-        let key = self.panel_key(cx);
-        self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx), self.now()));
-        let panel = self.terminal_panel(cx);
-        panel.update(cx, |panel, cx| panel.set_open(open, cx));
-        self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
-                .await;
-            this.update(cx, |shell, cx| {
-                shell.terminal_tween = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
+        Ok(did)
     }
 
     /// `slopty ui chat`: a chat on screen, as a sidebar row's click puts it there, the keyboard
@@ -697,8 +684,8 @@ impl Shell {
         Ok(Some(format!("put {title} on screen")))
     }
 
-    /// `slopty ui split`: `target` in the side pane, and the pane beside the chat at an even
-    /// share of the width.
+    /// `slopty ui split`: `target` opened beside the session, and the session's panes at even
+    /// shares.
     fn agent_split(
         &mut self,
         target: Option<&Target>,
@@ -708,20 +695,19 @@ impl Shell {
     ) -> Result<Option<String>, Failure> {
         self.agent_chat_here(None, cx)?;
         let opened = target.map(|target| self.agent_open(target, device, window, cx)).transpose()?;
-        self.set_surfaces_open(true, cx);
-        if self.right_pane_expanded && self.right_pane_shown(cx) {
-            self.toggle_right_pane_expand(cx);
+        if self.panes_now(cx).len() < 2 {
+            return Ok(None);
         }
-        let before = self.painted_panels(cx);
-        self.resplit_panels(before, None, cx);
+        self.panes_mut(cx).equalize();
+        cx.notify();
         Ok(Some(match opened.flatten() {
-            Some(opened) => format!("{opened} beside the chat"),
-            None => "put the side pane beside the chat".to_owned(),
+            Some(opened) => format!("{opened} beside the session, the panes at even shares"),
+            None => "put the session's panes at even shares".to_owned(),
         }))
     }
 
-    /// `slopty ui terminal`: a terminal tab for the chat on screen, in `folder`, in the drawer or
-    /// the side pane; `answered` hears once its shell is up and `command` typed.
+    /// `slopty ui terminal`: a shell in a pane beside the chat on screen, in `folder`, where there
+    /// is most room; `answered` hears once its shell is up and `command` typed.
     #[expect(clippy::too_many_arguments, reason = "an ask's parts, each its own")]
     fn agent_terminal(
         &mut self,
@@ -733,39 +719,31 @@ impl Shell {
         answered: Answered,
         cx: &mut Context<Self>,
     ) {
-        let in_pane = match region.as_deref().map(region_named) {
-            None | Some(Some("terminal")) => false,
-            Some(Some("pane")) => true,
-            Some(_) => {
-                let message = format!(
-                    "a terminal opens in the terminal drawer or the side pane, not {}",
-                    region.unwrap_or_default()
-                );
-                return answered(fail(Code::Unknown, message), cx);
-            }
-        };
+        let beside = region.as_deref().is_none_or(|region| {
+            region_named(region) == Some("terminal") || region.trim().eq_ignore_ascii_case("pane")
+        });
+        if !beside {
+            let message =
+                format!("a terminal opens in a pane beside the session, not {}", region.unwrap_or_default());
+            return answered(fail(Code::Unknown, message), cx);
+        }
         if let Err(failure) = self.agent_chat_here(folder.as_ref().and(device), cx) {
             return answered(Err(failure), cx);
+        }
+        if !self.splits_here() {
+            return answered(fail(Code::Failed, "this window is too narrow to split"), cx);
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return answered(fail(Code::Failed, "the window is not connected to its machines yet"), cx);
         };
         let chat = self.state.read(cx).panel_session_key();
         let target = self.state.read(cx).terminal_target_device(&chat);
-        let panel = if in_pane { self.right_terminal_panel(cx) } else { self.terminal_panel(cx) };
+        let state = self.state.clone();
+        let panel = cx.new(|cx| TerminalPanel::new(state, cx));
         let key = panel
             .update(cx, |panel, cx| panel.reserve_tab_for_chat(chat.clone(), "Terminal", cx));
-        if in_pane {
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
-            let pane = self.panel_key(cx);
-            self.right_tabs.entry(pane).or_default().push(RightSurface::Terminal(key));
-            self.set_surfaces_open(true, cx);
-            self.set_right_active(RightSurface::Terminal(key), cx);
-        } else {
-            self.agent_drawer(true, cx);
-            panel.update(cx, |panel, cx| panel.select_tab_by_key(key, cx));
-        }
-        cx.notify();
+        let panes = self.panel_key(cx);
+        let id = format!("terminal/{}", self.add_shell_beside(&panes, panel.clone(), cx));
         let mut params = serde_json::json!({ "chatId": chat });
         if let Some(object) = params.as_object_mut() {
             if let Some(folder) = &folder {
@@ -779,7 +757,6 @@ impl Shell {
             Some(folder) => format!("opened a terminal in {folder}"),
             None => "opened a terminal".to_owned(),
         };
-        let id = format!("{}/{key}", if in_pane { "pane/terminal" } else { "terminal" });
         cx.spawn(async move |this, cx| {
             let (cols, rows) =
                 crate::terminal::panel::TerminalPanel::grid(&panel.downgrade(), cx).await;
@@ -989,8 +966,9 @@ mod tests {
     }
 
     /// Each region shows, hides, toggles, expands and collapses by its name or the window's own
-    /// word for it, a change already made changes nothing, and a name the window does not know
-    /// is answered with the ones it does.
+    /// word for it: a view stands beside the session while the keyboard stays where it was, a
+    /// change already made changes nothing, a shell is the person's to close, and a name the
+    /// window does not know is answered with the ones it does.
     #[gpui::test]
     fn regions_show_hide_expand_and_collapse(cx: &mut TestAppContext) {
         let (_dir, shell, cx) = setup(cx);
@@ -1002,26 +980,31 @@ mod tests {
         let done = asked(cx, ask(change("Side bar", Change::Toggle))).unwrap();
         assert!(region(&done, "sidebar").shown, "{done:?}");
 
-        let done = asked(cx, ask(change("side-pane", Change::Show))).unwrap();
-        assert!(region(&done, "pane").shown, "{done:?}");
-        let done = asked(cx, ask(change("pane", Change::Expand))).unwrap();
-        assert!(region(&done, "pane").expanded);
-        assert_eq!(done.did.as_deref(), Some("expanded the side pane"));
-        let done = asked(cx, ask(change("pane", Change::Collapse))).unwrap();
-        assert!(region(&done, "pane").shown && !region(&done, "pane").expanded, "{done:?}");
-        let done = asked(cx, ask(change("pane", Change::Hide))).unwrap();
-        assert!(!region(&done, "pane").shown);
+        let done = asked(cx, ask(change("trace", Change::Show))).unwrap();
+        assert_eq!(done.did.as_deref(), Some("showed the inspector"));
+        assert!(region(&done, "inspector").shown, "{done:?}");
+        let tab = done.window.tabs.iter().find(|tab| tab.kind == "inspector").cloned().unwrap();
+        assert_eq!((tab.id.as_str(), tab.region.as_str(), tab.selected), ("pane/inspector/0", "inspector", false));
+        assert_eq!(
+            shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused()),
+            Pane::Session,
+            "the keyboard stays in the session"
+        );
+        assert_eq!(asked(cx, ask(change("inspector", Change::Expand))).unwrap().did, None, "shown already");
+        let done = asked(cx, ask(change("inspector", Change::Collapse))).unwrap();
+        assert!(!region(&done, "inspector").shown);
+        assert!(done.window.tabs.is_empty(), "{done:?}");
 
-        let done = asked(cx, ask(change("terminal", Change::Show))).unwrap();
-        assert!(region(&done, "terminal").shown);
-        assert!(shell.read_with(cx, |shell, cx| shell.terminal_open(cx)));
-        let done = asked(cx, ask(change("drawer", Change::Hide))).unwrap();
-        assert!(!region(&done, "terminal").shown);
+        // A shell splits beside the session; hiding it would end what runs in it.
+        let done = asked(cx, ask(change("shells", Change::Show))).unwrap();
+        assert!(region(&done, "terminal").shown, "{done:?}");
+        let kept = asked(cx, ask(change("terminal", Change::Hide)));
+        assert_eq!(code(&kept), Some(Code::Failed), "only the person closes a shell");
 
         let unknown = asked(cx, ask(change("dock", Change::Show)));
         assert_eq!(code(&unknown), Some(Code::Unknown));
         let message = unknown.unwrap_err().message;
-        assert!(message.contains("sidebar, pane, files, terminal"), "{message}");
+        assert!(message.contains("sidebar, files, changes, inspector, terminal"), "{message}");
     }
 
     /// A chat goes on screen by its id, a prefix of it or its title, or the agent's own; a name
@@ -1065,22 +1048,30 @@ mod tests {
         far.device = Some("laptop".into());
         assert_eq!(code(&asked(cx, far)), Some(Code::Elsewhere));
         assert_eq!(code(&asked(cx, ask(terminal(None, Some("sidebar"))))), Some(Code::Unknown));
+        assert_eq!(code(&asked(cx, ask(terminal(None, Some("pane"))))), Some(Code::Failed), "a pane too, no link");
         assert_eq!(code(&asked(cx, ask(terminal(None, None)))), Some(Code::Failed), "no link");
         shell.update(cx, |shell, _| shell.active_chat.clear());
         let page = Act::Open(Target::Page("https://example.com/".into()));
         assert_eq!(code(&asked(cx, ask(page))), Some(Code::Elsewhere), "no chat on screen");
     }
 
-    /// Split lays the side pane beside the chat at an even share: shown, and out of full width.
+    /// Split puts the session's panes at even shares; with nothing beside the session there is
+    /// nothing to share.
     #[gpui::test]
-    fn split_puts_the_pane_beside_the_chat(cx: &mut TestAppContext) {
-        let (_dir, _shell, cx) = setup(cx);
-        let expand = Act::Region { region: "pane".into(), change: Change::Expand };
-        assert!(region(&asked(cx, ask(expand)).unwrap(), "pane").expanded);
+    fn split_puts_the_panes_at_even_shares(cx: &mut TestAppContext) {
+        let (_dir, shell, cx) = setup(cx);
+        assert_eq!(asked(cx, ask(Act::Split(None))).unwrap().did, None, "the session alone");
+        let inspector = Act::Region { region: "inspector".into(), change: Change::Show };
+        asked(cx, ask(inspector)).unwrap();
         let done = asked(cx, ask(Act::Split(None))).unwrap();
-        let pane = region(&done, "pane");
-        assert!(pane.shown && !pane.expanded, "{done:?}");
-        assert_eq!(done.did.as_deref(), Some("put the side pane beside the chat"));
+        assert_eq!(done.did.as_deref(), Some("put the session's panes at even shares"));
+        let panes = shell.read_with(cx, |shell, cx| shell.panes_now(cx));
+        assert_eq!(panes.focused(), Pane::Session, "the keyboard stays in the session");
+        assert_eq!(panes, {
+            let mut even = panes.clone();
+            even.equalize();
+            even
+        });
     }
 
     /// A file link is named by its path, unescaped.

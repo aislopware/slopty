@@ -1,6 +1,6 @@
-//! The clipboard between this client and its worker while a shell in the terminal dock (⌘J) has
-//! the keyboard, over the run's own named pasteboards (the person's is never touched): a copy on
-//! the worker reaches this client, items and all, this client's copy is on the worker's
+//! The clipboard between this client and its worker while a shell split beside the session (⌘D)
+//! has the keyboard, over the run's own named pasteboards (the person's is never touched): a copy
+//! on the worker reaches this client, items and all, this client's copy is on the worker's
 //! pasteboard for anything there that reads it (`pbpaste`, a menu's Paste), and the worker is
 //! no longer watched once the keyboard leaves the shell.
 //!
@@ -24,13 +24,13 @@ fn watched(d: &Dump) -> bool {
     d.workers.iter().any(|w| w.clipboard_watched)
 }
 
-/// ⌘J's shell at its prompt with the keyboard, its worker watched, and the watch in effect: a
+/// ⌘D's shell at its prompt with the keyboard, its worker watched, and the watch in effect: a
 /// copy the worker makes before it hears the watch is, by design, never announced, and the
 /// keys' echo comes back behind the watch on the one control stream.
 async fn shell_watched(drv: &mut Driver) {
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
     drv.keys("cmd-d").await.unwrap();
-    drv.wait_for("the dock's shell with the keyboard, its worker watched", STEP, |d| {
+    drv.wait_for("the split's shell with the keyboard, its worker watched", STEP, |d| {
         d.terminals.iter().any(|t| t.at_prompt) && d.focused.starts_with("terminal:") && watched(d)
     })
     .await
@@ -70,13 +70,13 @@ fn item_texts(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// With the dock's shell holding the keyboard, a copy of several items on its worker (Finder's
+/// With the split's shell holding the keyboard, a copy of several items on its worker (Finder's
 /// several files, a note app's several entries) arrives here as the same items, in order, and
-/// what this client copies then is on the worker's pasteboard. Closing the dock takes the
-/// keyboard from the shell, and the worker is no longer watched.
+/// what this client copies then is on the worker's pasteboard. Closing the shell's pane (⌘W)
+/// takes the keyboard from the shell, and the worker is no longer watched.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_dock_s_shell_shares_the_clipboard_with_its_worker() {
+async fn a_split_shell_shares_the_clipboard_with_its_worker() {
     let mut stack = Stack::launch_at_home("e2e-clip").await.unwrap();
     let worker_name = pasteboard_name(stack.dir.path(), "worker");
     let app_name = pasteboard_name(stack.dir.path(), "app");
@@ -97,7 +97,7 @@ async fn the_dock_s_shell_shares_the_clipboard_with_its_worker() {
     assert_eq!(there.as_deref(), Some(&*text), "the worker's pasteboard holds it");
 
     let drv = &mut stack.driver;
-    drv.keys("cmd-d").await.unwrap();
+    drv.keys("cmd-w").await.unwrap();
     drv.wait_for("the keyboard away from the shell, nothing watched", STEP, |d| {
         !d.focused.starts_with("terminal:") && !watched(d)
     })

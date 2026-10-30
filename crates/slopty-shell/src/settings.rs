@@ -401,6 +401,8 @@ pub enum SavedSurface {
     Screen { screen: String, title: String },
     /// slopty: the session's inspector.
     Inspector,
+    /// slopty: the session's files.
+    Files,
 }
 
 /// How often the person ran a palette command, and when last, as `ui-settings.json` keeps it.

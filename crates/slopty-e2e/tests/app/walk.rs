@@ -1,7 +1,7 @@
 //! A person's day with the app's own surfaces, walked as they walk it: one input after another
 //! with nothing drawn from scratch between them, each landing on the frame the last one left.
-//! The terminal dock and its tabs, the files and their editor, the side pane's tabs, Settings
-//! and the palette, and the keyboard coming back to where it was each time.
+//! Shells split beside the session, the files and their editor in panes of their own, the
+//! changes, Settings and the palette, and the keyboard coming back to where it was each time.
 
 #![cfg(target_os = "macos")]
 
@@ -17,9 +17,11 @@ fn focused_terminal(dump: &Dump) -> Option<&str> {
     dump.focused.strip_prefix("terminal:")
 }
 
-/// The dock's terminal tabs, left to right.
-fn tabs(dump: &Dump) -> Vec<&A11yNode> {
-    dump.a11y.iter().filter(|n| n.role == "Tab").collect()
+/// The terminals drawn, left to right.
+fn terminals(dump: &Dump) -> Vec<&A11yNode> {
+    let mut drawn: Vec<_> = dump.a11y.iter().filter(|n| n.role == "Terminal").collect();
+    drawn.sort_by(|a, b| a.bounds[0].total_cmp(&b.bounds[0]));
+    drawn
 }
 
 /// The middle of `node`, in window points.
@@ -52,12 +54,12 @@ async fn run(drv: &mut Driver, command: &str, answer: &str) -> Dump {
     .unwrap()
 }
 
-/// The dock's tabs, a tab picked by pointer, a tab closed by its ✕, the dock hidden and shown,
-/// Settings opened over it (⌘K is the shell's own clear there): each time the keyboard is where the
-/// person left it, and what they type lands in the terminal they see in front.
+/// Shells split beside the home canvas (⌘D), one picked by pointer, the focused one closed with
+/// ⌘W, Settings opened over them: each time the keyboard is where the person left it, and what
+/// they type lands in the shell they see it in.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_terminal_dock_keeps_up_with_a_person() {
+async fn split_shells_keep_up_with_a_person() {
     let mut stack = Stack::launch_at_home("e2e-walk").await.unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
@@ -65,24 +67,24 @@ async fn the_terminal_dock_keeps_up_with_a_person() {
     drv.keys("cmd-d").await.unwrap();
     let first = run(drv, "echo one-$((1+1))", "one-2").await;
     let first_session = focused_terminal(&first).unwrap_or_default().to_owned();
-    println!("WALK dock\n{}", slopty_e2e::frame_text(&first.a11y));
+    println!("WALK split\n{}", slopty_e2e::frame_text(&first.a11y));
 
-    // A second tab, where the keyboard goes.
-    drv.keys("cmd-t").await.unwrap();
+    // A second shell split beside the first, where the keyboard goes.
+    drv.keys("cmd-d").await.unwrap();
     let second = drv
-        .wait_for("a second terminal with the keyboard", STEP, |d| {
-            tabs(d).len() == 2 && focused_terminal(d).is_some_and(|s| s != first_session)
+        .wait_for("a second shell with the keyboard", STEP, |d| {
+            terminals(d).len() == 2 && focused_terminal(d).is_some_and(|s| s != first_session)
         })
         .await
         .unwrap();
     let second_session = focused_terminal(&second).unwrap_or_default().to_owned();
     let second = run(drv, "echo two-$((2+2))", "two-4").await;
-    println!("WALK two tabs\n{}", slopty_e2e::frame_text(&second.a11y));
+    println!("WALK two shells\n{}", slopty_e2e::frame_text(&second.a11y));
 
-    // The first tab by pointer: it comes to the front with the keyboard.
-    let (x, y) = tabs(&second).first().map(|t| middle(t)).unwrap_or_default();
+    // The first shell, on the left, by pointer: the keyboard goes with the press.
+    let (x, y) = terminals(&second).first().map(|t| middle(t)).unwrap_or_default();
     drv.click(x, y).await.unwrap();
-    drv.wait_for("the first tab with the keyboard", STEP, |d| {
+    drv.wait_for("the first shell with the keyboard", STEP, |d| {
         focused_terminal(d) == Some(first_session.as_str())
     })
     .await
@@ -90,59 +92,28 @@ async fn the_terminal_dock_keeps_up_with_a_person() {
     let back = run(drv, "echo back-$((3+3))", "back-6").await;
     assert!(
         lines(&back, &second_session).iter().all(|l| !l.contains("back-6")),
-        "typed into the tab behind"
+        "typed into the shell beside it"
     );
 
-    // The second tab's ✕, shown once the pointer is over its tab.
-    let tab = tabs(&back).get(1).map(|t| middle(t)).unwrap_or_default();
-    drv.ok(&slopty_e2e::Command::Move { x: tab.0, y: tab.1 }).await.unwrap();
-    let hovered = drv
-        .wait_for("the second tab's close", STEP, |d| {
-            d.a11y.iter().filter(|n| n.role == "Button" && is_close(n)).count() >= 2
-        })
-        .await
-        .unwrap();
-    println!("WALK hovered\n{}", slopty_e2e::frame_text(&hovered.a11y));
-    let close = hovered
-        .a11y
-        .iter()
-        .filter(|n| n.role == "Button" && is_close(n))
-        .min_by(|a, b| distance(a, tab).total_cmp(&distance(b, tab)))
-        .map(middle)
-        .unwrap_or_default();
-    drv.click(close.0, close.1).await.unwrap();
-    drv.wait_for("one tab left, the first", STEP, |d| {
-        tabs(d).len() == 1 && focused_terminal(d) == Some(first_session.as_str())
+    // ⌘W closes the focused pane, not the window: the keyboard goes to its neighbour.
+    drv.keys("cmd-w").await.unwrap();
+    drv.wait_for("one shell left, the second, with the keyboard", STEP, |d| {
+        terminals(d).len() == 1 && focused_terminal(d) == Some(second_session.as_str())
     })
     .await
     .unwrap();
+    let left = run(drv, "echo left-$((4+4))", "left-8").await;
+    assert_eq!(focused_terminal(&left), Some(second_session.as_str()), "the shell left");
 
-    // Hidden and shown again: the same shell, with the keyboard.
-    drv.keys("cmd-d").await.unwrap();
-    drv.wait_for("the dock hidden", STEP, |d| tabs(d).is_empty()).await.unwrap();
-    drv.keys("cmd-d").await.unwrap();
-    let shown = run(drv, "echo again-$((4+4))", "again-8").await;
-    assert_eq!(focused_terminal(&shown), Some(first_session.as_str()), "the same shell");
-
-    // Settings over it, shut with Escape.
+    // Settings over it, shut with Escape: the keyboard back in the shell.
     drv.keys("cmd-,").await.unwrap();
     drv.wait_for("Settings", STEP, |d| node(d, "Button", "Close settings").is_some())
         .await
         .unwrap();
     drv.keys("escape").await.unwrap();
-    run(drv, "echo settings-$((6+6))", "settings-12").await;
+    let after = run(drv, "echo settings-$((6+6))", "settings-12").await;
+    assert_eq!(focused_terminal(&after), Some(second_session.as_str()), "the same shell");
     stack.shutdown().await;
-}
-
-/// Whether `node` is a tab's ✕.
-fn is_close(node: &A11yNode) -> bool {
-    node.label.as_deref().is_some_and(|l| l.starts_with("Close "))
-}
-
-/// How far `node`'s middle is from `at`.
-fn distance(node: &A11yNode, at: (f32, f32)) -> f32 {
-    let (x, y) = middle(node);
-    (x - at.0).hypot(y - at.1)
 }
 
 /// The worker's name for the files walk, as the CLI names the machine.
@@ -180,7 +151,7 @@ async fn click(drv: &mut Driver, role: &str, label: &str) -> Dump {
     dump
 }
 
-/// A stand-in agent's thread in a repository with a change, the files column open on it.
+/// A stand-in agent's thread in a repository with a change, its files summoned beside it.
 async fn files_walk() -> slopty_e2e::harness::ServedApp {
     let mut stack = slopty_e2e::harness::ServedApp::launch_rooted(MACHINE, &[], |_root| {
         vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
@@ -214,15 +185,27 @@ async fn files_walk() -> slopty_e2e::harness::ServedApp {
     drv.ok(&slopty_e2e::Command::Resize { width: 1320.0, height: 880.0 }).await.unwrap();
     drv.keys("cmd-1").await.unwrap();
     drv.keys("cmd-e").await.unwrap();
-    drv.wait_for("the files column", STEP, |d| node(d, "Button", "Hide files panel").is_some())
-        .await
-        .unwrap();
+    drv.wait_for("the files beside the session", STEP, |d| {
+        node(d, "TreeItem", "README.md").is_some()
+    })
+    .await
+    .unwrap();
     stack
 }
 
-/// A file opened from the tree, edited and saved with ⌘S, a second file beside it, the tabs
-/// switched by pointer, one closed with ⌘W and brought back with ⇧⌘T, and the Changes surface
-/// with the tree's diff: each input lands where the person sees it.
+/// Press `label`'s pane on its header, which takes no keyboard of its own: the pane takes it.
+async fn press_pane(drv: &mut Driver, label: &str) {
+    let dump = drv
+        .wait_for(&format!("{label}'s pane"), STEP, |d| node(d, "Group", label).is_some())
+        .await
+        .unwrap();
+    let [x, y, ..] = node(&dump, "Group", label).map(|n| n.bounds).unwrap_or_default();
+    drv.click(x + 40.0, y + 14.0).await.unwrap();
+}
+
+/// A file picked in the tree opening as a pane of its own, a second edited and saved with ⌘S, a
+/// pane picked by pointer and closed with ⌘W, one closed by its ✕ and brought back with ⇧⌘T,
+/// and the changes (⌘R) with the tree's diff: each input lands where the person sees it.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_files_and_changes_keep_up_with_a_person() {
@@ -232,10 +215,8 @@ async fn the_files_and_changes_keep_up_with_a_person() {
     let tree = click(drv, "TreeItem", "README.md").await;
     println!("WALK tree\n{}", slopty_e2e::frame_text(&tree.a11y));
     let opened = drv
-        .wait_for("README.md in the editor", STEP, |d| {
-            d.a11y.iter().any(|n| {
-                n.role != "TreeItem" && n.label.as_deref().is_some_and(|l| l.ends_with("README.md"))
-            })
+        .wait_for("README.md in a pane of its own", STEP, |d| {
+            node(d, "Group", "README.md").is_some()
         })
         .await
         .unwrap();
@@ -246,7 +227,7 @@ async fn the_files_and_changes_keep_up_with_a_person() {
     click(drv, "TreeItem", "src").await;
     click(drv, "TreeItem", "lib.rs").await;
     let editor = drv
-        .wait_for("lib.rs in front", STEP, |d| node(d, "Button", "Close lib.rs").is_some())
+        .wait_for("lib.rs in a pane", STEP, |d| node(d, "Group", "lib.rs").is_some())
         .await
         .unwrap();
     println!("WALK editor\n{} (focus {})", slopty_e2e::frame_text(&editor.a11y), editor.focused);
@@ -269,27 +250,22 @@ async fn the_files_and_changes_keep_up_with_a_person() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // The other tab by pointer, and back.
-    click(drv, "Button", "README.md").await;
-    drv.wait_for("README.md in front", STEP, |d| node(d, "Button", "Show Markdown code").is_some())
-        .await
-        .unwrap();
-    click(drv, "Button", "src/lib.rs").await;
-    drv.wait_for("lib.rs in front again", STEP, |d| {
-        node(d, "Button", "Show Markdown code").is_none()
-            && node(d, "Button", "Close lib.rs").is_some()
+    // README's pane by pointer takes the keyboard, so ⌘W closes it, not lib.rs.
+    press_pane(drv, "README.md").await;
+    drv.keys("cmd-w").await.unwrap();
+    drv.wait_for("README.md's pane closed, lib.rs's still there", STEP, |d| {
+        node(d, "Group", "README.md").is_none() && node(d, "Group", "lib.rs").is_some()
     })
     .await
     .unwrap();
 
-    // Its ✕ closes it, and ⇧⌘T brings it back.
+    // lib.rs's ✕, on its header once it has the keyboard, closes it; ⇧⌘T brings it back.
+    press_pane(drv, "lib.rs").await;
     click(drv, "Button", "Close lib.rs").await;
-    drv.wait_for("lib.rs closed", STEP, |d| node(d, "Button", "Close lib.rs").is_none())
-        .await
-        .unwrap();
+    drv.wait_for("lib.rs closed", STEP, |d| node(d, "Group", "lib.rs").is_none()).await.unwrap();
     drv.keys("cmd-shift-t").await.unwrap();
     let reopened =
-        drv.wait_for("lib.rs back", STEP, |d| node(d, "Button", "Close lib.rs").is_some()).await;
+        drv.wait_for("lib.rs back", STEP, |d| node(d, "Group", "lib.rs").is_some()).await;
     let reopened = match reopened {
         Ok(d) => d,
         Err(e) => panic!("{e:#}"),
@@ -300,11 +276,8 @@ async fn the_files_and_changes_keep_up_with_a_person() {
         reopened.focused
     );
 
-    // A new tab's picker, then the Changes surface with the tree's diff.
-    click(drv, "Button", "New tab").await;
-    let picker = drv.dump().await.unwrap();
-    println!("WALK picker\n{} (focus {})", slopty_e2e::frame_text(&picker.a11y), picker.focused);
-    click(drv, "MenuItem", "Changes").await;
+    // The changes by their key, beside the rest with the tree's diff.
+    drv.keys("cmd-r").await.unwrap();
     tokio::time::sleep(Duration::from_secs(2)).await;
     let changes = drv.dump().await.unwrap();
     println!(
@@ -313,7 +286,7 @@ async fn the_files_and_changes_keep_up_with_a_person() {
         changes.focused,
         changes.focus_path
     );
-    // The surface just opened has the keyboard: ⌘F finds in the diff, not in the chat.
+    // The changes just summoned have the keyboard: ⌘F finds in the diff, not in the session.
     drv.keys("cmd-f").await.unwrap();
     let find = drv
         .wait_for("the diff's find with the keyboard", STEP, |d| {
@@ -350,13 +323,13 @@ async fn the_files_and_changes_keep_up_with_a_person() {
     stack.shutdown().await;
 }
 
-/// The dock's shell across a dropped link: the path dies with nothing said, the system's wake
-/// hands the app its resume, and the same shell takes what the person types next, with what it
-/// showed before still there. Then the app quits and comes back: the dock, open when it quit,
-/// opens again on a shell that takes the keyboard, though it asked for it ahead of its link.
+/// A shell split beside the home canvas across a dropped link: the path dies with nothing said,
+/// the system's wake hands the app its resume, and the same shell takes what the person types
+/// next, with what it showed before still there. Then the app quits and comes back: a split
+/// there opens on a shell that takes the keyboard.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
+async fn a_split_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
     let (mut stack, cut) = Stack::launch_behind_cut("e2e-walk-link").await.unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the worker", STEP, |d| d.status == "connected").await.unwrap();
@@ -391,15 +364,9 @@ async fn the_dock_s_shell_comes_back_after_a_dropped_link_and_a_relaunch() {
         reopened.status,
         reopened.focused
     );
-    // The dock comes back as it was left; the keyboard starts where a launch puts it, and the
-    // person picks the shell by its tab.
-    if tabs(&reopened).is_empty() {
-        drv.keys("cmd-d").await.unwrap();
-    } else if focused_terminal(&reopened).is_none() {
-        let (x, y) = tabs(&reopened).first().map(|t| middle(t)).unwrap_or_default();
-        drv.click(x, y).await.unwrap();
-    }
-    // The home dock is not kept across launches: a working shell, whichever, with the keyboard.
+    // A view's panes beside the home canvas are not kept across launches: a split there opens a
+    // working shell, whichever, with the keyboard.
+    drv.keys("cmd-d").await.unwrap();
     let again = run(drv, "echo again-$((9+9))", "again-18").await;
     assert!(focused_terminal(&again).is_some(), "a shell with the keyboard after a relaunch");
     println!("WALK relaunched\n{}", slopty_e2e::frame_text(&again.a11y));

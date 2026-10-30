@@ -291,9 +291,9 @@ mod session_card {
         shell.settings.space_filter = None;
     }
 
-    /// A session opens on its terminal alone, the side pane shut; ⌘I opens its inspector
-    /// beside it, its tab first in the pane, and closes it again, the keyboard back with the
-    /// terminal. A plain terminal has nothing to inspect.
+    /// A session opens on its terminal alone; ⌘I summons its inspector beside it with the
+    /// keyboard, and again puts the keyboard back in the terminal, the inspector left standing.
+    /// A plain terminal has nothing to inspect.
     #[gpui::test]
     fn a_session_opens_on_its_terminal_and_cmd_i_opens_its_inspector(cx: &mut gpui::TestAppContext) {
         use super::super::RightSurface;
@@ -304,13 +304,13 @@ mod session_card {
         };
         let shown = |chat: &str, cx: &mut gpui::VisualTestContext| {
             cx.update(|window, cx| window.draw(cx).clear(cx));
-            let (tabs, open, pane) = shell.read_with(cx, |shell, cx| {
-                let tabs = shell.right_tabs.get(chat).cloned().unwrap_or_default();
-                (tabs, shell.inspector_shown(cx), shell.right_pane_open(cx))
+            let (views, front) = shell.read_with(cx, |shell, cx| {
+                let views = shell.panes.get(chat).map(|panes| panes.views()).unwrap_or_default();
+                (views, shell.inspector_shown(cx))
             });
-            assert_eq!(open, cx.debug_bounds("inspector").is_some(), "drawn as it stands");
-            assert_eq!(open, pane, "the pane open only on the inspector");
-            (tabs, open)
+            let drawn = cx.debug_bounds("inspector").is_some();
+            assert_eq!(views.contains(&RightSurface::Inspector), drawn, "drawn while it stands");
+            (views, front)
         };
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
@@ -322,10 +322,10 @@ mod session_card {
         assert_eq!(shown("a", cx), (Vec::new(), false), "the terminal alone");
         cx.simulate_keystrokes("cmd-i");
         cx.run_until_parked();
-        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], true), "⌘I opens it");
+        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], true), "⌘I summons it");
         cx.simulate_keystrokes("cmd-i");
         cx.run_until_parked();
-        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], false), "and closes it");
+        assert_eq!(shown("a", cx), (vec![RightSurface::Inspector], false), "and again leaves it");
         let terminal = cx.update(|window, cx| {
             shell.read(cx).session_terminal.read(cx).focus_handle().contains_focused(window, cx)
         });

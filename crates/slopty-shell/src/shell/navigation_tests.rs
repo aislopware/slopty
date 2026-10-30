@@ -1,5 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-//! Real pane rendering and key dispatch without booting an engine.
+//! The keyboard among a session's panes, through the shell's real panes and key dispatch,
+//! without booting an engine.
+use super::panes::{Direction, Pane};
 use super::*;
 use gpui::{AppContext, TestAppContext, VisualTestContext};
 
@@ -11,48 +13,26 @@ struct NavigationHost {
 impl Render for NavigationHost {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.shell.update(cx, |shell, cx| {
-            shell
-                .navigation_focus
-                .remember(&shell.shortcut_focus, window, cx);
             let (preferred, neutral) = shell.navigation_focus_fallback(cx);
-            defer_mounted_focus_restore(
-                shell.shortcut_focus.clone(),
-                preferred,
-                neutral,
-                window,
-                cx,
-            );
+            defer_mounted_focus_restore(shell.shortcut_focus.clone(), preferred, neutral, window, cx);
             let main = shell.render_main(window, cx);
-            let right = shell.render_right_pane(window, cx);
             div()
                 .size_full()
                 .flex()
-                .flex_col()
                 .track_focus(&shell.shortcut_focus)
                 .child(div().track_focus(&shell.unfocused))
-                .on_action(cx.listener(|shell, _: &NextSession, window, cx| {
-                    shell.cycle_navigation(true, window, cx);
-                }))
-                .on_action(cx.listener(|shell, _: &PrevSession, window, cx| {
-                    shell.cycle_navigation(false, window, cx);
-                }))
+                .on_action(cx.listener(|shell, _: &NextSession, _, cx| shell.cycle_navigation(true, cx)))
+                .on_action(cx.listener(|shell, _: &PrevSession, _, cx| shell.cycle_navigation(false, cx)))
                 // slopty: the window's own keys (`chrome_keys`).
                 .map(|el| shell.chrome_actions(el, cx))
-                .child(div().h(px(40.)).child(shell.render_right_tab_strip(cx)))
                 .child(
                     div()
+                        .id("navigation-main")
+                        .debug_selector(|| "navigation-main".into())
+                        .w(px(1100.))
+                        .h_full()
                         .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .child(
-                            div()
-                                .id("navigation-main")
-                                .debug_selector(|| "navigation-main".into())
-                                .w(px(400.))
-                                .h_full()
-                                .child(main),
-                        )
-                        .when(shell.right_pane_open(cx), |el| el.child(right)),
+                        .child(main),
                 )
         })
     }
@@ -65,11 +45,7 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
         cx.set_global(Theme::default());
         crate::app_menus::init(cx);
         settings::init(UiSettings::default(), dir.path(), cx);
-        // slopty: no History surface (ruled out).
-        apply_keymap(
-            cx,
-            &KeymapConfig::default(),
-        );
+        apply_keymap(cx, &KeymapConfig::default());
     });
     let (host, cx) = cx.add_window_view(|_, cx| {
         let shell = cx.new(|cx| {
@@ -107,25 +83,26 @@ fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
             crate::motion::set_reduced_motion(cx, true);
             shell
         });
-        NavigationHost {
-            shell,
-            _data_dir: dir,
-        }
+        NavigationHost { shell, _data_dir: dir }
     });
     let shell = host.read_with(cx, |host, _| host.shell.clone());
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    // slopty: two diff tabs stand for any two surfaces (no subagent tab), opened once the
-    // selection has settled the panes' owner.
+    draw(cx);
+    // Two views beside the parent session, stacked at its right, the newer with the keyboard.
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.set_surfaces_open(true, cx);
             for _ in 0..2 {
                 shell.add_diff_surface(window, cx);
             }
         });
     });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    draw(cx);
     (shell, cx)
+}
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
 /// slopty: the session's terminal, the main column's keyboard.
@@ -134,272 +111,160 @@ fn session_focus(shell: &Entity<Shell>, cx: &App) -> FocusHandle {
 }
 
 fn press(cx: &mut VisualTestContext, forward: bool) {
-    let id = if forward {
-        ShortcutId::NextSession
-    } else {
-        ShortcutId::PrevSession
-    };
+    let id = if forward { ShortcutId::NextSession } else { ShortcutId::PrevSession };
     cx.simulate_keystrokes(&platform_combo(id.default_combo()));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    draw(cx);
 }
 
-fn assert_surface(shell: &Entity<Shell>, cx: &mut VisualTestContext, surface: RightSurface) {
+fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+}
+
+/// The pane with the keyboard, which the model and the window agree on.
+#[track_caller]
+fn keyboard_in(shell: &Entity<Shell>, cx: &mut VisualTestContext, pane: Pane) {
     cx.update(|window, cx| {
         let shell = shell.read(cx);
-        assert_eq!(shell.resolved_right_active(cx), surface);
-        assert_eq!(
-            shell.state.read(cx).selected_chat.as_deref(),
-            Some("parent")
-        );
-        assert!(shell.navigation_focus.in_right(window, cx));
+        assert_eq!(shell.panes_now(cx).focused(), pane);
+        assert!(shell.pane_holds_keyboard(pane, window, cx), "{pane:?} holds the keyboard");
     });
 }
 
+/// ⌃⇥ walks the sessions from whichever pane holds the keyboard, a view or a shell split beside
+/// the terminal too, and each session keeps the pane that had its keyboard.
 #[gpui::test]
-fn repeated_keys_stay_in_the_right_pane_and_follow_reordering(cx: &mut TestAppContext) {
+fn the_session_keys_switch_sessions_from_any_pane(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    for expected in [2, 1, 2, 1] {
-        press(cx, true);
-        assert_surface(&shell, cx, RightSurface::Diff(expected));
+    let newer = Pane::View(RightSurface::Diff(2));
+    keyboard_in(&shell, cx, newer);
+    press(cx, true);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
+    keyboard_in(&shell, cx, Pane::Session);
+    press(cx, false);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
+    keyboard_in(&shell, cx, newer);
+
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.split_pane(Some(Direction::Right), cx)));
+    draw(cx);
+    let split = shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused());
+    assert!(matches!(split, Pane::Shell(_)), "{split:?}");
+    keyboard_in(&shell, cx, split);
+    press(cx, true);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
+}
+
+/// ⌘] and ⌘[ walk a session's panes in reading order, ⌥⌘arrows by direction, from the terminal
+/// as from a view: the terminal never eats them.
+#[gpui::test]
+fn the_pane_keys_walk_the_panes_from_the_terminal_too(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    let (older, newer) = (Pane::View(RightSurface::Diff(1)), Pane::View(RightSurface::Diff(2)));
+    for (key, lands) in
+        [("mod-]", Pane::Session), ("mod-]", older), ("mod-[", Pane::Session), ("mod-[", newer)]
+    {
+        cx.simulate_keystrokes(&platform_combo(key));
+        draw(cx);
+        keyboard_in(&shell, cx, lands);
     }
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.add_diff_surface(window, cx);
-            shell.reorder_right_tabs(2, 0, cx);
-        })
-    });
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Diff(3));
-    press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Diff(2));
+    for (key, lands) in [("alt-mod-left", Pane::Session), ("alt-mod-right", older)] {
+        cx.simulate_keystrokes(&platform_combo(key));
+        draw(cx);
+        keyboard_in(&shell, cx, lands);
+    }
+    cx.update(|window, cx| assert!(!session_focus(&shell, cx).is_focused(window)));
 }
 
+/// A press anywhere in a pane gives it the keyboard: on its header, which takes no keyboard of
+/// its own, as on what it shows.
 #[gpui::test]
-fn clicking_the_session_terminal_switches_back_to_session_navigation(cx: &mut TestAppContext) {
+fn a_press_on_a_pane_s_header_gives_it_the_keyboard(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    press(cx, true);
-    let main = cx.debug_bounds("navigation-main").unwrap();
-    cx.simulate_click(
-        main.origin + gpui::point(px(100.), px(150.)),
-        gpui::Modifiers::default(),
-    );
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-    });
+    keyboard_in(&shell, cx, Pane::View(RightSurface::Diff(2)));
+    for (header, pane) in [("pane-header-diff-1", Pane::View(RightSurface::Diff(1))), ("pane-header-session", Pane::Session)] {
+        let at = cx.debug_bounds(header).unwrap_or_else(|| panic!("{header} drawn"));
+        cx.simulate_click(gpui::point(at.left() + gpui::px(40.0), at.center().y), gpui::Modifiers::default());
+        draw(cx);
+        keyboard_in(&shell, cx, pane);
+    }
 }
 
+/// Under a dialog or an overlay that holds the keyboard the session keys wait, whichever pane
+/// the keyboard was in.
 #[gpui::test]
-fn closing_active_and_last_tabs_recovers_the_correct_pane(cx: &mut TestAppContext) {
+fn a_dialog_or_a_picker_holds_the_session_keys_in_every_pane(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::Diff(1), window, cx);
-        })
-    });
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(2));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.close_right_surface(RightSurface::Diff(2), window, cx);
-            assert!(!shell.right_pane_open(cx));
-            assert!(shell.session_terminal.read(cx).focus_handle().is_focused(window));
-        })
-    });
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-    });
-}
-
-#[gpui::test]
-fn modal_and_picker_block_navigation_in_both_panes(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    for right in [false, true] {
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                let focus = if right {
-                    &shell.navigation_focus.right
-                } else {
-                    &shell.navigation_focus.main
-                };
-                window.focus(focus, cx);
-                shell.delete_space_confirm = Some("space".into());
-            })
-        });
+    for pane in [Pane::Session, Pane::View(RightSurface::Diff(2))] {
+        cx.update(|_, cx| shell.update(cx, |shell, cx| shell.focus_pane(pane, cx)));
+        draw(cx);
+        shell.update(cx, |shell, _| shell.delete_space_confirm = Some("space".into()));
         press(cx, true);
         press(cx, false);
-        shell.update(cx, |shell, cx| {
-            assert_eq!(
-                shell.state.read(cx).selected_chat.as_deref(),
-                Some("parent")
-            );
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
-            shell.delete_space_confirm = None;
-        });
+        assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
+        shell.update(cx, |shell, _| shell.delete_space_confirm = None);
     }
     // slopty: New session's picker, an overlay that owns the keyboard.
     shell.update(cx, |shell, cx| shell.open_new_session_picker(None, cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    draw(cx);
     press(cx, true);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("parent"));
+}
+
+/// A view closed with the keyboard hands it to the pane that stood nearest, and the last one
+/// back to the terminal, where the session keys go on working.
+#[gpui::test]
+fn a_closed_view_hands_the_keyboard_to_its_neighbour(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.close_view(RightSurface::Diff(2), cx)));
+    draw(cx);
+    keyboard_in(&shell, cx, Pane::View(RightSurface::Diff(1)));
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.close_view(RightSurface::Diff(1), cx)));
+    draw(cx);
+    keyboard_in(&shell, cx, Pane::Session);
+    cx.update(|window, cx| assert!(session_focus(&shell, cx).is_focused(window)));
+    press(cx, true);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"));
+}
+
+// slopty: ⇧⌘T opens the view closed last again, docked beside its session with the keyboard.
+#[gpui::test]
+fn a_closed_view_comes_back_with_its_key(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.close_view(RightSurface::Diff(1), cx);
+            assert_eq!(shell.panes_now(cx).views(), [RightSurface::Diff(2)]);
+            assert_eq!(shell.closed_tabs.len(), 1);
+        })
+    });
+    draw(cx);
+    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
+    draw(cx);
+    let back = Pane::View(RightSurface::Diff(3));
     shell.read_with(cx, |shell, cx| {
-        assert_eq!(
-            shell.state.read(cx).selected_chat.as_deref(),
-            Some("parent")
-        );
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
+        assert_eq!(shell.panes_now(cx).views(), [RightSurface::Diff(2), RightSurface::Diff(3)], "the diff is back");
+        assert!(shell.closed_tabs.is_empty());
     });
+    keyboard_in(&shell, cx, back);
+    // Nothing more closed here: the key does nothing.
+    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
+    draw(cx);
+    shell.read_with(cx, |shell, cx| assert_eq!(shell.panes_now(cx).views().len(), 2));
 }
 
+// slopty: ⌥⌘[ and ⌥⌘] walk the history.
 #[gpui::test]
-fn empty_picker_and_stale_tabs_do_not_change_sessions(cx: &mut TestAppContext) {
+fn the_history_keys_walk_back_and_forward(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            let key = shell.panel_key(cx);
-            shell.right_tabs.insert(key, vec![RightSurface::File(999)]);
-            shell.set_right_active(RightSurface::Picker, cx);
-            window.focus(&shell.navigation_focus.right, cx);
-        })
-    });
-    press(cx, true);
-    press(cx, false);
-    assert_surface(&shell, cx, RightSurface::Picker);
-}
-
-#[gpui::test]
-fn hiding_reopening_and_expanding_preserve_navigation_boundaries(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    shell.update(cx, |shell, cx| shell.toggle_right_pane_expand(cx));
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(2));
-    shell.update(cx, |shell, cx| shell.set_surfaces_open(false, cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        assert!(!shell.read(cx).navigation_focus.in_right(window, cx));
-        assert!(session_focus(&shell, cx).is_focused(window));
-    });
-    shell.update(cx, |shell, cx| shell.set_surfaces_open(true, cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        assert!(session_focus(&shell, cx).is_focused(window));
-    });
-    // Restored tabs do not take navigation away from the session's terminal.
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-    });
-}
-
-#[gpui::test]
-fn embedded_terminal_and_browser_focus_route_to_right_tabs(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| {
-        // No engine in this harness: reserve a real emulator tab without
-        // starting a PTY, then use the normal surface activation path.
-        shell.right_terminal_panel(cx).update(cx, |panel, cx| {
-            panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
-        });
-        shell.add_terminal_surface(cx);
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        let terminal = shell.read(cx).right_terminal.as_ref().unwrap().read(cx);
-        assert!(terminal.focus_handle().is_focused(window));
-    });
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.add_browser_surface(None, window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-    // Exercise the GPUI target the native browser bridge focuses before it
-    // redispatches a shortcut (the native OS event itself needs platform QA).
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.set_right_active(RightSurface::Browser(1), cx);
-            window.focus(&shell.browsers[&1].focus_handle(cx), cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
-}
-
-#[gpui::test]
-fn bottom_terminal_keeps_session_navigation(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.terminal_panel(cx).update(cx, |panel, cx| {
-                panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
-            });
-            shell.toggle_terminal(window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        assert!(
-            shell
-                .read(cx)
-                .terminal
-                .as_ref()
-                .unwrap()
-                .read(cx)
-                .focus_handle()
-                .is_focused(window)
-        );
-    });
-    press(cx, true);
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-    });
-}
-
-#[gpui::test]
-fn each_session_cycles_only_its_own_tabs(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            // Its strip is the inspector ⌘I opened, and its diff.
-            shell.toggle_inspector(window, cx);
-            shell.add_diff_surface(window, cx);
-            shell.activate_right_surface(RightSurface::Diff(3), window, cx);
-        })
-    });
-    for surface in [RightSurface::Inspector, RightSurface::Diff(3)] {
-        press(cx, true);
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"));
-            assert_eq!(shell.resolved_right_active(cx), surface);
-        });
+    for chat in ["parent", "other"] {
+        shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
+        draw(cx);
     }
-    shell.update(cx, |shell, cx| shell.open_chat("parent".into(), cx));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    let tabs = shell.read_with(cx, |shell, _| shell.right_tabs["parent"].clone());
-    assert_eq!(tabs, [RightSurface::Diff(1), RightSurface::Diff(2)], "none of the other's");
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(2));
-    press(cx, true);
-    assert_surface(&shell, cx, RightSurface::Diff(1));
+    cx.simulate_keystrokes(&platform_combo("alt-mod-["));
+    draw(cx);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("parent"), "back");
+    cx.simulate_keystrokes(&platform_combo("alt-mod-]"));
+    draw(cx);
+    assert_eq!(selected(&shell, cx).as_deref(), Some("other"), "forward");
 }
 
 /// Settles a transcript selection and seeds the clipboard with a sentinel, so
@@ -418,104 +283,42 @@ fn clear_transcript_selection() {
     crate::markdown::selection::clear_if_owner("transcript-row:0");
 }
 
+/// The copy key in a view's pane copies a transcript's selection (the inspector's) once nothing
+/// in the view took it.
 #[gpui::test]
-fn copy_shortcut_copies_the_inspector_selection_from_the_right_pane(cx: &mut TestAppContext) {
+fn the_copy_key_copies_a_transcript_selection_from_a_view(cx: &mut TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();
     let (shell, cx) = setup(cx);
     cx.update(|window, cx| {
-        let right = shell.read(cx).navigation_focus.right.clone();
-        window.focus(&right, cx);
+        let handle = shell.update(cx, |shell, cx| shell.view_handle(RightSurface::Diff(2), cx));
+        window.focus(&handle, cx);
     });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    draw(cx);
     select_transcript_text(cx);
     cx.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard_text(cx).as_deref(), Some("selected"));
     clear_transcript_selection();
 }
 
+/// ⌃C in a terminal, the session's or a split shell's, is the terminal's: a transcript's
+/// selection never takes it.
 #[gpui::test]
 fn ctrl_c_in_a_terminal_is_not_taken_by_a_transcript_selection(cx: &mut TestAppContext) {
     let _selection = crate::markdown::selection::test_state_lock();
     let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.terminal_panel(cx).update(cx, |panel, cx| {
-                panel.reserve_tab_for_chat("parent".into(), "Test terminal", cx);
-            });
-            shell.toggle_terminal(window, cx);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.focus_pane(Pane::Session, cx)));
+    draw(cx);
+    keyboard_in(&shell, cx, Pane::Session);
     select_transcript_text(cx);
     cx.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.split_pane(Some(Direction::Down), cx)));
+    draw(cx);
+    let split = shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused());
+    keyboard_in(&shell, cx, split);
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(clipboard_text(cx).as_deref(), Some("sentinel"));
     clear_transcript_selection();
-}
-
-// slopty: no pull-request pages.
-// slopty: ⌘⇧T opens the tab closed last again, in front, with the pane open.
-#[gpui::test]
-fn a_closed_tab_comes_back_with_its_key(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.add_diff_surface(window, cx);
-            shell.close_right_surface(RightSurface::Diff(1), window, cx);
-            assert!(!shell.right_tabs[&shell.panel_key(cx)].contains(&RightSurface::Diff(1)));
-            // A closed terminal's shell is gone with it: nothing to reopen.
-            shell.remember_closed_tab("parent", RightSurface::Terminal(9), cx);
-            assert_eq!(shell.closed_tabs.len(), 1);
-        })
-    });
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    cx.update(|_, cx| {
-        let shell = shell.read(cx);
-        let key = shell.panel_key(cx);
-        assert!(shell.right_tabs[&key].contains(&RightSurface::Diff(4)), "the diff is back");
-        assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(4), "in front");
-        assert!(shell.right_pane_open(cx));
-        assert!(shell.closed_tabs.is_empty());
-    });
-    // Nothing more closed here: the key does nothing.
-    cx.simulate_keystrokes(&platform_combo(ShortcutId::ReopenClosedTab.default_combo()));
-    cx.update(|_, cx| {
-        let shell = shell.read(cx);
-        assert_eq!(shell.right_tabs[&shell.panel_key(cx)].len(), 3);
-    });
-}
-
-// slopty: ⌘T opens the right pane's new tab menu; ⌘[ and ⌘] walk the history.
-#[gpui::test]
-fn new_tab_and_history_keys(cx: &mut TestAppContext) {
-    let (shell, cx) = setup(cx);
-    cx.update(|window, cx| {
-        let focus = session_focus(&shell, cx);
-        window.focus(&focus, cx);
-    });
-    cx.simulate_keystrokes(&platform_combo("mod-t"));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    shell.read_with(cx, |shell, cx| {
-        assert!(shell.right_pane_open(cx));
-        assert!(shell.right_plus.get().is_some(), "the new tab menu is open");
-    });
-    shell.update(cx, |shell, cx| shell.close_right_plus(cx));
-    for chat in ["parent", "other"] {
-        shell.update(cx, |shell, cx| shell.open_chat(chat.into(), cx));
-        cx.run_until_parked();
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-    }
-    cx.simulate_keystrokes(&platform_combo("mod-["));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("parent"), "back");
-    });
-    cx.simulate_keystrokes(&platform_combo("mod-]"));
-    cx.update(|window, cx| window.draw(cx).clear(cx));
-    shell.read_with(cx, |shell, cx| {
-        assert_eq!(shell.state.read(cx).selected_chat.as_deref(), Some("other"), "forward");
-    });
 }
 
 // slopty: an archive offers Undo; ⌘Z takes it while its toast is up, and only once.
@@ -566,29 +369,26 @@ fn keyboard_in_changes(cx: &mut VisualTestContext) -> bool {
     })
 }
 
-/// slopty: a diff the person brings to the front takes the keyboard, so ⌘F finds in the diff
-/// and not in the chat: one opened from the pane's offers, and one picked by its tab. Diffs
-/// opened for no one (a restored tab, an agent's) leave the keyboard where it was.
+/// slopty: a diff given the keyboard has the diff's own keys, so ⌘F finds in the diff and not in
+/// the terminal: one summoned by Changes' key, and one the person clicks into.
 #[gpui::test]
-fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
+fn a_diff_given_the_keyboard_has_the_diffs_keys(cx: &mut TestAppContext) {
     let (shell, cx) = setup(cx);
-    let session = cx.update(|_, cx| session_focus(&shell, cx));
-    cx.update(|window, cx| window.focus(&session, cx));
-    assert!(!keyboard_in_changes(cx), "diffs opened for no one leave the keyboard");
-
-    cx.update(|window, cx| {
-        shell.update(cx, |shell, cx| {
-            shell.open_pane_offer(super::pane_offers::PaneOffer::Changes, window, cx);
-        });
-    });
-    assert!(keyboard_in_changes(cx), "the diff opened from the offers has the keyboard");
-
-    cx.update(|window, cx| window.focus(&session, cx));
+    assert!(keyboard_in_changes(cx), "the diff opened last has the keyboard");
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.focus_pane(Pane::Session, cx)));
     assert!(!keyboard_in_changes(cx), "the session's terminal has it back");
-    let tab = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-    cx.simulate_click(tab, gpui::Modifiers::default());
-    assert!(keyboard_in_changes(cx), "the diff picked by its tab has the keyboard");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).resolved_right_active(cx)), RightSurface::Diff(1));
+
+    // Changes' key summons the session's changes with the keyboard.
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.summon_changes(window, cx)));
+    assert!(keyboard_in_changes(cx), "the diff its key summoned has the keyboard");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).front_view(cx)), Some(RightSurface::Diff(1)));
+
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.focus_pane(Pane::Session, cx)));
+    assert!(!keyboard_in_changes(cx));
+    let pane = cx.debug_bounds("pane-diff-2").expect("the newer diff's pane").center();
+    cx.simulate_click(pane, gpui::Modifiers::default());
+    assert!(keyboard_in_changes(cx), "the diff clicked into has the keyboard");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).front_view(cx)), Some(RightSurface::Diff(2)));
 
     // With a diff to read, ⌘F puts the keyboard in the diff's find, and it stays there.
     cx.update(|_, cx| {
@@ -598,7 +398,7 @@ fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
                     chat.cwd = Some("/work".into());
                 }
             });
-            let changes = shell.diffs.get(&1).cloned().unwrap();
+            let changes = shell.diffs.get(&2).cloned().unwrap();
             changes.update(cx, |changes, cx| changes.show_patch("/work", DIFF, cx));
         });
     });
@@ -606,7 +406,7 @@ fn a_diff_brought_to_the_front_takes_the_keyboard(cx: &mut TestAppContext) {
     assert!(keyboard_in_changes(cx));
     cx.simulate_keystrokes(&crate::settings::platform_combo("mod-f"));
     cx.run_until_parked();
-    let changes = cx.update(|_, cx| shell.read(cx).diffs.get(&1).cloned().unwrap());
+    let changes = cx.update(|_, cx| shell.read(cx).diffs.get(&2).cloned().unwrap());
     assert!(
         cx.update(|window, cx| changes.read(cx).find_has_keyboard(window, cx)),
         "the diff's find has the keyboard"
@@ -626,8 +426,8 @@ fn a_find_opened_after_a_frame_in_its_key_s_dispatch_keeps_the_keyboard(cx: &mut
                     chat.cwd = Some("/work".into());
                 }
             });
-            shell.open_pane_offer(super::pane_offers::PaneOffer::Changes, window, cx);
-            let changes = shell.diffs.get(&shell.diff_seq).cloned().expect("the diff opened");
+            shell.summon_changes(window, cx);
+            let changes = shell.diffs.get(&1).cloned().expect("the diff summoned");
             changes.update(cx, |changes, cx| changes.show_patch("/work", DIFF, cx));
             changes
         })

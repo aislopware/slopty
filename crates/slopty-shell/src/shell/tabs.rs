@@ -7,8 +7,6 @@
 
 use super::*;
 
-const RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH: f32 = 8.0 + 4.0 + 4.0 + 28.0;
-
 /// The chat one step from `selected` in the sidebar `order`, wrapping at both
 /// ends. Pure.
 ///
@@ -34,84 +32,11 @@ pub(super) fn cycle_target(
     Some(order[next].clone())
 }
 
-pub(super) fn right_pane_expand_icon(expanded: bool) -> &'static str {
-    if expanded {
-        icons::COLLAPSE_ARROWS
-    } else {
-        icons::EXPAND_ARROWS
-    }
-}
-
-struct PanelTitlebarWidths {
-    surface_reveal: f32,
-    files_controls: f32,
-}
-
-pub(super) struct TitlebarTrailing {
-    fit: HorizontalPanelFit,
-    right_pane_visible: bool,
-    takeover: bool,
-    row_left: f32,
-    row_gap: f32,
-    right_pad: f32,
-    widths: PanelTitlebarWidths,
-    content_width: f32,
-}
-
-/// The two fixed right-edge anchors: the explorer toggle and the pane toggle
-/// (28px each) with the same 4px gap the surface strip keeps between its
-/// controls, so the two never render as one fused block.
-const PANEL_TOGGLE_GAP: f32 = 4.0;
-const PANEL_TOGGLE_SLOTS: f32 = 28.0 * 2.0 + PANEL_TOGGLE_GAP;
-
-fn panel_titlebar_widths(
-    surfaces_visible: f32,
-    files_visible: f32,
-    available: f32,
-    right_pad: f32,
-) -> PanelTitlebarWidths {
-    // Caption controls occupy the far-right panel first. Subtract their
-    // clearance once across the combined header, then split it at Files.
-    // The explorer and pane toggles keep their slots even when closed.
-    let files_controls = (files_visible - right_pad).max(PANEL_TOGGLE_SLOTS);
-    let surfaces = surfaces_visible + files_visible - right_pad - files_controls;
-    PanelTitlebarWidths {
-        surface_reveal: surfaces.min(available - files_controls).max(0.0),
-        files_controls,
-    }
-}
-
 impl Shell {
-    /// The same binding navigates the focused pane. Keep the persisted action
-    /// IDs so existing user keymaps and the native browser bridge still work.
-    pub(super) fn cycle_navigation(
-        &mut self,
-        forward: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.navigation_overlay_open() {
-            return;
-        }
-        // slopty: no pull-request pages.
-        if matches!(self.route, Route::Chat)
-            && self.right_pane_open(cx)
-            && self.navigation_focus.in_right(window, cx)
-        {
-            let rows = self.right_surface_rows(cx);
-            if rows.len() <= 1 {
-                return;
-            }
-            let active = self.resolved_right_active(cx);
-            let at = rows.iter().position(|(surface, ..)| *surface == active);
-            let next = match (at, forward) {
-                (Some(at), true) => (at + 1) % rows.len(),
-                (Some(at), false) => (at + rows.len() - 1) % rows.len(),
-                (None, true) => 0,
-                (None, false) => rows.len() - 1,
-            };
-            self.activate_right_surface(rows[next].0, window, cx);
-        } else {
+    /// ⌃⇥ and ⌃⇧⇥: the next or previous session in the list, quiet under an overlay that holds
+    /// the keyboard.
+    pub(super) fn cycle_navigation(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !self.navigation_overlay_open() {
             self.cycle_session(forward, cx);
         }
     }
@@ -127,40 +52,8 @@ impl Shell {
             || self.space_menu.get().is_some()
             || self.user_menu.get().is_some()
             || self.spaces_menu.get().is_some()
-            || self.right_plus.get().is_some()
             || !self.pending_file_closes.is_empty()
             || self.pending_exit.is_some()
-    }
-
-    pub(super) fn activate_right_surface(
-        &mut self,
-        surface: RightSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigation_focus.right_was_focused = true;
-        // Establish a stable target before detaching the old editor. Read-only
-        // surfaces keep it; editable surfaces claim their own focus below/on mount.
-        window.focus(&self.navigation_focus.right, cx);
-        self.set_right_active(surface, cx);
-        self.focus_right_file_editor(surface, window, cx);
-        // slopty: a diff picked by its tab takes the keyboard, as a file's editor does.
-        if let RightSurface::Diff(id) = surface {
-            self.focus_diff(id, cx);
-        }
-    }
-
-    pub(super) fn restore_right_focus_after_close(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.right_pane_open(cx) {
-            self.activate_right_surface(self.resolved_right_active(cx), window, cx);
-        } else {
-            self.navigation_focus.right_was_focused = false;
-            self.focus_session_terminal(window, cx); // slopty: the session
-        }
     }
 
     /// slopty: navigation gives the session's terminal the keyboard once it renders.
@@ -168,8 +61,8 @@ impl Shell {
         self.session_terminal.update(cx, |panel, cx| panel.request_focus(cx));
     }
 
-    /// slopty: the session's terminal takes the keyboard now (the dock closing, the pane
-    /// closing), and keeps it once its view renders.
+    /// slopty: the session's terminal takes the keyboard now (Esc from a view, a pane closing),
+    /// and keeps it once its view renders.
     pub(super) fn focus_session_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.session_terminal.read(cx).focus_handle(), cx);
         self.focus_composer(cx);
@@ -252,93 +145,10 @@ impl Shell {
         self.open_new_session_picker(project, cx);
     }
 
-    /// The trailing titlebar strip follows the columns beneath it.
-    pub(super) fn titlebar_trailing_layout(&self, on_canvas: bool, cx: &App) -> TitlebarTrailing {
-        let sidebar_now = self.sidebar_now();
-
-        // Same glide as the old strip: content starts at the inset card's
-        // left edge while the sidebar is open, and slides toward the control
-        // cluster as it collapses.
-        let content_left =
-            (sidebar_now + Theme::SPACE_LG).max(self.title_bar_content_start());
-
-        // Trailing titlebar section. With the changes pane open this is the
-        // PANE'S HEADER — a strip exactly as wide as the pane carrying its
-        // controls (scope dropdown, ref selector, fold-all from the Changes
-        // entity; expand + close shell-side). It lives up here because the
-        // titlebar overlay owns this band's hit-testing: controls mounted in
-        // the pane itself would sit under the drag region and never see a
-        // click. Closed, it is just the stable open/close toggle. Hidden on
-        // the new-session canvas (user request) — nothing to diff yet.
-        let fit = self.horizontal_fit();
-        let right_pane_visible = !on_canvas
-            && ((fit.right && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
-                || self.fit_exit_width(1).is_some());
-        let takeover = right_pane_visible
-            && (self.right_pane_expanded || self.tween_active(self.main_takeover_tween));
-        // In takeover the title hides and the strip owns the whole band, so
-        // the row's left inset pulls back to the sidebar seam — the title
-        // inset would push the scope dropdown off the pane's own left gutter
-        // (user report: misaligned dead space). With the sidebar COLLAPSED
-        // the seam is the window edge, where the traffic lights + nav
-        // cluster overlay lives — the strip must still clear it, but only
-        // just: `title_bar_content_start` carries the identity-group margin the
-        // strip doesn't want (it brings its own 8px pad), and doubling up
-        // read as a hole after the `+` (user report).
-        let row_left = if takeover {
-            // The surface tabs must LEFT-ALIGN with the pane's own rows (the
-            // diff options and stats strip carry an 8px box gutter off the
-            // seam — user report: rows started at different insets). The
-            // strip's width is capped to `avail`, which subtracts the row's
-            // 8px child gap — pulling row_left 8 LEFT of the seam cancels
-            // that, so the uncapped strip starts exactly at the seam and its
-            // own 8px pad lands the first chip on the pane gutter. The
-            // window-control cluster still wins while the sidebar is
-            // collapsed (the chips clear it instead of underlapping).
-            let cluster_end =
-                self.title_bar_content_start() - TITLEBAR_IDENTITY_GAP - 14.0;
-            (sidebar_now - 8.0).max(cluster_end)
-        } else {
-            content_left
-        };
-        let row_gap = 8.0;
-        let files_width = self.files_visible_width(cx);
-        // slopty: room at the edge for the outermost control's press on a touch screen (#23).
-        let right_pad = self
-            .titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)
-            .max(crate::surface_chrome::touch_reach(28.0));
-        // The title row's gaps are outside the fixed-width panel controls.
-        let gap_budget = if takeover { row_gap } else { row_gap * 3.0 };
-        // Match the surface's visible width, including its resize bounce,
-        // so the header follows the pane seam as the sidebar moves.
-        let right_visible = self.right_visible_width(cx);
-        let widths = panel_titlebar_widths(
-            right_visible,
-            files_width,
-            self.viewport_width - row_left - right_pad - gap_budget,
-            right_pad,
-        );
-        // Match the pane's stable inner width during open/close. Reflowing
-        // the scroller on every masked frame clamps its scroll offset and
-        // makes the tabs jump when the close is reversed.
-        let content_width = panel_titlebar_widths(
-            self.right_content_width(self.right_target(cx)),
-            files_width,
-            self.viewport_width - row_left - right_pad - gap_budget,
-            right_pad,
-        )
-        .surface_reveal
-        .max(widths.surface_reveal);
-        TitlebarTrailing {
-            fit,
-            right_pane_visible,
-            takeover,
-            row_left,
-            row_gap,
-            right_pad,
-            widths,
-            content_width,
-        }
+    /// Where the row's content starts: at the inset card's left edge while the sidebar is
+    /// open, gliding toward the window's controls as it closes.
+    fn titlebar_row_left(&self) -> f32 {
+        (self.sidebar_now() + Theme::SPACE_LG).max(self.title_bar_content_start())
     }
 
     /// The titlebar row over a session (`docs/decisions/layout.md`, "One row of chrome"): the
@@ -355,211 +165,17 @@ impl Shell {
     ) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let on_canvas = self.state.read(cx).selected_chat_row().is_none();
-        let TitlebarTrailing {
-            fit,
-            right_pane_visible,
-            takeover,
-            row_left,
-            row_gap,
-            right_pad,
-            widths,
-            content_width,
-        } = self.titlebar_trailing_layout(on_canvas, cx);
+        let row_left = self.titlebar_row_left();
+        let row_gap = 8.0;
+        // slopty: room at the edge for the outermost control's press on a touch screen (#23).
+        let right_pad = self
+            .titlebar_right_pad(TITLEBAR_ACTION_EDGE_INSET)
+            .max(crate::surface_chrome::touch_reach(24.0));
         // Inked for the ground under it: the terminal's over the session, the window's own over
         // the canvas.
         let ink = if on_canvas { theme.clone() } else { ink_for(self.shown_ground(cx), &theme) };
-        let identity = (!takeover && !on_canvas)
-            .then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx));
-
-        let trailing: Option<gpui::AnyElement> = if on_canvas {
-            None
-        } else {
-            let mut controls = div()
-                .id("right-titlebar-controls")
-                .debug_selector(|| "right-titlebar-controls".into())
-                .flex_none()
-                .h_full()
-                .flex()
-                .flex_row()
-                .items_center()
-                // The transcript extends under this band (it fades beneath
-                // the tab strip); a wheel over the tabs must scroll the
-                // strip, never the surface behind it.
-                .on_scroll(|_, _, cx| cx.stop_propagation());
-            if right_pane_visible {
-                // The right pane's SURFACE TABS (t3 RightPanelTabs) — the diff
-                // options that used to live here moved into the pane's own
-                // second row; expand stays in this band (user request).
-                let show_pane_controls =
-                    widths.surface_reveal >= RIGHT_PANE_HEADER_CONTROLS_MIN_WIDTH;
-                // slopty: the expand button's name, said and shown.
-                let expand_label = if self.right_pane_expanded {
-                    "Restore side pane"
-                } else {
-                    "Expand side pane"
-                };
-                // The toggle is the fixed right-edge anchor, like the left
-                // sidebar control. Only the tabs + expand section reveals to
-                // its left; including the toggle in this animated width
-                // compressed both icons into the same clipped box at open.
-                controls = controls.child(
-                    div()
-                        .w(px(widths.surface_reveal))
-                        .h_full()
-                        .flex_none()
-                        .relative()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .debug_selector(|| "right-titlebar-content".into())
-                                .absolute()
-                                .right_0()
-                                .top_0()
-                                .w(px(content_width))
-                                .h_full()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(4.0))
-                                .overflow_hidden()
-                                // 8 + the trigger's own 8px pad = the pane's 16px
-                                // text gutter. The 4px right padding is the stable
-                                // gap before the fixed toggle.
-                                .when(show_pane_controls, |el| {
-                                    el.pl(px(8.0))
-                                        .pr(px(4.0))
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .h_full()
-                                                .overflow_hidden()
-                                                .child(self.render_right_tab_strip(cx)),
-                                        )
-                                        .child(
-                                            header_icon_button(
-                                                "expand-changes",
-                                                right_pane_expand_icon(self.right_pane_expanded),
-                                                false,
-                                                &theme,
-                                                cx.listener(|this, _, _, cx| {
-                                                    this.toggle_right_pane_expand(cx)
-                                                }),
-                                            )
-                                            // slopty: named, with its key, for the eye and a
-                                            // screen reader.
-                                            .action_hint(
-                                                expand_label,
-                                                Keys::Action(Box::new(
-                                                    chrome_keys::ToggleExpandPane,
-                                                )),
-                                                cx,
-                                            ),
-                                        )
-                                }),
-                        ),
-                );
-            }
-            let files_panel_label = if self.files_panel_open(cx) && fit.files {
-                "Hide files panel"
-            } else {
-                "Show files panel"
-            };
-            // The explorer slot sits over the explorer column and carries the
-            // two fixed right-edge anchors — the explorer toggle and,
-            // outermost, the pane toggle — which stay mounted at one position
-            // while the surface tabs reveal to their left. The explorer's own
-            // search and visibility controls live in its secondary header.
-            Some(
-                controls
-                    .child(
-                        div()
-                            .w(px(widths.files_controls))
-                            .h_full()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap(px(PANEL_TOGGLE_GAP))
-                            // No hairline here: the explorer column below is
-                            // padded down by the titlebar height and its left
-                            // border already runs through this band, so a
-                            // second one on the slot stacked on the same
-                            // pixels and read lighter than the seam beneath
-                            // it (user report).
-                            .child(
-                                header_icon_button(
-                                    "toggle-files-panel",
-                                    icons::FOLDER_TREE,
-                                    self.files_panel_open(cx) && fit.files,
-                                    &theme,
-                                    cx.listener(|this, _, window, cx| {
-                                        this.toggle_files_panel(window, cx)
-                                    }),
-                                )
-                                .action_hint(files_panel_label, Keys::Action(Box::new(ToggleFiles)), cx),
-                            )
-                            .child(header_icon_button_with(
-                                "toggle-changes",
-                                icons::sidebar_glyph(
-                                    motion::state_t(
-                                        "toggle-changes",
-                                        self.right_pane_open(cx) && fit.right,
-                                        motion::GLYPH_STATE,
-                                        self.reduced_motion.get(),
-                                        cx.frame_time(), // slopty: the frame's moment
-                                    ),
-                                    true,
-                                    16.0,
-                                    theme.text_muted,
-                                ),
-                                false,
-                                &theme,
-                                cx.listener(|this, _, _, cx| this.toggle_right_pane(cx)),
-                            )
-                            // slopty: what it does now, and its key.
-                            .action_hint(
-                                if self.right_pane_open(cx) && fit.right {
-                                    "Hide side pane"
-                                } else {
-                                    "Show side pane"
-                                },
-                                Keys::Action(Box::new(ToggleChanges)),
-                                cx,
-                            )),
-                    )
-                    .into_any_element(),
-            )
-        };
-
-        // slopty: the inspector's toggle, and the chat's folder in the person's editor
-        // (`open_in`), until the summoned views take their place. A plain terminal has nothing
-        // to inspect.
-        let running_lanes = {
-            let state = self.state.read(cx);
-            let now = crate::clock::utc(cx);
-            state.selected_chat.as_deref().map_or(0, |chat| state.running_subagents_for(chat, now))
-        };
-        let inspects = crate::inspector::inspects(self.state.read(cx), &self.active_chat);
-        let session_info_toggle = (!takeover && !on_canvas && inspects).then(|| {
-            let open = self.inspector_shown(cx);
-            let label = if open { "Hide inspector" } else { "Show inspector" };
-            header_icon_button_with(
-                "toggle-inspector",
-                icons::corner_card_glyph(16.0, ink.text_muted),
-                open,
-                &ink,
-                cx.listener(|this, _, window, cx| this.toggle_inspector(window, cx)),
-            )
-            .action_hint(label, Keys::Action(Box::new(chrome_keys::ToggleInspector)), cx)
-            .flex_none()
-            // The session's running subagents: the button counts them, open or closed, for as
-            // long as they run.
-            .when(running_lanes > 0, |button| {
-                crate::running_pill::mark_titlebar_button(button, running_lanes, &ink)
-            })
-        });
-        let open_in = (!takeover && !on_canvas).then(|| self.render_open_in_button(cx)).flatten();
+        let identity =
+            (!on_canvas).then(|| self.render_titlebar_identity(&ink, window.is_window_active(), cx));
         // At the trailing end: the inbox's eye, the palette, then a new session, which over the
         // new-session canvas would open the canvas it is on.
         let eye = self.render_inbox_button(&ink, cx);
@@ -598,10 +214,7 @@ impl Shell {
             .pr(px(right_pad))
             .children(identity)
             .child(div().flex_1())
-            .children(open_in)
-            .children(session_info_toggle)
-            .child(actions)
-            .children(trailing);
+            .child(actions);
         let bar = div().h(px(Theme::TITLEBAR_HEIGHT)).flex_none().child(inner);
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
@@ -731,7 +344,7 @@ impl Shell {
 
 /// The identity's secondary words: the session's machine and its branch, "Studio · fix-lexer",
 /// or whichever of the two is known.
-fn machine_and_branch(machine: Option<&str>, branch: Option<&str>) -> Option<String> {
+pub(super) fn machine_and_branch(machine: Option<&str>, branch: Option<&str>) -> Option<String> {
     let (machine, branch) =
         (machine.filter(|words| !words.is_empty()), branch.filter(|words| !words.is_empty()));
     match (machine, branch) {
@@ -743,7 +356,7 @@ fn machine_and_branch(machine: Option<&str>, branch: Option<&str>) -> Option<Str
 
 /// Whether text over `ground` reads as on a light one, as Ghostty picks a transparent
 /// titlebar's appearance from the terminal's background: its luma past half.
-fn ground_is_light(ground: gpui::Hsla) -> bool {
+pub(super) fn ground_is_light(ground: gpui::Hsla) -> bool {
     let rgb = ground.to_rgb();
     0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b > 0.5
 }
@@ -766,7 +379,7 @@ pub(super) fn ink_for(ground: gpui::Hsla, theme: &Theme) -> Theme {
 }
 
 #[cfg(test)]
-mod panel_titlebar_tests {
+mod titlebar_tests {
     use super::*;
 
     /// The identity's secondary words say the machine and the branch, or whichever is known.
@@ -800,66 +413,6 @@ mod panel_titlebar_tests {
             crate::theme::contrast_ratio(ink_for(base03, &light).text, base03) >= 4.5,
             "the title reads on the dark ground"
         );
-    }
-
-    #[test]
-    fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {
-        let viewport = 1400.0;
-        for right_pad in [6.0, 40.0, 92.0, 114.0] {
-            for files in [0.0, 10.0, 28.0, 100.0, 220.0, 286.0, 440.0] {
-                let widths = panel_titlebar_widths(520.0, files, 1100.0, right_pad);
-                let controls_left =
-                    viewport - right_pad - widths.files_controls - widths.surface_reveal;
-                assert_eq!(
-                    controls_left,
-                    viewport - files - 520.0,
-                    "caption clearance {right_pad}, Files width {files}"
-                );
-                assert!(widths.files_controls >= PANEL_TOGGLE_SLOTS);
-                if files >= right_pad + PANEL_TOGGLE_SLOTS {
-                    assert_eq!(
-                        viewport - right_pad - widths.files_controls,
-                        viewport - files
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn expanded_tabs_clear_the_left_controls_without_reserving_captions_twice() {
-        for right_pad in [6.0, 92.0, 114.0] {
-            let viewport = 1400.0;
-            let files = 286.0;
-            // With the sidebar open, the header starts exactly at its seam.
-            // With it collapsed, leave room for the window/nav controls.
-            for (sidebar, row_left) in [(256.0, 248.0), (0.0, 180.0)] {
-                let widths = panel_titlebar_widths(
-                    viewport - sidebar - files,
-                    files,
-                    viewport - row_left - right_pad - 8.0,
-                    right_pad,
-                );
-                let controls_left =
-                    viewport - right_pad - widths.files_controls - widths.surface_reveal;
-                assert_eq!(controls_left, sidebar.max(row_left + 8.0));
-            }
-        }
-    }
-
-    #[test]
-    fn narrow_panels_and_tight_headers_keep_nonnegative_reveal_widths() {
-        // A narrow surface and Files share a 520px header.
-        let widths = panel_titlebar_widths(234.0, 286.0, 600.0, 92.0);
-        assert_eq!(
-            1000.0 - 92.0 - widths.files_controls - widths.surface_reveal,
-            480.0
-        );
-        for available in [-20.0, 0.0, 28.0, 56.0, 100.0] {
-            let widths = panel_titlebar_widths(0.0, 0.0, available, 114.0);
-            assert_eq!(widths.surface_reveal, 0.0);
-            assert_eq!(widths.files_controls, PANEL_TOGGLE_SLOTS);
-        }
     }
 }
 

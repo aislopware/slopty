@@ -1,37 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
-//! Focus boundaries shared by contextual navigation and focus recovery.
+//! Where the keyboard goes back to: a press in the main column keeps it there, and a focus that
+//! goes away (an element unmounting) comes back to the pane with the keyboard.
 use super::*;
-
-pub(super) struct NavigationFocus {
-    pub(super) main: FocusHandle,
-    pub(super) right: FocusHandle,
-    // The titlebar strip is a sibling of the pane, not its descendant.
-    pub(super) tabs: FocusHandle,
-    pub(super) right_was_focused: bool,
-}
-
-impl NavigationFocus {
-    pub(super) fn new(cx: &mut App) -> Self {
-        Self {
-            main: cx.focus_handle(),
-            right: cx.focus_handle(),
-            tabs: cx.focus_handle(),
-            right_was_focused: false,
-        }
-    }
-
-    pub(super) fn in_right(&self, window: &Window, cx: &App) -> bool {
-        self.right.contains_focused(window, cx) || self.tabs.contains_focused(window, cx)
-    }
-
-    pub(super) fn remember(&mut self, root: &FocusHandle, window: &Window, cx: &App) {
-        // Retain the origin while an element is being detached. A mounted
-        // focus elsewhere (including the explorer or a modal) takes precedence.
-        if root.contains_focused(window, cx) {
-            self.right_was_focused = self.in_right(window, cx);
-        }
-    }
-}
 
 /// Capture establishes a fallback before child listeners run. Inputs can
 /// claim focus during bubbling, including listeners that stop propagation.
@@ -70,43 +40,34 @@ pub(super) fn copy_transcript_selection(event: &gpui::KeyDownEvent, cx: &mut App
 }
 
 impl Shell {
-    pub(super) fn capture_navigation_focus(
-        &mut self,
-        right: bool,
-        tabs: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.navigation_focus.right_was_focused = right;
-        let scope = if tabs {
-            &self.navigation_focus.tabs
-        } else if right {
-            &self.navigation_focus.right
-        } else {
-            &self.navigation_focus.main
-        };
-        focus_navigation_scope(scope, window, cx);
+    /// A press in the main column keeps the keyboard in it, before what it lands on claims it.
+    pub(super) fn capture_navigation_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        focus_navigation_scope(&self.main_focus, window, cx);
     }
 
-    pub(super) fn navigation_focus_fallback(&self, cx: &App) -> (FocusHandle, FocusHandle) {
-        let right_open = match self.route {
-            Route::Chat => self.right_pane_open(cx),
-            // slopty: no pull-request pages.
-            Route::Settings(_) => false,
-        };
+    /// Where a lost focus comes back to, and where it goes with nothing focused: Settings' own
+    /// focus there; on a session's page the pane with the keyboard, its view or its terminal;
+    /// on a touch screen with the session in front, nowhere a software keyboard would rise.
+    pub(super) fn navigation_focus_fallback(&mut self, cx: &mut Context<Self>) -> (FocusHandle, FocusHandle) {
         if matches!(self.route, Route::Settings(_)) {
-            (self.settings_focus.clone(), self.unfocused.clone())
-        } else if right_open && self.navigation_focus.right_was_focused {
-            (
-                self.navigation_focus.right.clone(),
-                self.navigation_focus.right.clone(),
-            )
+            return (self.settings_focus.clone(), self.unfocused.clone());
+        }
+        let shell = match self.panes_now(cx).focused() {
+            super::panes::Pane::View(view) => {
+                let handle = self.view_handle(view, cx);
+                return (handle.clone(), handle);
+            }
+            super::panes::Pane::Shell(n) => self.pane_shells.get(&n).map(|shell| shell.read(cx).focus_handle()),
+            super::panes::Pane::Session => None,
+        };
+        if let Some(shell) = shell {
+            (shell, self.unfocused.clone())
         } else if crate::shell::touch_screen() {
-            // slopty: on a touch screen the keyboard waits for a tap in the composer
+            // slopty: on a touch screen the keyboard waits for a tap in the terminal
             // (`docs/decisions/ui.md`): focus recovered after a tap elsewhere, a sidebar row's,
             // goes where no software keyboard rises.
             (self.unfocused.clone(), self.unfocused.clone())
-        } else { // slopty: voice removed.
+        } else {
             (self.session_terminal.read(cx).focus_handle(), self.unfocused.clone())
         }
     }
@@ -119,7 +80,8 @@ mod tests {
 
     struct FocusHost {
         root: FocusHandle,
-        navigation: NavigationFocus,
+        main: FocusHandle,
+        right: FocusHandle,
         input: Entity<ComposerInput>,
         show_input: bool,
     }
@@ -135,9 +97,9 @@ mod tests {
                         .id("main")
                         .w(px(200.))
                         .h_full()
-                        .track_focus(&self.navigation.main)
+                        .track_focus(&self.main)
                         .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                            focus_navigation_scope(&this.navigation.main, window, cx);
+                            focus_navigation_scope(&this.main, window, cx);
                         })),
                 )
                 .child(
@@ -145,9 +107,9 @@ mod tests {
                         .id("right")
                         .w(px(200.))
                         .h_full()
-                        .track_focus(&self.navigation.right)
+                        .track_focus(&self.right)
                         .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                            focus_navigation_scope(&this.navigation.right, window, cx);
+                            focus_navigation_scope(&this.right, window, cx);
                         }))
                         .when(self.show_input, |el| el.child(self.input.clone())),
                 )
@@ -159,7 +121,8 @@ mod tests {
         cx.update(|cx| cx.set_global(Theme::default()));
         let (host, cx) = cx.add_window_view(|_, cx| FocusHost {
             root: cx.focus_handle(),
-            navigation: NavigationFocus::new(cx),
+            main: cx.focus_handle(),
+            right: cx.focus_handle(),
             input: cx.new(|cx| ComposerInput::new("Message", cx)),
             show_input: true,
         });
@@ -172,11 +135,11 @@ mod tests {
         // preserve keyboard navigation without re-entering the input.
         cx.simulate_click(gpui::point(px(300.), px(250.)), gpui::Modifiers::default());
         cx.update(|window, cx| {
-            assert!(host.read(cx).navigation.right.is_focused(window));
+            assert!(host.read(cx).right.is_focused(window));
         });
         cx.simulate_click(gpui::point(px(100.), px(250.)), gpui::Modifiers::default());
         cx.update(|window, cx| {
-            assert!(host.read(cx).navigation.main.is_focused(window));
+            assert!(host.read(cx).main.is_focused(window));
         });
     }
 }

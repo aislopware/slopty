@@ -4,7 +4,8 @@
 //! A seed picks a screen (the self-test's Mac window, a narrow one, an iPhone at 3 ×, an iPad)
 //! and a sequence of steps a person and the engine take: sessions opened and switched, a
 //! subagent's timeline opened and left for its parent's, sessions' terminals coming and going,
-//! the sidebar, the inspector and the right pane toggled, shortcuts, resizes,
+//! the sidebar toggled, views summoned and shells split beside a session, its panes walked and
+//! zoomed, shortcuts, resizes,
 //! turns starting and ending, chats arriving and going, the clock and the wall clock moving on,
 //! frames delivered mid-motion. After
 //! every step: nothing panicked (GPUI's own retained check panics on a stale frame as it draws
@@ -55,9 +56,10 @@ const RESIZES: [&[(f32, f32)]; 4] = [
 
 /// The shortcuts a step presses.
 const KEYS: &[&str] = &[
-    "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-b", "cmd-r", "cmd-e", "cmd-n", "cmd-[", "cmd-]", "cmd-t",
+    "cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-b", "cmd-r", "cmd-e", "cmd-n", "cmd-[", "cmd-]",
     "cmd-i", "cmd-k", "cmd-l", "cmd-/", "cmd-.", "cmd-;", "cmd-f", "cmd-shift-t", "ctrl-tab",
-    "ctrl-shift-tab",
+    "ctrl-shift-tab", "cmd-d", "cmd-shift-d", "cmd-enter", "cmd-shift-enter", "alt-cmd-left",
+    "alt-cmd-right", "alt-cmd-up", "alt-cmd-down", "alt-cmd-[", "alt-cmd-]",
     "escape", "escape", "tab", "enter",
 ];
 
@@ -707,7 +709,7 @@ fn a_prompt_wrapped_past_five_lines_folds_with_nothing_else_drawing(cx: &mut Tes
     cx.update(|window, _| window.set_a11y_active(true));
     frames(cx, Duration::from_millis(16), 60);
     // ⌘I opens the session's inspector, the timeline in it.
-    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_inspector(window, cx)));
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.toggle_inspector(cx)));
     frames(cx, Duration::from_millis(16), 60);
     assert!(shell.read_with(cx, |shell, cx| shell.inspector_shown(cx)), "the inspector shows");
     // Under the 400 characters that fold a prompt before it is measured, on one line: only its

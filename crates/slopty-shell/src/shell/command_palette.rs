@@ -902,8 +902,8 @@ impl Shell {
         }
     }
 
-    /// Open a workspace path of the focused chat: a file in an editor tab
-    /// (at `location`, when given), a folder revealed in the files tree.
+    /// Open a workspace path of the focused chat: a file in a view of its own beside the session
+    /// (at `location`, when given), a folder revealed in Files.
     fn open_palette_path(
         &mut self,
         path: String,
@@ -916,18 +916,12 @@ impl Shell {
             return;
         }
         if is_dir {
-            self.add_files_surface(window, cx);
+            self.ensure_explorer(window, cx);
+            self.open_view(RightSurface::Files, cx);
             if let Some(files) = self.files.get(&self.panel_key(cx)).cloned() {
                 files.update(cx, |files, cx| files.reveal_file_explicit(path, cx));
             }
             return;
-        }
-        let key = self.panel_key(cx);
-        let was_open = self.panels.get(&key).changes_open;
-        let from = self.right_target(cx);
-        self.panels.update(&key, |panel| panel.changes_open = true);
-        if !was_open {
-            self.right_tween = Some(WidthTween::new(from, self.right_target(cx), self.now()));
         }
         let owner = (self.active_chat.clone(), self.state.clone());
         self.add_file_surface_at(owner, path, location, window, cx);
@@ -953,15 +947,11 @@ impl Shell {
                 if is(&ToggleSidebar) {
                     on(!self.settings.sidebar_collapsed)
                 } else if is(&ToggleChanges) {
-                    on(self.right_pane_open(cx))
-                } else if is(&chrome_keys::ToggleExpandPane) {
-                    on(self.right_pane_expanded)
+                    on(self.panes_now(cx).views().into_iter().any(|view| matches!(view, RightSurface::Diff(_))))
                 } else if is(&ToggleFiles) {
-                    on(self.files_panel_open(cx))
-                } else if is(&ToggleTerminal) {
-                    on(self.terminal_open(cx))
+                    on(self.view_open(RightSurface::Files, cx))
                 } else if is(&chrome_keys::ToggleInspector) {
-                    on(self.inspector_shown(cx))
+                    on(self.view_open(RightSurface::Inspector, cx))
                 } else {
                     CommandState::None
                 }
@@ -3087,8 +3077,8 @@ mod tests {
                 "Appearance: Dark",
             ]
         );
-        assert!(all.contains(&"Reopen closed tab"), "the menu bar's commands: {all:?}");
-        assert_eq!(labels("new", &none), ["New session", "New project\u{2026}", "New tab"]);
+        assert!(all.contains(&"Reopen closed view"), "the menu bar's commands: {all:?}");
+        assert_eq!(labels("new", &none), ["New session", "New project\u{2026}"]);
         assert_eq!(labels("appearance dark", &none), ["Appearance: Dark"]);
         assert!(labels("deployment", &none).is_empty());
     }
@@ -3115,8 +3105,8 @@ mod tests {
     #[test]
     fn the_palette_holds_the_menu_bars_commands() {
         let none = std::collections::BTreeMap::new();
-        assert_eq!(labels("side pane", &none), ["Toggle side pane", "Expand side pane"]);
-        assert_eq!(labels("reopen", &none), ["Reopen closed tab"]);
+        assert_eq!(labels("split", &none), ["Split right", "Split down"]);
+        assert_eq!(labels("reopen", &none), ["Reopen closed view"]);
     }
 
     /// A command run from the palette counts from its next opening, no row moving while it is

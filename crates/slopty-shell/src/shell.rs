@@ -31,14 +31,10 @@ use slopty_view_rpc::methods;
 
 use crate::changes::{Changes, ChangesEvent}; // slopty: no Discard changes (ruled out).
 use crate::composer::{ComposerInput, ComposerInputEvent};
-use crate::files::{
-    FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface, WorkspacePathDrag,
-};
+use crate::files::{FileColumn, FilesCloseDisposition, FilesEvent, FilesSurface};
 use crate::icons::{self, icon};
 use crate::loaders;
-use crate::motion::{
-    self, AnimationExt as _, MotionSpec, PANEL_RESIZE, RESIZE, SPLASH_OUT, TAB_SLIDE,
-};
+use crate::motion::{self, AnimationExt as _, MotionSpec, PANEL_RESIZE, RESIZE, SPLASH_OUT};
 use crate::popover::{self, Loadable};
 // slopty: no pull-request pages.
 // slopty: no agent accounts: Slopty never touches a credential.
@@ -50,17 +46,15 @@ use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
-    self, CHAT_PANEL_MIN, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
-    RIGHT_PANE_MIN, SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, SavePolicy, ShortcutId,
-    TERMINAL_DEFAULT_HEIGHT, TERMINAL_MAX_VH,
-    TERMINAL_MIN_HEIGHT, UiSettings, jump_hints_visible,
+    self, CHAT_PANEL_MIN, JUMP_SLOTS, KeymapConfig, SIDEBAR_DEFAULT, SIDEBAR_MAX,
+    SIDEBAR_MIN, SavePolicy, ShortcutId, UiSettings, jump_hints_visible,
     platform_combo, workspace_profile_key,
 };
 use crate::state::{
     AppState, ConnectionStatus, EngineBootConfig, GatePhase, Indicator,
     format_time_ago, // slopty: no accounts, sync or sign-in.
 };
-use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
+use crate::terminal::panel::TerminalPanel;
 use crate::settings::widgets::{ActionHint as _, Keys}; // slopty: tooltips with their key
 use crate::theme::Theme;
 use crate::transcript::{self, Transcript, TranscriptEvent};
@@ -75,7 +69,11 @@ mod navigation_focus;
 #[cfg(test)]
 mod navigation_tests;
 mod panel_layout;
-use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_tween};
+use panel_layout::HorizontalPanelFit;
+mod panes; // a session's view as a tree of panes
+mod pane_area; // the panes drawn, with their dividers
+mod pane_frame; // the panes on the shell's side: splits, summoned views, keys and headers
+mod views; // the views summoned beside a session: what each shows, names, focuses and lets go
 #[cfg(test)]
 mod panel_interaction_tests;
 #[cfg(test)]
@@ -93,21 +91,21 @@ pub(crate) mod spaces;
 mod thread_search;
 mod session_search; // finding sessions by title and by what was said in them
 mod tabs;
-mod live_surfaces; // slopty: remote window and desktop surfaces
-mod pane_offers; // slopty: what a side pane offers to open, one list
-mod kept_tabs; // slopty: the pane's tabs kept across launches
-mod page_panes; // slopty: a page an agent showed, as a tab (M)
+mod live_surfaces; // slopty: remote window and desktop views
+mod kept_tabs; // slopty: the views beside each session kept across launches
+mod page_panes; // slopty: a page an agent showed, as a view (M)
 mod compact; // slopty: the phone's anatomy
 pub(crate) use compact::touch_screen; // slopty: the keyboard waits for a tap
 #[cfg(test)]
 pub(crate) use compact::force_touch; // slopty: tests lay a view out for a finger
-mod chrome_keys; // slopty: find, history, tab and picker keys, and undoing an archive
+mod chrome_keys; // slopty: find, history, pane and view keys, and undoing an archive
 // slopty: the window's own commands, for the menu bar (`app_menus`).
 pub use chrome_keys::{
-    Inbox, NavigateBack, NavigateForward, NewRightTab, NextNeedsYou, OpenIn, ReopenClosedTab,
-    ToggleExpandPane, ToggleInspector,
+    FocusPaneDown, FocusPaneLeft, FocusPaneRight, FocusPaneUp, Inbox, NavigateBack, NavigateForward,
+    NextNeedsYou, NextPane, OpenBrowser, OpenIn, OpenRemoteWindow, PreviousPane, ReopenClosedTab,
+    SplitAuto, SplitDown, SplitRight, ToggleInspector, ZoomPane,
 };
-mod closed_tabs; // slopty: the right pane's closed tabs, opened again
+mod closed_tabs; // slopty: the views closed last, opened again
 mod open_in; // slopty: a chat's folder in the person's editor
 mod terminal_runs; // slopty: a transcript's Run in the chat's own shell terminal
 mod new_session; // slopty: New session…: an agent's TUI, or a terminal, in a project at once
@@ -135,7 +133,6 @@ actions!(
         ArchiveSession
     ]
 );
-
 
 /// Restore a default focus only after an in-flight handoff has had a frame to
 /// claim the window. A synchronous focus-lost fallback can otherwise steal
@@ -234,35 +231,11 @@ enum ChatMenuPage {
 const CHAT_MENU_ROW_RENAME: u8 = 0;
 const CHAT_MENU_ROW_ARCHIVE: u8 = 2;
 const CHAT_MENU_ROW_COPY: u8 = 3;
-const CHAT_MENU_ROW_TAB: u8 = 5;
-const CHAT_MENU_ROW_OPEN_IN: u8 = 16; // slopty: past the tab rows
-
-#[derive(Clone, Copy)]
-pub(crate) enum TabCloseAction {
-    This,
-    Others,
-    Left,
-    Right,
-}
-
-impl TabCloseAction {
-    /// slopty: whether it closes the tab at `i` when asked from the tab at `index` (the side
-    /// pane's strip and the terminal's share it).
-    pub(crate) fn takes(self, i: usize, index: usize) -> bool {
-        match self {
-            Self::This => i == index,
-            Self::Others => i != index,
-            Self::Left => i < index,
-            Self::Right => i > index,
-        }
-    }
-}
+const CHAT_MENU_ROW_OPEN_IN: u8 = 4;
 
 #[derive(Clone)]
 struct ChatMenuState {
-    // Empty for surfaces that have no underlying chat.
     chat_id: String,
-    tab: Option<(String, RightSurface)>,
     position: Point<Pixels>,
     page: ChatMenuPage,
 }
@@ -270,7 +243,7 @@ struct ChatMenuState {
 impl ChatMenuState {
     /// The menu of chat `chat_id`'s row, opened at `position` on its first page.
     pub(super) fn for_row(chat_id: impl Into<String>, position: Point<Pixels>) -> Self {
-        Self { chat_id: chat_id.into(), tab: None, position, page: ChatMenuPage::Root }
+        Self { chat_id: chat_id.into(), position, page: ChatMenuPage::Root }
     }
 }
 
@@ -286,23 +259,6 @@ const PANE_RESIZE_HITBOX_TOP: f32 = Theme::TITLEBAR_HEIGHT;
 /// Chrome layers that paint full-bleed at a window edge round their own
 /// backgrounds with it — see [`Shell::window_corner_radius`].
 pub(crate) const LINUX_WINDOW_CORNER_RADIUS: f32 = 10.0;
-const TERMINAL_RESIZE_HITBOX_HEIGHT: f32 = 10.0;
-
-fn stable_panel_content_width(target: f32, transition: Option<(f32, f32)>) -> f32 {
-    transition.map(|(from, to)| from.max(to)).unwrap_or(target)
-}
-
-fn right_panel_content_width(
-    target: f32,
-    transition: Option<(f32, f32)>,
-    takeover_width: Option<f32>,
-) -> f32 {
-    takeover_width.unwrap_or_else(|| stable_panel_content_width(target, transition))
-}
-
-fn conversation_width(viewport: f32, sidebar: f32, right: f32) -> f32 {
-    (viewport - sidebar - right).max(0.0)
-}
 
 /// The chat's working directory as the host device spells it — the folder the
 /// harness runs in (a worktree chat's worktree). Projectless `~` chats have
@@ -443,9 +399,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
             None,
             cx,
         ),
-        // ⌘J is the jump to what needs the person (`docs/decisions/layout.md`); the shell beside
-        // the session is ⌘D, the split's key.
-        crate::keys::binding(&platform_combo("mod-d"), ToggleTerminal, None, cx),
         crate::keys::binding(
             &valid_or_default(&keymap.new_session, "mod-n"),
             NewSession,
@@ -493,7 +446,6 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     crate::files::bind_keys(cx);
     crate::changes::bind_keys(cx);
     chrome_keys::bind_keys(cx, keymap); // slopty: find, history, tab, picker and undo keys
-    crate::terminal::panel::bind_keys(cx); // slopty: ⌘T in the terminal panel
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
@@ -697,32 +649,18 @@ pub enum Route {
     Settings(SettingsSection),
 }
 
-/// Maximum width the right pane may occupy while retaining the conversation
-/// floor. The horizontal fit policy hides a lower-priority column before this
-/// budget can fall below the right pane's minimum at rest.
-fn right_pane_max_width(viewport: f32, sidebar: f32, chat_floor: f32) -> f32 {
-    (viewport - sidebar - chat_floor).max(0.0)
-}
-
-/// Width used by right-pane takeover. Unlike manual resizing, takeover is
-/// intentionally allowed to consume the conversation column completely.
-fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
-    (viewport - sidebar).max(0.0)
-}
-
-/// One right-pane surface tab: a workspace browser, an individual workspace
-/// file editor, a Git diff or history page, or an embedded terminal. `Picker` is the empty
-/// surface chooser.
-// slopty: no subagent tab: a subagent lives in its parent's chat (`docs/decisions/ui.md`,
+/// A view summoned beside a session's terminal as a pane of its own (`docs/decisions/layout.md`,
+/// "No permanent right column"): the session's files, a file of them, its changes, a web page, its
+/// inspector, a remote window or desktop, or a page an agent showed.
+// slopty: no subagent view: a subagent lives in its parent's chat (`docs/decisions/ui.md`,
 // "Subagents live in their parent's chat").
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RightSurface {
-    #[default]
-    Picker,
+    /// The session's files, the explorer of its folder.
+    Files,
     File(u64),
     Browser(u64),
     Diff(u64),
-    Terminal(u64),
     // slopty: the session's inspector, one per chat, following it (`crate::inspector`).
     Inspector,
     Screen(u64), // slopty: a remote window or desktop (`live_surfaces`)
@@ -738,173 +676,8 @@ fn screen_chip_glyph(chosen: Option<&str>) -> &'static str {
     }
 }
 
-fn push_unique_right_surface(tabs: &mut Vec<RightSurface>, surface: RightSurface) -> bool {
-    if tabs.contains(&surface) {
-        false
-    } else {
-        tabs.push(surface);
-        true
-    }
-}
-
 fn workspace_file_title(path: &str) -> SharedString {
     path.rsplit('/').next().unwrap_or(path).to_string().into()
-}
-
-/// Per-chat panel open flags (slopty parity: `sessionPanels` — the terminal and
-/// changes panels open *per session*, in memory only; heights and every other
-/// persisted setting stay global).
-///
-/// Everything defaults CLOSED — the right pane included (user request,
-/// revising the earlier default-open: it popped open on every session you
-/// visited). Opening is an explicit act, remembered per chat for the rest of
-/// the app run; a fresh open with no surface tabs lands on the picker.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct ChatPanels {
-    /// The explorer portion of the right pane is docked.
-    pub files_open: bool,
-    files_opened_at: u64,
-    pub terminal_open: bool,
-    /// The surface host portion of the right pane is visible (historically
-    /// the Changes pane). The pane itself shows when either portion does.
-    pub changes_open: bool,
-    /// Takeover is remembered with its owning chat, not inherited by the
-    /// next conversation (or by the new-thread canvas).
-    right_expanded: bool,
-    /// Opening order, which the window fit ranks columns by. Zero predates
-    /// an explicit open.
-    changes_opened_at: u64,
-    /// Which surface tab renders; validated against the live tab list each
-    /// frame (a closed tab falls back gracefully).
-    pub right_active: RightSurface,
-}
-
-/// slopty: how many chats' panes are kept across launches.
-const KEPT_PANELS: usize = 500;
-
-/// The session-scoped panel map. Keys are chat ids; the new-chat canvas uses
-/// the empty key. Not persisted — a fresh app starts with everything closed.
-#[derive(Debug, Default)]
-pub struct SessionPanels {
-    map: std::collections::HashMap<String, ChatPanels>,
-    /// slopty: a flag changed since the panes were last saved.
-    dirty: bool,
-    /// Unique surface visits, oldest first, independent of the strip order.
-    right_tab_history: std::collections::HashMap<String, Vec<RightSurface>>,
-}
-
-impl SessionPanels {
-    /// slopty: the panes each chat had open when the app last ran.
-    pub fn restored(saved: &std::collections::BTreeMap<String, settings::SavedPanels>) -> Self {
-        let map = saved
-            .iter()
-            .map(|(key, saved)| {
-                let panels = ChatPanels {
-                    files_open: saved.files,
-                    terminal_open: saved.terminal,
-                    changes_open: saved.changes,
-                    right_expanded: saved.expanded,
-                    ..ChatPanels::default()
-                };
-                (key.clone(), panels)
-            })
-            .collect();
-        Self { map, ..Self::default() }
-    }
-
-    /// slopty: the panes to keep, once a flag changed since the last save: each chat with any
-    /// open, at most [`KEPT_PANELS`] of them.
-    pub fn take_saved(
-        &mut self,
-    ) -> Option<std::collections::BTreeMap<String, settings::SavedPanels>> {
-        if !std::mem::take(&mut self.dirty) {
-            return None;
-        }
-        let saved = self
-            .map
-            .iter()
-            .map(|(key, panels)| {
-                let saved = settings::SavedPanels {
-                    files: panels.files_open,
-                    terminal: panels.terminal_open,
-                    changes: panels.changes_open,
-                    expanded: panels.right_expanded,
-                };
-                (key.clone(), saved)
-            })
-            .filter(|(_, saved)| *saved != settings::SavedPanels::default())
-            .take(KEPT_PANELS)
-            .collect();
-        Some(saved)
-    }
-
-    pub fn get(&self, key: &str) -> ChatPanels {
-        self.map.get(key).copied().unwrap_or_default()
-    }
-
-    /// Flip the terminal flag for `key`; returns the new value.
-    pub fn toggle_terminal(&mut self, key: &str) -> bool {
-        self.dirty = true; // slopty: kept panes
-        let entry = self.map.entry(key.to_string()).or_default();
-        entry.terminal_open = !entry.terminal_open;
-        entry.terminal_open
-    }
-
-    /// Flip the changes flag for `key`; returns the new value.
-    pub fn toggle_changes(&mut self, key: &str) -> bool {
-        self.dirty = true; // slopty: kept panes
-        let entry = self.map.entry(key.to_string()).or_default();
-        entry.changes_open = !entry.changes_open;
-        entry.changes_open
-    }
-
-    /// Mutate `key`'s flags in place (right-pane surface bookkeeping).
-    pub fn update(&mut self, key: &str, f: impl FnOnce(&mut ChatPanels)) {
-        let panel = self.map.entry(key.to_string()).or_default();
-        let previous = panel.right_active;
-        let before = *panel;
-        f(panel);
-        // slopty: kept panes
-        self.dirty |= (panel.files_open, panel.terminal_open, panel.changes_open, panel.right_expanded)
-            != (before.files_open, before.terminal_open, before.changes_open, before.right_expanded);
-        let surface = panel.right_active;
-        if surface != previous && surface != RightSurface::Picker {
-            let history = self.right_tab_history.entry(key.to_string()).or_default();
-            history.retain(|visited| *visited != surface);
-            history.push(surface);
-        }
-    }
-
-    fn forget_right_surface(&mut self, key: &str, surface: RightSurface) {
-        if let Some(history) = self.right_tab_history.get_mut(key) {
-            history.retain(|visited| *visited != surface);
-            if history.is_empty() {
-                self.right_tab_history.remove(key);
-            }
-        }
-    }
-
-    /// Resolve against live surfaces so stale terminal/entity ids are skipped.
-    /// The strip's first tab remains the fallback for surfaces never visited.
-    fn right_surface_fallback(
-        &self,
-        key: &str,
-        mut available: impl Iterator<Item = RightSurface>,
-    ) -> RightSurface {
-        let Some(first) = available.next() else {
-            return RightSurface::Picker;
-        };
-        let Some(history) = self.right_tab_history.get(key) else {
-            return first;
-        };
-        let live: std::collections::HashSet<_> = std::iter::once(first).chain(available).collect();
-        history
-            .iter()
-            .rev()
-            .find(|surface| live.contains(surface))
-            .copied()
-            .unwrap_or(first)
-    }
 }
 
 /// One route-history entry (slopty parity: the renderer's TanStack memory
@@ -1029,22 +802,12 @@ const SIDEBAR_GLASS_FADE_BAND: f32 = 24.0;
 
 // slopty: no Star on GitHub banner.
 
-
-
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
-/// Drag marker for the right-pane resize handle.
-struct RightPaneResize;
-
-/// slopty: how far ← or → moves the side pane's splitter.
-const RIGHT_PANE_NUDGE: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaneResizeKind {
     Sidebar,
-    Right,
-    Files,
-    Terminal,
 }
 
 /// Resolve one pointer sample while keeping the persisted width legal. The
@@ -1064,46 +827,13 @@ fn sidebar_drag_sample(
     )
 }
 
-/// The dragged surface-tab payload (strip reorder).
-struct RightTabDrag {
-    panel_key: String,
-    from: usize,
-    title: SharedString,
-    workspace_path: Option<WorkspacePathDrag>,
-}
-
-/// Live drag-over state for the surface-tab strip — the terminal drawer's
-/// [`crate::terminal::panel`] DragState, ported: `epoch` keys the 150ms
-/// slide-animation restarts as the hovered slot changes.
-struct RightTabDragState {
-    from: usize,
-    over: usize,
-    epoch: usize,
-    prev_over: usize,
-}
-
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
     rows: Vec<SidebarKeyedRow>,
 }
 
-/// Ghost chip following the pointer while a surface tab drags.
-struct SurfaceTabGhost {
-    title: SharedString,
-    width: f32, // slopty: the strip's fitted chip width
-}
-
-impl Render for SurfaceTabGhost {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::surface_chrome::tab_ghost(self.title.clone(), self.width, Theme::of(cx)) // slopty:
-    }
-}
-
 // slopty: a tab's tooltip is the house chip (`settings::widgets::text_tooltip`).
-/// Drag marker for the terminal-panel height handle.
-struct TerminalResize;
-
 /// Invisible drag ghost — resize drags render nothing at the cursor.
 struct DragGhost;
 
@@ -1321,20 +1051,24 @@ pub struct Shell {
     /// deactivation clears it, so a chip cannot stick after an app switch
     /// swallows the key-up.
     pub(super) jump_hints: bool,
-    /// Lazy panes: no entity (and no RPC) until first opened.
-    terminal: Option<Entity<TerminalPanel>>,
-    /// Last resolved layout, for drag anchors and matching transcript clearance.
-    terminal_geometry: crate::terminal::dock::SharedGeometry,
-    /// Embedded terminal host for right-pane Terminal surfaces — a SEPARATE
-    /// entity from the bottom drawer's (own PTYs, own grid geometry; one
-    /// panel can only size one visible grid at a time).
-    right_terminal: Option<Entity<TerminalPanel>>,
-    /// slopty: the tabs each chat's pane had when the app last ran, until it is shown again
-    /// (`kept_tabs`).
+    /// Each session view's panes, by its panel key (`panes.rs`).
+    panes: std::collections::HashMap<String, panes::Panes>,
+    /// The shells opened beside a session (⌘D), by their number.
+    pane_shells: std::collections::HashMap<u64, Entity<TerminalPanel>>,
+    pane_seq: u64,
+    /// Where the panes were laid out last, for walking focus by direction.
+    pane_area_at: std::rc::Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// The grid the terminal panes snap to, as last drawn.
+    pane_grid: Option<panes::Grid>,
+    /// The focus each view's pane holds around what it shows (`views::view_handle`).
+    view_handles: std::collections::HashMap<RightSurface, FocusHandle>,
+    /// The focused pane changed (a switch, a summon, a close) and takes the keyboard on the next
+    /// frame, once it is laid out.
+    pane_keyboard_pending: bool,
+    /// slopty: the views each session had beside it when the app last ran, until it is shown
+    /// again (`kept_tabs`).
     unrestored_tabs: std::collections::BTreeMap<String, crate::settings::SavedTabs>,
-    /// The surface-tab strip's `+` menu (Browser / Terminal / Diffs / History rows).
-    right_plus: popover::Popup<()>,
-    // slopty: the right pane's closed tabs, newest last, each with its pane (`closed_tabs`).
+    // slopty: the views closed last, newest last, each with its session (`closed_tabs`).
     closed_tabs: Vec<(String, crate::settings::SavedSurface)>,
     // slopty: the chat archived last and its Undo toast (`chrome_keys`).
     last_archive: Option<(String, u64)>,
@@ -1372,20 +1106,6 @@ pub struct Shell {
     browser_seq: u64,
     browser_context: crate::browser::BrowserContext,
     browser_profile: Option<crate::browser::profile::BrowserProfile>,
-    /// Ordered surface tabs per panel key (drag-reorderable; stale entries —
-    /// closed terminals/diffs — are skipped at read time).
-    right_tabs: std::collections::HashMap<String, Vec<RightSurface>>,
-    /// In-flight surface-tab drag (slide animation state).
-    right_tab_drag: Option<RightTabDragState>,
-    /// slopty: the chip width the strip holds after a close by pointer.
-    right_tab_hold: crate::surface_chrome::HeldTabWidth,
-    /// Surface-tab strip scroll (the strip overflows horizontally, t3
-    /// ScrollArea-style; drag drop-math reads the offset back out).
-    right_tab_scroll: gpui::ScrollHandle,
-    /// slopty: the front tab the strip last scrolled into view, with how many tabs it held: a tab
-    /// brought to the front is scrolled whole into the strip, so its close button is never under
-    /// the pane's controls.
-    right_tab_revealed: Option<(RightSurface, usize)>,
     /// Chat outlet, pull request dashboard, or settings pages.
     route: Route,
     settings_focus: FocusHandle,
@@ -1487,11 +1207,6 @@ pub struct Shell {
     /// The store's settings when `settings` last synced with it. Fields that
     /// differ from this are the Shell's edits; all others follow the store.
     settings_base: UiSettings,
-    /// Session-scoped panel open flags (terminal / changes per chat; §1.10-1.11
-    /// parity — heights stay in [`UiSettings`]).
-    panels: SessionPanels,
-    panel_open_sequence: u64,
-    sidebar_opened_at: u64,
     /// The panel key of the chat currently shown ("" = new-chat canvas).
     active_chat: String,
     /// slopty: the chat whose panes the active one shows (`AppState::panel_owner`), with the
@@ -1519,26 +1234,12 @@ pub struct Shell {
     debug_dialog: Option<String>,
     debug_gate: Option<GatePhase>,
     sidebar_tween: Option<WidthTween>,
-    files_tween: Option<WidthTween>,
-    files_content_tween: Option<WidthTween>,
-    /// The last tracked frame: its chat, the window fit, and for each of
-    /// `[sidebar, surface host, Files]` the width painted and the width its
+    /// The last tracked frame: the window fit, the sidebar's painted width and the width its
     /// content laid out at.
-    painted_columns: Option<(String, HorizontalPanelFit, [(f32, f32); 3])>,
-    /// Columns the fit just hid while still open, easing out from the width
-    /// they last painted with their content held at its layout width (same
-    /// order).
-    fit_exits: [Option<(WidthTween, f32)>; 3],
-    /// The window width the surface host's share was last split for. Seeded
-    /// by the first frame, so a saved divider survives a relaunch.
-    split_viewport: Option<f32>,
-    /// The last window fit and the inputs it was computed from, one slot
-    /// per `closing` flag of `fit`: layout helpers ask for both many times
-    /// per frame while a close runs. Not a per-frame value, since handlers
-    /// re-read the fit right after changing what it depends on.
-    fit_memo: [std::cell::Cell<Option<(FitInputs, HorizontalPanelFit)>>; 2],
-    /// The closed surface host already released its image previews.
-    right_images_suspended: bool,
+    painted_sidebar: Option<(HorizontalPanelFit, (f32, f32))>,
+    /// The sidebar easing out from the width it last painted after the window grew too narrow
+    /// for it, its content held at its layout width.
+    fit_exit: Option<(WidthTween, f32)>,
     sidebar_edge_bounce: Option<motion::ResizeEdgeBounce>,
     /// Boundary currently held during a sidebar drag. Cleared on re-entry or
     /// release so the next genuine edge crossing can acknowledge the limit.
@@ -1551,26 +1252,8 @@ pub struct Shell {
     /// The window changed width since the previous frame. Live window
     /// resizing moves layout directly instead of through motion springs.
     viewport_resized: bool,
-    right_tween: Option<WidthTween>,
-    right_edge_bounce: Option<motion::ResizeEdgeBounce>,
-    right_resize_edge: Option<motion::ResizeEdge>,
-    /// Holds content geometry during masked open/close (including reversals),
-    /// or resizes it during takeover. The outer mask has its own tween.
-    right_content_tween: Option<WidthTween>,
-    /// Takeover mask transition. `from` also retains the conversation's content
-    /// width while covered, even after expansion settles. Ordinary panel
-    /// open/close keeps the upstream flex behavior.
-    main_takeover_tween: Option<WidthTween>,
-    /// Changes-panel takeover (the header's expand button): the panel fills
-    /// everything right of the sidebar and the conversation column collapses
-    /// to zero. Session-local view state — never persisted, reset on close.
-    right_pane_expanded: bool,
-    /// Viewport width stamped each frame at render — the expanded panel's
-    /// width target and the physical ceiling for free-form resizing
-    /// ([`Self::right_target`] has no `Window`).
+    /// Viewport width stamped each frame at render, for the fit and the splits.
     viewport_width: f32,
-    viewport_height: f32,
-    terminal_tween: Option<WidthTween>,
     /// Last observed `window.is_fullscreen()` (`None` before first paint) —
     /// flips key the traffic-light inset tween.
     fullscreen: Option<bool>,
@@ -1588,10 +1271,6 @@ pub struct Shell {
     /// `button-layout` gsetting). Registered on first paint — [`Shell::new`]
     /// has no window.
     button_layout_sub: Option<Subscription>,
-    /// Clears the height tween once it completes (so a closed panel unmounts).
-    terminal_tween_task: Option<Task<()>>,
-    /// Height-drag anchor: (pointer y, height) at mouse-down on the handle.
-    terminal_drag_anchor: Option<(f32, f32)>,
     /// `motion::reduced_motion` snapshot, refreshed at the top of each render
     /// pass so [`Shell::eval_tween`] (called from `&self` render helpers) can
     /// snap without a `cx`. Only the global flag makes one.
@@ -1610,7 +1289,8 @@ pub struct Shell {
     /// settle, preserving focus on mounted controls.
     focus_sub: Option<Subscription>,
     shortcut_focus: FocusHandle,
-    navigation_focus: navigation_focus::NavigationFocus,
+    /// The main column's focus: a press in it keeps the keyboard there (`navigation_focus`).
+    main_focus: FocusHandle,
     /// Neutral shortcut target after clicking away from an input.
     unfocused: FocusHandle,
     /// Clears the jump hints when the window deactivates: a Cmd+Tab away
@@ -1735,7 +1415,6 @@ impl Shell {
             shell: shell.downgrade(),
             _observation: cx.observe(&shell, |_, _, cx| cx.notify()),
         });
-        let panels = SessionPanels::restored(&settings.session_panels); // slopty: kept panes
         Self {
             state,
             sidebar_pane,
@@ -1750,10 +1429,14 @@ impl Shell {
             sidebar_reveal_motions: std::collections::HashSet::new(),
             sidebar_disclosure_motion: std::collections::HashMap::new(),
             jump_hints: false,
-            terminal: None,
-            right_terminal: None,
+            panes: std::collections::HashMap::new(),
+            pane_shells: std::collections::HashMap::new(),
+            pane_seq: 0,
+            pane_area_at: std::rc::Rc::default(),
+            pane_grid: None,
+            view_handles: std::collections::HashMap::new(),
+            pane_keyboard_pending: false,
             unrestored_tabs: settings.session_tabs.clone(),
-            right_plus: popover::Popup::default(),
             closed_tabs: Vec::new(),       // slopty
             last_archive: None,            // slopty
             open_in: popover::Popup::default(), // slopty
@@ -1777,11 +1460,6 @@ impl Shell {
             browser_seq: 0,
             browser_context: crate::browser::BrowserContext::default(),
             browser_profile: None,
-            right_tabs: std::collections::HashMap::new(),
-            right_tab_drag: None,
-            right_tab_hold: crate::surface_chrome::HeldTabWidth::default(), // slopty
-            right_tab_scroll: gpui::ScrollHandle::new(),
-            right_tab_revealed: None, // slopty
             route,
             settings_focus: cx.focus_handle(),
             settings_end_focus: cx.focus_handle(),
@@ -1845,9 +1523,6 @@ impl Shell {
             data_dir,
             settings_base: settings::current(cx),
             settings,
-            panels, // slopty: kept panes
-            panel_open_sequence: 0,
-            sidebar_opened_at: 0,
             active_chat: String::new(),
             active_owner: None,
             // slopty: appshots removed.
@@ -1861,35 +1536,19 @@ impl Shell {
             debug_dialog,
             debug_gate,
             sidebar_tween: None,
-            files_tween: None,
-            files_content_tween: None,
-            painted_columns: None,
-            fit_exits: [None; 3],
-            split_viewport: None,
-            fit_memo: Default::default(),
-            right_images_suspended: false,
+            painted_sidebar: None,
+            fit_exit: None,
             sidebar_edge_bounce: None,
             sidebar_resize_edge: None,
             pane_resize_active: None,
             pane_resize_dragging: None,
             viewport_resized: false,
-            right_tween: None,
-            right_edge_bounce: None,
-            right_resize_edge: None,
-            right_content_tween: None,
-            main_takeover_tween: None,
-            right_pane_expanded: false,
             viewport_width: 1280.0,
-            viewport_height: 880.0,
-            terminal_tween: None,
-            terminal_geometry: Default::default(),
             fullscreen: None,
             titlebar_tween: None,
             titlebar_should_move: false,
             linux_captions: None,
             button_layout_sub: None,
-            terminal_tween_task: None,
-            terminal_drag_anchor: None,
             reduced_motion: motion::ReducedMotion::default(),
             motion_active: std::cell::Cell::new(false),
             render_time: None,
@@ -1897,7 +1556,7 @@ impl Shell {
             splash_task: None,
             focus_sub: None,
             shortcut_focus: cx.focus_handle(),
-            navigation_focus: navigation_focus::NavigationFocus::new(cx),
+            main_focus: cx.focus_handle(),
             unfocused: cx.focus_handle(),
             activation_sub: None,
             clock: ClockRedraw::default(),
@@ -1918,7 +1577,6 @@ impl Shell {
     }
 
     // slopty: appshots removed.
-
 
     // ---- splash ----
 
@@ -2043,10 +1701,7 @@ impl Shell {
             self.settings.machine_filter = None;
             self.schedule_save(cx);
         }
-        // Chat switch: restore THAT chat's panel state (per-session open flags;
-        // snap, no tween — the panels belong to the destination chat). The
-        // new-chat canvas is the exception: it always lands with the terminal
-        // hidden.
+        // Chat switch: the destination's panes show as it left them, at once.
         let selected = state.read(cx).selected_chat.clone().unwrap_or_default();
         // slopty: the panes a chat shows are its owner's: a subagent's are its agent's, and one
         // whose agent's row came only now moves to them.
@@ -2054,11 +1709,6 @@ impl Shell {
         // slopty: appshots removed.
         if selected != self.active_chat || owner != self.active_owner() {
             self.suspend_file_images(cx);
-            if !self.active_chat.is_empty() {
-                let expanded = self.right_pane_expanded;
-                let previous = self.active_owner().to_owned();
-                self.panels.update(&previous, |panels| panels.right_expanded = expanded);
-            }
             self.active_owner = Some((selected.clone(), owner));
             self.active_chat = selected;
             // Route history: a chat switch is a navigation. The very first
@@ -2074,32 +1724,15 @@ impl Shell {
                     self.nav.push(entry);
                 }
             }
-            self.clear_panel_transitions();
-            self.terminal_tween = None;
-            self.fit_exits = [None; 3];
-            let key = self.panel_key(cx);
-            // Entering the new-chat canvas always lands with the terminal
-            // hidden (user request) — a previously opened canvas drawer must
-            // not pop open on a fresh canvas. The source chat's flag stays in
-            // the map, so returning restores it.
-            let panels = if self.active_chat.is_empty() {
-                self.panels.update(&key, |panels| {
-                    panels.terminal_open = false;
-                });
-                self.panels.get(&key)
-            } else {
-                self.panels.get(&key)
-            };
-            self.right_pane_expanded =
-                !self.active_chat.is_empty() && panels.changes_open && panels.right_expanded;
-            if let Some(panel) = self.terminal.clone() {
-                panel.update(cx, |panel, cx| panel.set_open(panels.terminal_open, cx));
-            }
-            if panels.changes_open
-                && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-                && let Some(changes) = self.diffs.get(&id).cloned()
-            {
-                changes.update(cx, |changes, cx| changes.ensure_content(cx));
+            self.fit_exit = None;
+            // Its keyboard goes back to the pane that had it, once that pane draws.
+            self.pane_keyboard_pending = true;
+            for view in self.panes_now(cx).views() {
+                if let RightSurface::Diff(id) = view
+                    && let Some(changes) = self.diffs.get(&id).cloned()
+                {
+                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                }
             }
         }
         match state.read(cx).connection {
@@ -2168,221 +1801,21 @@ impl Shell {
         }
     }
 
-    /// Whether the right pane shows. NOT gated on git any more: the pane is
-    /// a surface HOST now (terminals work in any space), so only the Git
-    /// surface rows check `space_git_detected`. Still hidden on the
-    /// new-session canvas, where the titlebar carries no toggle to close it
-    /// again (an earlier user request).
-    fn right_pane_open(&self, cx: &App) -> bool {
-        !self.active_chat.is_empty() && self.panels.get(&self.panel_key(cx)).changes_open
-    }
-
-    /// Open and on screen: the window fit is not hiding it.
-    fn right_pane_shown(&self, cx: &App) -> bool {
-        self.right_pane_open(cx) && self.horizontal_fit().right
-    }
-
-    /// The current chat's terminal flag (per-session, in-memory).
-    fn terminal_open(&self, cx: &App) -> bool {
-        self.panels.get(&self.panel_key(cx)).terminal_open
-    }
-
-    fn right_target(&self, cx: &App) -> f32 {
-        self.right_target_for_columns(cx, self.sidebar_now(), self.files_reserved_width(cx))
-    }
-
-    /// The surface host's width once every running transition has landed.
-    /// The initial target uses the sidebar and Files' settled allocation;
-    /// the painted pane follows its live target while its neighbours move.
-    fn right_settled_target(&self, cx: &App) -> f32 {
-        self.right_target_for_columns(cx, self.sidebar_target(), self.files_settled_width(cx))
-    }
-
-    fn right_target_for_columns(&self, cx: &App, sidebar: f32, files: f32) -> f32 {
-        if !self.right_pane_shown(cx) {
-            0.0
-        } else {
-            // Manual sizing preserves a usable conversation column. Takeover
-            // intentionally consumes it completely. Both ride the sidebar
-            // tween so toggling it remains seamless.
-            if self.right_pane_expanded {
-                right_pane_takeover_width(self.viewport_width - files, sidebar)
-            } else {
-                self.settings.right_pane_width.min(right_pane_max_width(
-                    self.viewport_width - files,
-                    sidebar,
-                    CHAT_PANEL_MIN,
-                ))
-            }
-        }
-    }
-
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         // slopty: on a phone the sidebar button goes back to Sessions.
         if self.compact_back(cx) {
             return;
         }
-        if !self.settings.sidebar_collapsed
-            && self.promote_hidden_panel(AuxiliaryPanel::Sidebar, cx)
-        {
-            return;
-        }
         let from = self.sidebar_now();
-        let before = self.painted_panels(cx);
         self.session_hover_card.dismiss();
         self.sidebar_edge_bounce = None;
         self.sidebar_resize_edge = None;
         self.pane_resize_active = None;
         self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
-        // Record the open before targeting: the fit ranks columns by recency,
-        // and an unrecorded sidebar would target the width of a hidden one.
-        if !self.settings.sidebar_collapsed {
-            self.record_panel_open(AuxiliaryPanel::Sidebar, &self.panel_key(cx));
-        }
         self.sidebar_tween = Some(self.panel_tween(from, self.sidebar_target()));
         self.schedule_save(cx);
-        self.resplit_panels(before, None, cx);
         cx.notify();
-    }
-
-    /// The user's pane toggle (titlebar button, keyboard). It drives only the
-    /// surface host portion of the right pane: with just the explorer docked
-    /// it opens the surface host beside it, and it never hides the explorer —
-    /// only the explorer's own toggle undocks that portion.
-    fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        if self.right_pane_open(cx) && self.promote_hidden_panel(AuxiliaryPanel::Right, cx) {
-            return;
-        }
-        self.set_surfaces_open(!self.right_pane_open(cx), cx);
-    }
-
-    /// Closing the last surface tab closes the surface host; a docked
-    /// explorer keeps the pane open on its own.
-    fn collapse_surfaces_if_empty(&mut self, panel_key: &str, cx: &mut Context<Self>) {
-        if panel_key == self.panel_key(cx)
-            && self.right_tabs.get(panel_key).is_none_or(Vec::is_empty)
-        {
-            self.set_surfaces_open(false, cx);
-        }
-    }
-
-    /// Show or hide the surface host portion of the right pane. A no-op when
-    /// already in the requested state, so programmatic opens (a file, a
-    /// browser link, a subagent chip) never close a pane the user has open.
-    /// An open pane the window fit hides is brought forward instead, so the
-    /// requested content is reachable.
-    fn set_surfaces_open(&mut self, open: bool, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty() {
-            return;
-        }
-        if self.right_pane_open(cx) == open {
-            if open {
-                self.promote_hidden_panel(AuxiliaryPanel::Right, cx);
-            }
-            return;
-        }
-        // Reverse from the visible width when toggled during an animation.
-        let before = self.painted_panels(cx);
-        let from = before.right;
-        let content_from = before.right_content;
-        self.right_edge_bounce = None;
-        self.right_resize_edge = None;
-        self.finish_pane_resize(PaneResizeKind::Right);
-        let sidebar_now = self.sidebar_now();
-        let from_main = self.main_content_width(self.main_target_width(from, cx), cx);
-        let was_expanded = self.right_pane_expanded || self.tween_active(self.main_takeover_tween);
-        let key = self.panel_key(cx);
-        if open {
-            self.record_panel_open(AuxiliaryPanel::Right, &key);
-            // Its previews load again; the next hide releases them anew.
-            self.right_images_suspended = false;
-        } else {
-            // Closing always leaves takeover mode — reopening at full bleed
-            // with the conversation gone read as a broken chat.
-            self.right_pane_expanded = false;
-        }
-        self.panels.update(&key, |p| p.changes_open = open);
-        self.resplit_panels(before, Some(AuxiliaryPanel::Right), cx);
-        let to = self.right_settled_target(cx);
-        let pane = self.panel_tween(from, to);
-        self.right_tween = Some(pane);
-        let (content_start, content_end) = panel_content_tween(content_from, from, to);
-        self.right_content_tween = Some(WidthTween {
-            from: content_start,
-            to: content_end,
-            ..pane
-        });
-        // The conversation's return rides the pane's own tween.
-        self.main_takeover_tween = was_expanded.then(|| WidthTween {
-            from: from_main,
-            to: conversation_width(
-                self.viewport_width - self.files_reserved_width(cx),
-                sidebar_now,
-                to,
-            ),
-            ..pane
-        });
-        if open
-            && let RightSurface::Diff(id) = self.resolved_right_active(cx)
-            && let Some(changes) = self.diffs.get(&id).cloned()
-        {
-            // Reopening onto a diff tab revalidates its watch.
-            changes.update(cx, |changes, cx| changes.ensure_content(cx));
-        }
-        cx.notify();
-    }
-
-    /// Hide the pane `key` once it holds no tab: its last closed, or its last page gone.
-    pub(super) fn close_empty_right_pane(&mut self, key: &str, cx: &mut Context<Self>) {
-        let empty = if key == self.panel_key(cx) {
-            self.right_surface_rows(cx).is_empty()
-        } else {
-            self.right_tabs.get(key).is_none_or(Vec::is_empty)
-        };
-        if empty {
-            if key == self.panel_key(cx) && self.right_pane_open(cx) {
-                self.toggle_right_pane(cx);
-            } else {
-                self.panels.update(key, |p| p.changes_open = false);
-            }
-        }
-    }
-
-    /// slopty: whether the inspector shows: the pane open on it.
-    pub(super) fn inspector_shown(&self, cx: &App) -> bool {
-        self.right_pane_open(cx) && self.resolved_right_active(cx) == RightSurface::Inspector
-    }
-
-    /// slopty: ⌘I and the titlebar's toggle: the inspector in front in the pane, its tab first
-    /// in the session's strip, or the pane hidden when the inspector is what it shows. The
-    /// keyboard stays with the terminal, except on a phone, where the inspector is a sheet
-    /// ([`Self::render_compact_inspector`]). Its tab closes as any other.
-    pub(super) fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.active_chat.is_empty()
-            || !crate::inspector::inspects(self.state.read(cx), &self.active_chat)
-        {
-            return;
-        }
-        if self.inspector_shown(cx) {
-            self.set_surfaces_open(false, cx);
-            // slopty: on a touch screen the keyboard waits for a tap.
-            if !compact::touch_screen() {
-                self.focus_session_terminal(window, cx);
-            }
-            return;
-        }
-        // slopty: a phone's sheet comes up over the keyboard's band: the keyboard goes down.
-        if self.compact() {
-            window.focus(&self.unfocused.clone(), cx);
-        }
-        let key = self.panel_key(cx);
-        let tabs = self.right_tabs.entry(key).or_default();
-        if !tabs.contains(&RightSurface::Inspector) {
-            tabs.insert(0, RightSurface::Inspector);
-        }
-        self.set_surfaces_open(true, cx);
-        self.set_right_active(RightSurface::Inspector, cx);
     }
 
     /// slopty: what a press in the inspector asks.
@@ -2405,245 +1838,9 @@ impl Shell {
         }
     }
 
-    fn right_terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.right_terminal {
-            return terminal.clone();
-        }
-        let terminal = cx.new(|cx| TerminalPanel::new_embedded(self.state.clone(), cx));
-        self.right_terminal = Some(terminal.clone());
-        terminal
-    }
-
-    /// The right pane's surface tabs in the STORED (drag-reorderable) order —
-    /// `(surface, title)`; entries whose backing tab/entity is gone are
-    /// skipped.
-    fn right_surface_rows(
-        &self,
-        cx: &App,
-    ) -> Vec<(RightSurface, SharedString, bool, Option<SharedString>)> {
-        let key = self.panel_key(cx);
-        let stored: &[RightSurface] = self
-            .right_tabs
-            .get(&key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        let terminals: Vec<(u64, SharedString, bool)> = self
-            .right_terminal
-            .as_ref()
-            .map(|t| t.read(cx).tab_summaries(cx))
-            .unwrap_or_default();
-        stored
-            .iter()
-            .filter_map(|surface| match surface {
-                RightSurface::File(id) => self.file_surfaces.get(id).map(|file| {
-                    let path = self.file_surface_paths.get(id);
-                    let title = path
-                        .map(|path| workspace_file_title(path))
-                        .unwrap_or_else(|| SharedString::from("File"));
-                    (
-                        *surface,
-                        title,
-                        file.read(cx).has_unsaved_changes(),
-                        path.cloned().map(Into::into),
-                    )
-                }),
-                RightSurface::Diff(id) => self
-                    .diffs
-                    .get(id)
-                    // slopty: the pane's name; its scope is the picker's.
-                    .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
-                RightSurface::Terminal(tab) => terminals
-                    .iter()
-                    .find(|(k, _, _)| k == tab)
-                    .map(|(_, title, _)| (*surface, title.clone(), false, None)),
-                // slopty: a plain terminal's session has nothing to inspect.
-                RightSurface::Inspector => crate::inspector::inspects(
-                    self.state.read(cx),
-                    &self.active_chat,
-                )
-                .then(|| (*surface, "Inspector".into(), false, None)),
-                RightSurface::Browser(id) => self.browsers.get(id).map(|browser| {
-                    let browser = browser.read(cx);
-                    (
-                        *surface,
-                        browser.title(),
-                        false,
-                        browser.page.url.clone().map(Into::into),
-                    )
-                }),
-                RightSurface::Screen(id) => self.screen_surface_row(*id, cx), // slopty:
-                RightSurface::Page(id) => self.page_pane_row(*id, cx), // slopty:
-                RightSurface::Picker => None,
-            })
-            .collect()
-    }
-
-
-    fn workspace_path_for_surface(
-        &self,
-        surface: RightSurface,
-        cx: &App,
-    ) -> Option<WorkspacePathDrag> {
-        let path = match surface {
-            RightSurface::File(id) => self.file_surface_paths.get(&id)?.clone(),
-            RightSurface::Picker
-            | RightSurface::Diff(_)
-            | RightSurface::Terminal(_)
-            | RightSurface::Inspector
-            | RightSurface::Screen(_) // slopty:
-            | RightSurface::Page(_) // slopty:
-            | RightSurface::Browser(_) => {
-                return None;
-            }
-        };
-        let RightSurface::File(id) = surface else {
-            return None;
-        };
-        let origin = self.file_surfaces.get(&id)?.read(cx).interaction_origin(cx);
-        Some(WorkspacePathDrag::new(path, false).with_origin(
-            origin,
-            crate::files::WorkspacePathSource::FileTab,
-            None,
-        ))
-    }
-
-    /// Drag-reorder a surface tab within this chat's strip.
-    fn reorder_right_tabs(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        let key = self.panel_key(cx);
-        if let Some(tabs) = self.right_tabs.get_mut(&key)
-            && from < tabs.len()
-            && to < tabs.len()
-            && from != to
-        {
-            let surface = tabs.remove(from);
-            tabs.insert(to, surface);
-            cx.notify();
-        }
-    }
-
-    /// Track the hovered drop slot mid-drag (the terminal drawer's
-    /// `update_drag_over`, ported: epoch bumps restart the slide tween).
-    fn update_right_tab_drag_over(&mut self, from: usize, over: usize, cx: &mut Context<Self>) {
-        match &mut self.right_tab_drag {
-            Some(drag) if drag.over != over => {
-                drag.prev_over = drag.over;
-                drag.over = over;
-                drag.epoch += 1;
-                cx.notify();
-            }
-            Some(_) => {}
-            None => {
-                self.right_tab_drag = Some(RightTabDragState {
-                    from,
-                    over,
-                    epoch: 0,
-                    prev_over: from,
-                });
-                cx.notify();
-            }
-        }
-    }
-
-    /// The surface that actually renders: the stored pick when it still
-    /// exists, else the most recently visited live tab, else the picker.
-    /// Terminal keys go stale when their tab closes/exits — never render a dead surface.
-    fn resolved_right_active(&self, cx: &App) -> RightSurface {
-        let picked = self.panels.get(&self.panel_key(cx)).right_active;
-        let rows = self.right_surface_rows(cx);
-        let exists = match picked {
-            RightSurface::Picker => true,
-            surface => rows.iter().any(|(s, _, _, _)| *s == surface),
-        };
-        if exists {
-            picked
-        } else {
-            self.panels.right_surface_fallback(
-                &self.panel_key(cx),
-                rows.iter().map(|(surface, _, _, _)| *surface),
-            )
-        }
-    }
-
     fn suspend_file_images(&mut self, cx: &mut Context<Self>) {
         for files in self.files.values().chain(self.file_surfaces.values()) {
             files.update(cx, |files, cx| files.suspend_images(cx));
-        }
-    }
-
-    /// Release image previews once the surface host stops painting: after
-    /// its close mask lands, while the window fit hides it, or off the chat
-    /// route. Once per hide, so a quick reversal never unloads the frame.
-    fn suspend_hidden_right_images(&mut self, cx: &mut Context<Self>) {
-        let painting = matches!(self.route, Route::Chat)
-            && ((self.horizontal_fit().right
-                && (self.right_pane_open(cx) || self.tween_active(self.right_tween)))
-                || self.fit_exit_width(1).is_some());
-        if painting {
-            self.right_images_suspended = false;
-        } else if !self.right_images_suspended {
-            self.suspend_file_images(cx);
-            self.right_images_suspended = true;
-        }
-    }
-
-    fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
-        if self.resolved_right_active(cx) != surface {
-            self.suspend_file_images(cx);
-        }
-        let key = self.panel_key(cx);
-        self.panels.update(&key, |p| p.right_active = surface);
-        match surface {
-            RightSurface::File(id) => {
-                if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                    file.update(cx, |file, cx| file.ensure_loaded(cx));
-                    if let Some(path) = self.file_surface_paths.get(&id).cloned() {
-                        let chat_id = file.read(cx).chat_id().to_owned();
-                        self.note_recent_file(&chat_id, &path);
-                    }
-                }
-            }
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| {
-                    panel.select_tab_by_key(tab, cx);
-                    panel.request_focus(cx);
-                });
-            }
-            RightSurface::Diff(id) => {
-                if let Some(changes) = self.diffs.get(&id).cloned() {
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                }
-            }
-            RightSurface::Inspector => {}
-            RightSurface::Browser(_) => {}
-            RightSurface::Screen(id) => self.focus_screen_surface(id, cx), // slopty:
-            RightSurface::Page(_) => {} // slopty:
-            RightSurface::Picker => {}
-        }
-        self.sync_explorer_selection(cx);
-        cx.notify();
-    }
-
-    fn focus_right_file_editor(
-        &mut self,
-        surface: RightSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let RightSurface::Browser(id) = surface {
-            if let Some(browser) = self.browsers.get(&id).cloned() {
-                browser.update(cx, |browser, cx| browser.focus_address(window, cx));
-            }
-            return;
-        }
-        let files = match surface {
-            RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
-            _ => None,
-        };
-        if let Some(files) = files {
-            files.update(cx, |files, cx| {
-                files.focus_editor(window, cx);
-            });
         }
     }
 
@@ -2766,7 +1963,6 @@ impl Shell {
         }
         let outcome = resolved.web_outcome(cfg!(any(target_os = "macos", target_os = "linux", windows)));
         if outcome == LinkOutcome::Internal {
-            self.set_surfaces_open(true, cx);
             self.add_browser_surface(activation.target.navigation.clone().ok(), window, cx);
         }
         outcome
@@ -2833,23 +2029,19 @@ impl Shell {
                 crate::browser::BrowserEvent::NewTab(url) => {
                     // A background page cannot open a tab in the wrong session.
                     if this.panel_key(cx) == owner
-                        && this.resolved_right_active(cx) == RightSurface::Browser(id)
+                        && this.front_view(cx) == Some(RightSurface::Browser(id))
                     {
                         this.add_browser_surface(url.clone(), window, cx);
                     }
                 }
                 crate::browser::BrowserEvent::Close => {
-                    this.close_right_surface(RightSurface::Browser(id), window, cx)
+                    this.close_view(RightSurface::Browser(id), cx);
                 }
             }
         });
         self.browsers.insert(id, browser.clone());
         self.browser_subs.insert(id, sub);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Browser(id));
-        self.set_right_active(RightSurface::Browser(id), cx);
+        self.open_view(RightSurface::Browser(id), cx);
         browser.update(cx, |browser, cx| {
             if let Some(url) = url {
                 browser.navigate(&url, window, cx);
@@ -2859,9 +2051,8 @@ impl Shell {
         });
     }
 
-    /// The picker's Diffs card / the `+` menu's Diff row: every click opens a
-    /// FRESH diff tab with its own scope/base selection (multiple diff
-    /// panels, user request).
+    /// A fresh view of the session's changes beside it, with a scope and base of its own: one
+    /// kept across launches comes back so, and several can stand at once.
     fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
         self.register_diff_surface(changes, window, cx);
@@ -2894,18 +2085,15 @@ impl Shell {
             return;
         }
         let (owner_chat, owner_state) = owner;
-        self.set_surfaces_open(true, cx);
         let panel_key = self.panel_key(cx);
         let lookup = (panel_key.clone(), owner_chat.clone(), path.clone());
         if let Some(id) = self.file_surface_keys.get(&lookup).copied() {
-            let surface = RightSurface::File(id);
-            self.set_right_active(surface, cx);
+            self.open_view(RightSurface::File(id), cx);
             if let Some((line, column)) = location
                 && let Some(file) = self.file_surfaces.get(&id).cloned()
             {
                 file.update(cx, |file, cx| file.navigate_to_line(line, column, cx));
             }
-            self.focus_right_file_editor(surface, window, cx);
             return;
         }
 
@@ -2959,7 +2147,8 @@ impl Shell {
                         this.add_file_surface_at(owner, path.clone(), None, window, cx)
                     }
                     FilesEvent::RevealFile(path) => {
-                        this.add_files_surface(window, cx);
+                        this.ensure_explorer(window, cx);
+                        this.open_view(RightSurface::Files, cx);
                         if let Some(files) = this.files.get(&this.panel_key(cx)).cloned() {
                             files.update(cx, |files, cx| {
                                 files.reveal_file_explicit(path.clone(), cx)
@@ -2996,11 +2185,7 @@ impl Shell {
         self.file_surface_paths.insert(id, path);
         self.file_surface_keys.insert(lookup, id);
         self.file_surface_subs.insert(id, sub);
-        push_unique_right_surface(
-            self.right_tabs.entry(panel_key).or_default(),
-            RightSurface::File(id),
-        );
-        self.set_right_active(RightSurface::File(id), cx);
+        self.open_view(RightSurface::File(id), cx);
         if let Some((line, column)) = location
             && let Some(file) = self.file_surfaces.get(&id).cloned()
         {
@@ -3020,7 +2205,6 @@ impl Shell {
     ) -> bool {
         let shown = !self.active_chat.is_empty() && self.active_chat == chat_id;
         if shown && crate::settings::current(cx).open_web_links_in_slopty {
-            self.set_surfaces_open(true, cx);
             self.add_browser_surface(Some(url.to_owned()), window, cx);
         } else {
             cx.open_url(url);
@@ -3080,7 +2264,6 @@ impl Shell {
             return false;
         };
 
-        self.set_surfaces_open(true, cx);
         self.add_file_surface_at(
             owner,
             link.path,
@@ -3146,30 +2329,7 @@ impl Shell {
             );
         self.diffs.insert(id, changes);
         self.diff_subs.insert(id, sub);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Diff(id));
-        self.set_right_active(RightSurface::Diff(id), cx);
-    }
-
-    /// The picker's Terminal card / the `+` menu's Terminal row: every click
-    /// opens a fresh embedded terminal tab.
-    fn add_terminal_surface(&mut self, cx: &mut Context<Self>) {
-        let panel = self.right_terminal_panel(cx);
-        let opened = panel.update(cx, |panel, cx| {
-            panel.set_open(true, cx);
-            panel.open_tab_for_selected(cx)
-        });
-        if let Some(tab) = opened {
-            let key = self.panel_key(cx);
-            self.right_tabs
-                .entry(key)
-                .or_default()
-                .push(RightSurface::Terminal(tab));
-            self.set_right_active(RightSurface::Terminal(tab), cx);
-        }
+        self.open_view(RightSurface::Diff(id), cx);
     }
 
     /// Spawn-chip events from the primary transcript AND from subagent-tab
@@ -3185,101 +2345,6 @@ impl Shell {
             // terminal stays (a subagent runs inside its agent's session, `panel_owner`).
             TranscriptEvent::OpenSubagent { chat_id } => self.open_chat(chat_id.clone(), cx),
         }
-    }
-
-    /// Snapshot the displayed order before closing tabs mutates it.
-    fn tabs_to_close(
-        &self,
-        surface: RightSurface,
-        action: TabCloseAction,
-        cx: &App,
-    ) -> Vec<RightSurface> {
-        let tabs: Vec<_> = self
-            .right_surface_rows(cx)
-            .into_iter()
-            .map(|(tab, _, _, _)| tab)
-            .collect();
-        let Some(index) = tabs.iter().position(|tab| *tab == surface) else {
-            return Vec::new();
-        };
-        tabs.into_iter()
-            .enumerate()
-            .filter_map(|(i, tab)| action.takes(i, index).then_some(tab))
-            .collect()
-    }
-
-    /// Close one surface through its normal lifecycle, including unsaved-file prompts.
-    fn close_right_surface(
-        &mut self,
-        surface: RightSurface,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let was_active = self.resolved_right_active(cx) == surface;
-        let restore_focus = was_active && self.navigation_focus.in_right(window, cx);
-        self.navigation_focus.remember(&self.shortcut_focus, window, cx);
-        let key = self.panel_key(cx);
-        let files = match surface {
-            RightSurface::File(id) => self.file_surfaces.get(&id).cloned(),
-            _ => None,
-        };
-        if let Some(files) = files {
-            match files.update(cx, |files, cx| files.prepare_close(cx)) {
-                FilesCloseDisposition::Allow => {
-                    self.complete_file_close(surface, &key, cx);
-                    if restore_focus {
-                        self.restore_right_focus_after_close(window, cx);
-                    }
-                }
-                FilesCloseDisposition::Pending | FilesCloseDisposition::Blocked => {
-                    self.pending_file_closes.insert(surface);
-                    self.set_right_active(surface, cx);
-                }
-            }
-            return;
-        }
-        self.remember_closed_tab(&key, surface, cx); // slopty: ⌘⇧T opens it again
-        if let Some(tabs) = self.right_tabs.get_mut(&key) {
-            tabs.retain(|s| *s != surface);
-        }
-        match surface {
-            RightSurface::File(_) => {}
-            RightSurface::Browser(id) => {
-                if let Some(browser) = self.browsers.remove(&id) {
-                    browser.update(cx, |browser, cx| browser.close(cx));
-                }
-                self.browser_subs.remove(&id);
-            }
-            RightSurface::Diff(id) => {
-                // Dropping the entity tears down its diff watch.
-                self.diffs.remove(&id);
-                self.diff_subs.remove(&id);
-            }
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                panel.update(cx, |panel, cx| panel.close_tab_by_key(tab, window, cx));
-            }
-            RightSurface::Inspector => {}
-            RightSurface::Screen(id) => self.close_screen_surface(id, cx), // slopty:
-            RightSurface::Page(id) => self.close_page_pane(id, cx), // slopty:
-            RightSurface::Picker => {}
-        }
-        self.close_empty_right_pane(&key, cx);
-        self.panels.forget_right_surface(&key, surface);
-        let fallback = self.panels.right_surface_fallback(
-            &key,
-            self.right_tabs.get(&key).into_iter().flatten().copied(),
-        );
-        self.panels.update(&key, |p| {
-            if p.right_active == surface {
-                p.right_active = fallback;
-            }
-        });
-        self.collapse_surfaces_if_empty(&key, cx);
-        if restore_focus {
-            self.restore_right_focus_after_close(window, cx);
-        }
-        cx.notify();
     }
 
     fn on_file_close_ready(
@@ -3306,36 +2371,6 @@ impl Shell {
 
     pub fn prepare_window_close(&mut self, cx: &mut Context<Self>) -> bool {
         self.prepare_exit(PendingExit::CloseWindow, cx)
-    }
-
-    /// The first rung of `⌘W` / Window > Close Window: when the right pane is
-    /// open on a real surface (the file / diff / terminal / browser tab the
-    /// user just opened), close THAT and leave the window alone. Returns true
-    /// when the close was consumed by the pane.
-    ///
-    /// The pane's empty picker state and a closed pane both yield false, so the
-    /// caller falls through to [`Self::prepare_window_close`] and the window
-    /// closes — the same cascade browsers use. The native traffic-light close
-    /// deliberately skips this rung: it always closes the window.
-    pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(surface) = self.closable_right_surface(cx) else {
-            return false;
-        };
-        self.close_right_surface(surface, window, cx);
-        true
-    }
-
-    /// The right pane's closable surface for the `⌘W` cascade: the resolved
-    /// active surface while the pane is open, or `None` on the picker empty
-    /// state / a closed pane / the new-session canvas.
-    fn closable_right_surface(&self, cx: &App) -> Option<RightSurface> {
-        if !self.right_pane_shown(cx) {
-            return None;
-        }
-        match self.resolved_right_active(cx) {
-            RightSurface::Picker => None,
-            surface => Some(surface),
-        }
     }
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3380,19 +2415,10 @@ impl Shell {
         let mut dirty = editors.collect::<Vec<_>>();
         dirty.sort_by_key(|(key, _)| (key != &current, key.clone()));
         if let Some((key, surface)) = dirty.into_iter().next() {
-            self.panels
-                .update(&key, |panel| panel.right_active = surface);
-            if key == current {
-                // The ordinary open: it animates, re-splits the columns, and
-                // brings forward a pane the window fit hides.
-                self.apply_nav(NavEntry::Chat(key), cx);
-                self.set_surfaces_open(true, cx);
-            } else {
-                // Rank the pane most recent so a narrow window shows it.
-                self.panels.update(&key, |panel| panel.changes_open = true);
-                self.record_panel_open(AuxiliaryPanel::Right, &key);
-                self.apply_nav(NavEntry::Chat(key), cx);
-            }
+            // Its session on screen, and its pane, kept since it opened, given the keyboard.
+            self.panes.entry(key.clone()).or_default().focus(panes::Pane::View(surface));
+            self.pane_keyboard_pending = true;
+            self.apply_nav(NavEntry::Chat(key), cx);
         }
     }
 
@@ -3400,128 +2426,6 @@ impl Shell {
         self.file_surfaces
             .values()
             .all(|surface| !surface.read(cx).has_unsaved_changes())
-    }
-
-    fn complete_file_close(
-        &mut self,
-        surface: RightSurface,
-        panel_key: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.remember_closed_tab(panel_key, surface, cx); // slopty: ⌘⇧T opens it again
-        if let Some(tabs) = self.right_tabs.get_mut(panel_key) {
-            tabs.retain(|candidate| *candidate != surface);
-        }
-        match surface {
-            RightSurface::File(id) => {
-                self.file_surfaces.remove(&id);
-                self.file_surface_paths.remove(&id);
-                self.file_surface_subs.remove(&id);
-                self.file_surface_keys.retain(|_, value| *value != id);
-            }
-            _ => return,
-        }
-        self.pending_file_closes.remove(&surface);
-        self.close_empty_right_pane(panel_key, cx);
-        self.panels.forget_right_surface(panel_key, surface);
-        let fallback = self.panels.right_surface_fallback(
-            panel_key,
-            self.right_tabs
-                .get(panel_key)
-                .into_iter()
-                .flatten()
-                .copied(),
-        );
-        self.panels.update(panel_key, |panel| {
-            if panel.right_active == surface {
-                panel.right_active = fallback;
-            }
-        });
-        self.collapse_surfaces_if_empty(panel_key, cx);
-        cx.notify();
-    }
-
-    fn terminal_panel(&mut self, cx: &mut Context<Self>) -> Entity<TerminalPanel> {
-        if let Some(terminal) = &self.terminal {
-            return terminal.clone();
-        }
-        let terminal = cx.new(|cx| TerminalPanel::new(self.state.clone(), cx));
-        self.terminal = Some(terminal.clone());
-        terminal
-    }
-
-    fn terminal_target(&self, cx: &App) -> f32 {
-        if self.terminal_open(cx) {
-            self.settings.terminal_height
-        } else {
-            0.0
-        }
-    }
-
-    /// Cmd/Ctrl+J and the header button (feature-inventory §1.10). Height
-    /// animates 200 ms; closing detaches (PTYs stay alive), opening restores.
-    /// The flag is per chat (slopty `sessionPanels`).
-    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let from = self.terminal_geometry.get().height;
-        let key = self.panel_key(cx);
-        let open = self.panels.toggle_terminal(&key);
-        self.terminal_tween = Some(WidthTween::new(from, self.terminal_target(cx), self.now()));
-        let panel = self.terminal_panel(cx);
-        panel.update(cx, |panel, cx| panel.set_open(open, cx));
-        if open {
-            panel.update(cx, |panel, cx| panel.request_focus(cx));
-            // Opening lands keyboard focus IN the shell — typing goes straight
-            // to the prompt, no click needed (slopty terminal-panel.tsx: the
-            // visible+active effect calls `terminal.focus()` on every open).
-            // The handle is focusable before the panel's first paint; once the
-            // terminal body mounts with `track_focus` it receives the keys.
-            window.focus(&panel.read(cx).focus_handle(), cx);
-        } else {
-            // Hiding the panel removes the (likely focused) terminal view;
-            // with nothing focused, window key bindings stop dispatching, so
-            // hand focus to the session's terminal. (Cmd+J is a pure toggle — a second
-            // press closes even while the terminal is focused, as in slopty's
-            // `useHotkey(toggleShortcut, ... setOpenScoped(!open))`.)
-            self.focus_session_terminal(window, cx); // slopty: the session, not a composer
-        }
-        self.terminal_tween_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(RESIZE.total().mul_f32(motion::speed_scale()) + Duration::from_millis(30))
-                .await;
-            this.update(cx, |shell, cx| {
-                shell.terminal_tween = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
-    fn on_terminal_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<TerminalResize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some((anchor_y, anchor_h)) = self.terminal_drag_anchor else {
-            return;
-        };
-        let dy = anchor_y - f32::from(event.event.position.y);
-        let viewport_h = f32::from(window.viewport_size().height);
-        let requested = anchor_h + dy;
-        let max = self
-            .terminal_geometry
-            .get()
-            .limit
-            .min(viewport_h * TERMINAL_MAX_VH);
-        let min = TERMINAL_MIN_HEIGHT.min(max);
-        self.settings.terminal_height = clamp_terminal_height(requested.min(max), viewport_h);
-        self.pane_resize_dragging = Some(PaneResizeKind::Terminal);
-        self.pane_resize_active =
-            (requested > min && requested < max).then_some(PaneResizeKind::Terminal);
-        self.terminal_tween = None; // live drag tracks the pointer
-        self.schedule_save(cx);
-        cx.notify();
     }
 
     fn on_sidebar_drag(
@@ -3545,9 +2449,7 @@ impl Shell {
         self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Sidebar);
         self.sidebar_resize_edge = sample.edge;
         self.schedule_save(cx);
-        if was_collapsed {
-            self.record_panel_open(AuxiliaryPanel::Sidebar, &self.panel_key(cx));
-        }
+        let _ = was_collapsed;
         cx.notify();
     }
 
@@ -3560,63 +2462,7 @@ impl Shell {
         }
         match kind {
             PaneResizeKind::Sidebar => self.sidebar_resize_edge = None,
-            PaneResizeKind::Terminal => self.terminal_drag_anchor = None,
-            PaneResizeKind::Right => self.right_resize_edge = None,
-            PaneResizeKind::Files => {}
         }
-    }
-
-    fn on_right_pane_drag(
-        &mut self,
-        event: &gpui::DragMoveEvent<RightPaneResize>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let viewport = f32::from(window.viewport_size().width);
-        let width = viewport - self.files_reserved_width(cx) - f32::from(event.event.position.x);
-        // Use the same shared budget as rendering, including compact windows.
-        let max = self.surface_max_width(cx);
-        let sample = if max >= RIGHT_PANE_MIN {
-            motion::resize_drag_sample(
-                width,
-                RIGHT_PANE_MIN,
-                max,
-                self.right_resize_edge,
-                self.reduced_motion.get(),
-            )
-        } else {
-            motion::ResizeDragSample {
-                width: max,
-                edge: None,
-                starts_bounce: false,
-            }
-        };
-        self.settings.right_pane_width = sample.width;
-        self.pane_resize_dragging = Some(PaneResizeKind::Right);
-        if sample.starts_bounce {
-            self.right_edge_bounce = sample.edge.map(|edge| motion::ResizeEdgeBounce::new(edge, self.now()));
-        } else if sample.edge.is_none() {
-            self.right_edge_bounce = None;
-        }
-        self.pane_resize_active = sample.edge.is_none().then_some(PaneResizeKind::Right);
-        self.right_resize_edge = sample.edge;
-        self.right_tween = None;
-        self.right_content_tween = None;
-        self.main_takeover_tween = None;
-        self.schedule_save(cx);
-        cx.notify();
-    }
-
-    // slopty: the side pane's splitter from the keyboard.
-    /// Widens the side pane by `wider` pt (narrows it when negative), within its bounds.
-    fn nudge_right_pane(&mut self, wider: f32, cx: &mut Context<Self>) {
-        let max = self.surface_max_width(cx).max(RIGHT_PANE_MIN);
-        self.settings.right_pane_width =
-            (self.settings.right_pane_width + wider).clamp(RIGHT_PANE_MIN, max);
-        self.right_tween = None;
-        self.right_content_tween = None;
-        self.schedule_save(cx);
-        cx.notify();
     }
 
     /// Publish this view's working copy to the central settings store. The
@@ -4677,7 +3523,7 @@ impl Shell {
     pub(super) fn sidebar_now(&self) -> f32 {
         let fit = self.horizontal_fit();
         if !fit.sidebar {
-            return self.fit_exit_width(0).unwrap_or(0.0);
+            return self.fit_exit_width().unwrap_or(0.0);
         }
         let limit = self.sidebar_tween_limit(fit.sidebar_limit);
         // The edge bounce applies past the limit so the drag cue at the
@@ -4692,33 +3538,6 @@ impl Shell {
         .max(0.0)
     }
 
-    /// The surface host's eased width within `max`, plus its edge bounce,
-    /// which may cross `max` like the sidebar's.
-    fn right_now(&self, max: f32, cx: &App) -> f32 {
-        self.ease_toward(self.right_tween, self.right_target(cx))
-            .min(max)
-            + self.eval_resize_edge_bounce(
-                self.right_edge_bounce,
-                self.right_pane_open(cx) && !self.right_pane_expanded,
-            )
-    }
-
-    /// slopty: the side pane's contents' opacity while its width opens from or closes to
-    /// nothing ([`motion::pane_content_opacity`]); whole otherwise, and under reduced motion.
-    fn right_content_opacity(&self) -> f32 {
-        let Some(tween) = self.right_tween.filter(|tween| self.tween_active(Some(*tween))) else {
-            return 1.0;
-        };
-        let elapsed = self.tween_elapsed(tween.started);
-        if tween.from < 1.0 && tween.to > tween.from {
-            motion::pane_content_opacity(true, elapsed)
-        } else if tween.to < 1.0 && tween.from > tween.to {
-            motion::pane_content_opacity(false, elapsed)
-        } else {
-            1.0
-        }
-    }
-
     fn tween_active(&self, tween: Option<WidthTween>) -> bool {
         tween.is_some_and(|tween| {
             !self.reduced_motion.get() && self.tween_elapsed(tween.started) < tween.duration
@@ -4731,39 +3550,6 @@ impl Shell {
                 !self.reduced_motion.get() && self.tween_elapsed(transition.started) < transition.duration
             })
             .map(|transition| (transition.from, transition.to))
-    }
-
-    /// Right-anchored variant for the changes pane. The outer width follows the
-    /// existing shell tween, while descendants retain the larger endpoint's
-    /// geometry throughout the transition. This mirrors the sidebar's stable
-    /// inner/clipped outer behavior without changing the center column's
-    /// upstream flex layout.
-    fn right_pane_container(
-        &self,
-        target: f32,
-        visible: f32,
-        edge_offset: f32,
-        inner: AnyElement,
-    ) -> AnyElement {
-        let content_width = self.right_content_width(target) + edge_offset;
-        div()
-            .id("right-panel")
-            .debug_selector(|| "right-panel".into())
-            .h_full()
-            .flex_none()
-            .relative()
-            .overflow_hidden()
-            .w(px(visible))
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(px(content_width))
-                    .child(inner),
-            )
-            .into_any_element()
     }
 
     /// The animated spacer clearing the macOS traffic lights ahead of a
@@ -5515,11 +4301,9 @@ impl Shell {
 
     // slopty: no accounts, sync or sign-in.
 
+    /// The changes with the keyboard.
     fn active_changes(&self, cx: &App) -> Option<Entity<Changes>> {
-        if !self.right_pane_shown(cx) {
-            return None;
-        }
-        let RightSurface::Diff(id) = self.resolved_right_active(cx) else {
+        let Some(RightSurface::Diff(id)) = self.front_view(cx) else {
             return None;
         };
         self.diffs.get(&id).cloned()
@@ -5587,13 +4371,6 @@ impl Shell {
             return true;
         }
 
-        if self.right_plus.is_open() {
-            self.close_right_plus(cx);
-            return true;
-        }
-        if self.right_plus.get().is_some() {
-            return true;
-        }
         self.active_changes(cx)
             .is_some_and(|changes| changes.update(cx, |changes, cx| changes.handle_escape(cx)))
     }
@@ -5639,6 +4416,17 @@ impl Shell {
             }
             cx.stop_propagation();
             return;
+        }
+        // slopty: Esc a view took no use of puts the keyboard back in the session's terminal
+        // (`docs/decisions/layout.md`, "No permanent right column"); the view stays.
+        if event.keystroke.key == "escape"
+            && modifiers == gpui::Modifiers::default()
+            && matches!(self.route, Route::Chat)
+            && !self.overlay_owns_keyboard()
+            && matches!(self.panes_now(cx).focused(), panes::Pane::View(_))
+        {
+            self.focus_pane(panes::Pane::Session, cx);
+            cx.stop_propagation();
         }
     }
 
@@ -5742,86 +4530,6 @@ impl Shell {
                         .children(open_in)
                 }
             };
-            let mut menu = menu;
-            if let Some((key, surface)) = menu_state.tab {
-                if !chat_id.is_empty() {
-                    menu = menu.child(popover::menu_separator());
-                }
-                // slopty: ⌘W closes the tab in front, so only its own row says so.
-                let in_front = self.panel_key(cx) == key
-                    && self.closable_right_surface(cx) == Some(surface);
-                let close_keys = in_front
-                    .then(|| crate::keys::for_action(&crate::app_menus::CloseTab, None, window, cx))
-                    .flatten();
-                for (ix, (action, label)) in [
-                    (TabCloseAction::This, "Close tab"),
-                    (TabCloseAction::Others, "Close other tabs"),
-                    (TabCloseAction::Left, "Close tabs to the left"),
-                    (TabCloseAction::Right, "Close tabs to the right"),
-                ]
-                .into_iter()
-                .enumerate()
-                {
-                    let enabled = !self.tabs_to_close(surface, action, cx).is_empty();
-                    let key = key.clone();
-                    let hint = matches!(action, TabCloseAction::This)
-                        .then(|| close_keys.clone())
-                        .flatten();
-                    let row = popover::menu_row(&theme, false, label)
-                            .id(SharedString::from(label))
-                            .role(gpui::Role::MenuItem)
-                            .aria_label(label) // slopty
-                            .aria_disabled(!enabled)
-                            .when(!enabled, |el| {
-                                el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if !enabled {
-                                    return;
-                                }
-                                this.close_chat_menu(cx);
-                                if this.panel_key(cx) == key {
-                                    for tab in this.tabs_to_close(surface, action, cx) {
-                                        this.close_right_surface(tab, window, cx);
-                                    }
-                                }
-                            }))
-                            .child(div().flex_1().child(label))
-                            .children(hint.map(|hint| popover::kbd_hint(&theme, &hint)));
-                    menu = menu.child(self.chat_menu_hover_row(
-                        CHAT_MENU_ROW_TAB + ix as u8,
-                        row,
-                        cx,
-                    ));
-                }
-                // slopty: the tab closed last comes back here as from ⇧⌘T.
-                let reopen_label = "Reopen closed tab";
-                let can_reopen = self.closed_tabs.iter().any(|(pane, _)| *pane == key);
-                let reopen_keys =
-                    crate::keys::for_action(&chrome_keys::ReopenClosedTab, None, window, cx);
-                let row = popover::menu_row(&theme, false, reopen_label)
-                    .id(SharedString::from(reopen_label))
-                    .role(gpui::Role::MenuItem)
-                    .aria_label(reopen_label) // slopty
-                    .aria_disabled(!can_reopen)
-                    .when(!can_reopen, |el| {
-                        el.opacity(crate::theme::DISABLED_OPACITY).cursor_default()
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if !can_reopen {
-                            return;
-                        }
-                        this.close_chat_menu(cx);
-                        this.reopen_closed_tab(window, cx);
-                    }))
-                    .child(div().flex_1().child(reopen_label))
-                    .children(reopen_keys.map(|keys| popover::kbd_hint(&theme, &keys)));
-                menu = menu.child(popover::menu_separator()).child(self.chat_menu_hover_row(
-                    CHAT_MENU_ROW_TAB + 4,
-                    row,
-                    cx,
-                ));
-            }
             let menu = menu.into_any_element();
             overlays.push(popover::menu_at(
                 "chat-context-menu",
@@ -5884,37 +4592,15 @@ impl Shell {
         let clear = highlight.opacity(0.0);
         let release_key = fade_key.clone();
         let release_out_key = fade_key.clone();
-        // slopty: a splitter a screen reader names (T3's `role="separator"`); the side pane's
-        // takes ← and → by 16 pt from the keyboard, its ring on the seam.
-        let ring = crate::surface_chrome::ring(theme, -crate::surface_chrome::RING_WIDTH);
+        // slopty: a splitter a screen reader names (T3's `role="separator"`).
         let name = match kind {
             PaneResizeKind::Sidebar => "Resize sidebar",
-            PaneResizeKind::Right => "Resize side pane",
-            PaneResizeKind::Files => "Resize files panel",
-            PaneResizeKind::Terminal => "Resize terminal",
         };
         div()
             .id(id)
             .role(gpui::Role::Splitter)
             .aria_label(name)
-            .aria_orientation(if kind == PaneResizeKind::Terminal {
-                gpui::Orientation::Horizontal
-            } else {
-                gpui::Orientation::Vertical
-            })
-            .when(kind == PaneResizeKind::Right, |el| {
-                el.tab_index(0).focus_visible(move |style| style.outline_ring(ring)).on_key_down(
-                    cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                        let wider = match event.keystroke.key.as_str() {
-                            "left" => RIGHT_PANE_NUDGE,
-                            "right" => -RIGHT_PANE_NUDGE,
-                            _ => return,
-                        };
-                        this.nudge_right_pane(wider, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-            })
+            .aria_orientation(gpui::Orientation::Vertical)
             .absolute()
             .top(px(PANE_RESIZE_HITBOX_TOP))
             .bottom_0()
@@ -5985,10 +4671,10 @@ impl Shell {
             )
     }
 
-    /// slopty: the main column is the selected session's terminal, full height and width with
-    /// nothing over it, and the shell dock (⌘J) under it (`docs/decisions/ui.md`, "A session is
-    /// its terminal"). With no session selected it
-    /// offers to start one; with nowhere to work yet, the first step.
+    /// slopty: the main column is the selected session's view: its terminal, full height and
+    /// width with nothing over it, and the panes split or summoned beside it
+    /// (`docs/decisions/layout.md`, "One session per view, splits on demand"). With no session
+    /// selected it offers to start one; with nowhere to work yet, the first step.
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
@@ -5996,19 +4682,7 @@ impl Shell {
         let selected = self.state.read(cx).selected_chat.clone();
         let has_terminal =
             selected.as_deref().is_some_and(|chat| self.state.read(cx).session_terminal(chat).is_some());
-        let terminal_geometry =
-            std::rc::Rc::new(std::cell::Cell::new(crate::terminal::dock::Geometry::new(
-                self.eval_tween(self.terminal_tween, self.terminal_target(cx)),
-                self.settings.terminal_height,
-                (self.viewport_height * TERMINAL_MAX_VH).min(
-                    (self.viewport_height - Theme::TITLEBAR_HEIGHT).max(0.0),
-                ),
-            )));
         let outlet: AnyElement = if has_terminal {
-            // slopty: a glide around the terminal reflows its TUI once (`glide_hold`).
-            let (width, height) = self.glide_hold(terminal_geometry.get(), cx);
-            let by = gpui::size(px(width), px(height));
-            self.session_terminal.update(cx, |panel, cx| panel.hold_fit(by, cx));
             let landing = self.landing_fade(selected.as_deref(), window, cx);
             div()
                 .id("session-terminal")
@@ -6099,9 +4773,9 @@ impl Shell {
         div()
             .id("main-column")
             .debug_selector(|| "main-column".into())
-            .track_focus(&self.navigation_focus.main)
+            .track_focus(&self.main_focus)
             .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                this.capture_navigation_focus(false, false, window, cx);
+                this.capture_navigation_focus(window, cx);
             }))
             .relative()
             .flex_1()
@@ -6113,8 +4787,12 @@ impl Shell {
             // too (`docs/decisions/layout.md`, "One row of chrome").
             .when(has_terminal, |column| column.bg(self.shown_ground(cx)))
             .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(div().flex_1().min_h_0().flex().flex_col().child(outlet))
-            .child(self.render_terminal_container(terminal_geometry, window, cx))
+            .child({
+                // The session's view, its terminal or that it ended, or the new-session canvas,
+                // among its panes: a shell splits beside either.
+                let session = div().size_full().flex().flex_col().child(outlet).into_any_element();
+                div().flex_1().min_h_0().child(self.render_panes(session, window, cx)).into_any_element()
+            })
             .into_any_element()
     }
 
@@ -6289,746 +4967,9 @@ impl Shell {
             .into_any_element()
     }
 
-    /// The "↓ Scroll to bottom" pill (round-9 §3): a LABELED rounded-full
-    /// chip — down-arrow glyph + 13px label on a near-opaque raised surface
-    /// with a hairline — horizontally centered over the transcript column and
-    /// floating six pixels above the composer. It shares the composer's
-    /// measured dock transform and paints after it, outside the transcript fade.
-    fn render_jump_to_bottom(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // slopty: and it leaves faster than it came (design-inspiration item 11).
-        let shown = self.transcript.read(cx).jump_button_shown();
-        let leaving = jump_presence("jump-to-bottom", shown, crate::clock::now(cx))?;
-        if leaving.is_some() {
-            // Drawn again until it has gone, so a spent button never lingers unseen.
-            cx.notify();
-        }
-        Some(
-            div()
-                .absolute()
-                // Share the composer's measured translation, not its final
-                // bottom-stack target. Paint after the composer so it cannot
-                // pass over this control during docking.
-                .top(px(-36.0))
-                .left_0()
-                .right(px(10.0))
-                .flex()
-                .justify_center()
-                .child(self.jump_pill("jump-to-bottom", "jump-pill", self.transcript.clone(), leaving, cx))
-                .into_any_element(),
-        )
-    }
 
-    /// The jump pill itself — shared between the conversation overlay and
-    /// the subagent pane so both read as one control. `anim_key`/`hover_key`
-    /// must be distinct per instance (they key global animation state).
-    ///
-    /// Use the shared popover tint and blur, with a separate hover wash so
-    /// the floating control retains the same glass surface in either theme.
-    fn jump_pill(
-        &self,
-        anim_key: &'static str,
-        hover_key: &'static str,
-        transcript: Entity<Transcript>,
-        leaving: Option<u64>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        // slopty: it says how many rows arrived while the person read above (item 11).
-        let unseen = transcript.read(cx).jump_unseen();
-        let roll = (motion::reduced_motion(cx), crate::clock::now(cx));
-        let button = jump_button(anim_key, hover_key, unseen, roll, Theme::of(cx), cx.listener(move |_, _, _, cx| {
-            transcript.update(cx, |transcript, cx| transcript.jump_to_bottom(cx));
-        }));
-        jump_out(anim_key, leaving, button)
-    }
-
-    /// Terminal panel dock at the main-column bottom: a 5px height-drag handle
-    /// over the panel, the whole container height-animated 200 ms on toggle.
-    fn render_terminal_container(
-        &mut self,
-        geometry: crate::terminal::dock::SharedGeometry,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let target = self.terminal_target(cx);
-        let tween = self.terminal_tween;
-        if target <= 0.0 && tween.is_none() {
-            self.terminal_geometry
-                .set(crate::terminal::dock::Geometry::default());
-            return gpui::Empty.into_any_element();
-        }
-        // Defensive: an open flag needs its entity (and set_open) even if
-        // toggle_terminal never created one.
-        if self.terminal_open(cx) && self.terminal.is_none() {
-            let panel = self.terminal_panel(cx);
-            panel.update(cx, |panel, cx| panel.set_open(true, cx));
-        }
-        let Some(panel) = self.terminal.clone() else {
-            return gpui::Empty.into_any_element();
-        };
-        // The dock spans the main column's bottom: when the sidebar is fully
-        // closed the column IS the window's left edge (and likewise the right
-        // edge when the right pane is closed) — the panel's fill then carries
-        // the CSD window's bottom corners.
-        let window_corner = Self::window_corner_radius(window) > 0.0;
-        {
-            let bl = window_corner && self.sidebar_now() < 0.5;
-            let br = window_corner && !self.right_pane_open(cx) && !self.files_panel_open(cx);
-            panel.update(cx, |panel, cx| panel.set_window_corners(bl, br, cx));
-        }
-        let border = Theme::of(cx).border;
-        let handle_key = "pane-resize-terminal-resize";
-        let handle_hover = motion::hover_blend(
-            handle_key,
-            Theme::of(cx).border_strong.opacity(0.0),
-            Theme::of(cx).border_strong,
-        );
-        let terminal_active = self.pane_resize_active == Some(PaneResizeKind::Terminal);
-        let terminal_constrained =
-            self.pane_resize_dragging == Some(PaneResizeKind::Terminal) && !terminal_active;
-        let handle_highlight = if terminal_constrained {
-            Theme::of(cx).border_strong.opacity(0.0)
-        } else if terminal_active {
-            Theme::of(cx).border_strong
-        } else {
-            handle_hover
-        };
-        let handle = div()
-            .id("terminal-resize")
-            .h(px(TERMINAL_RESIZE_HITBOX_HEIGHT))
-            .w_full()
-            .flex_none()
-            .cursor_row_resize()
-            // slopty: the resize cursor holds for the whole drag, past the handle and the clamp.
-            .when(self.pane_resize_dragging == Some(PaneResizeKind::Terminal), |el| {
-                el.child(drag_cursor(gpui::CursorStyle::ResizeRow))
-            })
-            .hover_fade(handle_key)
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .right_0()
-                    .h(px(1.0))
-                    .bg(handle_highlight),
-            )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
-                    this.terminal_drag_anchor = Some((
-                        f32::from(event.position.y),
-                        this.terminal_geometry.get().height,
-                    ));
-                    this.pane_resize_dragging = Some(PaneResizeKind::Terminal);
-                    this.pane_resize_active = Some(PaneResizeKind::Terminal);
-                    cx.notify();
-                }),
-            )
-            .on_drag(TerminalResize, |_, _point: Point<gpui::Pixels>, _, cx| {
-                cx.stop_propagation();
-                cx.new(|_| DragGhost)
-            })
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, window, cx| {
-                    if event.click_count == 2 {
-                        this.settings.terminal_height = TERMINAL_DEFAULT_HEIGHT;
-                        this.schedule_save(cx);
-                        cx.notify();
-                    }
-                    this.finish_pane_resize(PaneResizeKind::Terminal);
-                    motion::set_hover(handle_key, false, this.reduced_motion.get());
-                    window.refresh();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    this.finish_pane_resize(PaneResizeKind::Terminal);
-                    motion::set_hover(handle_key, false, this.reduced_motion.get());
-                    window.refresh();
-                }),
-            );
-
-        // Fixed-height inner clipped by the animated container: content never
-        // reflows mid-transition (same trick as the side panes). The handle
-        // FLOATS over the panel's top edge (painted after, so it wins hit
-        // testing) instead of stacking above it — stacked, its hitbox would read as
-        // dead air between the seam and the tab bar (user report).
-        crate::terminal::dock::terminal(geometry, self.terminal_geometry.clone(), move |geometry| {
-            let inner = div()
-                .h(px(geometry.content_height))
-                .w_full()
-                .relative()
-                .flex()
-                .flex_col()
-                .child(div().flex_1().min_h_0().child(panel))
-                .child(handle.absolute().top_0().left_0().right_0());
-
-            div()
-                .w_full()
-                .flex_none()
-                .overflow_hidden()
-                .when(geometry.height > 0.0, |el| el.border_t_1())
-                .border_color(border)
-                .h(px(geometry.height))
-                .child(inner)
-                .into_any_element()
-        })
-        .into_any_element()
-    }
-
-    /// The right pane's active surface, drawn alone: the pane's own content, and a phone's page
-    /// of it (`compact.rs`). // slopty: one body for both.
-    pub(super) fn right_surface_content(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = Theme::of(cx).clone();
-        match self.resolved_right_active(cx) {
-            RightSurface::File(id) => {
-                if let Some(file) = self.file_surfaces.get(&id).cloned() {
-                    // Keep the last file frame behind the closing mask. Loading
-                    // while closing would reactivate suspended image resources.
-                    if self.right_pane_open(cx) {
-                        file.update(cx, |file, cx| file.ensure_loaded(cx));
-                    }
-                    file.into_any_element()
-                } else {
-                    self.render_surface_picker(cx)
-                }
-            }
-            RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                let changes = self.diffs.get(&id).cloned().expect("checked");
-                // Idempotent — also covers a persisted-open pane on boot.
-                changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                // The diff options (scope dropdown, ref selector,
-                // fold-all) moved DOWN from the titlebar band — the
-                // surface tabs own that row now; the expand/close
-                // buttons stayed up there (user request).
-                let controls =
-                    changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_col()
-                    .child(crate::surface_chrome::toolbar(&theme).child(controls))
-                    .child(div().flex_1().min_h_0().child(changes))
-                    .into_any_element()
-            }
-            RightSurface::Browser(id) => self
-                .browsers
-                .get(&id)
-                .cloned()
-                .map(|browser| browser.into_any_element())
-                .unwrap_or_else(|| self.render_surface_picker(cx)),
-            RightSurface::Terminal(tab) => {
-                let panel = self.right_terminal_panel(cx);
-                // Keep the embedded panel's own active tab aligned with
-                // the resolved surface (fallbacks can move it).
-                let resize_suspended = self.tween_active(self.right_tween)
-                    || self.tween_active(self.files_tween)
-                    || self.tween_active(self.sidebar_tween);
-                panel.update(cx, |panel, cx| {
-                    panel.set_resize_suspended(resize_suspended);
-                    panel.select_tab_by_key(tab, cx);
-                });
-                panel.into_any_element()
-            }
-            RightSurface::Inspector => self.inspector.clone().into_any_element(),
-            RightSurface::Screen(id) => self.render_screen_surface(id, cx), // slopty:
-            RightSurface::Page(id) => self.render_page_pane(id, cx), // slopty:
-            _ => self.render_surface_picker(cx),
-        }
-    }
-
-    /// Right pane — the surface host (t3code RightPanelTabs): hidden by
-    /// default, drag-resizable. Content is the ACTIVE surface — the Diff
-    /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
-    /// an embedded terminal, or the surface picker when no tabs exist.
-    fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let exiting = self.fit_exit_width(1).is_some();
-        if !self.horizontal_fit().right && !exiting {
-            return Empty.into_any_element();
-        }
-        let theme = Theme::of(cx).clone();
-        let showing = self.right_pane_open(cx) || self.tween_active(self.right_tween) || exiting;
-        let content: AnyElement = if showing {
-            self.right_surface_content(cx)
-        } else {
-            gpui::Empty.into_any_element()
-        };
-        // slopty: while the pane opens or closes its contents fade, late in and early out; the
-        // frame does not (item 12).
-        let content_opacity = self.right_content_opacity();
-        // Flush panel (user request — the inset card is gone): full window
-        // height with a left hairline, glass-friendly like the terminal dock
-        // (translucent over the frost; solid otherwise). The resize grabber
-        // lives outside this clipped container, on the root layout's seam.
-        let panel_bg = theme.panel_bg();
-        let panel = div()
-            .id("right-pane-focus")
-            .debug_selector(|| "right-pane".into())
-            .track_focus(&self.navigation_focus.right)
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                this.capture_navigation_focus(true, false, window, cx);
-            }))
-            .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
-            .size_full()
-            .flex()
-            .flex_col()
-            // In takeover the panel's left edge IS the sidebar seam, which
-            // already carries the sidebar tone's right hairline — a second
-            // border there doubled up (user report).
-            .when(!self.right_pane_expanded, |el| {
-                el.border_l_1().border_color(theme.border)
-            })
-            // With the explorer undocked the panel's right edge IS the
-            // window's right edge: it carries the CSD window's rounded corners
-            // directly (gpui cannot clip children rounded — each full-bleed
-            // layer rounds itself; see [`Self::window_corner_radius`]). Docked,
-            // the explorer column is the rightmost layer and rounds instead.
-            .when(
-                Self::window_corner_radius(window) > 0.0 && self.files_visible_width(cx) <= 0.0,
-                |el| {
-                    let corner = Self::window_corner_radius(window);
-                    el.rounded_tr(px(corner)).rounded_br(px(corner))
-                },
-            )
-            .bg(panel_bg)
-            .overflow_hidden()
-            // The titlebar is a glass overlay over the full-height content
-            // row; the panel's own chrome starts below it.
-            .pt(px(Theme::TITLEBAR_HEIGHT))
-            .child(
-                div() // slopty: the fading layer.
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .flex()
-                    .flex_col()
-                    .opacity(content_opacity)
-                    .child(content),
-            );
-        let target = self.right_target(cx);
-        let edge_offset = self.eval_resize_edge_bounce(
-            self.right_edge_bounce,
-            self.right_pane_open(cx) && !self.right_pane_expanded,
-        );
-        self.right_pane_container(
-            target,
-            self.right_visible_width(cx),
-            edge_offset,
-            div().h_full().relative().child(panel).into_any_element(),
-        )
-    }
-
-    // slopty: the empty pane's list is `pane_offers`' (one list with the `+` menu).
 
     // slopty: no accounts, sync or sign-in.
-
-    /// slopty: holds the strip's chips at `width` after a close by pointer, letting go by itself
-    /// after [`crate::surface_chrome::TAB_HOLD`].
-    fn hold_right_tab_width(&mut self, width: f32, cx: &mut Context<Self>) {
-        self.right_tab_hold.hold(width, crate::clock::now(cx));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(crate::surface_chrome::TAB_HOLD).await;
-            this.update(cx, |_, cx| cx.notify()).ok();
-        })
-        .detach();
-    }
-
-    fn close_right_plus(&mut self, cx: &mut Context<Self>) {
-        if self.right_plus.begin_close(crate::clock::now(cx)) {
-            popover::reap_popup(cx, |shell: &mut Self| &mut shell.right_plus);
-        }
-        cx.notify();
-    }
-
-    /// The titlebar strip over the right pane: one chip per surface tab
-    /// (icon · title · ✕) plus the `+` menu — the t3code RightPanelTabs bar,
-    /// living in the top row; the diff options moved into the pane below.
-    pub(crate) fn render_right_tab_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        use crate::surface_chrome::TAB_CHIP_HEIGHT as CHIP_H;
-
-        let theme = Theme::of(cx).clone();
-        // Heal drag state if the pointer was released outside the strip.
-        if self.right_tab_drag.is_some() && !cx.has_active_drag() {
-            self.right_tab_drag = None;
-        }
-        let rows = self.right_surface_rows(cx);
-        let count = rows.len();
-        // slopty: the chips fit the widest title, one width for the strip (drag maths stay
-        // uniform).
-        let widths =
-            crate::surface_chrome::tab_widths(rows.iter().map(|(_, title, ..)| title.as_ref()), cx);
-        // slopty: after a close by pointer the chips hold their width while it stays.
-        let (chip_w, held_moving) = self.right_tab_hold.width(
-            widths.chip,
-            crate::clock::now(cx),
-            crate::motion::reduced_motion(cx),
-        );
-        if held_moving {
-            self.motion_active.set(true);
-        }
-        let chip_slot = chip_w + crate::surface_chrome::CONTROL_GAP;
-        let active = self.resolved_right_active(cx);
-        // slopty: a tab come to the front (or a tab more or fewer beside it) scrolls whole into
-        // view, as every tab strip does; a strip scrolled by hand stays where it was put until then.
-        // The last tab brings the `+` after it along, so a new tab is never under the pane's
-        // controls either.
-        if self.right_tab_revealed != Some((active, count))
-            && let Some(ix) = rows.iter().position(|(surface, ..)| *surface == active)
-        {
-            self.right_tab_scroll.scroll_to_item(if ix + 1 == count { count } else { ix });
-            self.right_tab_revealed = Some((active, count));
-        }
-        let drag = self
-            .right_tab_drag
-            .as_ref()
-            .map(|d| (d.from, d.over, d.epoch, d.prev_over));
-
-        // The old session-tab strip's proven scroll shape: the flex row IS
-        // the scroller (id + overflow_x_scroll + track_scroll), wrapped in a
-        // relative min_w_0 region below; drop math runs in CONTENT
-        // coordinates (viewport-relative x plus the scrolled-off width).
-        let scroll_for_drag = self.right_tab_scroll.clone();
-        let mut strip = div()
-            .id("right-surface-strip")
-            .track_focus(&self.navigation_focus.tabs)
-            .capture_any_mouse_down(cx.listener(|this, _, window, cx| {
-                this.capture_navigation_focus(true, true, window, cx);
-            }))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap(px(4.0))
-            .min_w_0()
-            .overflow_x_scroll()
-            .track_scroll(&self.right_tab_scroll)
-            // Windows caption hit-testing includes the scroll-only hitboxes
-            // behind each chip. Stop at the scroller so the titlebar cannot
-            // claim tab clicks, while wheel events still reach this scroller.
-            .when(cfg!(target_os = "windows"), |strip| strip.occlude())
-            // slopty: the pointer leaving lets a held width go.
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if !*hovered && this.right_tab_hold.release(crate::clock::now(cx)) {
-                    cx.notify();
-                }
-            }))
-            .on_drag_move::<RightTabDrag>(cx.listener(
-                move |this, event: &gpui::DragMoveEvent<RightTabDrag>, _, cx| {
-                    let payload = event.drag(cx);
-                    if payload.panel_key != this.panel_key(cx) {
-                        return;
-                    }
-                    let from = payload.from;
-                    let rel_x = f32::from(event.event.position.x)
-                        - f32::from(event.bounds.left())
-                        - f32::from(scroll_for_drag.offset().x);
-                    let over = crate::terminal::panel::drop_index(rel_x, chip_slot, count);
-                    this.update_right_tab_drag_over(from, over, cx);
-                },
-            ))
-            .on_drop::<RightTabDrag>(cx.listener(move |this, payload: &RightTabDrag, _, cx| {
-                if payload.panel_key != this.panel_key(cx) {
-                    this.right_tab_drag = None;
-                    cx.notify();
-                    return;
-                }
-                let to = this
-                    .right_tab_drag
-                    .as_ref()
-                    .map(|d| d.over)
-                    .unwrap_or(payload.from);
-                this.right_tab_drag = None;
-                this.reorder_right_tabs(payload.from, to, cx);
-            }));
-        for (ix, (surface, title, dirty, detail)) in rows.into_iter().enumerate() {
-            let is_active = surface == active;
-            let file_identity_path = detail.as_ref().cloned().unwrap_or_else(|| title.clone());
-            let icon_path = match surface {
-                RightSurface::File(_) => icons::DOCUMENT,
-                RightSurface::Diff(_) => icons::FILE_DIFF, // slopty: the Changes glyph.
-                // slopty: the inspector, steps in time as a trace reads; the eye is the inbox's.
-                RightSurface::Inspector => icons::SORT_BY_TIME,
-                RightSurface::Terminal(_) => icons::TERMINAL,
-                RightSurface::Browser(_) => icons::GLOBE,
-                // slopty: a window's chip wears the window glyph its picker row wore; a desktop,
-                // or nothing chosen yet, the monitor.
-                RightSurface::Screen(id) => screen_chip_glyph(
-                    self.screen_surface_chosen(id, cx).map(|(id, _)| id).as_deref(),
-                ),
-                RightSurface::Page(_) => icons::GLOBE, // slopty: one globe in the pane
-                RightSurface::Picker => icons::PLUS,
-            };
-            // Working chats and subagents swap their harness icon for the
-            // mini spinner; subagent liveness follows the doc's streaming tail.
-            let browser_favicon = match surface {
-                RightSurface::Browser(id) => self
-                    .browsers
-                    .get(&id)
-                    .and_then(|b| b.read(cx).favicon.clone()),
-                _ => None,
-            };
-            let subagent_running = match surface {
-                RightSurface::Browser(id) => self
-                    .browsers
-                    .get(&id)
-                    .is_some_and(|b| b.read(cx).page.loading),
-                _ => false,
-            };
-            let ghost_title = title.clone();
-            // slopty: every chip names itself in full on hover: its detail (a file's path), or
-            // its title when the chip cuts it.
-            let tip = detail
-                .clone()
-                .or_else(|| widths.cut.get(ix).copied().unwrap_or(false).then(|| title.clone()));
-            let workspace_path = self.workspace_path_for_surface(surface, cx);
-            let accessible_name = detail.as_ref().unwrap_or(&title);
-            let accessible_label = if dirty {
-                format!("{accessible_name}, unsaved changes")
-            } else {
-                accessible_name.to_string()
-            };
-            let leading = if subagent_running {
-                loaders::mini_glyph_spinner(
-                    format!("subagent-tab-{ix}"),
-                    2.0,
-                    theme.glyph,
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else if let Some(favicon) = browser_favicon {
-                // slopty: named, so a screen reader (and the e2e) tells the page's own icon
-                // from the default globe.
-                div()
-                    .id(SharedString::from(format!("right-tab-favicon-{ix}")))
-                    .role(gpui::Role::Image)
-                    .aria_label("Page icon")
-                    // slopty: every leading glyph in the strip is 14 (item 21).
-                    .child(gpui::img(favicon).size(px(crate::surface_chrome::ICON_SIZE)))
-                    .into_any_element()
-            } else if matches!(surface, RightSurface::File(_)) {
-                crate::file_icons::icon(
-                    crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
-                    theme.appearance,
-                )
-                .size(px(14.0))
-                .when(!is_active, |icon| icon.opacity(0.78))
-                .into_any_element()
-            } else {
-                crate::surface_chrome::tab_chip_icon(icon_path, is_active, &theme)
-            };
-            let chip = crate::surface_chrome::tab_chip(
-                crate::surface_chrome::TabChip {
-                    id: "right-surface-tab",
-                    close_id: "right-surface-close",
-                    ix,
-                    active: is_active,
-                    title,
-                    dirty,
-                    leading,
-                    width: chip_w,
-                    close_hint: "Close tab",
-                },
-                &theme,
-                cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
-                    // slopty: a close by pointer holds the strip's width (keys need no hold).
-                    if !event.is_keyboard() {
-                        this.hold_right_tab_width(chip_w, cx);
-                    }
-                    this.close_right_surface(surface, window, cx);
-                }),
-            )
-            .aria_label(accessible_label)
-            // slopty: the house tooltip chip, at the house delay.
-            .when_some(tip, |chip, tip| {
-                chip.tooltip(crate::settings::widgets::text_tooltip(tip))
-                    .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                this.activate_right_surface(surface, window, cx);
-            }))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
-                    let chat_id = String::new();
-                    this.chat_menu.open(ChatMenuState {
-                        chat_id,
-                        tab: Some((this.panel_key(cx), surface)),
-                        position: event.position,
-                        page: ChatMenuPage::Root,
-                    });
-                    cx.notify();
-                }),
-            )
-            // Middle-click closes, like every tab strip.
-            .on_mouse_down(
-                gpui::MouseButton::Middle,
-                cx.listener(move |this, _, window, cx| {
-                    this.close_right_surface(surface, window, cx);
-                }),
-            )
-            .on_drag(
-                RightTabDrag {
-                    panel_key: self.panel_key(cx),
-                    from: ix,
-                    title: ghost_title,
-                    workspace_path,
-                },
-                move |payload, _point, _, cx| {
-                    let title = payload.title.clone();
-                    cx.stop_propagation();
-                    cx.new(|_| SurfaceTabGhost { title, width: chip_w })
-                },
-            )
-            // The chip's BlockMouse hitbox (the titlebar/scroll carve-out)
-            // cuts the strip out of the hover stack, so the strip's own
-            // on_drop can never fire while the pointer is over a chip — tabs
-            // tile the strip. Receiving the drop on the chip itself keeps
-            // drag-reorder working without giving up the carve-out. The
-            // bubble dispatch reaches the chip before the strip, and the
-            // handler consumes the drag, so the two never double-apply.
-            .on_drop::<RightTabDrag>(cx.listener(
-                move |this, payload: &RightTabDrag, _, cx| {
-                    if payload.panel_key != this.panel_key(cx) {
-                        this.right_tab_drag = None;
-                        cx.notify();
-                        return;
-                    }
-                    let to = this
-                        .right_tab_drag
-                        .as_ref()
-                        .map(|d| d.over)
-                        .unwrap_or(payload.from);
-                    this.right_tab_drag = None;
-                    this.reorder_right_tabs(payload.from, to, cx);
-                },
-            ));
-
-            // Sliding transform while a sibling drags over (the terminal
-            // drawer's exact recipe): animate 150ms between committed
-            // offsets; the dragged tab leaves an invisible spacer — the
-            // ghost carries it.
-            let wrapped: AnyElement = match drag {
-                Some((from, over, epoch, prev_over)) if ix != from => {
-                    let target = crate::terminal::panel::slide_offset(ix, from, over) * chip_slot;
-                    let start =
-                        crate::terminal::panel::slide_offset(ix, from, prev_over) * chip_slot;
-                    div()
-                        .relative()
-                        .child(chip.with_animation(
-                            ("right-tab-slide", (ix as u64) | ((epoch as u64) << 32)),
-                            TAB_SLIDE.animation(),
-                            move |el, t| el.left(px(motion::lerp(start, target, t))),
-                        ))
-                        .into_any_element()
-                }
-                Some((from, ..)) if ix == from => div()
-                    .w(px(chip_w))
-                    .h(px(CHIP_H))
-                    .flex_none()
-                    .into_any_element(),
-                _ => chip.into_any_element(),
-            };
-            strip = strip.child(wrapped);
-        }
-        // The `+` — a small menu offering the available surfaces (t3 "Add panel
-        // surface"); mirrors the picker cards.
-        let plus_open = self.right_plus.get().is_some();
-        // slopty: the pane's one icon button (24, r 6, a 14 glyph, faded hover, deeper press).
-        let mut plus = crate::surface_chrome::icon_menu_button("right-surface-add", icons::PLUS, plus_open, &theme)
-            .block_mouse_except_scroll()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    window.prevent_default();
-                    this.right_plus.note_trigger_press();
-                }),
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                cx.stop_propagation();
-                if this.right_plus.take_press_was_open() {
-                    this.close_right_plus(cx);
-                } else {
-                    this.right_plus.open(());
-                    cx.notify();
-                }
-            }))
-            // slopty: named with its key, out of the way while its menu is up.
-            .aria_expanded(plus_open)
-            .map(|el| {
-                if plus_open {
-                    el.aria_label("New tab")
-                } else {
-                    el.action_hint("New tab", Keys::Action(Box::new(chrome_keys::NewRightTab)), cx)
-                }
-            });
-        if plus_open {
-            let closing = self.right_plus.closing_at(crate::clock::now(cx));
-            let menu = popover::popover_card(&theme)
-                .w(px(168.0))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_right_plus(cx)))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        // slopty: the empty pane's offers, in its order and names (`pane_offers`).
-                        .children(self.render_pane_offer_rows(&theme, cx)),
-                )
-                .into_any_element();
-            plus = plus.relative().child(popover::anchored_menu_below_gap(
-                "right-plus-menu",
-                menu,
-                closing,
-                10.0,
-            ));
-        }
-        // The empty-state picker already offers every surface. Show a single
-        // Chrome-style add-tab affordance only after at least one tab exists.
-        strip = strip.when(count > 0, |strip| strip.child(plus));
-        crate::surface_chrome::tab_strip_region(strip, &self.right_tab_scroll, &theme)
-    }
-
-    /// Toggle the changes-panel takeover (the header's expand button, t3code
-    /// parity): the panel grows to fill everything right of the sidebar,
-    /// hiding the conversation column; toggling back restores the saved
-    /// width. Rides the same width tween as open/close so the jump glides.
-    fn toggle_right_pane_expand(&mut self, cx: &mut Context<Self>) {
-        // The outgoing header stays painted during close, but it must not
-        // turn an already closed surface into a zero-width takeover.
-        if !self.right_pane_shown(cx) {
-            return;
-        }
-        // A second click during the first expansion starts at the painted
-        // seam, not the previous destination.
-        let from = self.right_visible_width(cx);
-        let content_from = self.right_content_width(self.right_target(cx));
-        self.right_edge_bounce = None;
-        self.right_resize_edge = None;
-        self.finish_pane_resize(PaneResizeKind::Right);
-        let sidebar_now = self.sidebar_now();
-        let from_main = self.main_content_width(self.main_target_width(from, cx), cx);
-        self.right_pane_expanded = !self.right_pane_expanded;
-        let to = self.right_target(cx);
-        let right_transition = self.panel_tween(from, to);
-        self.right_tween = Some(right_transition);
-        self.right_content_tween = Some(WidthTween {
-            from: content_from,
-            ..right_transition
-        });
-        self.main_takeover_tween = Some(WidthTween {
-            from: from_main,
-            to: conversation_width(
-                self.viewport_width - self.files_reserved_width(cx),
-                sidebar_now,
-                to,
-            ),
-            ..right_transition
-        });
-        cx.notify();
-    }
 
     fn render_gate_card(&mut self, error: &str, cx: &mut Context<Self>) -> AnyElement { // slopty: no accounts, sync or sign-in.
         let theme = Theme::of(cx).clone();
@@ -7180,7 +5121,7 @@ fn grid_backdrop(theme: &Theme) -> AnyElement {
 /// `grid size-6 place-items-center rounded-md text-muted-foreground`).
 // slopty: the caller names it with `action_hint` (its tooltip, key and accessible name).
 fn window_control_button(
-    id: &'static str,
+    id: impl Into<SharedString>,
     icon_path: &'static str,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
@@ -7201,11 +5142,12 @@ pub(crate) fn titlebar_top_pad() -> f32 {
 }
 
 fn window_control_button_with(
-    id: &'static str,
+    id: impl Into<SharedString>,
     glyph: impl IntoElement,
     theme: &Theme,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
+    let id: SharedString = id.into();
     let fade_key = format!("window-control-{id}");
     // slopty: on a touch screen the control takes presses over a finger's 44 pt, centred on the
     // 24 it draws, which keeps its wash and glyph (#23).
@@ -7228,8 +5170,8 @@ fn window_control_button_with(
         .group_active(group.clone(), |style| style.bg(theme_pressed()))
         .child(glyph);
     div()
-        .id(id)
-        .debug_selector(move || id.to_owned())
+        .id(id.clone())
+        .debug_selector(move || id.to_string())
         .group(group)
         .size(px(24.0 + 2.0 * reach))
         .m(px(-reach))
@@ -7471,15 +5413,7 @@ impl Render for Shell {
         let wake = shell_clock_wake(self.state.read(cx), now);
         self.clock
             .arm(wake, now, |shell: &mut Shell| &mut shell.clock, cx);
-        // slopty: the panes a chat has open are kept across launches, saved after the frame.
-        if let Some(saved) = self.panels.take_saved() {
-            self.settings.session_panels = saved;
-            cx.spawn(async move |this, cx| {
-                this.update(cx, |shell, cx| shell.schedule_save(cx)).ok();
-            })
-            .detach();
-        }
-        // slopty: and what their panes show.
+        // slopty: the panes a chat has beside its terminal are kept across launches.
         self.restore_tabs(window, cx);
         self.keep_tabs(cx);
         let active_files_key = self.panel_key(cx);
@@ -7495,8 +5429,6 @@ impl Render for Shell {
             files.update(cx, |files, cx| files.suspend_tree_interactions(cx));
         }
         // slopty: voice removed.
-        self.navigation_focus
-            .remember(&self.shortcut_focus, window, cx);
         if let Some(path) = self.pending_change.take() {
             self.show_change_at(&path, window, cx);
         }
@@ -7528,7 +5460,7 @@ impl Render for Shell {
             });
         }
         crate::transcript::record_view_frame("shell");
-        self.observe_viewport_width(f32::from(window.viewport_size().width), cx);
+        self.observe_viewport_width(f32::from(window.viewport_size().width));
         // Appearance actions persist independently of the shell. Mirror the
         // globals before any later debounced settings save can overwrite them.
         self.settings.appearance = crate::appearance::mode(cx);
@@ -7550,7 +5482,7 @@ impl Render for Shell {
         // Manual tween drive bookkeeping for this pass (see [`WidthTween`]).
         self.reduced_motion = motion::ReducedMotion::of(cx);
         self.motion_active.set(false);
-        self.track_horizontal_fit(cx);
+        self.track_horizontal_fit();
         // The sidebar's render reconciles the card against its rows.
         if !matches!(gate, GatePhase::Ready)
             || matches!(self.route, Route::Settings(_))
@@ -7559,46 +5491,31 @@ impl Render for Shell {
         {
             self.dismiss_session_card(cx);
         }
-        self.suspend_hidden_right_images(cx);
-        // After the fit tracking, which starts a fit exit this frame.
-        let browser_active = matches!(gate, GatePhase::Ready) // slopty: no accounts, sync or sign-in.
-            && matches!(self.route, Route::Chat)
-            // A pane the fit evicts keeps painting while it slides out.
-            && (self.horizontal_fit().right || self.fit_exit_width(1).is_some())
-            && (self.right_pane_open(cx) || self.tween_active(self.right_tween));
-        // Native clipping follows the animated GPUI mask. Drags only transfer
-        // pointer ownership; the browser continues rendering and reflowing.
+        // slopty: a page draws while its pane is laid out: in the shown session's view, through
+        // a zoom only the pane zoomed, and on a phone only the page in front.
+        let laid_views = self.laid_views(matches!(gate, GatePhase::Ready), cx);
+        // Native clipping follows the GPUI layout. Drags only transfer pointer ownership; the
+        // browser continues rendering and reflowing.
         let browser_dragging = cx.has_active_drag();
-        #[cfg(target_os = "macos")]
-        let browser_resize_inset = if self.right_pane_open(cx)
-            && !self.right_pane_expanded
-            && !self.tween_active(self.right_tween)
-        {
-            // The browser starts inside the panel's one-point left border.
-            px(PANE_RESIZE_HITBOX_HALF_WIDTH - 1.0)
-        } else {
-            px(0.0)
-        };
-        #[cfg(any(target_os = "macos", windows))]
-        let browser_overlay_width = px(if self.files_visible_width(cx) > 0.0 {
-            self.files_visible_width(cx) + PANE_RESIZE_HITBOX_HALF_WIDTH
-        } else {
-            0.0
-        });
-        let selected_surface = self.resolved_right_active(cx);
         for (id, browser) in &self.browsers {
             let presentation = crate::browser::model::presentation(
-                browser_active && selected_surface == RightSurface::Browser(*id),
+                laid_views.contains(&RightSurface::Browser(*id)),
                 browser_dragging,
             );
             browser.update(cx, |browser, cx| {
+                // The page starts clear of the grab of the divider at its left (`pane_area`).
                 #[cfg(target_os = "macos")]
-                browser.set_resize_inset(browser_resize_inset, cx);
-                #[cfg(any(target_os = "macos", windows))]
-                browser.set_right_occlusion(browser_overlay_width, cx);
+                browser.set_resize_inset(px((panes::DIVIDER_GRAB - panes::DIVIDER) / 2.0), cx);
                 browser.set_shortcuts(&self.settings.keymap);
                 browser.set_presentation(presentation, cx);
             });
+        }
+        // A file's images let go of their memory while its view is not laid out (another
+        // session's, under a zoom, behind a phone's page); drawing it again brings them back.
+        for (id, file) in &self.file_surfaces {
+            if !laid_views.contains(&RightSurface::File(*id)) {
+                file.update(cx, |file, cx| file.suspend_images(cx));
+            }
         }
 
         // Fullscreen hides the macOS traffic lights — reflow the control
@@ -7714,27 +5631,15 @@ impl Render for Shell {
             .capture_key_down(cx.listener(Self::on_key_down_capture))
             .on_key_down(cx.listener(Self::on_key_down))
             .on_drag_move(cx.listener(Self::on_sidebar_drag))
-            .on_drag_move(cx.listener(Self::on_right_pane_drag))
-            .on_drag_move(cx.listener(Self::on_files_panel_drag))
-            .on_drag_move(cx.listener(Self::on_terminal_drag))
-            // The panel shortcuts are chat-scoped chrome: in Settings they are
-            // no-ops (slopty __root.tsx gates the hotkey on `!isSettings`, and
-            // the terminal panel is only mounted on session routes). The
-            // sidebar toggle stays live everywhere, as in the original.
-            .on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
-                if matches!(this.route, Route::Chat) {
-                    this.toggle_terminal(window, cx)
-                }
-            }))
+            // The view keys are chat-scoped chrome: in Settings they are no-ops. The sidebar
+            // toggle stays live everywhere.
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| {
-                if matches!(this.route, Route::Chat) && this.right_pane_open(cx) {
-                    let file = match this.resolved_right_active(cx) {
-                        RightSurface::File(id) => this.file_surfaces.get(&id).cloned(),
-                        _ => None,
-                    };
-                    if let Some(file) = file {
-                        file.update(cx, |file, cx| file.save_active_document(cx));
-                    }
+                // The file with the keyboard saves.
+                if matches!(this.route, Route::Chat)
+                    && let Some(RightSurface::File(id)) = this.front_view(cx)
+                    && let Some(file) = this.file_surfaces.get(&id).cloned()
+                {
+                    file.update(cx, |file, cx| file.save_active_document(cx));
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
@@ -7749,27 +5654,22 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
-            .on_action(cx.listener(|this, _: &NextSession, window, cx| {
-                this.cycle_navigation(true, window, cx)
+            .on_action(cx.listener(|this, _: &NextSession, _, cx| {
+                this.cycle_navigation(true, cx)
             }))
-            .on_action(cx.listener(|this, _: &PrevSession, window, cx| {
-                this.cycle_navigation(false, window, cx)
+            .on_action(cx.listener(|this, _: &PrevSession, _, cx| {
+                this.cycle_navigation(false, cx)
             }))
+            // slopty: each view's key summons it beside the session, and again puts the keyboard
+            // back in the terminal (`docs/decisions/layout.md`, "No permanent right column").
             .on_action(cx.listener(|this, _: &ToggleChanges, window, cx| {
                 if matches!(this.route, Route::Chat) {
-                    this.toggle_right_pane(cx);
-                    if !this.right_pane_open(cx) {
-                        // The hidden editor can retain a focus handle after unmounting.
-                        // Restore a mounted target so the next shortcut can reopen it.
-                        this.focus_session_terminal(window, cx); // slopty: the session
-                    }
+                    this.summon_changes(window, cx);
                 }
             }))
-            // The explorer's own toggle (the titlebar tree button): docks or
-            // undocks the explorer portion without touching the surface host.
             .on_action(cx.listener(|this, _: &ToggleFiles, window, cx| {
                 if matches!(this.route, Route::Chat) {
-                    this.toggle_files_panel(window, cx);
+                    this.summon_files(window, cx);
                 }
             }))
             // Chat-scoped like the panel toggles: Settings has no current
@@ -7846,11 +5746,6 @@ impl Render for Shell {
                 {
                     cx.defer_in(window, |this, _, cx| this.mark_open_chat_seen(cx));
                 }
-                let viewport = f32::from(window.viewport_size().width);
-                self.viewport_height = f32::from(window.viewport_size().height);
-                // Stamped for `right_target` — the expanded changes panel
-                // sizes itself to the viewport.
-                self.viewport_width = viewport;
                 // Settings replaces the whole workspace, sidebar included. The
                 // chat layout stays unmounted; its entities keep their state
                 // for the return trip.
@@ -7888,23 +5783,10 @@ impl Render for Shell {
                 if let Some(page) = self.render_compact_sessions(window, cx) {
                     break 'ready root.child(page);
                 }
-                // slopty: a phone's page for the chat's files or an open surface, over the chat.
+                // slopty: a phone's page for a view summoned beside the session, over it.
                 if let Some(page) = self.render_compact_side(window, cx) {
                     break 'ready root.child(page);
                 }
-                // The Pull requests route shares this layout without the
-                // chat's side pane.
-                let on_chat = matches!(self.route, Route::Chat);
-                let right_target_width = if on_chat {
-                    self.right_visible_width(cx)
-                } else {
-                    0.0
-                };
-                let main_target_width = self.main_target_width(right_target_width, cx);
-                let panel_handoff = false; // slopty: no composer to hand between columns
-                let main_takeover = self.main_takeover_active();
-                let main_content_width = self.main_content_width(main_target_width, cx);
-
                 let sidebar = self.render_sidebar(cx);
                 // A collapsed or fit-hidden sidebar has no seam: the window's
                 // own left edge sits there, and a press must resize the window
@@ -7915,59 +5797,16 @@ impl Render for Shell {
                         "sidebar-resize",
                         PaneResizeKind::Sidebar,
                         || SidebarResize,
-                        |shell, cx| shell.reset_panel_widths(PaneResizeKind::Sidebar, cx),
+                        |shell, cx| shell.reset_sidebar_width(cx),
                         cx,
                     )
                 });
+                // slopty: the session's view: its terminal and every pane split or summoned
+                // beside it (`pane_frame`).
                 let main = self.render_main(window, cx);
-                // The Changes pane is chat-scoped chrome: the Settings route
-                // never renders it (slopty __root.tsx `!isSettings && activeChat`
-                // around the diff column) — the per-session open flags stay
-                // intact for the return trip.
-                let right_open = on_chat && self.right_pane_shown(cx);
-                // Takeover mode derives its width from the viewport, so a
-                // manual drag handle would fight the expanded target.
-                let right_handle = (right_open
-                    && !panel_handoff
-                    && !self.right_pane_expanded
-                    && !self.tween_active(self.right_tween))
-                .then(|| {
-                    self.resize_handle(
-                        "right-pane-resize",
-                        PaneResizeKind::Right,
-                        || RightPaneResize,
-                        |shell, cx| shell.reset_panel_widths(PaneResizeKind::Right, cx),
-                        cx,
-                    )
-                    // A forgiving transparent hit target centered on the
-                    // seam; the panel's 1px border remains the visual divider.
-                    .left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))
-                });
-                let right: AnyElement = if on_chat {
-                    self.render_right_pane(window, cx)
-                } else {
-                    Empty.into_any_element()
-                };
-                let files_panel = self.render_files_panel(window, cx);
                 let overlays = self.render_overlays(window.viewport_size(), window, cx);
-                // slopty: voice removed.
                 // Copied out (not held) — `render_title_bar` needs `cx` mutable.
                 let border_color = Theme::of(cx).border;
-                // No inset cards (user request): the conversation column sits
-                // flush and unbordered, the transcript directly on the frost
-                // glass; the changes pane is a flush left-bordered glass panel
-                // (built inside `render_right_pane`).
-                let main = if main_takeover {
-                    div()
-                        .h_full()
-                        .w(px(main_content_width))
-                        .flex_none()
-                        .flex()
-                        .child(main)
-                        .into_any_element()
-                } else {
-                    main
-                };
                 let card: AnyElement = div()
                     .id("conversation-column")
                     .debug_selector(|| "conversation-column".into())
@@ -7976,17 +5815,11 @@ impl Render for Shell {
                     .flex()
                     .flex_row()
                     .overflow_hidden()
-                    // slopty: voice removed.
                     .child(main)
                     .into_any_element();
-                // The whole app page is one keyed `animate-in` entrance (slopty
-                // App.tsx `<div key={phase} className="animate-in h-full">`):
-                // arriving from the splash or any gate fades the page in; the
-                // splash-out crossfades over it on boot.
                 // The sidebar resize handle FLOATS over the sidebar/card seam
-                // (zero layout width, same idiom as the changes-pane grabber)
-                // so the sidebar's right gutter stays exactly as wide as its
-                // left one — a 5px flex child here read as lopsided spacing.
+                // (zero layout width) so the sidebar's right gutter stays exactly
+                // as wide as its left one.
                 let sidebar_seam = div()
                     .w(px(0.0))
                     .h_full()
@@ -7996,24 +5829,6 @@ impl Render for Shell {
                         sidebar_handle
                             .map(|handle| handle.left(px(-PANE_RESIZE_HITBOX_HALF_WIDTH))),
                     );
-                // Keep the right resize target outside the pane's
-                // overflow-hidden width container. This mirrors the sidebar
-                // seam and lets the target straddle both adjacent panes.
-                // Paint it after the page so page input cannot occlude the
-                // inner half. A deferred draw would capture all native input.
-                let right_seam: AnyElement = if let Some(handle) = right_handle {
-                    div()
-                        .w(px(0.0))
-                        .h_full()
-                        .flex_none()
-                        .absolute()
-                        .left_0()
-                        .top_0()
-                        .child(handle)
-                        .into_any_element()
-                } else {
-                    Empty.into_any_element()
-                };
                 let title_bar = self.render_session_title_bar(window, cx);
                 let compact_nav = self.render_compact_nav_bar(cx); // slopty: the phone's
                 // slopty: a phone's inspector, a sheet over the session.
@@ -8038,27 +5853,7 @@ impl Render for Shell {
                             .flex_row()
                             .child(sidebar)
                             .child(sidebar_seam)
-                            .child(card)
-                            // The right pane is ONE container: the surface
-                            // host column and the docked explorer column
-                            // sit side by side under a shared titlebar
-                            // strip; the resize seam straddles its left edge.
-                            .child(
-                                div()
-                                    .h_full()
-                                    .flex_none()
-                                    .relative()
-                                    // slopty: voice removed.
-                                    .child(
-                                        div()
-                                            .h_full()
-                                            .flex()
-                                            .flex_row()
-                                            .child(right)
-                                            .child(files_panel),
-                                    )
-                                    .child(right_seam),
-                            ),
+                            .child(card),
                     )
                     // slopty: a phone's navigation bar stands in for the titlebar, its title
                     // and its sidebar and history cluster.
@@ -8086,7 +5881,7 @@ impl Render for Shell {
                     })
                     .children(compact_inspector) // slopty
                     .children(overlays);
-                let session = on_chat && {
+                let session = matches!(self.route, Route::Chat) && {
                     let state = self.state.read(cx);
                     let chat = state.selected_chat.as_deref();
                     chat.is_some_and(|chat| state.session_terminal(chat).is_some())
@@ -8319,29 +6114,6 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_uses_the_shared_clamp_and_edge_latch() {
-        let min =
-            motion::resize_drag_sample(RIGHT_PANE_MIN - 40.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(min.width, RIGHT_PANE_MIN);
-        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
-        assert!(min.starts_bounce);
-
-        let held = motion::resize_drag_sample(
-            RIGHT_PANE_MIN - 80.0,
-            RIGHT_PANE_MIN,
-            820.0,
-            min.edge,
-            false,
-        );
-        assert!(!held.starts_bounce);
-
-        let max = motion::resize_drag_sample(900.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(max.width, 820.0);
-        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
-        assert!(max.starts_bounce);
-    }
-
-    #[test]
     fn sidebar_bounce_has_rounded_out_and_return_phases() {
         assert_eq!(
             motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.0),
@@ -8383,22 +6155,6 @@ mod tests {
                 id.label()
             );
         }
-    }
-
-    #[test]
-    fn right_pane_ceiling_preserves_the_chat_floor() {
-        assert_eq!(right_pane_max_width(1200.0, 256.0, CHAT_PANEL_MIN), 644.0);
-        assert_eq!(1200.0 - 256.0 - 644.0, CHAT_PANEL_MIN);
-        // The chat floor wins over the right pane's preferred 360px minimum
-        // when the whole window is unusually narrow.
-        assert_eq!(right_pane_max_width(800.0, 256.0, CHAT_PANEL_MIN), 244.0);
-        assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
-    }
-
-    #[test]
-    fn right_pane_takeover_consumes_the_chat_column() {
-        assert_eq!(right_pane_takeover_width(1200.0, 256.0), 944.0);
-        assert_eq!(1200.0 - 256.0 - 944.0, 0.0);
     }
 
     /// A minute boundary.
@@ -8538,46 +6294,9 @@ mod tests {
     // slopty: no accounts, sync or sign-in.
 
     #[test]
-    fn right_pane_takeover_control_reverses_direction() {
-        assert_eq!(tabs::right_pane_expand_icon(false), icons::EXPAND_ARROWS);
-        assert_eq!(tabs::right_pane_expand_icon(true), icons::COLLAPSE_ARROWS);
-    }
-
-    #[test]
     fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
         assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
         assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
-        assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn right_panel_content_keeps_the_larger_width_only_during_transition() {
-        assert_eq!(right_panel_content_width(520.0, None, None), 520.0);
-        assert_eq!(
-            right_panel_content_width(0.0, Some((520.0, 0.0)), None),
-            520.0
-        );
-        assert_eq!(
-            right_panel_content_width(760.0, Some((520.0, 760.0)), None),
-            760.0
-        );
-        assert_eq!(
-            right_panel_content_width(1064.0, Some((520.0, 1064.0)), Some(760.0)),
-            760.0
-        );
-
-        let conversation = conversation_width(1320.0, 256.0, 520.0);
-        let takeover = conversation_width(1320.0, 256.0, 1064.0);
-        assert_eq!(conversation, 544.0);
-        assert_eq!(takeover, 0.0);
-        assert_eq!(
-            stable_panel_content_width(takeover, Some((conversation, takeover))),
-            conversation
-        );
-        assert_eq!(
-            stable_panel_content_width(conversation, Some((takeover, conversation))),
-            conversation
-        );
     }
 
     // slopty: no accounts, sync or sign-in.
@@ -8639,225 +6358,8 @@ mod tests {
         assert_eq!(cluster_buttons_start(true, false, 3), 88.0);
     }
 
-    // ---- per-session panel flags (§1.10/1.11 parity: slopty sessionPanels) ----
-
     #[test]
-    fn session_panels_are_kept_across_launches() {
-        // slopty: the panes a chat has open come back on the next launch.
-        let mut panels = SessionPanels::default();
-        assert!(panels.take_saved().is_none(), "nothing changed, nothing to save");
-        panels.update("c1", |p| p.files_open = true);
-        panels.toggle_terminal("c2");
-        panels.toggle_terminal("c2");
-        let saved = panels.take_saved().expect("a pane opened");
-        assert!(saved["c1"].files && !saved["c1"].terminal);
-        assert!(!saved.contains_key("c2"), "a chat with every pane closed is not kept");
-        assert!(panels.take_saved().is_none(), "saved once");
-        let restored = SessionPanels::restored(&saved);
-        assert!(restored.get("c1").files_open);
-        assert!(!restored.get("c2").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_default_closed_per_chat() {
-        let panels = SessionPanels::default();
-        assert_eq!(panels.get("a"), ChatPanels::default());
-        // Everything closed until explicitly opened (user request — the
-        // brief default-open popped the pane on every visited session).
-        assert!(!panels.get("a").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        assert_eq!(panels.get("a").right_active, RightSurface::Picker);
-        // The new-chat canvas ("" key) is its own session, also closed.
-        assert!(!panels.get("").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_flags_are_chat_scoped() {
-        let mut panels = SessionPanels::default();
-        // Opening the terminal in chat A opens it ONLY in chat A.
-        assert!(panels.toggle_terminal("a"));
-        assert!(panels.get("a").terminal_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("").terminal_open);
-        // Changes pane in B is independent of A's terminal.
-        assert!(panels.toggle_changes("b"));
-        assert!(panels.get("b").changes_open);
-        assert!(!panels.get("b").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        // Switching back to A restores A's state untouched.
-        assert!(panels.get("a").terminal_open);
-        // Toggling off round-trips.
-        assert!(!panels.toggle_terminal("a"));
-        assert!(!panels.get("a").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_both_flags_coexist_per_chat() {
-        let mut panels = SessionPanels::default();
-        panels.toggle_terminal("a");
-        panels.toggle_changes("a");
-        assert_eq!(
-            panels.get("a"),
-            ChatPanels {
-                terminal_open: true,
-                changes_open: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(panels.get("b"), ChatPanels::default());
-        // The right pane round-trips back closed.
-        assert!(!panels.toggle_changes("a"));
-        assert!(!panels.get("a").changes_open);
-    }
-
-    #[test]
-    fn session_panels_update_tracks_right_surfaces() {
-        let mut panels = SessionPanels::default();
-        panels.update("a", |p| p.right_active = RightSurface::Diff(3));
-        assert_eq!(panels.get("a").right_active, RightSurface::Diff(3));
-        // Other chats keep the picker default.
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-        panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
-        assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        panels.update("a", |p| p.right_active = RightSurface::File(0));
-        assert_eq!(panels.get("a").right_active, RightSurface::File(0));
-    }
-
-    #[test]
-    fn session_panels_right_history_tracks_visits_without_duplicates() {
-        let mut panels = SessionPanels::default();
-        let [a, b, c, d] = [1, 2, 3, 4].map(RightSurface::Browser);
-        for surface in [a, b, c, d, c, b, d, d] {
-            panels.update("chat", |p| p.right_active = surface);
-        }
-        assert_eq!(panels.right_tab_history["chat"], vec![a, c, b, d]);
-        panels.forget_right_surface("chat", d);
-        let next = panels.right_surface_fallback("chat", [a, b, c].into_iter());
-        assert_eq!(next, b);
-        panels.update("chat", |p| p.right_active = next);
-        panels.forget_right_surface("chat", b);
-        assert_eq!(panels.right_surface_fallback("chat", [a, c].into_iter()), c);
-        // Dragging the strip into another order cannot change recency.
-        assert_eq!(panels.right_surface_fallback("chat", [c, a].into_iter()), c);
-    }
-
-    #[test]
-    fn session_panels_right_history_is_scoped_and_skips_stale_surfaces() {
-        let mut panels = SessionPanels::default();
-        let a = RightSurface::File(1);
-        let b = RightSurface::Diff(2);
-        let stale = RightSurface::Terminal(3);
-        for surface in [a, b, stale] {
-            panels.update("first", |p| p.right_active = surface);
-        }
-        for surface in [b, a] {
-            panels.update("second", |p| p.right_active = surface);
-        }
-        assert_eq!(
-            panels.right_surface_fallback("first", [a, b].into_iter()),
-            b
-        );
-        assert_eq!(
-            panels.right_surface_fallback("second", [a, b].into_iter()),
-            a
-        );
-        assert_eq!(panels.right_surface_fallback("new", [a, b].into_iter()), a);
-        assert_eq!(
-            panels.right_surface_fallback("first", [].into_iter()),
-            RightSurface::Picker
-        );
-        // Changing visibility or showing the picker is not a surface visit.
-        panels.update("first", |p| p.changes_open = true);
-        panels.update("first", |p| p.right_active = RightSurface::Picker);
-        assert_eq!(panels.right_tab_history["first"], vec![a, b, stale]);
-        for surface in [a, b, stale] {
-            panels.forget_right_surface("first", surface);
-        }
-        assert!(!panels.right_tab_history.contains_key("first"));
-        assert_eq!(panels.right_tab_history["second"], vec![b, a]);
-    }
-
-    #[gpui::test]
-    fn right_tabs_close_in_visit_order_across_surface_types(cx: &mut gpui::TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
-                    default_harness: slopty_view_proto::HarnessId::MOCK,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, window, cx| {
-                shell.active_chat = "owner".into();
-                let mut tabs = Vec::new();
-                for _ in 0..4 {
-                    shell.add_browser_surface(None, window, cx);
-                    tabs.push(RightSurface::Browser(shell.browser_seq));
-                }
-                let [a, b, c, d] = <[_; 4]>::try_from(tabs).unwrap();
-                for surface in [c, b, d] {
-                    shell.set_right_active(surface, cx);
-                }
-                shell.reorder_right_tabs(2, 0, cx);
-                shell.close_right_surface(d, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), b);
-                shell.close_right_surface(a, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), b, "inactive close");
-                shell.close_right_surface(b, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), c);
-
-                shell.add_browser_surface(None, window, cx);
-                let recent = RightSurface::Browser(shell.browser_seq);
-                shell.add_file_surface("README.md".into(), window, cx);
-                let file = RightSurface::File(shell.file_surface_seq);
-                shell.close_right_surface(file, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), recent);
-
-                // A save may complete after switching to another session.
-                shell.add_file_surface("README.md".into(), window, cx);
-                let file = RightSurface::File(shell.file_surface_seq);
-                let owner = shell.panel_key(cx);
-                shell.active_chat = "other".into();
-                shell.add_browser_surface(None, window, cx);
-                let other = RightSurface::Browser(shell.browser_seq);
-                shell.complete_file_close(file, &owner, cx);
-                assert_eq!(shell.resolved_right_active(cx), other);
-                shell.active_chat = "owner".into();
-                assert_eq!(shell.resolved_right_active(cx), recent);
-                shell.close_right_surface(recent, window, cx);
-                shell.close_right_surface(c, window, cx);
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                assert!(!shell.panels.right_tab_history.contains_key(&owner));
-                assert!(!shell.right_pane_open(cx));
-            })
-            .unwrap();
-    }
-
-    #[test]
-    fn file_surface_is_single_instance_per_tab_list() {
-        let mut tabs = vec![RightSurface::Terminal(1)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::File(0)]);
-    }
-
-    #[test]
-    fn file_editors_are_distinct_surface_tabs_with_stable_titles() {
-        let mut tabs = vec![RightSurface::File(0)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(1)));
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(2)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(1)));
+    fn a_files_view_is_titled_by_its_name() {
         assert_eq!(workspace_file_title("src/árbol.rs"), "árbol.rs");
     }
 
@@ -9056,53 +6558,6 @@ mod exit_regressions {
                 let width = shell.eval_tween(tween, 0.);
                 assert!(width > 0. && width < 520.);
                 assert_eq!(shell.eval_tween(tween, 0.), width);
-                shell.active_chat = "preview".into();
-                shell.viewport_width = 1000.;
-                shell.right_tween = tween;
-                shell.toggle_right_pane(cx);
-                assert_eq!(
-                    shell.right_tween.unwrap().from,
-                    width,
-                    "reversing must not restart from zero"
-                );
-                let files = cx.new(|cx| {
-                    FilesSurface::new(
-                        shell.state.clone(),
-                        "preview".into(),
-                        false,
-                        1000,
-                        13.0,
-                        false,
-                        false,
-                        cx,
-                    )
-                });
-                let key = shell.panel_key(cx);
-                shell.file_surfaces.insert(0, files.clone());
-                shell
-                    .right_tabs
-                    .insert(key.clone(), vec![RightSurface::File(0)]);
-                shell
-                    .panels
-                    .update(&key, |panel| panel.right_active = RightSurface::File(0));
-                assert!(files.read(cx).test_images_visible());
-                shell.toggle_right_pane(cx);
-                assert!(!shell.right_pane_open(cx));
-                assert!(shell.tween_active(shell.right_tween));
-                assert!(
-                    files.read(cx).test_images_visible(),
-                    "file content stays painted through the closing mask"
-                );
-                let frame_time = shell.render_time;
-                // slopty: the close runs on its own spec (`PANEL_RESIZE`), read off the tween.
-                let close = shell.right_tween.unwrap();
-                shell.render_time = Some(close.started + close.duration);
-                shell.suspend_hidden_right_images(cx);
-                assert!(
-                    !files.read(cx).test_images_visible(),
-                    "image resources suspend once the close animation ends"
-                );
-                shell.render_time = frame_time;
                 shell.settings.sidebar_collapsed = true;
                 // slopty: put away, the sidebar keeps its rail, so its closing tween ends there.
                 let closing = tween.map(|tween| WidthTween {
@@ -9418,15 +6873,15 @@ mod exit_regressions {
         }
     }
 
-    // slopty: no pull-request pages.
+    /// A shell split beside the session takes the keyboard once it draws; ordinary redraws after
+    /// leave a focus elsewhere where it is.
     #[gpui::test]
-    fn opening_terminals_focuses_the_terminal_once(cx: &mut TestAppContext) {
+    fn a_split_shell_takes_the_keyboard_once(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            // slopty: no History surface (ruled out).
             settings::init(settings::UiSettings::default(), dir.path(), cx);
         });
         let window = cx.add_window(|_, cx| {
@@ -9435,62 +6890,35 @@ mod exit_regressions {
                 state,
                 EngineBootConfig {
                     data_dir: dir.path().into(),
-                    // slopty: Slopty's server is the only backend.
                     default_harness: slopty_view_proto::HarnessId::MOCK,
                 },
                 cx,
             )
         });
-        let mut drawer_window = None;
-        for embedded in [false, false, true] {
-            let panel = window
-                .update(cx, |shell, window, cx| {
-                    shell.open_chat("terminal-session".into(), cx);
-                    shell.active_chat = "terminal-session".into();
-                    if embedded {
-                        shell.add_terminal_surface(cx);
-                        shell.right_terminal.clone().unwrap()
-                    } else {
-                        shell.toggle_terminal(window, cx);
-                        shell.terminal.clone().unwrap()
-                    }
-                })
-                .unwrap();
-            let terminal_window = if !embedded && drawer_window.is_some() {
-                drawer_window.unwrap()
-            } else {
-                let handle = cx.update(|cx| {
-                    cx.open_window(gpui::WindowOptions::default(), |_, _| panel.clone())
-                        .unwrap()
-                });
-                if !embedded {
-                    drawer_window = Some(handle);
-                }
-                handle
-            };
-            cx.update_window(terminal_window.into(), |_, window, cx| {
-                window.draw(cx).clear(cx);
-                assert!(
-                    panel.read(cx).focus_handle().is_focused(window),
-                    "embedded: {embedded}"
-                );
-                // Ordinary redraws must not steal focus from another control.
-                let other_input = cx.focus_handle();
-                window.focus(&other_input, cx);
-                window.draw(cx).clear(cx);
-                assert!(other_input.is_focused(window));
+        let panel = window
+            .update(cx, |shell, _, cx| {
+                shell.open_chat("terminal-session".into(), cx);
+                shell.active_chat = "terminal-session".into();
+                shell.split_pane(None, cx);
+                let panes = shell.panes_now(cx);
+                let panes::Pane::Shell(n) = panes.focused() else {
+                    panic!("the shell is the pane focused: {panes:?}");
+                };
+                shell.pane_shells[&n].clone()
             })
             .unwrap();
-            if !embedded {
-                window
-                    .update(cx, |shell, window, cx| {
-                        shell.toggle_terminal(window, cx);
-                        // slopty: the dock closing gives the session's terminal the keyboard.
-                        assert!(shell.session_terminal.read(cx).focus_handle().is_focused(window));
-                    })
-                    .unwrap();
-            }
-        }
+        let terminal_window = cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |_, _| panel.clone()).unwrap()
+        });
+        cx.update_window(terminal_window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(panel.read(cx).focus_handle().is_focused(window));
+            let other_input = cx.focus_handle();
+            window.focus(&other_input, cx);
+            window.draw(cx).clear(cx);
+            assert!(other_input.is_focused(window), "a redraw steals nothing");
+        })
+        .unwrap();
     }
 
     /// slopty: landing on a session (opening it, the way back) gives its terminal the keyboard
@@ -9635,20 +7063,20 @@ mod exit_regressions {
                     action: LinkAction::Primary,
                     source_session: Some("first-session".into()),
                 };
-                assert!(!shell.right_pane_open(cx));
+                assert_eq!(shell.front_view(cx), None);
                 assert_eq!(
                     shell.activate_session_link(&activation, window, cx),
                     LinkOutcome::Internal
                 );
-                assert!(shell.right_pane_open(cx));
                 let first = shell.browser_seq;
                 assert_eq!(
                     shell.browsers[&first].read(cx).page.url.as_deref(),
                     Some("https://example.com/docs")
                 );
                 assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(first)
+                    shell.front_view(cx),
+                    Some(RightSurface::Browser(first)),
+                    "the page opens as a pane beside the session, with the keyboard"
                 );
                 shell.activate_session_link(&activation, window, cx);
                 assert_eq!(shell.browsers.len(), 2);
@@ -9697,7 +7125,7 @@ mod exit_regressions {
                 );
                 assert_eq!(shell.browsers.len(), 4);
                 let weak = shell.browsers[&first].downgrade();
-                shell.close_right_surface(RightSurface::Browser(first), window, cx);
+                shell.close_view(RightSurface::Browser(first), cx);
                 weak
             })
             .unwrap();
@@ -9836,7 +7264,7 @@ mod exit_regressions {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[gpui::test]
-    fn markdown_preview_events_open_browser_from_tree_and_file_tabs(cx: &mut TestAppContext) {
+    fn markdown_preview_events_open_browser_from_files_and_a_file(cx: &mut TestAppContext) {
         use crate::markdown::render::{LinkAction, LinkActivation, LinkTarget};
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
@@ -9863,7 +7291,7 @@ mod exit_regressions {
                 shell
                     .state
                     .update(cx, |state, _| state.selected_chat = Some("owner".into()));
-                shell.add_files_surface(window, cx);
+                shell.summon_files(window, cx);
                 shell.add_file_surface("README.md".into(), window, cx);
                 [
                     shell.files[&shell.panel_key(cx)].clone(),
@@ -9885,11 +7313,10 @@ mod exit_regressions {
             assert_eq!(cx.opened_url(), last_external_url);
             window
                 .update(cx, |shell, _, cx| {
-                    assert!(shell.right_pane_open(cx));
                     assert_eq!(shell.browsers.len(), index + 1);
                     assert_eq!(
-                        shell.resolved_right_active(cx),
-                        RightSurface::Browser(shell.browser_seq)
+                        shell.front_view(cx),
+                        Some(RightSurface::Browser(shell.browser_seq))
                     );
                     assert_eq!(
                         shell.browsers[&shell.browser_seq]
@@ -9993,8 +7420,11 @@ mod exit_regressions {
             .unwrap();
     }
 
+    /// A page opens as a pane of its own session's view and lets go of its browser when it
+    /// closes; a page closed without the keyboard leaves the keyboard where it was.
     #[gpui::test]
-    fn browser_tabs_keep_session_ownership_and_release_on_close(cx: &mut TestAppContext) {
+    fn pages_keep_their_session_and_let_go_on_close(cx: &mut TestAppContext) {
+        use super::panes::Pane;
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -10015,60 +7445,46 @@ mod exit_regressions {
         });
         let weak = window
             .update(cx, |shell, window, cx| {
-                // A fresh-session canvas never accumulates ownerless tabs.
+                // The new-session canvas never gathers pages nobody owns.
                 shell.add_browser_surface(None, window, cx);
                 assert!(shell.browsers.is_empty());
                 shell.active_chat = "first-session".into();
                 shell.add_browser_surface(None, window, cx);
-                let first = shell.browser_seq;
-                let weak = shell.browsers[&first].downgrade();
+                let first = RightSurface::Browser(shell.browser_seq);
+                let weak = shell.browsers[&shell.browser_seq].downgrade();
                 shell.add_browser_surface(None, window, cx);
-                let second = shell.browser_seq;
+                let second = RightSurface::Browser(shell.browser_seq);
                 assert_ne!(first, second);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
+                assert_eq!(shell.front_view(cx), Some(second));
                 shell.active_chat = "second-session".into();
-                assert!(shell.right_surface_rows(cx).is_empty());
+                assert!(shell.panes_now(cx).views().is_empty(), "a session has panes of its own");
                 shell.add_browser_surface(None, window, cx);
-                let other = shell.browser_seq;
+                let other = RightSurface::Browser(shell.browser_seq);
                 shell.active_chat = "first-session".into();
-                assert_eq!(shell.right_surface_rows(cx).len(), 2);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                // Closing a background tab preserves the selected address input.
-                let focus = window.focused(cx);
-                shell.close_right_surface(RightSurface::Browser(first), window, cx);
-                assert_eq!(window.focused(cx), focus);
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
-                shell.close_right_surface(RightSurface::Browser(second), window, cx);
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
+                assert_eq!(shell.panes_now(cx).views(), vec![first, second]);
+                assert_eq!(shell.front_view(cx), Some(second));
+                shell.close_view(first, cx);
+                assert_eq!(shell.front_view(cx), Some(second), "the keyboard stays");
+                shell.close_view(second, cx);
+                assert_eq!(shell.panes_now(cx).focused(), Pane::Session, "the keyboard goes home");
+                assert!(shell.panes_now(cx).views().is_empty());
                 shell.active_chat = "second-session".into();
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(other)
-                );
-                shell.close_right_surface(RightSurface::Browser(other), window, cx);
+                assert_eq!(shell.front_view(cx), Some(other));
+                shell.close_view(other, cx);
                 assert!(shell.browsers.is_empty());
                 assert!(shell.browser_subs.is_empty());
                 weak
             })
             .unwrap();
         cx.run_until_parked();
-        assert!(
-            weak.upgrade().is_none(),
-            "closed browser retained by callbacks"
-        );
+        assert!(weak.upgrade().is_none(), "a closed page's browser kept alive by a callback");
     }
 
+    /// ⌘W closes the focused pane, a view or a split shell, before the window; the session's
+    /// own pane falls through to the window's close.
     #[gpui::test]
-    fn cmd_w_closes_the_active_right_pane_surface_before_the_window(cx: &mut TestAppContext) {
+    fn cmd_w_closes_the_focused_pane_before_the_window(cx: &mut TestAppContext) {
+        use super::panes::Pane;
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             gpui_base::init(cx);
@@ -10090,73 +7506,19 @@ mod exit_regressions {
         window
             .update(cx, |shell, window, cx| {
                 shell.active_chat = "session".into();
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx));
+                assert!(!shell.close_focused_pane(cx), "the session's own pane is the window's");
 
                 shell.add_browser_surface(None, window, cx);
-                let first = shell.browser_seq;
+                let first = RightSurface::Browser(shell.browser_seq);
                 shell.add_browser_surface(None, window, cx);
-                let second = shell.browser_seq;
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(second)
-                );
+                let second = RightSurface::Browser(shell.browser_seq);
+                assert_eq!(shell.panes_now(cx).views(), vec![first, second]);
 
-                shell.add_browser_surface(None, window, cx);
-                let third = shell.browser_seq;
-                let middle = RightSurface::Browser(second);
-                assert_eq!(
-                    shell.tabs_to_close(middle, TabCloseAction::Left, cx),
-                    vec![RightSurface::Browser(first)]
-                );
-                assert_eq!(
-                    shell.tabs_to_close(middle, TabCloseAction::Right, cx),
-                    vec![RightSurface::Browser(third)]
-                );
-                assert_eq!(
-                    shell.tabs_to_close(middle, TabCloseAction::Others, cx),
-                    vec![RightSurface::Browser(first), RightSurface::Browser(third)]
-                );
-                assert_eq!(
-                    shell.tabs_to_close(middle, TabCloseAction::This, cx),
-                    vec![middle]
-                );
-                assert!(
-                    shell
-                        .tabs_to_close(RightSurface::Browser(first), TabCloseAction::Left, cx)
-                        .is_empty()
-                );
-                assert!(
-                    shell
-                        .tabs_to_close(RightSurface::Browser(third), TabCloseAction::Right, cx)
-                        .is_empty()
-                );
-                for tab in shell.tabs_to_close(middle, TabCloseAction::Right, cx) {
-                    shell.close_right_surface(tab, window, cx);
-                }
-                shell.set_right_active(middle, cx);
-
-                // ⌘W closes the active tab, not the window.
-                assert!(shell.close_active_surface(window, cx));
-                assert_eq!(
-                    shell.resolved_right_active(cx),
-                    RightSurface::Browser(first)
-                );
-
-                // …and again for the last tab, which also collapses the
-                // surface host (nothing left to show).
-                assert!(shell.close_active_surface(window, cx));
-                assert_eq!(shell.resolved_right_active(cx), RightSurface::Picker);
-                assert!(!shell.right_pane_open(cx));
-
-                // A closed pane falls through to the window-close rung
-                // instead of being consumed.
-                assert!(!shell.close_active_surface(window, cx));
-
-                // So does an open pane with nothing left to close.
-                shell.toggle_right_pane(cx);
-                assert!(shell.right_pane_open(cx));
-                assert!(!shell.close_active_surface(window, cx));
+                assert!(shell.close_focused_pane(cx));
+                assert_eq!(shell.front_view(cx), Some(first), "its sibling takes the keyboard");
+                assert!(shell.close_focused_pane(cx));
+                assert_eq!(shell.panes_now(cx).panes(), vec![Pane::Session]);
+                assert!(!shell.close_focused_pane(cx));
             })
             .unwrap();
     }
@@ -10231,85 +7593,6 @@ mod exit_regressions {
     }
 }
 
-/// Native browser regression fixture hooks are excluded from shipped builds.
-#[cfg(feature = "browser-fixture")]
-impl Shell {
-    pub fn fixture_focus_mounted(&self, window: &Window, cx: &App) -> bool {
-        self.shortcut_focus.contains_focused(window, cx)
-    }
-    pub fn fixture_active_browser(
-        &self,
-        cx: &App,
-    ) -> Option<(u64, Entity<crate::browser::BrowserSurface>)> {
-        let RightSurface::Browser(id) = self.resolved_right_active(cx) else {
-            return None;
-        };
-        self.browsers.get(&id).cloned().map(|browser| (id, browser))
-    }
-    pub fn fixture_open_browser(
-        &mut self,
-        url: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (u64, Entity<crate::browser::BrowserSurface>) {
-        self.set_surfaces_open(true, cx);
-        // Hosted Macs can expose only a 1024px desktop. Use the app's
-        // normal collapsed-sidebar layout to keep both conversation and
-        // preview readable in that real window.
-        if f32::from(window.viewport_size().width) < 1200.0 {
-            self.settings.sidebar_collapsed = true;
-        }
-        self.add_browser_surface(url, window, cx);
-        (self.browser_seq, self.browsers[&self.browser_seq].clone())
-    }
-    pub fn fixture_select_browser(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.set_right_active(RightSurface::Browser(id), cx);
-    }
-    pub fn fixture_close_browser(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.close_right_surface(RightSurface::Browser(id), window, cx);
-    }
-    pub fn fixture_browser_menu(&mut self, open: bool, cx: &mut Context<Self>) {
-        if open {
-            self.right_plus.open(());
-            cx.notify();
-        } else {
-            self.close_right_plus(cx);
-        }
-    }
-    pub fn fixture_browser_menu_mounted(&self) -> bool {
-        self.right_plus.get().is_some()
-    }
-    pub fn fixture_expand_browser(&mut self, cx: &mut Context<Self>) {
-        self.toggle_right_pane_expand(cx);
-    }
-    pub fn fixture_blur_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.route = Route::Settings(SettingsSection::Devices);
-        window.blur(cx);
-        cx.notify();
-    }
-    pub fn fixture_toggle_sidebar(&mut self, right: bool, cx: &mut Context<Self>) {
-        if right {
-            // The fixtures drive the surface host only; the explorer stays put.
-            self.set_surfaces_open(!self.right_pane_open(cx), cx);
-        } else {
-            self.toggle_sidebar(cx);
-        }
-    }
-    pub fn fixture_resize_browser(&mut self, width: f32, cx: &mut Context<Self>) {
-        self.settings.right_pane_width = width;
-        cx.notify();
-    }
-}
-
-// slopty: the jump button's shape and arrival (opencode's, `.research/opencode-study-2026-10-19.md`
-// item 18): 32 × 28 with corners of 8, rising 8 px into place over 200 ms on an ease-out.
-const JUMP_WIDTH: f32 = 32.0;
-const JUMP_HEIGHT: f32 = 28.0;
-const JUMP_RADIUS: f32 = 8.0;
-const JUMP_RISE: f32 = 8.0;
-// slopty: in on the quint ease-out over 200 ms, out over 300 ms on (0.7, 0, 0.84, 0), gathering
-// speed as it sinks back the way it came (HextaUI's `MessageScrollerButton`;
-// design-inspiration item 11). Its 0.95 scale is left out: a div has no scale here.
 /// slopty: a note's landing: one 0.4 s accent border fade on its session's terminal.
 const LANDING: motion::MotionSpec = motion::MotionSpec::new(400, motion::EASE_OUT);
 
@@ -10335,530 +7618,6 @@ mod landing_tests {
             "fainter as it goes"
         );
         assert_eq!(super::landing_opacity(Duration::from_millis(400)), None, "then gone");
-    }
-}
-
-const JUMP_IN: motion::MotionSpec = motion::MotionSpec::new(200, motion::EASE_OUT_QUINT);
-const JUMP_OUT: motion::MotionSpec =
-    motion::MotionSpec::new(300, motion::CubicBezier::new(0.7, 0.0, 0.84, 0.0));
-/// The arrow's side margins: with no count the button, its 1 px border with them, is
-/// [`JUMP_WIDTH`] wide.
-const JUMP_PAD: f32 = (JUMP_WIDTH - 16.0 - 2.0) / 2.0;
-
-thread_local! {
-    /// slopty: each jump button's last showing, when it began to leave, and how many leaves it
-    /// has begun.
-    static JUMP_SHOWN: std::cell::RefCell<JumpMarks> = std::cell::RefCell::new(JumpMarks::new());
-}
-
-type JumpMarks = std::collections::HashMap<&'static str, (bool, Option<std::time::Instant>, u64)>;
-
-/// slopty: whether `key`'s jump button is drawn at `now`: `None` gone, `Some(None)` shown, and
-/// `Some(Some(n))` leaving, `n` naming this leave so its animation plays once.
-fn jump_presence(key: &'static str, shown: bool, now: std::time::Instant) -> Option<Option<u64>> {
-    JUMP_SHOWN.with(|marks| {
-        let mut marks = marks.borrow_mut();
-        let (was, leave, leaves) = marks.entry(key).or_insert((false, None, 0));
-        let result = if shown {
-            *leave = None;
-            Some(None)
-        } else {
-            if *was {
-                *leave = Some(now);
-                *leaves += 1;
-            }
-            let leaving = JUMP_OUT.total().mul_f32(motion::speed_scale());
-            leave
-                .filter(|at| now.saturating_duration_since(*at) < leaving)
-                .map(|_| Some(*leaves - 1))
-        };
-        *was = shown;
-        result
-    })
-}
-
-/// slopty: the jump button leaving: faded out and sunk [`JUMP_RISE`] over [`JUMP_OUT`].
-fn jump_out(key: &'static str, leaving: Option<u64>, button: AnyElement) -> AnyElement {
-    let Some(n) = leaving else {
-        return button;
-    };
-    div()
-        .child(button)
-        .with_animation(
-            gpui::ElementId::NamedInteger(SharedString::from(format!("{key}-out")), n),
-            JUMP_OUT.animation(),
-            |el, t| el.relative().opacity(1.0 - t).top(px(JUMP_RISE * t)),
-        )
-        .into_any_element()
-}
-
-/// slopty: the button that glides a transcript back to its end, `on_click`.
-fn jump_button(
-    anim_key: &'static str,
-    hover_key: &'static str,
-    unseen: usize,
-    (reduced, now): (bool, std::time::Instant),
-    theme: &Theme,
-    on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    // slopty: opencode's jump button (`.research/opencode-study-2026-10-19.md` item 18): the
-    // arrow alone, 32 × 28 with corners of 8, on the popover's frosted surface, lifted and
-    // ringed by a halo of the page's own colour so the text scrolling under it never touches
-    // its edge; it says what it does to a screen reader and in its tooltip.
-    let theme = theme.for_popup();
-    let glass = theme.is_frost();
-    // On frost the hover's wash rides a layer of its own over the glass (a div has one fill).
-    let wash = if glass {
-        motion::hover_blend(hover_key, gpui::transparent_black(), theme.glass_hover())
-    } else {
-        gpui::transparent_black()
-    };
-    let page = if glass { theme.glass() } else { theme.surface };
-    let button = div()
-        .id(anim_key)
-        .role(gpui::Role::Button)
-        .aria_label("Scroll to bottom")
-        .tooltip(crate::settings::widgets::text_tooltip("Scroll to bottom"))
-        .tooltip_show_delay(crate::settings::widgets::TOOLTIP_DELAY)
-        // slopty: as wide as the arrow and the count it says; with none, [`JUMP_WIDTH`].
-        .min_w(px(JUMP_WIDTH))
-        .h(px(JUMP_HEIGHT))
-        .flex_none()
-        .rounded(px(JUMP_RADIUS))
-        .border_1()
-        .border_color(theme.border)
-        .bg(if glass {
-            crate::popover::surface_bg(&theme)
-        } else {
-            motion::hover_blend(hover_key, theme.surface_raised, theme.surface_raised_hover)
-        })
-        .when(!glass, |button| {
-            let shadow = |color, y: f32, blur: f32, spread: f32| gpui::BoxShadow {
-                color,
-                offset: gpui::point(px(0.0), px(y)),
-                blur_radius: px(blur),
-                spread_radius: px(spread),
-                inset: false,
-            };
-            // The halo first, so the lift's shade lies over it.
-            button.shadow(vec![
-                shadow(page, 2.0, 8.0, 0.0),
-                shadow(gpui::hsla(0.0, 0.0, 0.0, 0.1), 4.0, 6.0, -1.0),
-                shadow(gpui::hsla(0.0, 0.0, 0.0, 0.1), 2.0, 4.0, -2.0),
-            ])
-        })
-        .hover_fade(hover_key)
-        .cursor_pointer()
-        .on_click(on_click)
-        .child(
-            div()
-                .h_full()
-                .px(px(JUMP_PAD))
-                .rounded(px(JUMP_RADIUS - 1.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(wash)
-                .child(crate::icons::icon(crate::icons::ARROW_DOWN).size(px(16.0)).text_color(theme.text_muted))
-                // slopty: "↓ 3 new", the count in the accent as new content is, each part
-                // rolled in and out (`roll_text`), the button's width gliding with them.
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .text_size(crate::typography::ui_rems(12.5))
-                        .child(div().text_color(theme.accent).child(crate::roll_text::roll_text(
-                            format!("{anim_key}-count"),
-                            if unseen > 0 { format!(" {unseen}").into() } else { SharedString::default() },
-                            reduced,
-                            now,
-                        )))
-                        .child(div().text_color(theme.text_muted).child(crate::roll_text::roll_text(
-                            format!("{anim_key}-new"),
-                            if unseen > 0 { " new".into() } else { SharedString::default() },
-                            reduced,
-                            now,
-                        ))),
-                ),
-        );
-    let button = jump_in(anim_key, button.debug_selector(move || anim_key.to_owned()));
-    crate::frost::frosted(JUMP_RADIUS, crate::frost::MENU_BLUR, button).into_any_element()
-}
-
-/// slopty: the jump button arriving: faded in and risen [`JUMP_RISE`] into place.
-fn jump_in<E>(id: impl Into<gpui::ElementId>, element: E) -> gpui::AnimationElement<E>
-where
-    E: Styled + IntoElement + 'static,
-{
-    element.with_animation(id, JUMP_IN.animation(), |el, t| {
-        el.relative().opacity(t).top(px(JUMP_RISE * (1.0 - t)))
-    })
-}
-
-#[cfg(test)]
-mod jump_button_tests {
-    use std::rc::Rc;
-
-    use super::*;
-    use gpui::TestAppContext;
-
-    struct Host(Rc<std::cell::Cell<u32>>, usize);
-
-    impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let clicks = Rc::clone(&self.0);
-            let unseen = self.1;
-            // As the transcript lays it out: a row that centres it at its own width.
-            div().size_full().flex().justify_center().child(jump_button("jump-test", "jump-test-hover", unseen, (true, std::time::Instant::now()), Theme::of(cx), move |_, _, _| {
-                clicks.set(clicks.get() + 1);
-            }))
-        }
-    }
-
-    /// slopty: the jump to the end is the arrow alone on a 32 × 28 button (opencode's), named
-    /// for a screen reader, and a click on it jumps.
-    #[gpui::test]
-    fn the_jump_button_is_an_arrow_that_jumps(cx: &mut TestAppContext) {
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-        });
-        let clicks = Rc::new(std::cell::Cell::new(0));
-        let host = Rc::clone(&clicks);
-        let (view, cx) = cx.add_window_view(move |_, _| Host(host, 0));
-        cx.run_until_parked();
-        let bounds = cx.debug_bounds("jump-test").expect("the button");
-        assert_eq!((f32::from(bounds.size.width), f32::from(bounds.size.height)), (JUMP_WIDTH, JUMP_HEIGHT));
-        let named = cx.update(|window, cx| {
-            window.set_a11y_active(true);
-            window.refresh();
-            window.draw(cx).clear(cx);
-            window
-                .a11y_tree()
-                .is_some_and(|tree| tree.nodes.iter().any(|(_, node)| node.label() == Some("Scroll to bottom")))
-        });
-        assert!(named, "named for a screen reader");
-        cx.simulate_click(bounds.center(), gpui::Modifiers::default());
-        assert_eq!(clicks.get(), 1, "a click jumps");
-
-        // slopty: rows that arrived while the person read above widen it to say so (item 11).
-        view.update(cx, |host, cx| {
-            host.1 = 3;
-            cx.notify();
-        });
-        cx.run_until_parked();
-        let wide = cx.debug_bounds("jump-test").expect("the button");
-        assert!(f32::from(wide.size.width) > JUMP_WIDTH + 20.0, "it says \"3 new\": {wide:?}");
-    }
-
-    /// slopty: the jump button leaves over 300 ms, and plays its leave once.
-    #[test]
-    fn the_jump_button_plays_one_leave_then_goes() {
-        let start = std::time::Instant::now();
-        assert_eq!(jump_presence("jump-leave-test", false, start), None, "never shown");
-        assert_eq!(jump_presence("jump-leave-test", true, start), Some(None));
-        assert_eq!(jump_presence("jump-leave-test", false, start), Some(Some(0)), "leaving");
-        let mid = start + Duration::from_millis(150);
-        assert_eq!(jump_presence("jump-leave-test", false, mid), Some(Some(0)), "the same leave");
-        assert_eq!(jump_presence("jump-leave-test", false, start + Duration::from_millis(301)), None, "gone");
-        assert_eq!(jump_presence("jump-leave-test", true, mid), Some(None));
-        assert_eq!(jump_presence("jump-leave-test", false, mid), Some(Some(1)), "a new leave");
-    }
-}
-
-#[cfg(test)]
-mod right_tab_mouse_regressions {
-    use super::*;
-    use gpui::{AppContext, TestAppContext, VisualTestContext};
-
-    // Render the production strip and use its real Shell callbacks, without
-    // starting an engine or rendering the rest of the desktop application.
-    struct TabHost {
-        shell: Entity<Shell>,
-        _data_dir: tempfile::TempDir,
-    }
-
-    impl Render for TabHost {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            self.shell.update(cx, |shell, cx| {
-                let tabs = shell.render_right_tab_strip(cx);
-                shell.titlebar_drag_region(
-                    "right-tab-test-titlebar",
-                    div().w(px(400.)).h(px(40.)).child(tabs),
-                    cx,
-                )
-            })
-        }
-    }
-
-    fn setup(cx: &mut TestAppContext) -> (Entity<Shell>, &mut VisualTestContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let (host, cx) = cx.add_window_view(|window, cx| {
-            let shell = cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                let mut shell = Shell::new(
-                    state,
-                    EngineBootConfig {
-                        data_dir: dir.path().into(),
-                        // slopty: Slopty's server is the only backend.
-                        default_harness: slopty_view_proto::HarnessId::MOCK,
-                    },
-                    cx,
-                );
-                shell.active_chat = "parent".into();
-                // slopty: two diff tabs stand for any two surfaces (no subagent tab).
-                for _ in 0..2 {
-                    shell.add_diff_surface(window, cx);
-                }
-                shell
-            });
-            TabHost {
-                shell,
-                _data_dir: dir,
-            }
-        });
-        let shell = host.read_with(cx, |host, _| host.shell.clone());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        (shell, cx)
-    }
-
-    #[gpui::test]
-    fn surface_close_press_does_not_start_parent_drag(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-close-0").unwrap().center();
-        let end = start + gpui::point(px(6.), px(0.));
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.update(|_, cx| assert!(!cx.has_active_drag(), "close press started a tab drag"));
-        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert!(!shell.diffs.contains_key(&1));
-            assert!(shell.diffs.contains_key(&2));
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(2));
-        });
-    }
-
-    #[gpui::test]
-    fn right_tab_close_sits_at_the_trailing_edge(cx: &mut TestAppContext) {
-        let (_shell, cx) = setup(cx);
-        let tab = cx.debug_bounds("right-surface-tab-0").unwrap();
-        let close = cx.debug_bounds("right-surface-close-0").unwrap();
-        assert!(
-            close.left() > tab.center().x,
-            "close is not after the title"
-        );
-        assert_eq!(close.right(), tab.right() - px(4.));
-    }
-
-    // slopty: a pane's tabs fit their titles, one width for the strip, so a title never cuts
-    // beside an empty strip ("Working t…") and a drag's slots stay uniform.
-    #[gpui::test]
-    fn right_tabs_fit_their_widest_title(cx: &mut TestAppContext) {
-        use crate::surface_chrome::{TAB_CHIP_MAX_WIDTH, TAB_CHIP_MIN_WIDTH, tab_widths};
-        let (shell, cx) = setup(cx);
-        let widths = shell.read_with(cx, |shell, cx| {
-            let rows = shell.right_surface_rows(cx);
-            tab_widths(rows.iter().map(|(_, title, ..)| title.as_ref()), cx)
-        });
-        assert_eq!(widths.cut, [false, false], "both titles read whole");
-        for (ix, id) in ["right-surface-tab-0", "right-surface-tab-1"].into_iter().enumerate() {
-            let tab = cx.debug_bounds(id).unwrap();
-            assert_eq!(f32::from(tab.size.width), widths.chip, "tab {ix} takes the strip's width");
-        }
-        cx.update(|_, cx| {
-            let long = "a title far longer than any pane tab should ever draw in full";
-            let fitted = tab_widths(["Working tree", "a"], cx);
-            assert!(fitted.chip > TAB_CHIP_MIN_WIDTH && fitted.cut == [false, false], "{fitted:?}");
-            assert_eq!(tab_widths(["a"], cx).chip, TAB_CHIP_MIN_WIDTH);
-            let capped = tab_widths([long, "a"], cx);
-            assert_eq!(capped.chip, TAB_CHIP_MAX_WIDTH);
-            assert_eq!(capped.cut, [true, false], "only the long title is cut");
-        });
-    }
-
-    // slopty: the side pane's splitter moves 16 pt a key, within the pane's bounds.
-    #[gpui::test]
-    fn the_side_pane_splitter_nudges_within_its_bounds(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        cx.update(|_, cx| {
-            shell.update(cx, |shell, cx| {
-                let start = shell.settings.right_pane_width;
-                shell.nudge_right_pane(-RIGHT_PANE_NUDGE, cx);
-                assert_eq!(shell.settings.right_pane_width, (start - RIGHT_PANE_NUDGE).max(RIGHT_PANE_MIN));
-                for _ in 0..200 {
-                    shell.nudge_right_pane(-RIGHT_PANE_NUDGE, cx);
-                }
-                assert_eq!(shell.settings.right_pane_width, RIGHT_PANE_MIN, "never under its least");
-                for _ in 0..400 {
-                    shell.nudge_right_pane(RIGHT_PANE_NUDGE, cx);
-                }
-                let max = shell.surface_max_width(cx).max(RIGHT_PANE_MIN);
-                assert_eq!(shell.settings.right_pane_width, max, "never past what the window holds");
-            });
-        });
-    }
-
-    /// slopty: the tab brought to the front scrolls whole into the strip, its close button in
-    /// view and not under the pane's controls, whichever end of the strip it is at; the last
-    /// brings the `+` after it along.
-    #[gpui::test]
-    fn the_front_tab_scrolls_whole_into_the_strip(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                for _ in 0..6 {
-                    shell.add_diff_surface(window, cx);
-                }
-            })
-        });
-        let shown = |cx: &mut gpui::VisualTestContext| {
-            cx.update(|window, cx| window.draw(cx).clear(cx));
-            let (front, strip) = shell.read_with(cx, |shell, cx| {
-                let front = shell
-                    .right_surface_rows(cx)
-                    .iter()
-                    .position(|(surface, ..)| *surface == shell.resolved_right_active(cx))
-                    .expect("a front tab");
-                (front, shell.right_tab_scroll.bounds())
-            });
-            // A debug selector lives as long as the window's frames.
-            let name = Box::leak(format!("right-surface-close-{front}").into_boxed_str());
-            let close = cx.debug_bounds(name).unwrap();
-            (front, close.left() >= strip.left() && close.right() <= strip.right())
-        };
-        let (last, whole) = shown(cx);
-        assert!(last > 2 && whole, "the newest tab, at the strip's end, shows whole");
-        let (offset, max) = shell.read_with(cx, |shell, _| {
-            (shell.right_tab_scroll.offset().x, shell.right_tab_scroll.max_offset().x)
-        });
-        assert!(max > px(0.), "the strip overflows");
-        assert!((offset + max).abs() < px(0.5), "the `+` after it shows too: {offset:?} of {max:?}");
-        let first = shell.read_with(cx, |shell, cx| shell.right_surface_rows(cx)[0].0);
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| shell.activate_right_surface(first, window, cx))
-        });
-        assert_eq!(shown(cx), (0, true), "the first tab, brought back, shows whole");
-    }
-
-    #[gpui::test]
-    fn tab_strip_scrolls_over_chips_inside_titlebar(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                for _ in 0..4 {
-                    shell.add_diff_surface(window, cx);
-                }
-            })
-        });
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        cx.update(|window, cx| {
-            window.dispatch_event(
-                gpui::PlatformInput::Scroll(gpui::ScrollEvent {
-                    position: start,
-                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(-100.), px(0.))),
-                    modifiers: gpui::Modifiers::default(),
-                    touch_phase: gpui::TouchPhase::Moved,
-                    momentum_phase: None, // slopty: gpui-fast
-                    source: gpui::ScrollSource::Pointer,
-                }),
-                cx,
-            );
-        });
-        shell.read_with(cx, |shell, _| {
-            assert!(
-                shell.right_tab_scroll.offset().x < px(0.),
-                "tab strip did not scroll"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn surface_tab_body_still_selects_drags_and_middle_closes(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        cx.simulate_click(start, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(1));
-        });
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(
-            start + gpui::point(px(8.), px(0.)),
-            Some(MouseButton::Left),
-            gpui::Modifiers::default(),
-        );
-        cx.update(|_, cx| assert!(cx.has_active_drag(), "tab drag did not start"));
-        cx.simulate_mouse_up(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_down(start, MouseButton::Middle, gpui::Modifiers::default());
-        cx.simulate_mouse_up(start, MouseButton::Middle, gpui::Modifiers::default());
-        shell.read_with(cx, |shell, _| {
-            assert!(!shell.diffs.contains_key(&1));
-            assert!(shell.diffs.contains_key(&2));
-        });
-    }
-
-    #[cfg(target_os = "windows")]
-    #[gpui::test]
-    fn surface_tab_click_jitter_selects_without_starting_a_drag(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let start = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        // Sub-threshold pointer jitter (the Windows drag rectangle is 4px,
-        // matching the system SM_CXDRAG default): a jittery click must stay
-        // a click — no drag ghost, tab still activates on release.
-        let end = start + gpui::point(px(3.), px(0.));
-
-        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::default());
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.update(|_, cx| {
-            assert!(
-                !cx.has_active_drag(),
-                "ordinary Windows click jitter started a tab drag"
-            )
-        });
-        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::default());
-
-        shell.read_with(cx, |shell, cx| {
-            assert_eq!(shell.resolved_right_active(cx), RightSurface::Diff(1));
-        });
-    }
-
-    /// The user-visible contract: dragging a surface tab onto another slot
-    /// reorders the strip. On Windows the chip's `on_drag` used to be gated
-    /// off entirely (`click_activation_drag_enabled`), so the drag could
-    /// never start; on every platform the drop could not land on a chip
-    /// (BlockMouse carve-out). This test is the regression lock for both.
-    #[gpui::test]
-    fn surface_tab_drag_reorders_the_strip(cx: &mut TestAppContext) {
-        let (shell, cx) = setup(cx);
-        let from = cx.debug_bounds("right-surface-tab-0").unwrap().center();
-        let to = cx.debug_bounds("right-surface-tab-1").unwrap().center();
-
-        cx.simulate_mouse_down(from, MouseButton::Left, gpui::Modifiers::default());
-        // First move crosses the threshold and promotes the press into a
-        // drag (bubble phase). The DragMoveEvent dispatch that computes the
-        // drop slot only fires on the NEXT move (capture phase, after the
-        // drag is already active) — a real pointer always produces both.
-        cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.update(|_, cx| {
-            assert!(cx.has_active_drag(), "surface tab drag never started");
-        });
-        cx.simulate_mouse_move(to, Some(MouseButton::Left), gpui::Modifiers::default());
-        cx.simulate_mouse_up(to, MouseButton::Left, gpui::Modifiers::default());
-
-        shell.read_with(cx, |shell, cx| {
-            let key = shell.panel_key(cx);
-            let tabs = shell.right_tabs.get(&key).expect("panel has surface tabs");
-            assert_eq!(
-                tabs,
-                &vec![RightSurface::Diff(2), RightSurface::Diff(1)],
-                "tab drag did not reorder the strip"
-            );
-        });
     }
 }
 

@@ -129,6 +129,15 @@ fn host_live_views(view: &Entity<WorkspaceView>, cx: &mut App) {
         let theme = theme.unwrap_or_default();
         slopty_terminal::fits(&theme, Some(frame), size, window, cx)
     });
+    // A split snaps a terminal's pane to the cell its view draws.
+    let measured = view.downgrade();
+    slopty_shell::live::serve_grid(cx, move |window, cx| {
+        let look = TerminalLook::of(cx);
+        let frame =
+            slopty_terminal::GridFrame { padding: look.padding, line_height: look.line_height };
+        let theme = measured.upgrade().map(|view| view.read(cx).theme().clone());
+        slopty_terminal::cell(&theme.unwrap_or_default(), Some(frame), window, cx)
+    });
     // Whether the person has words in a terminal's line unsent: what an agent driving the
     // window reads as them typing.
     slopty_shell::live::serve_drafting(cx, |view, cx| {

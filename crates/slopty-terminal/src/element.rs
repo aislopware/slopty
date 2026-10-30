@@ -1519,6 +1519,23 @@ pub fn fits(
     Cells::of(Typed::of(theme), frame, &family, window, cx).fit(size)
 }
 
+/// The cell a grid draws in a host's `frame`, and the inset around the grid on each side: what
+/// a split snaps a terminal's pane to, so its grid fills it to the edge.
+pub fn cell(
+    theme: &slopty_theme::Theme,
+    frame: Option<crate::GridFrame>,
+    window: &Window,
+    cx: &mut App,
+) -> (Size<Pixels>, Pixels) {
+    if !cx.has_global::<ShapeCache>() {
+        cx.set_global(ShapeCache::default());
+    }
+    let candidates = &theme.typography.mono_families;
+    let family = cx.update_global::<ShapeCache, _>(|cache, _| cache.family(window, candidates));
+    let cells = Cells::of(Typed::of(theme), frame, &family, window, cx);
+    (Size { width: cells.grid.cell_width, height: cells.grid.line_height }, cells.pad)
+}
+
 /// What a theme sets of a grid's type.
 #[derive(Clone, Copy)]
 struct Typed {

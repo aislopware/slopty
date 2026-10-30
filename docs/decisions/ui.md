@@ -11694,7 +11694,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   app is in front. The workspace looks at which of its views holds it on each clipboard tick
   (250 ms; GPUI has no window-wide focus event a view outside the window's tree can hear), so the
   dock's shell and a right-pane window share the clipboard as the old tiles did. Test:
-  `slopty-e2e` `app::clipboard::the_dock_s_shell_shares_the_clipboard_with_its_worker`.
+  `slopty-e2e` `app::clipboard::a_split_shell_shares_the_clipboard_with_its_worker`.
 
 - ✅ **A phone or iPad finds the server from the Mac's Devices page (2026-10-13).** The code the
   old workspace showed in a sheet is on the server's row of Settings → Devices as "Connect a
