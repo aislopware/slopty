@@ -25,7 +25,7 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::ctl::{EditAsk, Handed, NoClient, UiCall};
@@ -35,6 +35,7 @@ use slopty_proto::handoff::{
 };
 use slopty_worker::handoff::{Heard, Need, Nobody};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::Daemon;
 
@@ -299,7 +300,7 @@ async fn until_edited(
     gave_up: impl Future<Output = ()>,
 ) -> Option<Handed> {
     let mut gave_up = std::pin::pin!(gave_up);
-    let mut lost_at: Option<tokio::time::Instant> = None;
+    let mut lost_at: Option<Instant> = None;
     loop {
         let lost = async {
             match lost_at {
@@ -315,7 +316,7 @@ async fn until_edited(
                     return Some(Handed::Edited { outcome });
                 }
                 Some(Heard::Gone(by)) if by == holder => {
-                    lost_at = tokio::time::Instant::now().checked_add(LOST_AFTER);
+                    lost_at = Instant::now().checked_add(LOST_AFTER);
                 }
                 Some(Heard::Back(by)) if by == holder => lost_at = None,
                 Some(_) => {}

@@ -9,11 +9,12 @@
 //! it drives, so a turn of `claude -p`, Codex, pi or an ACP agent holds the machine with nobody
 //! linked, as the server's tables already do for its own Mac (`slopty_server::hub::awake`).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_core::WallMs;
 use slopty_worker::thread::Host;
 use slopty_worker::wake;
+use tokio::time::Instant;
 
 use crate::Daemon;
 

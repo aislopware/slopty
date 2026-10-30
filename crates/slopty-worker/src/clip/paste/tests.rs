@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use parking_lot::Mutex;
 use slopty_core::{ClientId, WorkerId};
 use slopty_input::pasteboard::Held;
 use slopty_proto::transfer::{ClipEntry, ClipType, Offer, Rep};
+use tokio::time::Instant;
 
 use super::*;
 use crate::clip::Sink;

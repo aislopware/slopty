@@ -221,6 +221,7 @@ mod review {
         let dir = tempfile::tempdir().unwrap();
         let repo = repository(dir.path());
         run(&repo, &["config", "core.trustctime", "false"]);
+        #[expect(clippy::disallowed_methods, reason = "a file's times are set on the system clock")]
         let then = SystemTime::now().checked_sub(Duration::from_secs(3_600)).unwrap();
         let age = |path: &Path| {
             let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
@@ -431,7 +432,7 @@ mod review {
             if label == "one file changed" {
                 std::fs::write(root.join("README.md"), "changed\n").unwrap();
             }
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             repo.take().await.unwrap();
             timed.push((label, started.elapsed()));
         }
@@ -459,11 +460,11 @@ mod review {
             std::fs::write(root.join(format!("f{i}.txt")), A.replace("six\n", "SIX\n")).unwrap();
         }
         let to = repo.take().await.unwrap();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let files = repo.changes(&from, &to).await.unwrap();
         let review = started.elapsed();
         assert_eq!(files.len(), FILES);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for file in &files {
             for id in file.from.iter().chain(file.to.iter()) {
                 repo.object(id).await.unwrap();

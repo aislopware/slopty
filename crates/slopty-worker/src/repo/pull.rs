@@ -10,11 +10,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value;
 use slopty_proto::git::{CHECKS_MAX, Forge, GitDone, GitOutcome, PullCheck, PullStatus};
+use tokio::time::Instant;
 
 use super::commit::{Programs, REMOTE, config, merge_base_key, run};
 

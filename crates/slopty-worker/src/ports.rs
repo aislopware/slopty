@@ -21,11 +21,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::LazyLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use imp::{children, name, tcp_listeners};
 use slopty_core::SessionId;
 use slopty_proto::orchestration::Port;
+use tokio::time::Instant;
 
 /// Processes walked per session at most: a fork bomb in a terminal must not take the worker
 /// with it.

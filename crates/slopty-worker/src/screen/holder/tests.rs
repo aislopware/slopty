@@ -9,7 +9,7 @@ use slopty_proto::screen::{DisplayKey, DisplayShape};
 use slopty_vdisplay::{DisplayError, Enforced, Plan};
 use tokio::sync::mpsc;
 
-use super::{Dial, Ended, Holder, Need, Remote, kept, restore, serve};
+use super::{ALONE_FOR, Dial, Ended, Holder, Need, RESTORE_TRIES, Remote, kept, restore, serve};
 use crate::screen::sized::{Displays, Factory, Job, Main, Registry, plan_for};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,9 +166,11 @@ async fn a_held_display_outlives_its_worker_and_its_client_takes_it_back() {
     assert!(kept(&store).is_empty() && !store.exists(), "an empty list is no file");
 }
 
-/// A holder started after one that went makes its list's displays again, trying again while
-/// macOS still holds an identity for the holder before.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+/// A holder started after one that went makes its list's displays again, trying again a second
+/// apart while macOS still holds an identity for the holder before; one macOS refuses past its
+/// tries is given up, and stays on the list for the next holder. On tokio's paused clock: the
+/// seconds between tries pass at once, and each is exact.
+#[tokio::test(start_paused = true)]
 async fn a_new_holder_makes_the_kept_displays_again() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("displays.json");
@@ -178,24 +180,50 @@ async fn a_new_holder_makes_the_kept_displays_again() {
 
     let fake = Fake::refusing(2);
     let (main, _ends) = on_task(Holder::new(fake.clone(), store.clone()));
-    tokio::time::timeout(Duration::from_secs(10), restore(Arc::clone(&main), &store))
-        .await
-        .expect("made within its tries");
+    let started = tokio::time::Instant::now();
+    restore(Arc::clone(&main), &store).await;
+    assert_eq!(started.elapsed(), Duration::from_secs(2), "a second after each refusal");
     assert_eq!(fake.did(), [Did::Made(1)], "made again after two refusals");
     assert_eq!(kept(&store), [(KEY, plan)], "the list stands");
+
+    let fake = Fake::refusing(u32::MAX);
+    let (main, _ends) = on_task(Holder::new(fake.clone(), store.clone()));
+    let started = tokio::time::Instant::now();
+    restore(Arc::clone(&main), &store).await;
+    let tries = Duration::from_secs(RESTORE_TRIES.into());
+    assert_eq!(started.elapsed(), tries, "given up after its tries, a second apart");
+    assert_eq!(fake.did(), [], "never made");
+    assert_eq!(kept(&store), [(KEY, plan)], "still on the list for the next holder");
 }
 
-/// A holder no worker is linked to ends once the time it was given has passed, and one asked
-/// to quit ends at once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_holder_ends_alone_or_when_asked_to_quit() {
+/// A holder no worker is linked to ends once its minute alone has passed, counted from when the
+/// last worker went, not from its start. On tokio's paused clock, so the minute is exact.
+#[tokio::test(start_paused = true)]
+async fn a_holder_ends_a_minute_after_its_last_worker_went() {
     let dir = tempfile::tempdir().unwrap();
     let fake = Fake::default();
     let (main, _ends) = on_task(Holder::new(fake, dir.path().join("displays.json")));
-    let alone = serve(Arc::clone(&main), None, None, Duration::from_millis(50));
-    let ended = tokio::time::timeout(Duration::from_secs(10), alone).await;
-    assert_eq!(ended.ok(), Some(Ended::Alone));
+    let started = tokio::time::Instant::now();
+    assert_eq!(serve(Arc::clone(&main), None, None, ALONE_FOR).await, Ended::Alone);
+    assert_eq!(started.elapsed(), ALONE_FOR, "alone from the start");
 
+    let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+    let serving = tokio::spawn(serve(main, Some(theirs), None, ALONE_FOR));
+    let linked_for = Duration::from_secs(90);
+    tokio::time::sleep(linked_for).await;
+    assert!(!serving.is_finished(), "a holder with a worker stays");
+    let went = tokio::time::Instant::now();
+    drop(ours);
+    assert_eq!(serving.await.unwrap(), Ended::Alone);
+    assert_eq!(went.elapsed(), ALONE_FOR, "a minute after its worker went");
+}
+
+/// A holder asked to quit ends at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_holder_asked_to_quit_ends_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::default();
+    let (main, _ends) = on_task(Holder::new(fake, dir.path().join("displays.json")));
     let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
     let serving = tokio::spawn(serve(main, Some(theirs), None, Duration::from_mins(10)));
     let ours = ours.into_std().unwrap();

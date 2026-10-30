@@ -25,11 +25,12 @@ use std::collections::HashMap;
 use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_proto::screen::DisplayKey;
 use slopty_vdisplay::{DisplayError, Enforced, Plan};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+use tokio::time::Instant;
 
 use self::wire::{Answer, Ask, HeldDisplay, WireError, WirePlan};
 use super::sized::{Factory, Main};

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
@@ -12,6 +12,7 @@ use slopty_proto::terminal::{OpenSession, Restored, SessionState, SessionSummary
 use slopty_pty::protocol::{Exit, SessionInfo, socket_path};
 use slopty_pty::{PtyError, PtydClient, SpawnSpec};
 use tokio::sync::{Notify, mpsc};
+use tokio::time::Instant;
 
 use crate::WorkerError;
 use crate::orchestrate::Agents;
@@ -289,7 +290,7 @@ impl Worker {
     }
 
     async fn adopt_when_free(&self, id: SessionId, size: TermSize, adoption: Adoption) {
-        let asked = tokio::time::Instant::now();
+        let asked = Instant::now();
         loop {
             tokio::time::sleep(HANDOVER_POLL).await;
             match self.adopt(id, size, adoption.clone()).await {
@@ -798,9 +799,9 @@ async fn dial(
         let kept = words.next().map(str::to_owned);
         (by.is_some() && by == peer).then_some(kept).flatten()
     };
-    let deadline = tokio::time::Instant::now().checked_add(CUSTODY_WAIT);
+    let deadline = Instant::now().checked_add(CUSTODY_WAIT);
     let mut kept = read();
-    while kept.is_none() && deadline.is_some_and(|at| tokio::time::Instant::now() < at) {
+    while kept.is_none() && deadline.is_some_and(|at| Instant::now() < at) {
         tokio::time::sleep(CUSTODY_LOOK).await;
         kept = read();
     }
@@ -914,9 +915,10 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::SessionId;
+    use tokio::time::Instant;
 
     use super::Unwatched;
 

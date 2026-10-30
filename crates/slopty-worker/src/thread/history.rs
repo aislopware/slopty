@@ -27,7 +27,7 @@ use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use nucleo_matcher::chars::{graphemes, normalize, to_lower_case};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
@@ -38,6 +38,7 @@ use slopty_core::WallMs;
 use slopty_proto::search::Span;
 use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::{PROMPT_HIT_BYTES, PastSession, PromptHit};
+use tokio::time::Instant;
 
 /// How many of a session's prompts that matched it carries.
 pub const PROMPTS_PER_SESSION: usize = 3;

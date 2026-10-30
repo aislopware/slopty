@@ -516,7 +516,7 @@ mod tests {
                 let mut walks = Vec::new();
                 let mut opens = Vec::new();
                 while busy.load(std::sync::atomic::Ordering::Relaxed) {
-                    let started = std::time::Instant::now();
+                    let started = tokio::time::Instant::now();
                     let find = ClientMsg::FindFiles { root: root.clone(), query: "nothing".into() };
                     send.send(find).await.unwrap();
                     if screens {
@@ -602,7 +602,7 @@ mod tests {
         let mut took = Vec::with_capacity(count);
         for i in 0..count {
             let key = b'a'.saturating_add(u8::try_from(i % 26).unwrap());
-            let sent = std::time::Instant::now();
+            let sent = tokio::time::Instant::now();
             let req = TermRequest::Raw(vec![key]);
             send.send(ClientMsg::Term { session, req }).await.unwrap();
             loop {
@@ -640,7 +640,7 @@ mod tests {
         for i in 0..count {
             let key = char::from(b'a'.saturating_add(u8::try_from(i % 26).unwrap()));
             line.push(key);
-            let sent = std::time::Instant::now();
+            let sent = tokio::time::Instant::now();
             let req = TermRequest::Raw(vec![u8::try_from(key).unwrap()]);
             send.send(ClientMsg::Term { session, req }).await.unwrap();
             loop {
@@ -1038,7 +1038,7 @@ mod tests {
             _ => None,
         };
 
-        let asked = std::time::Instant::now();
+        let asked = tokio::time::Instant::now();
         worker.tx.send(&start(1, "needle")).await.unwrap();
         let mut found = Vec::new();
         let summary = loop {
@@ -1429,7 +1429,8 @@ mod tests {
         };
         let target = CaptureTarget::Display(display);
         let quality = Quality::default();
-        let sent_at = std::time::Instant::now();
+        // A stream is timed on the media's clock, the standard one.
+        let sent_at = tokio::time::Instant::now().into_std();
         link.send(ClientMsg::Screen(ScreenRequest::Open { target, quality })).await.unwrap();
         let (stream, codec) = loop {
             match tokio::time::timeout(STEP, events.recv()).await.unwrap().unwrap() {
@@ -1447,7 +1448,7 @@ mod tests {
             }
         };
         let mut sample = StartUp {
-            opened_ms: ms(sent_at, Some(std::time::Instant::now())),
+            opened_ms: ms(sent_at, Some(tokio::time::Instant::now().into_std())),
             ..StartUp::default()
         };
         let screen = silenced(link.screen(stream, codec));
@@ -1455,7 +1456,7 @@ mod tests {
         let deadline =
             tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
         let mut gaps: Vec<f64> = Vec::new();
-        let mut last: Option<std::time::Instant> = None;
+        let mut last: Option<tokio::time::Instant> = None;
         let mut rate: Vec<String> = Vec::new();
         // The app's presentation path: the element's pacer, offered every decoded frame and
         // asked to present on a 60 Hz timer. A tokio timer is not a display link, so the
@@ -1465,12 +1466,12 @@ mod tests {
         paint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                _paint = paint.tick() => if let Some(stamp) = pacer.painted() { pacer.shown(stamp, std::time::Instant::now()); },
+                _paint = paint.tick() => if let Some(stamp) = pacer.painted() { pacer.shown(stamp, tokio::time::Instant::now().into_std()); },
                 changed = frames.changed() => {
                     if changed.is_err() { break; }
                     let Some(frame) = frames.borrow_and_update().clone() else { continue };
                     let _pace = pacer.offer(frame.stamp);
-                    let now = std::time::Instant::now();
+                    let now = tokio::time::Instant::now();
                     if let Some(prev) = last {
                         gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
                     }
@@ -1616,7 +1617,7 @@ mod tests {
         let deadline =
             tokio::time::Instant::now().checked_add(Duration::from_secs(seconds)).unwrap();
         let mut gaps: Vec<f64> = Vec::new();
-        let mut last: Option<std::time::Instant> = None;
+        let mut last: Option<tokio::time::Instant> = None;
         let mut row = LossRow { drop_permille, ..LossRow::default() };
         loop {
             tokio::select! {
@@ -1624,7 +1625,7 @@ mod tests {
                     if changed.is_err() { break; }
                     if frames.borrow_and_update().is_none() { continue; }
                     row.decoded = row.decoded.saturating_add(1);
-                    let now = std::time::Instant::now();
+                    let now = tokio::time::Instant::now();
                     if let Some(prev) = last {
                         gaps.push(now.saturating_duration_since(prev).as_secs_f64() * 1e3);
                     }
@@ -2573,7 +2574,7 @@ mod tests {
     /// returned sender is dropped.
     fn watch_luma(
         handle: &slopty_client::ScreenHandle,
-    ) -> (tokio::task::JoinHandle<Vec<(std::time::Instant, f64)>>, tokio::sync::oneshot::Sender<()>)
+    ) -> (tokio::task::JoinHandle<Vec<(tokio::time::Instant, f64)>>, tokio::sync::oneshot::Sender<()>)
     {
         let mut frames = handle.frames();
         let (stop, mut stopped) = tokio::sync::oneshot::channel();
@@ -2589,7 +2590,7 @@ mod tests {
                         let picture = frames.borrow_and_update().clone();
                         if let Some(picture) = picture {
                             seen.push((
-                                std::time::Instant::now(),
+                                tokio::time::Instant::now(),
                                 mean_luma(&picture.frame.image),
                             ));
                         }
@@ -2602,7 +2603,7 @@ mod tests {
     }
 
     /// Mean brightness over `samples`, 0 when there are none.
-    fn luma_level(samples: &[(std::time::Instant, f64)]) -> f64 {
+    fn luma_level(samples: &[(tokio::time::Instant, f64)]) -> f64 {
         let total: f64 = samples.iter().map(|&(_at, luma)| luma).sum();
         #[expect(clippy::cast_precision_loss, reason = "a handful of samples")]
         let count = samples.len() as f64;
@@ -2611,7 +2612,7 @@ mod tests {
 
     /// How much the picture moved over `samples`: the difference between the brightest and the
     /// dimmest of them, 0 when there are fewer than two.
-    fn luma_spread(samples: &[(std::time::Instant, f64)]) -> f64 {
+    fn luma_spread(samples: &[(tokio::time::Instant, f64)]) -> f64 {
         let (mut lo, mut hi) = (f64::MAX, f64::MIN);
         for &(_at, luma) in samples {
             lo = lo.min(luma);
@@ -2832,7 +2833,7 @@ mod tests {
             drawing.cropped.saturating_sub(cropping.cropped),
         );
         let (luma, stop_luma) = watch_luma(&screen);
-        let watching_from = std::time::Instant::now();
+        let watching_from = tokio::time::Instant::now();
         // Wait for at least one decoded frame to arrive while the window is drawing.
         let mut frames = screen.frames();
         let frame_deadline =
@@ -2858,14 +2859,14 @@ mod tests {
             .await
             .expect("the stream is still live after waiting 5 s");
         std::fs::write(markers.join("hide"), b"").unwrap();
-        let hidden_at = std::time::Instant::now();
+        let hidden_at = tokio::time::Instant::now();
         // When the window was really ordered out, as AppKit saw it: the marker is only a
         // request, and everything measured below is measured from the act, not the asking.
         let ordered_out = loop {
             if std::fs::read_to_string(markers.join("state"))
                 .is_ok_and(|s| s.starts_with("hide visible=false"))
             {
-                break std::time::Instant::now();
+                break tokio::time::Instant::now();
             }
             assert!(
                 hidden_at.elapsed() < Duration::from_secs(5),
@@ -2881,7 +2882,7 @@ mod tests {
         let swapped = wait_for_stats(&ctl, Duration::from_secs(10), |s| !s.on_crop)
             .await
             .expect("a hidden window stayed on the crop path: it streams what is behind it after waiting 10 s");
-        let left_crop_at = std::time::Instant::now();
+        let left_crop_at = tokio::time::Instant::now();
         let swap_ms = left_crop_at.saturating_duration_since(ordered_out).as_millis();
         let order_ms = ordered_out.saturating_duration_since(hidden_at).as_millis();
 
@@ -3149,12 +3150,12 @@ mod tests {
         let windows_before = ax_window_count(pid);
 
         std::fs::write(markers.join("hide"), b"").unwrap();
-        let asked = std::time::Instant::now();
+        let asked = tokio::time::Instant::now();
         let ordered_out = loop {
             if std::fs::read_to_string(markers.join("state"))
                 .is_ok_and(|s| s.starts_with("hide visible=false"))
             {
-                break std::time::Instant::now();
+                break tokio::time::Instant::now();
             }
             assert!(
                 asked.elapsed() < Duration::from_secs(5),
@@ -3298,7 +3299,7 @@ mod tests {
         // filter that the stream flows straight through.
         std::fs::write(markers.join(close), b"").unwrap();
         wait_for_marker_state(&markers, &format!("{close} visible=false")).await;
-        let gone_at = std::time::Instant::now();
+        let gone_at = tokio::time::Instant::now();
         let heard = wait_for_stats(&ctl, Duration::from_secs(3), |s| s.siblings > 0)
             .await
             .expect("the order-out was not heard within 3 s");
@@ -3340,7 +3341,7 @@ mod tests {
 
     /// Poll the helper's `state` file until it starts with `want`.
     async fn wait_for_marker_state(markers: &std::path::Path, want: &str) {
-        let asked = std::time::Instant::now();
+        let asked = tokio::time::Instant::now();
         loop {
             if std::fs::read_to_string(markers.join("state")).is_ok_and(|s| s.starts_with(want)) {
                 return;
@@ -3761,7 +3762,7 @@ mod tests {
         assert!(board.0.items()[0].iter().any(|t| t == ORIGIN_TYPE), "stamped with its origin");
 
         let reader = name.clone();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let read = tokio::task::spawn_blocking(move || {
             let read = slopty_input::MacBoard::named(&reader).data(0, &png);
             (read, started.elapsed())
@@ -3866,7 +3867,7 @@ mod tests {
         let mut took = Vec::new();
         for n in 0..40_u32 {
             let body = format!("copy {n}").into_bytes();
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             board.0.write(&[Item::data(vec![(text.clone(), body.clone())])], None).unwrap();
             let offer = next_msg(&mut worker, |m| match m {
                 WorkerMsg::Clip(ClipMsg::Offer(offer)) => Some(offer),
@@ -4066,7 +4067,7 @@ mod tests {
         assert!(cut < big.len() as u64, "cut mid-file, at {cut}");
 
         let (_next_end, second) = dial(addr).await;
-        let linked = std::time::Instant::now();
+        let linked = tokio::time::Instant::now();
         let mut next = slopty_client::WorkerLink::start(second);
         let mut events = next.events().unwrap();
         let paths = tokio::time::timeout(STEP, async {
@@ -4186,6 +4187,7 @@ mod tests {
         let newer: Vec<u8> = big.iter().rev().copied().collect();
         std::fs::write(out.join("big.bin"), &newer).unwrap();
         let file = std::fs::File::options().write(true).open(out.join("big.bin")).unwrap();
+        #[expect(clippy::disallowed_methods, reason = "a file's times are set on the system clock")]
         let later = std::time::SystemTime::now().checked_add(Duration::from_secs(5)).unwrap();
         file.set_modified(later).unwrap();
         drop(file);
@@ -4354,7 +4356,7 @@ mod tests {
             .collect();
         for round in 0..SAMPLES + 20 {
             for (way, (first, last)) in times.iter_mut().enumerate() {
-                let started = std::time::Instant::now();
+                let started = tokio::time::Instant::now();
                 let opened = match way {
                     0 => {
                         within("the forward's connect", round, way, async {
@@ -4758,7 +4760,7 @@ mod tests {
             // Past the follower's `HOLD` since the last listing, which paces a busy folder.
             tokio::time::sleep(Duration::from_millis(100)).await;
             let file = folder.join(format!("f{round}.txt"));
-            let at = std::time::Instant::now();
+            let at = tokio::time::Instant::now();
             std::fs::write(&file, "x").unwrap();
             let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
             loop {
@@ -4861,7 +4863,7 @@ mod tests {
 
         /// How long the next word took, if it came `within`.
         async fn next(&mut self, within: Duration) -> Option<Duration> {
-            let at = std::time::Instant::now();
+            let at = tokio::time::Instant::now();
             let until = tokio::time::Instant::now().checked_add(within).unwrap();
             loop {
                 let event = tokio::time::timeout_at(until, self.events.recv()).await.ok()??;
@@ -4884,7 +4886,7 @@ mod tests {
         /// The time from `change` to its word, which must come within half a second; the
         /// words after it, of the same burst, are let through.
         async fn timed(&mut self, what: &str, change: impl FnOnce()) -> Duration {
-            let at = std::time::Instant::now();
+            let at = tokio::time::Instant::now();
             change();
             let heard = self.next(Duration::from_millis(500)).await;
             assert!(heard.is_some(), "{what}: no word within half a second");
@@ -4894,29 +4896,17 @@ mod tests {
             assert!(after <= 2, "{what}: one burst, {after} more words");
             took
         }
-
-        /// Like [`Self::timed`] for a change made of many writes spread over as long as the disk
-        /// takes (a git directory deleted and made again): its first word must come within half
-        /// a second, and the words of its writes are let through however many there are.
-        async fn said(&mut self, what: &str, change: impl FnOnce()) {
-            let at = std::time::Instant::now();
-            change();
-            let heard = self.next(Duration::from_millis(500)).await;
-            assert!(heard.is_some(), "{what}: no word within half a second");
-            println!("MEASURE e2e {what} → RepoMoved at the client: {:?}", at.elapsed());
-            let _burst = self.until_quiet(slopty_worker::repowatch::HOLD.saturating_mul(3)).await;
-        }
     }
 
     /// A repository whose status and diffs a client shows is followed by the worker, which says
-    /// `RepoMoved` when something git reports on changed, so the client asks git only then:
-    /// a write in a folder no client listed, an agent's edit, a stage, a commit and a branch
-    /// switched in a terminal each reach the client within half a second, and an idle
-    /// repository sends nothing. How it fails: a thousand files written are a word or two, a
-    /// git directory replaced and a repository deleted are said and what is made in their place
-    /// is followed, and a link that dropped follows nothing until the next one names the
-    /// repository again. Prints change → word at the client on loopback (MEASUREMENTS.md,
-    /// "Watches wait on the worker's events").
+    /// `RepoMoved` when something git reports on changed, so the client asks git only then: an
+    /// agent's edit and a commit in a terminal each reach the client within half a second. A
+    /// client that lets the repository go hears nothing more, and a link that dropped follows
+    /// nothing until the next one names the repository again. What git sees and ignores, an
+    /// idle repository, a burst of writes and a repository deleted or its git directory
+    /// replaced are the watch's own, against the same real file system and git
+    /// (`slopty-worker`'s `tests/repowatch.rs`); this is the link's part. Prints change → word
+    /// at the client on loopback (MEASUREMENTS.md, "Watches wait on the worker's events").
     #[tokio::test]
     async fn a_watched_repository_says_when_it_moves_and_nothing_while_idle() {
         use slopty_worker::repowatch::HOLD;
@@ -4934,100 +4924,14 @@ mod tests {
         let mut words = Words::new(slopty_client::WorkerLink::start(worker), &repo);
         words.watch(true).await;
         words.next(UP).await.expect("the watch comes up and says so");
-        assert_eq!(words.until_quiet(Duration::from_secs(2)).await, 0, "idle: no word");
-
-        let mut took = Vec::new();
-        for n in 0..10 {
-            took.push(
-                words
-                    .timed("a new file in a folder nobody listed", || {
-                        let path = repo.join(format!("crates/deep/src/new{n}.rs"));
-                        std::fs::write(path, "pub fn two() {}\n").unwrap();
-                    })
-                    .await,
-            );
-        }
-        took.push(
-            words
-                .timed("an agent's edit in place", || {
-                    std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn three() {}\n")
-                        .unwrap();
-                })
-                .await,
-        );
-        took.push(words.timed("git add in a terminal", || git(&repo, &["add", "-A"])).await);
-        took.push(
-            words
-                .timed("git commit in a terminal", || git(&repo, &["commit", "-q", "-m", "two"]))
-                .await,
-        );
-        took.push(
-            words
-                .timed("git switch in a terminal", || git(&repo, &["switch", "-q", "-c", "side"]))
-                .await,
-        );
-        took.sort_unstable();
-        let (median, most) = (took[took.len() / 2], took[took.len().saturating_sub(1)]);
-        println!(
-            "MEASURE e2e change → RepoMoved, {} changes: p50 {median:?}, max {most:?}",
-            took.len()
-        );
-        assert_eq!(words.until_quiet(Duration::from_secs(2)).await, 0, "idle again: no word");
-
-        // A thousand files written at once, as a build or a checkout does: a word or two.
-        let at = std::time::Instant::now();
-        for n in 0..1_000 {
-            std::fs::write(repo.join(format!("crates/deep/src/many{n}.rs")), "//\n").unwrap();
-        }
-        let wrote = at.elapsed();
-        let first = words.next(wrote.saturating_add(Duration::from_millis(500))).await;
-        assert!(first.is_some(), "the burst is said");
-        let all = words.until_quiet(HOLD.saturating_mul(3)).await.saturating_add(1);
-        let most = u32::try_from(wrote.as_millis().checked_div(HOLD.as_millis()).unwrap())
-            .unwrap()
-            .saturating_add(2);
-        println!("MEASURE e2e 1000 files written in {wrote:?}: {all} RepoMoved");
-        assert!(all <= most, "{all} words for a burst of {wrote:?}");
-
-        // The git directory replaced: said at once, and the new one followed.
-        words
-            .said("the git directory replaced", || {
-                std::fs::remove_dir_all(repo.join(".git")).unwrap();
-                git(&repo, &["init", "-q", "-b", "main"]);
-            })
-            .await;
-        // Its watch starts again behind fseventsd's other starts: a stage in the new git
-        // directory is said once it is up.
-        let at = std::time::Instant::now();
-        let mut n = 0_u32;
-        loop {
-            n = n.saturating_add(1);
-            std::fs::write(repo.join(format!("crates/deep/src/staged{n}.rs")), "//\n").unwrap();
-            git(&repo, &["add", "."]);
-            if words.next(Duration::from_millis(500)).await.is_some() {
-                break;
-            }
-            assert!(at.elapsed() < UP, "the new git directory is never followed");
-        }
-        let _burst = words.until_quiet(HOLD.saturating_mul(3)).await;
-        words
-            .timed("a commit in the new git directory", || {
-                git(&repo, &["commit", "-q", "-m", "anew"]);
-            })
-            .await;
-
-        // The repository deleted: said at once; one made in its place is said and followed.
-        words.timed("the repository deleted", || std::fs::remove_dir_all(&repo).unwrap()).await;
-        let made = root.join("made");
-        repository(&made);
-        std::fs::rename(&made, &repo).unwrap();
-        // The word is its watch's as it comes up.
-        words.next(UP).await.expect("the repository made in its place is said");
         let _up = words.until_quiet(HOLD.saturating_mul(3)).await;
         words
-            .timed("a write in the repository made again", || {
-                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn four() {}\n").unwrap();
+            .timed("an agent's edit in place", || {
+                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn two() {}\n").unwrap();
             })
+            .await;
+        words
+            .timed("git commit in a terminal", || git(&repo, &["commit", "-q", "-am", "two"]))
             .await;
 
         // Let go: nothing more is said.
@@ -5044,7 +4948,7 @@ mod tests {
         let (endpoint, worker) = dial(addr).await;
         guard.1 = Some(endpoint);
         let mut words = Words::new(slopty_client::WorkerLink::start(worker), &repo);
-        std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn five() {}\n").unwrap();
+        std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn three() {}\n").unwrap();
         assert_eq!(
             words.until_quiet(HOLD.saturating_mul(3)).await,
             0,
@@ -5055,7 +4959,7 @@ mod tests {
         let _up = words.until_quiet(HOLD.saturating_mul(3)).await;
         words
             .timed("a write after the link came back", || {
-                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn six() {}\n").unwrap();
+                std::fs::write(repo.join("crates/deep/src/lib.rs"), "pub fn four() {}\n").unwrap();
             })
             .await;
     }
@@ -5175,7 +5079,7 @@ mod tests {
         let mut ops = FsOps::default();
         let mut took = Vec::new();
         let mut run = async |op: FsOp| {
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             let msg = ops.ask(op);
             let ClientMsg::FsOp { request, .. } = msg else { panic!("{msg:?}") };
             link.send(msg).await.unwrap();
@@ -5493,7 +5397,7 @@ mod tests {
         let mut asked = pages.more();
         let mut took = Vec::new();
         while let Some(msg) = asked {
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             link.send(msg).await.unwrap();
             let (after, listing) = next_control(&mut events, |msg| match msg {
                 WorkerMsg::FolderPage { path: p, after, listing } if p == path => {

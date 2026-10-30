@@ -15,12 +15,13 @@
 //! pasteboard as promises.
 
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 use slopty_net::ClientMsg;
 use slopty_proto::transfer::{ClipMsg, Hash, INLINE_CLIP_BYTES, Offer, RepRef, Source};
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 #[cfg(target_vendor = "apple")]
 mod local;
@@ -283,7 +284,7 @@ impl ClipCache {
             }
             let since = state.heard.get(rep).map_or(asked, |heard| (*heard).max(asked));
             let Some(deadline) = since.checked_add(wait) else { return Fetched::Gone };
-            if self.changed.wait_until(&mut state, deadline).timed_out()
+            if self.changed.wait_until(&mut state, deadline.into_std()).timed_out()
                 && state.heard.get(rep).is_none_or(|heard| *heard <= since)
             {
                 drop(state);

@@ -12,12 +12,13 @@ mod tests {
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
     use slopty_proto::screen::{DisplayKey, DisplayShape};
     use slopty_worker::screen::holder::{self, HeldBy, Remote};
     use slopty_worker::screen::sized::{self, Enforced, Factory as _};
+    use tokio::time::Instant;
 
     /// A worker's link to the holder at `socket`. With `start`, it dials as a worker does
     /// ([`holder::spawning`], from this build's worker): one is started when a display is asked

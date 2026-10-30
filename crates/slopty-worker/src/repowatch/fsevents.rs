@@ -56,6 +56,10 @@ impl Watch {
         }
         let (up, refused) = (Arc::clone(&repo), Arc::clone(&repo));
         // When its start was asked for: what last changed before is read after the watch is up.
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "compared with files' modification times, which the system clock stamps"
+        )]
         let began = SystemTime::now();
         let handler = Box::new(move |path: &Path, flags: fsevents::Flags| {
             let place = &repo.place;

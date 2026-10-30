@@ -5,6 +5,11 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
 ## Four layers, fastest first
 1. **Unit**, in every crate: pure logic behind traits with fakes (`slopty_input::Recorder`
    for the injector, `Layout`/`ItemDoc` in `slopty-client`). Runs under `cargo gate`.
+   **Waits in virtual time.** The CLI, the worker daemon, the client core and the worker library
+   read only tokio's clock, and clippy refuses a standard-clock read in them. So a lease, a
+   redial, a quiet stretch or an outage runs on `#[tokio::test(start_paused = true)]` in
+   virtual time, each wait exact. A link runs over `slopty_shape::sim`'s network, which a
+   blackout cuts (docs/decisions/testing.md, "The daemons and clients wait on tokio's clock").
 2. **Headless GPUI**, `#[gpui::test]` in `slopty-ui` and `slopty-shell`: a `VisualTestContext`
    window with real layout, `simulate_keystrokes`/`simulate_click`, a channel for the worker.
    The view model (`slopty_ui::workspace::view_model::tests`) is driven through the shell's own
@@ -191,9 +196,9 @@ and its run supersedes the red one. The tests a runner's virtual Mac cannot run 
 hardware) are listed in nextest's `ci` profile and run in every local `cargo gate --full`.
 A test that fails and then passes on a retry fails its run (`flaky-result = "fail"`): a pass on
 a retry is a flake, which a green must not hide. The one exception is the few tests named in
-the `gate` and `warm` profiles, which time themselves against the machine's load and are
-retried twice by their exact names, never by a pattern, until virtual time replaces their
-clocks (a test in `xtask/src/deep.rs` holds the config to that). `docs/DEV.md` ("Gate") has
+the `gate` and `warm` profiles, which time the machine itself (the OS timer's lateness, the
+parser's CPU time), something no simulated clock stands in for. They are retried twice by their
+exact names, never by a pattern (a test in `xtask/src/deep.rs` holds the config to that). `docs/DEV.md` ("Gate") has
 the flags and the workflow.
 
 ### VideoToolbox

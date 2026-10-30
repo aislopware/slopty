@@ -550,9 +550,9 @@ mod tests {
             let _delta = store.ensure_terminal(SessionId::new(), by).unwrap();
         }
         drop(under_way);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         while store.inner.writing.load(Ordering::SeqCst) {
-            assert!(std::time::Instant::now() < deadline, "the writer never stood down");
+            assert!(tokio::time::Instant::now() < deadline, "the writer never stood down");
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         assert_eq!(store.inner.writes.load(Ordering::SeqCst), 1, "one write for the burst");

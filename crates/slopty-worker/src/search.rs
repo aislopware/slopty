@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -25,6 +25,7 @@ use slopty_proto::search::{
     SearchQuery, SearchRequest, SearchSummary, Span,
 };
 use slopty_proto::{RequestId, WorkerMsg};
+use tokio::time::Instant;
 
 /// How long a found file waits for others to share its page: short enough that the first
 /// match shows while the walk is still going, long enough that a burst goes as one page.

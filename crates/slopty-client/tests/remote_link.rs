@@ -206,7 +206,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let (mut client, _next, mut events) = pair_as(worker).await;
-        let linked = std::time::Instant::now();
+        let linked = tokio::time::Instant::now();
         assert_eq!(
             begun(&mut client, xfer).await,
             (Some(dest), 1, 4_000_000),
@@ -273,7 +273,7 @@ mod tests {
         client.conn.close(0_u32.into(), b"gone");
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(slopty_client::xfer::Line::of(worker).carries(xfer), "waiting for the worker");
-        let cancelled = std::time::Instant::now();
+        let cancelled = tokio::time::Instant::now();
         link.remote().cancel(xfer);
         let error = tokio::time::timeout(WAIT, async {
             loop {
@@ -538,7 +538,7 @@ mod tests {
         assert!(!waiting.is_finished(), "the download waits for the worker");
 
         let (mut client, _next, _events) = pair_as(worker).await;
-        let linked = std::time::Instant::now();
+        let linked = tokio::time::Instant::now();
         let (second, held) = fetched(&mut client).await;
         println!("a download's fetch on the next link, from the link up: {:?}", linked.elapsed());
         assert_ne!(second, first, "the next link's fetch is a transfer of its own");
@@ -593,7 +593,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!waiting.is_finished(), "waiting for the worker");
         assert!(!slopty_client::xfer::Line::of(worker).cancel(XferId::new()), "no such download");
-        let cancelled = std::time::Instant::now();
+        let cancelled = tokio::time::Instant::now();
         link.remote().cancel(xfer);
         let ended = tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap();
         assert!(
@@ -749,19 +749,19 @@ mod tests {
         send.write_all(&png).await.unwrap();
         send.finish().unwrap();
         let remote = link.remote();
-        let deadline = std::time::Instant::now() + WAIT;
+        let deadline = tokio::time::Instant::now() + WAIT;
         loop {
             if remote.clip_fetch(&rep, None, Duration::ZERO) == Fetched::Data(png.clone()) {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "the prefetch lands");
+            assert!(tokio::time::Instant::now() < deadline, "the prefetch lands");
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         // No time to wait is given, so only a picture already in memory can answer: that, not a
         // clock that a loaded runner stretches, is what shows the paste came from memory.
         let mut took = Vec::new();
         for _ in 0..20 {
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             let got = remote.clip_fetch(&rep, None, Duration::ZERO);
             took.push(started.elapsed());
             assert!(

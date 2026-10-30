@@ -2728,7 +2728,7 @@ mod tests {
         let pixels: Vec<u8> = (0..=u8::MAX).cycle().take(12 << 20).collect();
         let mut samples: Vec<Duration> = std::iter::repeat_with(|| {
             let rgba = pixels.clone();
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             std::hint::black_box(premultiplied_bgra(rgba));
             started.elapsed()
         })

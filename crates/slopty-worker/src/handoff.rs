@@ -28,13 +28,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::WorkerMsg;
 use slopty_proto::handoff::{
     EditFile, HandoffCaps, HandoffEvent, HandoffId, HandoffReply, OfferReason, Page,
 };
+use tokio::time::Instant;
 
 use crate::clip::Link;
 
@@ -155,6 +156,10 @@ impl Default for Handoffs {
 
 /// Where a run's handoff numbers start: the wall clock in microseconds, so a restarted worker
 /// never reuses a number a client may still hold from its last run.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a start unique across runs is the real wall clock's, in microseconds"
+)]
 fn first_id() -> HandoffId {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

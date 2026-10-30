@@ -108,7 +108,7 @@ fn enter_raw() -> Result<RawGuard> {
 fn handoff(
     handoffs: &mut slopty_client::handoff::Handoffs,
     event: slopty_proto::handoff::HandoffEvent,
-    received: std::time::Instant,
+    received: tokio::time::Instant,
 ) -> Option<ClientMsg> {
     use slopty_client::handoff::Todo;
     use slopty_proto::handoff::HandoffReply;
@@ -380,7 +380,9 @@ fn color(params: &mut Vec<String>, base: u8, c: Color) {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
 
     use super::{exited, read_on_a_thread, relay_notification};
 

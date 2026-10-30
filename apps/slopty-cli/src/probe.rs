@@ -7,12 +7,13 @@
 //! - `screen` ([`screen`]): open a screen stream and report what arrives.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use slopty_client::{LinkEvent, WorkerLink};
 use slopty_proto::ClientMsg;
 use slopty_proto::terminal::{OpenSession, TermEvent, TermRequest, TermSize};
+use tokio::time::Instant;
 
 use crate::client::{Session, connect_to};
 

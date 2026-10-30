@@ -451,3 +451,34 @@ mod tests {
         }
     }
 }
+
+/// This crate times its waits on tokio's clock, which a paused runtime simulates, and its own
+/// `clippy.toml` disallows the standard clocks. Clippy reads only the nearest `clippy.toml`, so
+/// that file is the workspace's plus the clock entries, and the two must not drift apart.
+#[cfg(test)]
+mod clock {
+    #[test]
+    fn clippy_config_is_the_workspaces_plus_the_clock() {
+        let root = include_str!("../../../clippy.toml");
+        let ours = include_str!("../clippy.toml");
+        let clock = [
+            "std::time::Instant::now",
+            "std::time::Instant::elapsed",
+            "std::time::SystemTime::now",
+            "std::time::SystemTime::elapsed",
+        ];
+        for path in clock {
+            assert!(ours.contains(&format!("path = \"{path}\"")), "{path} is not disallowed");
+        }
+        let rest = ours
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.is_empty())
+            .filter(|line| !clock.iter().any(|path| line.contains(path)))
+            .fold(String::new(), |mut rest, line| {
+                rest.push_str(line);
+                rest.push('\n');
+                rest
+            });
+        assert_eq!(rest, root, "this crate's clippy.toml is the root's plus the clock entries");
+    }
+}

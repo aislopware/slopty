@@ -19,12 +19,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use parking_lot::Mutex;
 use slopty_proto::folder::FolderHit;
+use tokio::time::Instant;
 
 /// How long zoxide or Spotlight may take to answer.
 const ASK_WAIT: Duration = Duration::from_secs(3);

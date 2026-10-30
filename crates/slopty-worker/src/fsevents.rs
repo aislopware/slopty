@@ -288,9 +288,10 @@ unsafe extern "C-unwind" fn callback(
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use dispatch2::DispatchQueueAttr;
+    use tokio::time::Instant;
 
     use super::*;
 

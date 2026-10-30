@@ -7,10 +7,11 @@
 mod lock {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
     use tokio::process::{Child, Command};
+    use tokio::time::Instant;
 
     /// Slack for a loaded machine: each step is a process starting, not a wait.
     const STEP: Duration = Duration::from_secs(30);

@@ -18,10 +18,11 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_core::WallMs;
 use slopty_proto::thread::{ItemBody, Liveness, Phase, ThreadId, ThreadState};
+use tokio::time::Instant;
 
 /// How long a thread at work may show no progress before it stops keeping the machine awake.
 ///

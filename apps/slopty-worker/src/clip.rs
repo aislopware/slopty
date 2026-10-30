@@ -2,7 +2,7 @@
 //! of the programs in its sessions.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_input::pasteboard::{Board, Item, board_type, format_of};
 use slopty_proto::WorkerMsg;
@@ -11,6 +11,7 @@ use slopty_proto::transfer::{ClipFormat, ClipMsg};
 use slopty_worker::clip::{Interest, MAX_REP_BYTES};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::time::Instant;
 
 use crate::Daemon;
 

@@ -2,7 +2,7 @@
 //! files it fetches (going down).
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use slopty_core::{ClientId, SessionId, WallMs, XferId};
@@ -17,6 +17,7 @@ use slopty_worker::screen::drag::Heard;
 use slopty_worker::xfer::{Again, Claim, Landed, Receiving, XferError, outgoing, resume_points};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::Daemon;
 

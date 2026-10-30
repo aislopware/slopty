@@ -51,6 +51,11 @@
 //! held while another is taken, nor while anything is asked of the session. Every other lock is
 //! taken alone.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a screen is captured, encoded and paced on the media's clock, the standard one, which its frames and the capture's stamps share; a paused runtime does not stand in for it"
+)]
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};

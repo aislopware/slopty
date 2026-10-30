@@ -992,6 +992,53 @@ mod tests {
         assert!(last <= ended.saturating_add(HOLD), "the last {last:?} soon after the burst");
     }
 
+    /// Whether `moves` stays quiet for ten minutes.
+    async fn quiet(moves: &mut Moves) -> bool {
+        tokio::time::timeout(Duration::from_secs(600), moves.next()).await.is_err()
+    }
+
+    /// An idle repository says nothing however long it is followed, nor does a change git
+    /// ignores or does not report on, and a write git sees is one report a [`QUIET`] after it:
+    /// the follower on tokio's paused clock, told of each change as its watch tells it
+    /// ([`Repo::heard`]). (`tests/repowatch.rs` has the real file system's events and a real git
+    /// report each change git sees.)
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_repository_and_what_git_ignores_say_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let top = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir_all(top.join(".git/objects")).unwrap();
+        std::fs::write(top.join(".gitignore"), "target/\n*.log\n").unwrap();
+        let name = top.to_string_lossy().into_owned();
+        let heard: Arc<Heard> = Arc::default();
+        let (_lists, lists) = watch::channel(vec![name.clone()]);
+        // Looked at an hour apart, so only the changes below could bring reports.
+        let limits = Limits { watches: 0, poll: Duration::from_secs(3_600) };
+        let (mut follower, mut moves) = Follower::new(lists, limits, Arc::clone(&heard));
+        let place = place_of(&name).expect("the folder is a repository");
+        let repo = Arc::new(Repo::new(place, Arc::clone(&heard)));
+        let source = Source::Polled(Some(0));
+        let followed = Followed { repo: Arc::clone(&repo), source, reported: None, up: true };
+        follower.repos.insert(top.clone(), followed);
+        follower.named.insert(name.clone(), Some(top.clone()));
+        tokio::spawn(follower.run());
+
+        assert!(quiet(&mut moves).await, "an idle repository says nothing");
+        for (rel, what) in [
+            ("target/debug/out.o", "a build's output"),
+            ("server.log", "an ignored log"),
+            (".git/objects/stray", "a git object"),
+        ] {
+            assert_eq!(repo.heard(&top.join(rel), Some(false), || true), Said::Nothing, "{what}");
+        }
+        assert!(quiet(&mut moves).await, "what git ignores says nothing");
+
+        let at = Instant::now();
+        assert_eq!(repo.heard(&top.join("src/lib.rs"), Some(false), || true), Said::Moved);
+        assert_eq!(moves.next().await, Some(vec![name]), "a write git sees");
+        assert_eq!(at.elapsed(), QUIET, "reported a quiet after it");
+        assert!(quiet(&mut moves).await, "idle again, nothing");
+    }
+
     #[test]
     fn a_burst_is_due_after_quiet_at_the_hold_and_paced_after_a_report() {
         let t0 = Instant::now();

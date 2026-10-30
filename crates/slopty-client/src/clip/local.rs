@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_core::ClientId;
 use slopty_platform::pasteboard::{
@@ -43,6 +43,7 @@ use slopty_proto::transfer::{
     RepRef, Source, origin_bytes,
 };
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use super::{Fetched, MAX_CLIP_BYTES, digest};
 use crate::WorkerKey;
@@ -187,6 +188,10 @@ impl std::fmt::Debug for ClipSync {
 /// Where this client's offer generations start. The app keeps its client id across launches,
 /// so a relaunch must not reuse a generation a worker still holds from the last run: the wall
 /// clock in microseconds, with a count for two made within one.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a start unique across launches is the real wall clock's, in microseconds"
+)]
 fn first_generation() -> u64 {
     static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let micros = std::time::SystemTime::now()

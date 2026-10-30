@@ -442,13 +442,14 @@ mod threads {
              {acted:?}, to the review {reviewed:?}"
         );
 
-        // Cut on the way back: the name is acted on, its reply lost, and the app gives up.
+        // Cut on the way back: the name is acted on, its reply lost, and the app gives up. The
+        // reply went as the witness heard the name: half a second more of the link brings
+        // nothing.
         cable.cut_back();
-        let cut = tokio::time::Instant::now();
         let (second, msg) = b.threads.intent(thread, name("Greeting, renamed"));
         b.send_all(msg).await;
         witness.until("the second name acted on", |t| named(t, thread, "Greeting, renamed")).await;
-        tokio::time::sleep_until(cut.checked_add(SILENCE_DROP).unwrap()).await;
+        b.take_for(Duration::from_millis(500)).await;
         assert!(b.done.iter().all(|d| d.id != second), "its reply was lost");
         b.link.close();
         b.threads.disconnected();

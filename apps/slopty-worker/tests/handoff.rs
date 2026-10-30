@@ -18,7 +18,6 @@ mod handoff {
     use slopty_proto::handoff::{EditOutcome, HandoffEvent, HandoffReply, OfferReason, Wary};
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
-    use slopty_worker::handoff::TYPED_RECENTLY;
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
 
@@ -358,7 +357,10 @@ mod handoff {
     }
 
     /// A page nobody typed for (a program opening pages on its own), or one at a local
-    /// address, is offered, not opened, and the program is told where.
+    /// address, is offered, not opened, and the program is told where. Nobody types before the
+    /// first; the person types before the second, which is offered for its address all the
+    /// same. A typing gone stale past [`slopty_worker::handoff::TYPED_RECENTLY`] is the
+    /// handoffs' own test (`a_page_opens_only_right_after_its_client_typed`), on its instants.
     #[tokio::test]
     async fn a_page_nobody_typed_for_is_offered() {
         let dir = tempfile::tempdir().unwrap();
@@ -370,9 +372,9 @@ mod handoff {
             ("https://example.com/docs", OfferReason::NotTyped),
             ("http://localhost:5173/", OfferReason::Wary(Wary::Loopback)),
         ] {
-            typed(&mut client, shell).await;
-            let wait = if why == OfferReason::NotTyped { TYPED_RECENTLY } else { Duration::ZERO };
-            tokio::time::sleep(wait + Duration::from_millis(200)).await;
+            if why != OfferReason::NotTyped {
+                typed(&mut client, shell).await;
+            }
             let child = d.run_as("slopty-browser", &[url], Some(shell), PATH);
             let asked = next_msg(&mut client, asked_open).await;
             assert_eq!(asked.offer, Some(why), "{url}");
@@ -420,7 +422,7 @@ mod handoff {
         let stubs = stubs(dir.path(), 0);
         let path = format!("{}:{PATH}", stubs.display());
         let url = "https://example.com/oauth";
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let (code, said) = exits(d.run_as("slopty-browser", &[url], None, &path)).await;
         assert_eq!(code, 0);
         assert!(said.contains("no client is connected"), "{said}");

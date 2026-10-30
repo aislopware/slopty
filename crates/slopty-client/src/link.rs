@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use bytes::Bytes;
 use parking_lot::Mutex;
@@ -26,6 +25,7 @@ use slopty_proto::thread::wire::ThreadFrame;
 use slopty_proto::transfer::{BulkHeader, Dest, Purpose};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use crate::clip::{ClipCache, MAX_CLIP_BYTES};
 use crate::remote::{LinkRemote, Remote};
@@ -583,8 +583,9 @@ async fn read_datagrams(
                 break;
             }
         };
+        // A screen's datagrams are timed on the media's clock, the standard one.
         #[cfg(target_vendor = "apple")]
-        let now = Instant::now();
+        let now = Instant::now().into_std();
         for datagram in batch.iter_mut().take(read) {
             let datagram = std::mem::take(datagram);
             match split_term_datagram(&datagram) {
@@ -1303,10 +1304,11 @@ mod tests {
     #[ignore = "a measurement; run with --run-ignored only --no-capture"]
     #[expect(clippy::cast_precision_loss, reason = "measurement arithmetic")]
     fn datagram_reader_cost() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         use slopty_core::StreamId;
         use slopty_media::{EncodedFrame, Packetizer};
+        use tokio::time::Instant;
 
         const FRAMES: u32 = 1_200;
         /// Frames per round: the busy time is read per round, and the quietest round is the
@@ -1348,7 +1350,7 @@ mod tests {
                 region: None,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
-            let sent = Instant::now();
+            let sent = Instant::now().into_std();
             for d in &datagrams {
                 sender.send_datagram(d.clone()).unwrap();
             }

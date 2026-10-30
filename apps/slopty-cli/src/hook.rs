@@ -29,6 +29,10 @@ const RELAY_WAIT: Duration = Duration::from_secs(3);
 const TOOL_RESPONSE: &str = "tool_response";
 
 /// `slopty hook`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a hook is stamped on the wall clock in microseconds, finer than `WallMs`"
+)]
 pub async fn run(data_dir: &Path) -> ExitCode {
     let at_us = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

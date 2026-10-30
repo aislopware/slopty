@@ -16,7 +16,7 @@
 //! deploy asks the person first.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args, Subcommand};
@@ -27,6 +27,7 @@ use slopty_platform::service::{
 };
 use slopty_proto::ctl::{CtlReply, CtlRequest, Health};
 use slopty_proto::server::Role;
+use tokio::time::Instant;
 
 use crate::workerctl;
 

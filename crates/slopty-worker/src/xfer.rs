@@ -35,13 +35,14 @@ use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_proto::drag::DragId;
 use slopty_proto::transfer::{Dest, Hash, Held, MAX_FILES, MODE_BITS, partial_of, relative_path};
 use tokio::sync::{Notify, watch};
+use tokio::time::Instant;
 
 /// Progress is reported at most this often per transfer.
 pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
@@ -609,7 +610,7 @@ impl Transfers {
     /// Wait up to `wait` for `xfer` to begin; `false` when it did not. One that finished has
     /// begun.
     pub async fn begun(&self, xfer: XferId, wait: Duration) -> bool {
-        let deadline = tokio::time::Instant::now().checked_add(wait);
+        let deadline = Instant::now().checked_add(wait);
         loop {
             let notified = self.begun.notified();
             let mut notified = std::pin::pin!(notified);
@@ -729,6 +730,10 @@ impl Transfers {
     /// Remove the partial files of unfinished transfers that nothing wrote to for `stale`, and
     /// the directories in the drop directory that leaves empty. The ledger keeps the entries
     /// that still hold a younger partial. Returns the partial files removed.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "compared with files' modification times, which the system clock stamps"
+    )]
     pub fn sweep(&self, stale: Duration) -> usize {
         // Not held over the walk: a transfer placing an entry meanwhile only appends.
         let listed = {
@@ -1021,6 +1026,10 @@ fn outgoing_up_to(path: &Path, max: usize) -> std::io::Result<Vec<Outgoing>> {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "files' modification times are set on the system clock"
+)]
 mod tests {
     use std::os::unix::fs::PermissionsExt as _;
 

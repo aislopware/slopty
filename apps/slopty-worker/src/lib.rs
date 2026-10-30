@@ -170,7 +170,7 @@ pub(crate) struct Daemon {
     /// When each session's listening ports are scanned, and what they were.
     pub ports: Arc<parking_lot::Mutex<slopty_worker::ports::Trigger>>,
     /// When the daemon came up (for `doctor`).
-    pub started_at: std::time::Instant,
+    pub started_at: tokio::time::Instant,
     /// Where it listens.
     pub listen: std::net::SocketAddr,
     /// Screen streams across every connection, for the control socket.
@@ -270,7 +270,7 @@ async fn close_stale_exits(daemon: Daemon) -> ! {
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         sweep.tick().await;
-        let now = std::time::Instant::now();
+        let now = tokio::time::Instant::now();
         let after = slopty_worker::manager::EXITED_UNWATCHED;
         for session in daemon.worker.stale_exits(now, after).await {
             tracing::info!(%session, "closing an exited session nobody watched for a day");
@@ -370,7 +370,8 @@ fn join_server(
     let facts = kept.subscribe();
     let facts_task = tokio::spawn(slopty_worker::facts::watch(kept));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };
-    let run = tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
+    let here = Arc::new(server::Here { daemon: daemon.clone(), orchestrator });
+    let run = tokio::spawn(server::run(here, endpoint, addr, watched));
     Some(Joined(vec![facts_task.abort_handle(), run.abort_handle()]))
 }
 
@@ -944,7 +945,7 @@ async fn run(
         transfers: Arc::clone(&transfers),
         dnd: Arc::new(dnd::Dnd::new(transfers)),
         ports: Arc::default(),
-        started_at: std::time::Instant::now(),
+        started_at: tokio::time::Instant::now(),
         listen,
         screens,
         wake,
@@ -1247,5 +1248,36 @@ mod tests {
         let listed = admission(dir.path());
         let ranges: Vec<String> = listed.ranges().iter().map(ToString::to_string).collect();
         assert_eq!(ranges, ["10.0.0.0/8"]);
+    }
+}
+
+/// This crate times its waits on tokio's clock, which a paused runtime simulates, and its own
+/// `clippy.toml` disallows the standard clocks. Clippy reads only the nearest `clippy.toml`, so
+/// that file is the workspace's plus the clock entries, and the two must not drift apart.
+#[cfg(test)]
+mod clock {
+    #[test]
+    fn clippy_config_is_the_workspaces_plus_the_clock() {
+        let root = include_str!("../../../clippy.toml");
+        let ours = include_str!("../clippy.toml");
+        let clock = [
+            "std::time::Instant::now",
+            "std::time::Instant::elapsed",
+            "std::time::SystemTime::now",
+            "std::time::SystemTime::elapsed",
+        ];
+        for path in clock {
+            assert!(ours.contains(&format!("path = \"{path}\"")), "{path} is not disallowed");
+        }
+        let rest = ours
+            .lines()
+            .skip_while(|line| line.starts_with('#') || line.is_empty())
+            .filter(|line| !clock.iter().any(|path| line.contains(path)))
+            .fold(String::new(), |mut rest, line| {
+                rest.push_str(line);
+                rest.push('\n');
+                rest
+            });
+        assert_eq!(rest, root, "this crate's clippy.toml is the root's plus the clock entries");
     }
 }

@@ -429,7 +429,8 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
             }
             Some(Arrived { feedback, at }) = feedback_rx.recv() => {
                 peer.lease.heard();
-                peer.feedback(feedback, at);
+                // A stream's feedback is timed on the media's clock, the standard one.
+                peer.feedback(feedback, at.into_std());
             }
             Some(copy) = copies_rx.recv() => {
                 peer.lease.heard();
@@ -521,7 +522,7 @@ enum InputCopy {
 #[derive(Debug)]
 struct Arrived {
     feedback: Feedback,
-    at: std::time::Instant,
+    at: tokio::time::Instant,
 }
 
 /// Read the client's datagrams until the connection ends: loss feedback for the loop, and
@@ -533,7 +534,7 @@ async fn read_datagrams(
 ) {
     loop {
         let (datagram, at) = match conn.read_datagram().await {
-            Ok(d) => (d, std::time::Instant::now()),
+            Ok(d) => (d, tokio::time::Instant::now()),
             Err(e) => {
                 tracing::debug!(error = %e, "read_datagram ended");
                 break;
@@ -982,7 +983,7 @@ async fn pump(
     let mut depended_on = false;
     let mut lift = slopty_net::streams::EchoLift::default();
     while let Some(event) = events.recv().await {
-        let send_from = std::time::Instant::now();
+        let send_from = tokio::time::Instant::now();
         if event.is_frame() {
             lift.before_frame(&stream, event.is_echo());
         }
@@ -1324,7 +1325,7 @@ impl Peer<'_> {
                     concealed = offer.concealed,
                     "client clipboard offered"
                 );
-                if self.daemon.clip.offered(self.link, offer, std::time::Instant::now()) {
+                if self.daemon.clip.offered(self.link, offer, tokio::time::Instant::now()) {
                     let (clip, link) = (Arc::clone(&self.daemon.clip), self.link);
                     // Off the runtime: a write waits on the pasteboard server.
                     self.tasks.spawn(async move {
@@ -1393,7 +1394,7 @@ impl Peer<'_> {
         held.stage = Stage::Writing;
         let (clip, link, done) = (Arc::clone(&self.daemon.clip), self.link, self.done.clone());
         self.tasks.spawn(async move {
-            let write = move || clip.write_incoming(link, std::time::Instant::now());
+            let write = move || clip.write_incoming(link, tokio::time::Instant::now());
             let _written = tokio::task::spawn_blocking(write).await;
             let _sent = done.send(Done::PasteWritten);
         });
@@ -1728,7 +1729,11 @@ impl Peer<'_> {
             TermRequest::Focus { focused } => self.focus(session, *focused),
             TermRequest::Detach => self.focus(session, false),
             input if input.is_input() => {
-                self.daemon.handoffs.lock().typed(session, self.client, std::time::Instant::now());
+                self.daemon.handoffs.lock().typed(
+                    session,
+                    self.client,
+                    tokio::time::Instant::now(),
+                );
             }
             _ => {}
         }
@@ -2266,7 +2271,7 @@ mod tests {
 mod lossy {
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::{ClientId, StreamId, WorkerId};
     use slopty_net::worker::{AcceptedClient, WorkerListener};
@@ -2276,6 +2281,7 @@ mod lossy {
     use slopty_proto::screen::{CaptureTarget, Quality, ScreenInput, ScreenRequest};
     use slopty_worker::screen::Pipeline;
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
     use super::{COPY_DEPTH, FEEDBACK_DEPTH, InputCopy, ScreenOrder, read_datagrams};
     use crate::screens::fake::{Fake, Gated, Nowhere, Queued, note};
@@ -2450,14 +2456,14 @@ mod lossy {
         let mut ticks = tokio::time::interval(pattern.every());
         for i in 0..count {
             ticks.tick().await;
-            sent.push(Instant::now());
+            sent.push(Instant::now().into_std());
             let input = pattern.input(i);
             let msg = ClientMsg::Screen(ScreenRequest::Input { stream: STREAM, input });
             sender.send(msg).await.unwrap();
         }
-        let mut handed: Vec<Option<Instant>> = vec![None; count];
+        let mut handed: Vec<Option<std::time::Instant>> = vec![None; count];
         let mut order = Vec::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(20);
         while handed.last().is_some_and(Option::is_none) {
             let Ok(Some(Queued { at, input, .. })) =
                 tokio::time::timeout_at(deadline, queued.recv()).await

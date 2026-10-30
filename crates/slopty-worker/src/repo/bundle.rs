@@ -226,6 +226,10 @@ fn file_safe(branch: &str) -> String {
 }
 
 /// Remove the bundles in `dir` kept longer than [`KEPT`].
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a bundle's age is the wall clock against its file's modification time"
+)]
 pub async fn sweep(dir: &Path) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else { return };
     while let Ok(Some(entry)) = entries.next_entry().await {

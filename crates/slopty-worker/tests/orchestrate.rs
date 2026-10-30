@@ -206,7 +206,7 @@ mod orchestrate {
             assert!(tokio::time::Instant::now() < deadline, "sleep never ran");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let done = wait_for(h, &WaitUntil::CommandDone, WAIT);
         let interrupt =
             async { send_input(h, &Input::Keys(vec!["ctrl+c".to_owned()])).await.unwrap() };

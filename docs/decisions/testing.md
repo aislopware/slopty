@@ -1784,3 +1784,75 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - Meanwhile a panic costs one run, not the pool: the run ends within 20 s of the guest's new
     boot ("A guest run ends when its guest boots again", above), the guest is back in about a
     minute, and the other guest goes on.
+
+- ✅ **The daemons and clients wait on tokio's clock** (2026-10-30). The CLI, the worker daemon,
+  the client core and the worker library read time from the standard clock, so their tests
+  waited out real seconds. Some waits were a lease's six seconds of silence, a redial's backoff
+  or an outage of half a minute. Others were the quiet that shows a watch says nothing, or the
+  window a hand-off waits for a person's typing. The four crates now read only tokio's clock:
+  `tokio::time::Instant`, `sleep`, `timeout` and `interval`. A test's paused runtime
+  (`#[tokio::test(start_paused = true)]`) simulates that clock and moves it to the next timer
+  whenever nothing can run. Without tokio's `test-util`, as in every build that ships, its `now`
+  is the standard clock's, at no cost.
+  - **Clippy holds the door.** Each of the four crates has a `clippy.toml` that disallows
+    `Instant::now`, `Instant::elapsed`, `SystemTime::now` and `SystemTime::elapsed`, beside the
+    workspace's `thread::sleep`. Clippy reads only the nearest `clippy.toml`, so each is the
+    root's plus these lines. A test in each crate (`clippy_config_is_the_workspaces_plus_the_clock`)
+    fails when the two drift apart. The wall clock is `slopty_core::WallMs::now`. A type of
+    another crate may take a standard `Instant`: the lease's `Beat`, `Redial`, the log's
+    `Repeats`, or a condvar's deadline. Its caller passes tokio's now, `into_std()`, which a
+    paused clock moves too.
+  - **What reads the standard clock says why**, in a `#[expect(clippy::disallowed_methods)]`
+    with its reason:
+    - The screen streams keep the media clock that frames, decoder, pacing and display share,
+      which a paused runtime does not stand in for. This covers the client's `screen` and
+      `pacing`, the worker's `screen`, the daemon's `screens` test doubles and the CLI's
+      screen probe.
+    - A start must be unique across launches: a clipboard's first generation, a hand-off's
+      first id.
+    - A file's own times: the transfer sweep, a kept bundle's age, recent files, FSEvents'
+      starting point. `SystemTime::elapsed` hides a wall-clock read too, and the ban found
+      the bundle sweep's.
+    - A hook's stamp, in microseconds.
+  - **What moved onto the paused clock**, each of its waits now exact:
+    - The CLI's `links`. A real server runs in the test's process, and the client core's own
+      server link dials it over `slopty_shape::sim`'s network, which a blackout cuts. The server
+      now listens on a socket the sim network made (`endpoint::bind_lease_on`,
+      `ServerListener::on`, `Server::start_on`).
+    - The worker daemon's server link (`server::run`) now takes the daemon through a door
+      (`server::Registrant`; the daemon's is `server::Here`). So
+      `a_server_that_stops_answering_its_pings_is_dialled_again` runs the link alone against
+      a server double on the sim network. It is given up at the first look past six seconds of
+      silence, and dialled again at the first backoff's spread. It replaced the test of the
+      same name that ran the worker and ptyd as processes.
+    - The repository watch's idle part, on the follower with a polled source
+      (`an_idle_repository_and_what_git_ignores_say_nothing`). One test on the real file system
+      and a real git keeps each change git sees
+      (`a_repository_is_reported_on_each_change_git_sees`).
+      The daemon's e2e keeps what only the daemon and a client link do, with the reconnect. Its
+      matrix of changes, a burst and a replaced git directory were the unit's and the
+      integration's already. Its count of a burst's reports was flaky as well. It was bounded by
+      the measured write time, and it failed one run in three alone here: 3 reports for a 179 ms
+      burst, against 2. FSEvents delivers later than the writes under load, and the count is the
+      follower's pacing, which `a_second_of_steady_changes_is_a_report_each_hold` holds exactly.
+    - The display holder's restart: its tries to make a kept display again, a second apart,
+      and giving up on them; and its minute alone after its last worker went.
+    - The hand-off's offer to a page nobody typed for no longer waits out the typing window,
+      which `a_page_opens_only_right_after_its_client_typed` covers.
+    - The client's cut link no longer waits out the lease on its second cut. Half a second of
+      the link shows that the reply was lost.
+  - **What stays on real time, and why.** These tests run the real daemons as processes, and a
+    paused clock moves only its own process: the client's cut link (a real worker's 10 s for a
+    half-open link's hello), the CLI's agents, the daemon's e2e protocol tests and
+    `echo_is_not_held_behind_slow_requests`, and the holder tests on real displays, which watch
+    macOS move a window. Each moves once the worker runs in the test's process (rank 6 of the
+    research's plan, `.research/testing-rust-modern-2026-10-29.md` §7). Three retries are left,
+    and no clock can replace them. The markdown parser's two bounds are its CPU time, and
+    counting the parser's work would replace them. The relay's
+    `a_short_wait_ends_when_it_was_asked_to` measures how late the OS timer wakes. None of
+    `land`'s exclusions waited on a deadline that the paused clock now simulates, so they stay.
+  - **Not chosen.** A clock trait passed through every type. Tokio's clock is already the door,
+    at no cost in a build that ships. A paused runtime also moves every timer under the test,
+    the libraries' too (noq's handshakes, idle timeouts and pacing), which a trait of ours
+    would never reach.
+  - Numbers in MEASUREMENTS.md, 2026-10-30, "the daemons and clients on tokio's paused clock".

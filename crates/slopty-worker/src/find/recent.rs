@@ -113,6 +113,10 @@ pub(super) fn walked(root: &Path, walked: Vec<String>, limit: usize) -> Vec<Stri
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "files' modification times are set on the system clock"
+)]
 mod tests {
     use std::fs;
     use std::path::PathBuf;

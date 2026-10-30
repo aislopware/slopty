@@ -635,7 +635,7 @@ struct Relook {
     tmpdir: Option<String>,
     at: WallMs,
     /// When it is looked for next.
-    next: std::time::Instant,
+    next: tokio::time::Instant,
     /// How many more looks it gets.
     left: u8,
 }
@@ -741,9 +741,9 @@ impl Reader {
             text,
             tmpdir,
             at,
-            next: std::time::Instant::now()
+            next: tokio::time::Instant::now()
                 .checked_add(LOOK)
-                .unwrap_or_else(std::time::Instant::now),
+                .unwrap_or_else(tokio::time::Instant::now),
             left: looks.saturating_sub(1),
         });
     }
@@ -778,7 +778,7 @@ impl Reader {
     }
 
     fn read(&mut self, host: &Host) {
-        if let Some(relook) = self.relook.take_if(|r| r.next <= std::time::Instant::now()) {
+        if let Some(relook) = self.relook.take_if(|r| r.next <= tokio::time::Instant::now()) {
             self.draft(host, relook.text, relook.tmpdir, relook.at, relook.left);
         }
         let changes = self.transcripts.read(&self.main, &[]);

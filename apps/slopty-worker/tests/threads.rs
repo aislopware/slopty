@@ -426,6 +426,10 @@ mod threads {
             .collect()
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a hook is stamped on the wall clock in microseconds, finer than `WallMs`"
+    )]
     fn now_us() -> u64 {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         u64::try_from(now.as_micros()).unwrap()
@@ -748,7 +752,7 @@ mod threads {
         let (thread, terminal) = started(&mut a, claude_in(&root, Some("hold the line"))).await;
         a.row_until(thread, |row| row.status.phase == Phase::Working).await;
         a.leave().await;
-        let left = std::time::Instant::now();
+        let left = tokio::time::Instant::now();
         // Linux's logind may refuse the system's hold (a CI runner's does): the hold itself is
         // asked of macOS alone, the agent that wants it of both.
         let system = |w: &slopty_proto::ctl::Awake| w.system || !cfg!(target_vendor = "apple");
@@ -812,10 +816,10 @@ mod threads {
     async fn awake_until(
         daemons: &Daemons,
         holds: impl Fn(&slopty_proto::ctl::Awake) -> bool,
-    ) -> std::time::Instant {
+    ) -> tokio::time::Instant {
         loop {
             if holds(&awake(daemons).await) {
-                return std::time::Instant::now();
+                return tokio::time::Instant::now();
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

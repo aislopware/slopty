@@ -7,10 +7,11 @@ mod history {
     use std::fs;
     use std::io::Write as _;
     use std::path::Path;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_proto::thread::AgentId;
     use slopty_worker::thread::history::{Ask, Found, History, Limits, Stores};
+    use tokio::time::Instant;
 
     fn line(text: &str, session: &str, at: u64) -> String {
         let line = serde_json::json!({"display": text, "pastedContents": {}, "timestamp": at,

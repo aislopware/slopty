@@ -8665,6 +8665,7 @@ dependencies = [
  "slopty-pty",
  "slopty-server",
  "slopty-settings",
+ "slopty-shape",
  "slopty-tailnet",
  "slopty-testkit",
  "slopty-tools",

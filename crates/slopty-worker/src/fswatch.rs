@@ -33,12 +33,13 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod inotify;
@@ -305,7 +306,7 @@ async fn readable(
 
 async fn sleep_until(due: Option<Instant>) {
     if let Some(due) = due {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(due)).await;
+        tokio::time::sleep_until(due).await;
     }
 }
 

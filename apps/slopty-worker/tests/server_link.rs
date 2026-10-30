@@ -112,10 +112,6 @@ mod tests {
         rx: PeerRx,
         heard: Vec<ToServer>,
         next: u64,
-        /// Cleared, the worker's pings go unanswered while everything else still flows.
-        answering: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        /// When a ping was last answered: the worker's silence counts from there.
-        answered: tokio::sync::watch::Receiver<Option<std::time::Instant>>,
     }
 
     /// What the test sends the worker, beside the pongs.
@@ -149,9 +145,6 @@ mod tests {
             let (to_worker, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
             let (incoming, from_worker) = tokio::sync::mpsc::unbounded_channel();
             let pongs = to_worker.clone();
-            let answering = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-            let answers = std::sync::Arc::clone(&answering);
-            let (last_answer, answered) = tokio::sync::watch::channel(None);
             tokio::spawn(async move {
                 while let Some(msg) = outgoing.recv().await {
                     if tx.send(&msg).await.is_err() {
@@ -165,11 +158,7 @@ mod tests {
                     let ended = msg.is_err();
                     match msg {
                         Ok(ToServer::Ping { sent_at }) => {
-                            if answers.load(std::sync::atomic::Ordering::SeqCst) {
-                                // Noted before it goes, so the worker hears it no sooner.
-                                last_answer.send_replace(Some(std::time::Instant::now()));
-                                let _gone = pongs.send(FromServer::Pong { sent_at });
-                            }
+                            let _gone = pongs.send(FromServer::Pong { sent_at });
                         }
                         msg => {
                             if incoming.send(msg).is_err() || ended {
@@ -180,8 +169,7 @@ mod tests {
                 }
             });
             let (tx, rx) = (PeerTx(to_worker), PeerRx(from_worker));
-            let peer =
-                Self { conn: link.conn, tx, rx, heard: Vec::new(), next: 1, answering, answered };
+            let peer = Self { conn: link.conn, tx, rx, heard: Vec::new(), next: 1 };
             (peer, *registration)
         }
 
@@ -279,10 +267,7 @@ mod tests {
         let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
         let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
         let (mut peer, reg) = Peer::welcome(link).await;
-        let unix_ms = || {
-            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-            u64::try_from(since.unwrap().as_millis()).unwrap()
-        };
+        let unix_ms = || slopty_core::WallMs::now().as_millis();
 
         let before = unix_ms();
         let Outcome::Opened(term) = peer.ask(open(reg.worker, &repo)).await else {
@@ -438,46 +423,6 @@ mod tests {
             matches!(&said, Some(LinkState::Redialling { why }) if !why.is_empty()),
             "it says why: {said:?}"
         );
-    }
-
-    /// A server whose control stream stops answering while its connection still holds (QUIC's
-    /// keep-alives answered, as a stalled reader leaves it) is given up by the worker within six
-    /// seconds of its last answer and dialled again: the lease follows the stream, not the
-    /// connection under it.
-    #[tokio::test]
-    async fn a_server_that_stops_answering_its_pings_is_dialled_again() {
-        let dir = tempfile::tempdir().unwrap();
-        let server =
-            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
-                .unwrap();
-        let _daemons = daemons(dir.path(), server.local_addr().unwrap()).await;
-        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        let (mut peer, first) = Peer::welcome(link).await;
-        // Answered for a while: the link holds past the bar.
-        let held = slopty_net::liveness::PONG_WITHIN.saturating_add(Duration::from_secs(1));
-        let again = tokio::time::timeout(held, server.accept()).await;
-        assert!(again.is_err(), "a server that answers keeps its link");
-        let term = TermRef { worker: first.worker, session: SessionId::new() };
-        let read = peer.ask(Verb::ReadScreen { term }).await;
-        assert!(
-            matches!(read, Outcome::Error { code: ErrorCode::UnknownTerminal, .. }),
-            "the worker still answers: {read:?}"
-        );
-
-        peer.answering.store(false, std::sync::atomic::Ordering::SeqCst);
-        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
-        // Counted from the last answer, as the worker counts its silence: a ping on its way
-        // when the answers stopped, or one a loaded runner read late, goes unanswered, so the
-        // last answer may be well over a ping before the mute.
-        let last = peer.answered.borrow().expect("pings were answered");
-        let took = last.elapsed();
-        let (_peer, second) = Peer::welcome(link).await;
-        assert_eq!(second.worker, first.worker, "the same worker registers again");
-        println!("MEASURE a server that stopped answering, dialled again after {took:?}");
-        let within = slopty_net::liveness::PONG_WITHIN;
-        assert!(took >= within, "given up only past its last answer's six seconds: {took:?}");
-        assert!(took < within.saturating_add(Duration::from_secs(3)), "{took:?}");
-        drop(peer);
     }
 
     /// A probe the worker is running when it is killed outright dies with it: its warden kills

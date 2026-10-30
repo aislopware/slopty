@@ -1,7 +1,7 @@
 //! Connecting straight to a worker as a client: one the server lists, or any `host:port`.
 
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use slopty_client::update::UpdateNotice;
@@ -14,6 +14,7 @@ use slopty_proto::server::Role;
 use slopty_proto::terminal::OpenSession;
 use slopty_tools::Dispatch;
 use slopty_tools::resolve::Resolver;
+use tokio::time::Instant;
 
 /// How long a closing endpoint may take to tell its peers.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);

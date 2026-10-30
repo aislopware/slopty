@@ -58,7 +58,9 @@ slopty-codec.workspace = true
 serde_json.workspace = true
 slopty-worker.workspace = true
 slopty-media.workspace = true
+# The simulated network the server link's tests run on, on tokio's paused clock.
 slopty-shape.workspace = true
+tokio = { workspace = true, features = [ "test-util" ] }
 slopty-client.workspace = true
 # A stand-in LocalAPI for the path reader's tests (`tailnet`).
 slopty-tailnet = { workspace = true, features = [ "fake" ] }

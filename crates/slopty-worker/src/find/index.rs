@@ -11,9 +11,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock, mpsc};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use parking_lot::{Mutex, RwLock};
+use tokio::time::Instant;
 
 use super::watch::Watch;
 use super::{narrows, rank, recent, walk_bounded, walk_matching, walker, worktree_of};

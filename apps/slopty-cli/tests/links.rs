@@ -1,40 +1,52 @@
 //! The app's link to the server failing and coming back: a real server in this process, and the
-//! client core's own server link (`slopty_client::server`) dialling it over QUIC on loopback
-//! through a relay the test cuts (`slopty_testkit::relay`), so packets stop and nothing says so,
-//! as on a train. What the person sees while the server is out of reach, what waits and what is
-//! refused, and how soon the board is current again once the network is back.
+//! client core's own server link (`slopty_client::server`) dialling it over QUIC, both on
+//! `slopty_shape::sim`'s network on tokio's paused clock, which a blackout cuts so packets stop
+//! and nothing says so, as on a train. What the person sees while the server is out of reach,
+//! what waits and what is refused, and how soon the board is current again once the network is
+//! back. Half a minute away passes in milliseconds, and each time is exact.
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
-    use std::net::SocketAddr;
-    use std::time::{Duration, Instant};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::Duration;
 
     use slopty_client::server::{ServerEvent, spawn};
     use slopty_core::WorkerId;
     use slopty_net::HostAddr;
+    use slopty_net::admission::Admission;
+    use slopty_net::server::ServerListener;
     use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
     use slopty_proto::server::{FromServer, Os, Registration, Role, WorkerCaps};
     use slopty_server::{Config, Server};
-    use slopty_testkit::relay::Relay;
+    use slopty_shape::sim::{Faults, Net};
     use tokio::sync::mpsc;
+    use tokio::time::Instant;
 
-    /// Long enough for any step on a loaded runner; the test judges what arrives, and the
-    /// times it prints are the measurement.
+    /// A bound on each step, on the simulated clock: the test judges what arrives.
     const STEP: Duration = Duration::from_secs(60);
     /// How long the app is off the network.
     const AWAY: Duration = Duration::from_secs(30);
+    /// The run's draws: the network's, the server's and the client's.
+    const SEED: u64 = 0x5106_7e57;
+    /// Where the server answers on the simulated network.
+    const SERVER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 45560);
+    /// Where the app dials from.
+    const PHONE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), 50000);
 
-    async fn server(dir: &std::path::Path) -> Server {
-        Server::start(Config {
+    /// The server on `net`, letting in loopback alone: no tailnet is asked.
+    async fn server(net: &Net, dir: &std::path::Path) -> Server {
+        let socket = Box::new(net.bind(SERVER).unwrap());
+        let endpoint = slopty_net::endpoint::bind_lease_on(socket, Some(SEED)).unwrap();
+        let admission = Admission::with_tailnet(Vec::new(), None);
+        let config = Config {
             name: "links-test".to_owned(),
-            quic: "127.0.0.1:0".parse().unwrap(),
+            quic: SERVER,
             data_dir: dir.to_path_buf(),
-            admission: slopty_net::admission::Admission::default(),
+            admission: admission.clone(),
             push: slopty_server::PushConfig::Off,
-        })
-        .await
-        .unwrap()
+        };
+        Server::start_on(config, ServerListener::on(endpoint, admission)).await.unwrap()
     }
 
     /// A machine that once registered and is off now: what the person forgets.
@@ -124,17 +136,19 @@ mod tests {
     /// network went goes again under its key on the next link, and is done once; one asked once
     /// the link is known lost is refused at once, rather than left waiting. Back on the network,
     /// the link comes back by itself and the board is current at once.
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test(start_paused = true)]
     async fn the_app_off_the_network_keeps_its_board_and_catches_up_once_back() {
         let dir = tempfile::tempdir().unwrap();
-        let server = server(dir.path()).await;
+        let net = Net::new(Faults::CLEAR, SEED);
+        let server = server(&net, dir.path()).await;
         let hub = server.hub().clone();
         let [went, away, elsewhere] = ["went", "away", "elsewhere"].map(|n| machine(&server, n));
 
-        let relay = Relay::start(server.quic_addr()).await.unwrap();
-        let endpoint = slopty_net::client::bind_client().unwrap();
+        let socket = Box::new(net.bind(PHONE).unwrap());
+        let endpoint =
+            slopty_net::endpoint::bind_on(socket, false, Some(SEED.rotate_left(32))).unwrap();
         let role = Role::Client { name: "phone".to_owned() };
-        let addr = HostAddr::from(relay.addr());
+        let addr = HostAddr::from(server.quic_addr());
         let runtime = tokio::runtime::Handle::current();
         let (link, mut events) = spawn(&runtime, endpoint, addr, role, None);
         let caller = link.caller();
@@ -142,7 +156,7 @@ mod tests {
         board.until(&mut events, "the board", |b| b.linked && b.machines.len() == 3).await;
 
         // Off the network. A verb made just then is on its way when the link goes.
-        relay.cut();
+        net.blackout(AWAY);
         let cut = Instant::now();
         let in_flight = tokio::spawn({
             let caller = caller.clone();
@@ -165,8 +179,7 @@ mod tests {
         assert!(board.machines.contains(&elsewhere), "the board shows what it knew");
 
         let back = cut.checked_add(AWAY).unwrap();
-        tokio::time::sleep_until(back.into()).await;
-        relay.restore();
+        tokio::time::sleep_until(back).await;
         let restored = Instant::now();
         let linked = board.until(&mut events, "linked again", |b| b.linked).await;
         let current = board
@@ -181,15 +194,27 @@ mod tests {
         };
         assert_eq!(left.iter().map(|w| w.worker).collect::<Vec<_>>(), [away], "{left:?}");
 
+        let (linked_after, current_after) =
+            (linked.duration_since(restored), current.duration_since(restored));
         println!(
             "off the network {AWAY:?}: said lost after {lost_after:?}; refused in {refused_in:?}; \
-             back: linked after {:?}, board current after {:?}; {} datagrams dropped",
-            linked.duration_since(restored),
-            current.duration_since(restored),
-            relay.dropped()
+             back: linked after {linked_after:?}, board current after {current_after:?}; {} \
+             packets blacked out",
+            net.counts().blacked_out
         );
-        assert!(lost_after < Duration::from_secs(10), "{lost_after:?}");
-        assert!(refused_in < Duration::from_secs(1), "{refused_in:?}");
+        // The lease's idle timeout, counted from the verb that went into the cut: the first
+        // packet that asked for an answer after the last one heard.
+        let lease = slopty_net::endpoint::LEASE_IDLE_TIMEOUT;
+        assert_eq!(lost_after, lease, "said lost at the lease's idle timeout");
+        assert_eq!(refused_in, Duration::ZERO, "refused at once");
+        // A dial on its way when the network came back is answered, or given up at its own
+        // idle timeout; the next is due within the redials' longest wait.
+        let redial = slopty_net::redial::MAX;
+        assert!(linked_after <= lease.saturating_add(redial), "{linked_after:?}");
+        assert!(
+            current_after.saturating_sub(linked_after) < Duration::from_millis(50),
+            "the board is current as the link comes back: {current_after:?}"
+        );
         drop(link);
         server.shutdown().await;
     }

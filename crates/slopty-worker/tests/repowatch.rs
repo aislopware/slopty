@@ -1,7 +1,8 @@
 //! A repository's watch (`slopty_worker::repowatch`) on the real file system and a real git: a
 //! write in a folder nobody listed, a stage and a commit in a terminal and an agent's edit in
-//! place are each reported within half a second, what git ignores and an idle repository are
-//! not, and a repository made in a folder that had none is noticed. How it fails: a burst of a
+//! place are each reported within half a second, and a repository made in a folder that had
+//! none is noticed (what git ignores and an idle repository are no report: the follower's own
+//! test, on tokio's paused clock). How it fails: a burst of a
 //! thousand writes is reported and comes to rest, a repository deleted is said and one made again
 //! in its place followed, a git directory replaced is followed afresh, and past its watches a
 //! repository is looked at every few seconds, still saying nothing while idle.
@@ -18,18 +19,17 @@
 mod follow {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_worker::repowatch::{HOLD, Limits, Moves, follow, follow_within};
     use tokio::sync::watch;
+    use tokio::time::Instant;
 
     /// A change is reported within this, or the watch is no use to a person looking at it.
     const PROMPT: Duration = Duration::from_millis(500);
     /// Only a guard against a watch that never comes up: fseventsd starts one stream at a time
     /// for the whole system, 0.4 to 1 s each on macOS 27, so a start can wait behind others.
     const UP: Duration = Duration::from_secs(90);
-    /// How long an idle repository is listened to for a report it should not make.
-    const IDLE: Duration = Duration::from_secs(2);
 
     fn git(repo: &Path, args: &[&str]) {
         let ran = std::process::Command::new("git")
@@ -111,14 +111,15 @@ mod follow {
     }
 
     /// What a person looking at a repository's status and diffs needs to hear of, however deep
-    /// and whoever made it, is each reported once a burst and within half a second; an idle
-    /// repository and what git ignores make no report.
+    /// and whoever made it, is each reported once a burst and within half a second. That an
+    /// idle repository and what git ignores make no report is the follower's own test, on
+    /// tokio's paused clock
+    /// (`repowatch::tests::an_idle_repository_and_what_git_ignores_say_nothing`).
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_repository_is_reported_on_each_change_git_sees_and_never_while_idle() {
+    async fn a_repository_is_reported_on_each_change_git_sees() {
         let (_dir, repo) = repository();
         let workspace = repo.join("docs");
         let (_lists, mut moves) = following(&[&workspace]).await;
-        assert_eq!(next(&mut moves, IDLE).await, None, "an idle repository says nothing");
 
         reported(&mut moves, &workspace, "a new file in a folder never listed", || {
             std::fs::write(repo.join("src/deep/inner/new.rs"), "// new\n").unwrap();
@@ -151,22 +152,6 @@ mod follow {
             std::fs::write(repo.join("src/fresh/a.rs"), "// a, again\n").unwrap();
         })
         .await;
-
-        unreported(&mut moves, "a build's output", PROMPT, || {
-            std::fs::write(repo.join("target/debug/out.o"), "object").unwrap();
-            std::fs::create_dir_all(repo.join("target/debug/deps")).unwrap();
-            std::fs::write(repo.join("target/debug/deps/lib.rlib"), "lib").unwrap();
-        })
-        .await;
-        unreported(&mut moves, "an ignored log", PROMPT, || {
-            std::fs::write(repo.join("server.log"), "line\n").unwrap();
-        })
-        .await;
-        unreported(&mut moves, "a git object", PROMPT, || {
-            std::fs::write(repo.join(".git/objects/stray"), "x").unwrap();
-        })
-        .await;
-        assert_eq!(next(&mut moves, IDLE).await, None, "idle again, nothing");
     }
 
     /// A folder in no repository is followed for one made there: a `git init` is reported, and

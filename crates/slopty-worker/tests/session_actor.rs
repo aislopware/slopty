@@ -1036,7 +1036,7 @@ mod actor {
         let script = "for c in $(seq 40); do printf '%s' \"$1\"; sleep 0.025; done; \
                       sleep 0.1; printf '\\033]9;4;1;77\\007'; read x";
         let (moves, mut moved) = mpsc::unbounded_channel();
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let (session, mut child, _tap) =
             start_with(&["/bin/sh", "-c", script, "sh", &burst], Vec::new(), Some(moves));
         let last = Progress { state: ProgressState::Set, percent: Some(77) };
@@ -2662,12 +2662,11 @@ done"#
     /// promised: the read never waits on the client, however long a promise would.
     #[tokio::test]
     async fn a_programs_clipboard_read_gets_the_text_only_while_it_is_shared() {
-        use std::time::Instant;
-
         use slopty_core::WorkerId;
         use slopty_input::pasteboard::Held;
         use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipType, Offer, Peer, Rep};
         use slopty_worker::clip::{Clipboard, digest};
+        use tokio::time::Instant;
 
         fn offer(generation: u64, text: &[u8], inline: bool) -> Offer {
             let rep = Rep {
@@ -2751,12 +2750,11 @@ exec sleep 60"#;
     /// it wants with the event's password and gets their bytes.
     #[tokio::test]
     async fn a_paste_to_a_program_asking_for_events_carries_the_pasters_copy() {
-        use std::time::Instant;
-
         use slopty_core::WorkerId;
         use slopty_input::pasteboard::Held;
         use slopty_proto::transfer::{ClipEntry, ClipFormat, ClipMsg, ClipType, Offer, Peer, Rep};
         use slopty_worker::clip::{Clipboard, digest};
+        use tokio::time::Instant;
 
         fn rep(format: ClipFormat, bytes: &[u8], inline: bool) -> Rep {
             Rep {
@@ -2954,9 +2952,9 @@ exec sleep 60"#;
     /// Wait until the bash stand-in wrote `name` into `dir`.
     async fn written(dir: &std::path::Path, name: &str) {
         let path = dir.join(name);
-        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
         while !path.exists() {
-            assert!(std::time::Instant::now() < deadline, "never wrote {}", path.display());
+            assert!(tokio::time::Instant::now() < deadline, "never wrote {}", path.display());
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -3229,12 +3227,12 @@ exec cat > "$0/raw""#;
 
     /// Wait for the program's answer to close, and say how many bytes it carried.
     async fn answered(raw: &std::path::Path) -> usize {
-        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
         loop {
             if let Some(bytes) = answered_bytes(raw) {
                 return bytes;
             }
-            assert!(std::time::Instant::now() < deadline, "the answer never closed");
+            assert!(tokio::time::Instant::now() < deadline, "the answer never closed");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
@@ -3296,7 +3294,7 @@ exec cat > "$0/raw""#;
             .collect();
         let mut chunks = chunks.into_iter();
         let mut before_reading = 0_usize;
-        let mut reading = std::time::Instant::now();
+        let mut reading = tokio::time::Instant::now();
         for chunk in chunks.by_ref() {
             let len = chunk.len();
             match tokio::time::timeout(Duration::from_millis(500), stream.send(chunk.clone())).await
@@ -3305,7 +3303,7 @@ exec cat > "$0/raw""#;
                 Err(_held) => {
                     // Held back: the program reads now, and this chunk goes once it has.
                     std::fs::write(dir.path().join("go"), b"").unwrap();
-                    reading = std::time::Instant::now();
+                    reading = tokio::time::Instant::now();
                     assert!(stream.send(chunk).await);
                     break;
                 }
@@ -3417,7 +3415,7 @@ exec cat > "$0/raw""#;
         let text: bytes::Bytes =
             (0..bytes).map(|i| b"abcdefghijklmnopqrstuvwxyz\n"[i % 27]).collect::<Vec<u8>>().into();
         let before = slopty_testkit::process::own().unwrap().peak_footprint;
-        let began = std::time::Instant::now();
+        let began = tokio::time::Instant::now();
         let kind = ClipType::Format(ClipFormat::Text);
         if streamed {
             let mut stream = session.drag_stream(drag, (0, kind), slopty_core::XferId::new());
@@ -3442,12 +3440,12 @@ exec cat > "$0/raw""#;
             file.read_exact(&mut tail).ok()?;
             Some(tail == *end)
         };
-        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
+        let deadline = tokio::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
         loop {
             if ended() == Some(true) {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "the answer never ended");
+            assert!(tokio::time::Instant::now() < deadline, "the answer never ended");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let peak = slopty_testkit::process::own().unwrap().peak_footprint;

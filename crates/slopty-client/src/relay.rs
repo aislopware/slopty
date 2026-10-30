@@ -7,9 +7,8 @@
 //! (`docs/decisions/transport.md`, "A link that stays on DERP says so"). Pure: the caller feeds
 //! it each path and asks with its own clock.
 
-use std::time::Instant;
-
 use slopty_proto::tailnet::{DERP_NOTICE_AFTER, LinkPath};
+use tokio::time::Instant;
 
 /// What a person is told about a link that has stayed on DERP.
 #[derive(Clone, PartialEq, Eq, Debug)]

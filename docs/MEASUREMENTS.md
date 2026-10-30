@@ -18433,3 +18433,45 @@ for the switch, so output dense in SGR (the fill's colour per line, a replay's p
 run-to-run step of 25 to 50): the old scan searched each read for `ESC [ ?` and its last escape.
 `fill_raw_vt` is `vt_write` on both sides, so its 0.2 % is ghostty's other two fixes and noise.
 Every series is inside its budget (`xtask/budgets.toml`, 5 % slack).
+
+## 2026-10-30 — the daemons and clients on tokio's paused clock
+
+mac-studio, the lane's warm tree after `cargo xtask remote` (the debug test profile), each test
+alone, three runs, the median. Before: the tests as at ad810b625. After: on the paused clock
+(`docs/decisions/testing.md`, "The daemons and clients wait on tokio's clock").
+
+```sh
+cd target/local/K/tree
+SLOPTY_BINS_FRESH=1 cargo nextest run -p <crate> -E 'test(=<test>)'
+```
+
+| crate | test | before | after |
+| --- | --- | --- | --- |
+| cli | `links::…_keeps_its_board_and_catches_up_once_back` | 30.11 s | 0.03 s |
+| workerd | `…_stops_answering_its_pings_is_dialled_again`, now in `server` | 13.26 s | 0.02 s |
+| workerd | `e2e::a_watched_repository_says_when_it_moves_…` | 22.2 s, 1 of 3 failed | 6.16 s |
+| workerd | `handoff::a_page_nobody_typed_for_is_offered` | 8.86 s | 0.86 s |
+| worker | `repowatch::follow::…_on_each_change_git_sees`, renamed | 9.44 s | 3.87 s |
+| worker | `repowatch::tests::an_idle_repository_…_say_nothing`, new | — | 0.02 s |
+| worker | `holder::tests::a_new_holder_makes_the_kept_displays_again` | 2.08 s | 0.02 s |
+| worker | `holder::tests::a_holder_ends_alone_or_when_asked_to_quit`, now two | 0.09 s | 0.04 s |
+| client | `threads::a_name_and_a_review_cross_a_cut_link` | 19.77 s | 14.23 s |
+
+Per crate, the moved tests' time: cli 30.1 s → 0.03 s, workerd 44.4 s → 7.0 s, worker
+11.6 s → 3.9 s, client 19.8 s → 14.2 s; in all 105.9 s → 25.2 s, saved 80.7 s a run. The
+holder's tests now wait its real times and still take milliseconds: two refusals and then 16
+tries a second apart, and a minute alone where a 50 ms stand-in was.
+
+The suites, from nextest's JUnit on this Mac (the sum of every test's time, all at once: a warm
+runner's run before, `remote`'s `land` run after; load differs, so only the moved tests above
+are like for like): cli 45.3 s → 15.2 s, workerd 153.6 s → 133.4 s, client 46.9 s → 40.4 s,
+worker 242.1 s → 206.2 s.
+
+The failed run before was the e2e's count of a burst's reports: 3 for a 179 ms burst against a
+bound of 2 drawn from the write time (the decision says why that count went).
+
+What the paused clock now prints, each run alike but for the redials' random spread: the app
+off the network for 30 s is said lost after 5 s (the lease's idle timeout, exactly), a verb
+then is refused in 0 ns, and back on the network it is linked and its board current 8 to 45 ms
+later. A mute server is given up 6 s after its last answer, exactly, and redialled 224 ms on.
+40 runs of the two, back to back, all passed.

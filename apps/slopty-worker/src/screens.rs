@@ -827,6 +827,10 @@ fn apply<P: Platform>(stream: &mut Pipeline<P>, client: ClientId, command: Comma
     clippy::cast_precision_loss,
     reason = "measurement arithmetic on small counts and microseconds"
 )]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 mod tests {
     use std::time::Duration;
 
@@ -1071,6 +1075,10 @@ mod tests {
 /// the window server or the worker's input.
 #[cfg(test)]
 #[cfg(target_vendor = "apple")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 pub mod fake {
     use std::collections::HashMap;
     use std::marker::PhantomData;
@@ -1615,6 +1623,10 @@ pub mod fake {
     clippy::arithmetic_side_effects,
     reason = "measurement arithmetic on small counts"
 )]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 mod serving {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -1978,6 +1990,10 @@ mod serving {
 /// displays settle at once: nothing here makes a real display.
 #[cfg(test)]
 #[cfg(target_vendor = "apple")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 mod made {
     use std::sync::Arc;
     use std::time::Duration;
@@ -2303,6 +2319,10 @@ mod fields {
 /// the switch is heard, and a client told when another client's ask took its source.
 #[cfg(test)]
 #[cfg(target_vendor = "apple")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 mod sourcing {
     use std::sync::Arc;
     use std::time::Duration;
@@ -2523,6 +2543,10 @@ mod sourcing {
 /// source check ranks it over the frames, and the client's link hears it over QUIC.
 #[cfg(test)]
 #[cfg(target_os = "macos")]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one"
+)]
 mod console {
     use std::net::SocketAddr;
     use std::sync::Arc;

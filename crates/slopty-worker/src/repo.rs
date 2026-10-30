@@ -532,18 +532,18 @@ mod tests {
         let root = real(&repo);
         let reads = 20_000_u32;
 
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..reads {
             let found = root_of_str(cwd);
             std::hint::black_box(found.as_deref().map(Path::new).and_then(branch_of));
         }
         let whole = started.elapsed() / reads;
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..reads {
             std::hint::black_box(root_of_str(cwd));
         }
         let walk = started.elapsed() / reads;
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         for _ in 0..reads {
             std::hint::black_box(branch_of(&root));
         }

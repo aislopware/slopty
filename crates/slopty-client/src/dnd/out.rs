@@ -15,11 +15,12 @@
 //! waits for it there ([`Shared::data`]).
 
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use slopty_platform::pasteboard::{clip_type, uti_of_type};
 use slopty_proto::drag::{DragEvent, DragId, DragItem, FileMeta};
 use slopty_proto::transfer::{Rep, RepRef, Source};
+use tokio::time::Instant;
 
 /// What the local drag offers for one item of a drag out.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -306,7 +307,7 @@ impl Shared {
                 return Some(found);
             }
             let until = until?;
-            if self.changed.wait_until(&mut out, until).timed_out() {
+            if self.changed.wait_until(&mut out, until.into_std()).timed_out() {
                 return look(&out);
             }
         }

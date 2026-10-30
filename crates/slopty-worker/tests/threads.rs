@@ -133,11 +133,11 @@ mod threads {
         let bytes = walk(dir.path());
         let (mut times, mut firsts) = (Vec::new(), Vec::new());
         for _ in 0..5 {
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             let host = open(dir.path());
             times.push(started.elapsed());
             let thread = host.threads()[THREADS / 2];
-            let started = std::time::Instant::now();
+            let started = tokio::time::Instant::now();
             assert_eq!(
                 state(&host, thread).0.turns.len(),
                 usize::try_from(TURNS).unwrap(),

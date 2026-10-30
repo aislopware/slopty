@@ -99,8 +99,9 @@ not (
 # Mac with the person and the lanes at `Nice 10`, and its lints build beside its tests. In its
 # first run (40930812923, cold, the lanes building beside it) the two linear-time parses took
 # 3.2 s and 3.9 s against bounds of 2 s and 3 s. A pass on a retry shows as FLAKY and stands;
-# failing every try fails the gate. Named, never a pattern. Virtual time (research rank 2)
-# replaces these retries.
+# failing every try fails the gate. Named, never a pattern. Virtual time cannot replace these:
+# they bound the parser's own work in CPU time, which no clock simulates; counting that work
+# instead would.
 [[profile.warm.overrides]]
 filter = '''
 package(slopty-markdown) & (
@@ -141,21 +142,12 @@ slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
 # rather than wherever their binary sorts. In the order binaries sort, the worker shard's run, the
 # gate's critical path, ended on one of them alone: a 25 s test started at 188 s of a 214 s run,
 # and for 44 s one test ran on the three cores (run 39069617088). Each is named, with its time
-# there (Mac shards and the linux lane); a test added past ten seconds joins the list.
+# there; a test added past ten seconds joins the list. The rest that were here wait on tokio's
+# paused clock now (docs/decisions/testing.md, "The daemons and clients wait on tokio's clock").
+# The one left waits out a real worker's 10 s for a half-open link's hello (14 s on the Mac).
 [[profile.default.overrides]]
 filter = '''
-(package(=slopty-worker) & binary(=repowatch)
-    & test(=follow::a_repository_is_reported_on_each_change_git_sees_and_never_while_idle))
-| (package(=slopty-workerd) & binary(=e2e)
-    & test(=tests::a_watched_repository_says_when_it_moves_and_nothing_while_idle))
-| (package(=slopty-workerd) & binary(=server_link)
-    & test(=tests::a_server_that_stops_answering_its_pings_is_dialled_again))
-| (package(=slopty-client) & binary(=threads)
-    & test(=threads::an_answer_and_a_review_cross_a_cut_link))
-| (package(=slopty-cli) & binary(=links)
-    & test(=tests::the_app_off_the_network_keeps_its_board_and_catches_up_once_back))
-| (package(=slopty-cli) & binary(=agents)
-    & test(=tests::an_agent_starts_a_child_waits_reads_it_and_hears_it_as_messages))
+package(=slopty-client) & binary(=threads) & test(=threads::a_name_and_a_review_cross_a_cut_link)
 '''
 priority = 50
 
@@ -266,8 +258,10 @@ test-group = 'fsevents'
 # them), and alone they pass (2026-09-28, 2026-09-30). A pass on a retry shows as FLAKY in the
 # gate log; failing every try still fails the gate. Name a test here only when it is
 # timing-sensitive this way, never by pattern; each one's pass on a retry stands
-# (`flaky-result`), every other flake fails. Virtual time (research rank 2) replaces these
-# retries: the session actor's timing tests run on tokio's paused clock (2026-10-30).
+# (`flaky-result`), every other flake fails. Virtual time (research rank 2) replaced the others:
+# the session actor's timing tests and the daemons' and clients' run on tokio's paused clock
+# (2026-10-30). This one stays: it measures how late the OS timer itself wakes, which a
+# simulated clock cannot stand in for.
 [profile.gate]
 
 [[profile.gate.overrides]]

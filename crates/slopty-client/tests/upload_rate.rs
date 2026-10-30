@@ -6,7 +6,7 @@
 mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_client::WorkerLink;
     use slopty_core::{ClientId, SessionId, WorkerId, XferId};
@@ -18,6 +18,7 @@ mod tests {
     use slopty_net::{ClientMsg, HostAddr, WorkerMsg};
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::transfer::{Dest, XferMsg};
+    use tokio::time::Instant;
 
     /// Two windows of the client's 16 streams awaiting acknowledgement.
     const FILES: usize = 32;

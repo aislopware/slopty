@@ -10,6 +10,11 @@
 //!
 //! Apple only: decoding is `VideoToolbox`'s (`docs/decisions/platform.md`, "Linux seams").
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the probe times a stream on the media's clock, the standard one, which the stream's frames share"
+)]
+
 use std::path::Path;
 use std::time::{Duration, Instant};
 

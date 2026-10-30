@@ -207,7 +207,7 @@ mod tests {
         assert!(seen.lock().is_empty(), "read with no client listening: {:?}", seen.lock());
 
         let (out, mut heard) = mpsc::channel(8);
-        let asked = std::time::Instant::now();
+        let asked = tokio::time::Instant::now();
         let reporting = tokio::spawn({
             let paths = paths.clone();
             async move { paths.report("100.64.0.4:5000".parse().unwrap(), out).await }

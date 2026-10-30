@@ -373,7 +373,7 @@ async fn write_screen(
     let recipe = recipe.clone();
     let path = screen_path(dir, id);
     let written = tokio::task::spawn_blocking(move || {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let written = slopty_platform::fs::replace(&path, &state);
         tracing::debug!(session = %id, bytes = state.len(), us = started.elapsed().as_micros(), "screen kept");
         written
@@ -552,9 +552,9 @@ mod tests {
         let path = dir.path().join("screen.vt");
         let rounds = 20_u32;
         let mut worst = std::time::Duration::ZERO;
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         for _ in 0..rounds {
-            let one = std::time::Instant::now();
+            let one = Instant::now();
             slopty_platform::fs::replace(&path, &state).unwrap();
             worst = worst.max(one.elapsed());
         }

@@ -380,7 +380,7 @@ mod tests {
         let warm = count(root.clone()).await;
         let mut took = Vec::new();
         for _ in 0..5 {
-            let at = std::time::Instant::now();
+            let at = Instant::now();
             assert_eq!(count(root.clone()).await, warm);
             took.push(at.elapsed());
         }

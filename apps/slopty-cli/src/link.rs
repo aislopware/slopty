@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use slopty_client::update::UpdateNotice;
@@ -26,6 +26,7 @@ use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, Verb};
 use slopty_proto::server::{FromServer, Role, ToServer};
 use slopty_tools::Dispatch;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::Instant;
 
 /// Environment variable naming the server, between `--server` and the settings file. Every
 /// session a worker runs has it, so `slopty` and `slopty mcp` inside one need no flag.
@@ -210,12 +211,12 @@ impl Link {
                 let wait = match dialled {
                     Ok(link) => {
                         tracing::info!(%server, "connected to the server");
-                        redial.linked(Instant::now());
+                        redial.linked(Instant::now().into_std());
                         match serve(link, held.take(), &mut rx, &events).await {
                             Ended::Released => return,
                             Ended::Lost(e) => tracing::warn!(%server, error = %e, "server lost"),
                         }
-                        redial.next(Instant::now())
+                        redial.next(Instant::now().into_std())
                     }
                     Err(e) => {
                         tracing::debug!(%server, error = %e, "server unreachable");
@@ -293,7 +294,7 @@ async fn retried<F: Future<Output = Answer>>(
     mut attempt: impl FnMut(Option<IdempotencyKey>, Verb) -> F,
 ) -> Outcome {
     let key = key.or_else(|| verb.changes().then(fresh_key));
-    let started = tokio::time::Instant::now();
+    let started = Instant::now();
     let mut pauses = RETRY_PAUSES.into_iter();
     let mut lost = false;
     loop {
@@ -390,7 +391,7 @@ fn redial_after(e: &anyhow::Error, redial: &mut Redial) -> Duration {
     if e.downcast_ref::<UpdateNotice>().is_some() {
         slopty_net::redial::WRONG_BUILD
     } else {
-        redial.next(Instant::now())
+        redial.next(Instant::now().into_std())
     }
 }
 
@@ -539,7 +540,7 @@ mod tests {
         assert!(is_other_build(Some(&notice)));
         assert!(!is_other_build(Some(&anyhow!("no answer"))) && !is_other_build(None));
         let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let mut tries = 0;
         let outcome =
             retried(None, Verb::Close { term }, (OFFLINE_PATIENCE, false), |_key, verb| {
@@ -561,7 +562,7 @@ mod tests {
             message: "cannot reach the server".to_owned(),
         };
         let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let mut keys = Vec::new();
         let back_after = Duration::from_secs(30);
         let outcome =
@@ -583,7 +584,7 @@ mod tests {
         })
         .await;
         assert_eq!((outcome, tries), (offline(), 1), "a read fails at once");
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let outcome = retried(None, read, (OFFLINE_PATIENCE, true), |_key, verb| {
             let answer = if started.elapsed() < back_after { offline() } else { Outcome::Done };
             std::future::ready((answer, Some(verb)))
@@ -599,7 +600,7 @@ mod tests {
         .await;
         assert_eq!((outcome, tries), (offline(), 1), "a command's own link does not wait");
 
-        let started = tokio::time::Instant::now();
+        let started = Instant::now();
         let outcome =
             retried(None, Verb::Close { term }, (OFFLINE_PATIENCE, false), |_key, verb| {
                 std::future::ready((offline(), Some(verb)))

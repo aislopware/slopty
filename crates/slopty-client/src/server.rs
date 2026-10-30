@@ -277,7 +277,7 @@ async fn run(
         let mut another_build = false;
         let event = match dialled {
             Ok(link) => {
-                redial.linked(std::time::Instant::now());
+                redial.linked(tokio::time::Instant::now().into_std());
                 let Some(why) = pump(link, &tx, &mut up, &mut carried).await else { return };
                 ServerEvent::Unlinked { why }
             }
@@ -306,7 +306,7 @@ async fn run(
         let wait = if another_build {
             slopty_net::redial::WRONG_BUILD
         } else {
-            redial.next(std::time::Instant::now())
+            redial.next(tokio::time::Instant::now().into_std())
         };
         let wait = tokio::time::sleep(wait);
         tokio::pin!(wait);

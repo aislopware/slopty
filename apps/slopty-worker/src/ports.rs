@@ -4,12 +4,12 @@
 //! sessions' output hints and a look at every session each [`RESCAN`], and runs the scans.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 use slopty_core::SessionId;
 use slopty_proto::WorkerMsg;
 use slopty_worker::ports::{RESCAN, listening};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::time::Instant;
 
 use crate::Daemon;
 
@@ -58,7 +58,7 @@ pub async fn watch(daemon: Daemon, mut hints: UnboundedReceiver<SessionId>) {
 /// Sleep until `at`, or forever when nothing is owed.
 async fn until(at: Option<Instant>) {
     match at {
-        Some(at) => tokio::time::sleep_until(at.into()).await,
+        Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
     }
 }

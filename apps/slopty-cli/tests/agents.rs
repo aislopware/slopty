@@ -8,7 +8,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use serde_json::{Value, json};
     use slopty_proto::server::Liveness;
@@ -16,6 +16,7 @@ mod tests {
     use slopty_server::{Config, Server};
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
+    use tokio::time::Instant;
 
     /// Long enough for any step on a loaded runner; the test judges what arrives.
     const STEP: Duration = Duration::from_secs(60);

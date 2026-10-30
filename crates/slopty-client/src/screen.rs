@@ -8,6 +8,11 @@
 //! on the reassembler's schedule, decode, report every 50 ms, and publish the newest decoded
 //! frame and cursor position on `watch` channels the UI polls at paint time.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a stream is timed on the media's clock, the standard one, which its frames, decoder and display share; a paused runtime does not stand in for it"
+)]
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};

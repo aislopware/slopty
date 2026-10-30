@@ -129,13 +129,13 @@ struct Hosted {
     feed: broadcast::Sender<Arc<Batch>>,
     own: Own,
     /// When it was last used ([`Host::rest`]).
-    used: std::time::Instant,
+    used: tokio::time::Instant,
 }
 
 impl Hosted {
     /// Whether it can go back to its head: nobody follows it and nothing used it since
     /// `before`. Its log and files hold all of it.
-    fn resting(&self, before: std::time::Instant) -> bool {
+    fn resting(&self, before: tokio::time::Instant) -> bool {
         self.used <= before && self.feed.receiver_count() == 0
     }
 
@@ -152,7 +152,7 @@ impl Hosted {
             intents: Intents::open(&dir.join("intents"))?,
             feed: broadcast::Sender::new(FEED_BATCHES),
             own,
-            used: std::time::Instant::now(),
+            used: tokio::time::Instant::now(),
         })
     }
 }
@@ -312,7 +312,7 @@ impl Host {
     /// head written over its log, its state and tail let go, its files closed. How many went.
     /// One whose head cannot be written keeps its head in memory alone, as at the start.
     pub fn rest(&self, idle: std::time::Duration) -> usize {
-        let Some(before) = std::time::Instant::now().checked_sub(idle) else { return 0 };
+        let Some(before) = tokio::time::Instant::now().checked_sub(idle) else { return 0 };
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let resting: Vec<ThreadId> = inner
@@ -744,7 +744,7 @@ impl Inner {
     /// be read is let go, with a warning: its agent's own session still has everything.
     fn load(&mut self, thread: ThreadId) {
         if let Some(hosted) = self.threads.get_mut(&thread) {
-            hosted.used = std::time::Instant::now();
+            hosted.used = tokio::time::Instant::now();
             return;
         }
         let Some(head) = self.cold.remove(&thread) else { return };

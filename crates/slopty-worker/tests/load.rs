@@ -10,7 +10,9 @@
 
 #[cfg(test)]
 mod spin {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+
+    use tokio::time::Instant;
 
     #[test]
     #[ignore = "load for a measurement, run on demand"]

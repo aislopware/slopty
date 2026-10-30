@@ -28,6 +28,11 @@
 //! Everything here is pure: the caller supplies the clock ([`Clock`]), so the policy is testable
 //! without a window.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "frames are paced on the media's clock, the standard one, which captures and displays share"
+)]
+
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 

@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -33,6 +33,7 @@ use slopty_proto::thread::detail::{ExecDetail, McpDetail};
 use slopty_proto::thread::{Action, AgentScreen, ThreadId, ThreadState, ToolCall, ToolDetail};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use super::Host;
 use super::host::ToolSeen;

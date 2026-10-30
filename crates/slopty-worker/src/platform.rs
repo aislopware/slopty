@@ -192,6 +192,10 @@ pub mod headless {
             stream.absurd()
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "frames are stamped on the media's clock, the standard one"
+        )]
         fn now_us() -> u64 {
             static EPOCH: OnceLock<Instant> = OnceLock::new();
             let since = EPOCH.get_or_init(Instant::now).elapsed().as_micros();

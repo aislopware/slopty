@@ -15,13 +15,14 @@
 mod follow {
     use std::io::Write as _;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_testkit::stats::Spread;
     use slopty_worker::fswatch::{
         CONTENT_HOLD, CONTENT_QUIET, Changes, HOLD, Limits, Status, follow, follow_folders,
     };
     use tokio::sync::watch;
+    use tokio::time::Instant;
 
     /// Longer than any report takes on a loaded machine, short of a stuck test.
     const WITHIN: Duration = Duration::from_secs(3);
@@ -591,11 +592,11 @@ mod follow {
     mod raw {
         use std::path::Path;
         use std::time::Duration;
-        #[cfg(target_vendor = "apple")]
-        use std::time::Instant;
 
         #[cfg(target_vendor = "apple")]
         use tokio::sync::mpsc;
+        #[cfg(target_vendor = "apple")]
+        use tokio::time::Instant;
 
         #[cfg(target_vendor = "apple")]
         use super::{KINDS, change};

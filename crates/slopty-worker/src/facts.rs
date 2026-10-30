@@ -854,7 +854,7 @@ fn text_of(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use tokio::time::Instant;
 
     use super::*;
 
@@ -908,7 +908,7 @@ mod tests {
             move || real_wait(|| pid_file.exists())
         });
         let budget = Duration::from_millis(500);
-        let start = tokio::time::Instant::now();
+        let start = Instant::now();
         let (ran, started) = tokio::join!(sh(&line, budget, 64), started);
         assert!(started.unwrap(), "the shell started its sleep");
         assert!(ran.is_none(), "past its time");

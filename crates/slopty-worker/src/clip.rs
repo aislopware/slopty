@@ -38,7 +38,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use parking_lot::{Condvar, Mutex};
@@ -52,6 +52,7 @@ use slopty_proto::transfer::{
     Rep, RepRef, Source, origin_bytes, parse_origin,
 };
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 /// One client connection (its QUIC `stable_id`): a client that reconnects is a new link, and the
 /// old one ending must not take the new one's watch with it.
@@ -92,6 +93,10 @@ pub fn digest(bytes: &[u8]) -> Hash {
 /// Where one clipboard's offer generations start. A restarted worker keeps its id, so its first
 /// offer must not reuse a generation its clients may still hold from its last run: the wall
 /// clock in microseconds, with a count for two clipboards made within one.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a start unique across launches is the real wall clock's, in microseconds"
+)]
 fn first_generation() -> u64 {
     static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let micros = std::time::SystemTime::now()
@@ -1062,7 +1067,7 @@ fn provide(shared: &Weak<Shared>, client: Link, source: Source, key: &Key) -> Op
             return None;
         }
         let until = if on_main { deadline.min(now.checked_add(MAIN_SLICE)?) } else { deadline };
-        let _woken = shared.arrived.wait_until(&mut state, until);
+        let _woken = shared.arrived.wait_until(&mut state, until.into_std());
         if on_main {
             on_main = parking_lot::MutexGuard::unlocked(&mut state, serve_main_run_loop);
         }

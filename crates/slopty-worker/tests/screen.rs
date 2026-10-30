@@ -87,10 +87,11 @@ mod tests {
 #[cfg(test)]
 mod stand_in {
     use std::process::{Child, Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_core::WindowId;
     use slopty_worker::screen::shareable;
+    use tokio::time::Instant;
 
     pub struct Window(Child);
 
@@ -258,7 +259,7 @@ mod crop_path {
 )]
 mod encoder_rate_control {
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use objc2_core_foundation::CFType;
     use slopty_capture::{Capture, CaptureConfig, PixelFormat, Target, host_now_us};
@@ -267,6 +268,7 @@ mod encoder_rate_control {
     use slopty_proto::ctl::Quantiles;
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_worker::screen::shareable;
+    use tokio::time::Instant;
 
     use super::stand_in::launch;
 
@@ -549,10 +551,11 @@ fn channel() -> (
 /// encoder_build_stall --no-capture`.
 #[cfg(test)]
 mod encoder_build {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use slopty_codec::{EncoderConfig, VideoEncoder as _, VideoToolbox};
     use slopty_proto::screen::VideoCodec;
+    use tokio::time::Instant;
 
     /// A Retina display's worth, as a full-screen stream asks for.
     const CONFIG: EncoderConfig = EncoderConfig {
