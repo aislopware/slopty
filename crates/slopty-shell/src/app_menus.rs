@@ -152,7 +152,8 @@ fn close_active_window(pane_first: bool, cx: &mut App) {
 }
 
 /// Close `shell`'s focused pane with `pane_first` when it is not the session's, else its window,
-/// the unsaved-file gate and all.
+/// the unsaved-file gate and all. On a touch screen the window is the app's scene, which the
+/// system shows and puts away: there only the panes beside the session close.
 fn close(
     shell: &mut shell::Shell,
     pane_first: bool,
@@ -162,7 +163,7 @@ fn close(
     if pane_first && shell.close_focused_pane(cx) {
         return;
     }
-    if shell.prepare_window_close(cx) {
+    if !shell::touch_screen() && shell.prepare_window_close(cx) {
         window.remove_window();
     }
 }
@@ -182,32 +183,55 @@ pub(crate) fn window_actions<E: InteractiveElement>(root: E, cx: &Context<shell:
         .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
 }
 
+/// The keyboard the fixed application shortcuts are bound for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Keyboard {
+    /// A Mac's: ⌘ keys, the window's and the app's verbs among them.
+    Mac,
+    /// An iPad's or iPhone's hardware keyboard: ⌘ keys, ⌘W closing the focused pane. The app and
+    /// its window are the system's there: ⌘H and ⌘Q are iPadOS's own, and nothing minimizes,
+    /// zooms or closes a scene's window.
+    Ios,
+    /// Any other: Ctrl keys.
+    Other,
+}
+
+impl Keyboard {
+    /// This build's.
+    const HERE: Self = if cfg!(target_os = "macos") {
+        Self::Mac
+    } else if cfg!(target_os = "ios") {
+        Self::Ios
+    } else {
+        Self::Other
+    };
+}
+
 /// Fixed app-level shortcuts backing the menu key equivalents.
 ///
 /// These live outside the customizable keymap; `shell::apply_keymap` calls this after its
-/// `clear_key_bindings` so they survive keymap re-application. Settings follows
-/// the platform convention everywhere (Cmd+, on macOS, Ctrl+, elsewhere);
-/// window/application lifecycle shortcuts remain macOS-only.
+/// `clear_key_bindings` so they survive keymap re-application. Settings follows the platform
+/// convention everywhere (⌘, on every Apple keyboard, Ctrl+, elsewhere), and ⌘W closes the
+/// focused pane on an iPad's keyboard as on a Mac's; the app's and its windows' own verbs are a
+/// Mac's alone.
 pub fn bind_keys(cx: &mut App) {
-    // Settings is ⌘, on every Apple keyboard, an iPad's too.
-    cx.bind_keys(app_key_bindings(crate::keys::MOD_IS_COMMAND, cfg!(target_os = "macos")));
+    cx.bind_keys(app_key_bindings(Keyboard::HERE));
 }
 
 /// The binding table behind [`bind_keys`] — `KeyBinding` construction is pure
 /// (no `App`), so unit tests can inspect it directly.
-fn app_key_bindings(command: bool, macos: bool) -> Vec<KeyBinding> {
-    let mut bindings = vec![KeyBinding::new(
-        if command { "cmd-," } else { "ctrl-," }, // `command`, not `macos`
-        shell::OpenSettings,
-        None,
-    )];
-    if macos {
+fn app_key_bindings(keyboard: Keyboard) -> Vec<KeyBinding> {
+    let settings = if keyboard == Keyboard::Other { "ctrl-," } else { "cmd-," };
+    let mut bindings = vec![KeyBinding::new(settings, shell::OpenSettings, None)];
+    if keyboard != Keyboard::Other {
+        bindings.push(KeyBinding::new("cmd-w", CloseTab, None));
+    }
+    if keyboard == Keyboard::Mac {
         bindings.extend([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-h", Hide, None),
             KeyBinding::new("alt-cmd-h", HideOthers, None),
             KeyBinding::new("cmd-m", Minimize, None),
-            KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-shift-w", CloseWindow, None),
         ]);
     }
@@ -582,7 +606,7 @@ mod tests {
             })
         };
         let combo = |source: &'static str| vec![Keystroke::parse(source).unwrap()];
-        let macos = app_key_bindings(true, true);
+        let macos = app_key_bindings(Keyboard::Mac);
         assert_eq!(find(&macos, shell::OpenSettings.name()), Some(combo("cmd-,")));
         assert_eq!(find(&macos, Quit.name()), Some(combo("cmd-q")));
         // ⌘W closes the focused pane, ⇧⌘W the window.
@@ -590,14 +614,20 @@ mod tests {
         assert_eq!(find(&macos, CloseWindow.name()), Some(combo("cmd-shift-w")));
         assert_eq!(find(&macos, Minimize.name()), Some(combo("cmd-m")));
 
-        // An iPad's keyboard opens Settings with ⌘, and has no window verbs to bind.
-        let ipad = app_key_bindings(true, false);
+        // An iPad's keyboard opens Settings with ⌘, and ⌘W closes its focused pane; the app and
+        // its window are the system's.
+        let ipad = app_key_bindings(Keyboard::Ios);
         assert_eq!(find(&ipad, shell::OpenSettings.name()), Some(combo("cmd-,")));
-        assert_eq!(find(&ipad, Quit.name()), None);
+        assert_eq!(find(&ipad, CloseTab.name()), Some(combo("cmd-w")));
+        for system in [Quit.name(), Hide.name(), HideOthers.name(), Minimize.name()] {
+            assert_eq!(find(&ipad, system), None, "{system} is iPadOS's");
+        }
+        assert_eq!(find(&ipad, CloseWindow.name()), None, "a scene's window is the system's");
 
-        let other = app_key_bindings(false, false);
+        let other = app_key_bindings(Keyboard::Other);
         assert_eq!(find(&other, shell::OpenSettings.name()), Some(combo("ctrl-,")));
         assert_eq!(find(&other, Quit.name()), None);
+        assert_eq!(find(&other, CloseTab.name()), None);
     }
 }
 
