@@ -10,15 +10,6 @@
 //! The other way round, a path a person ⌘-clicks in a shell opens where a transcript's file link
 //! opens, in its chat's Files pane ([`open_file`]), and a web link one hands over opens where a
 //! transcript's web link opens ([`open_link`]): the shell serves both once its window is up.
-#![allow(
-    missing_debug_implementations,
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::derive_partial_eq_without_eq,
-    clippy::needless_pass_by_ref_mut,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 
 pub mod chrome;
 pub mod key_row; // the touch key row's armed modifiers, and whether a keyboard stands in for it
@@ -33,7 +24,7 @@ use gpui::{
 };
 
 /// One of Slopty's views, as the shell places it.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Hosted {
     /// What is drawn.
     pub view: AnyView,
@@ -257,9 +248,17 @@ pub struct Host {
 
 impl Global for Host {}
 
-/// Install the app's views: `terminal` gives a shell's terminal by its id, styled by the look
-/// passed; `screen` a remote window or desktop by its id; `watch` calls back when what a
-/// [`Hosted`] says of itself (its title, its end) changes.
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host").finish_non_exhaustive()
+    }
+}
+
+/// Install the app's views.
+///
+/// `terminal` gives a shell's terminal by its id, styled by the look passed; `screen` a remote
+/// window or desktop by its id; `watch` calls back when what a [`Hosted`] says of itself (its
+/// title, its end) changes.
 pub fn install(
     cx: &mut App,
     terminal: impl Fn(&str, &TerminalLook, &mut App) -> Option<Hosted> + 'static,
@@ -275,19 +274,19 @@ pub fn install(
 
 /// The terminal `id`, looking as `look` says; `None` until it is attached, or with no host.
 pub fn terminal(id: &str, look: &TerminalLook, cx: &mut App) -> Option<Hosted> {
-    let host = cx.try_global::<Host>()?.terminal.clone();
+    let host = Rc::clone(&cx.try_global::<Host>()?.terminal);
     host(id, look, cx)
 }
 
 /// The remote window or desktop `id`; `None` while it has no stream, or with no host.
 pub fn screen(id: &str, cx: &mut App) -> Option<Hosted> {
-    let host = cx.try_global::<Host>()?.screen.clone();
+    let host = Rc::clone(&cx.try_global::<Host>()?.screen);
     host(id, cx)
 }
 
 /// Call `changed` whenever the view `id` says something new of itself.
 pub fn watch(id: &str, changed: Box<dyn FnMut(&mut App)>, cx: &mut App) -> Option<Subscription> {
-    let host = cx.try_global::<Host>()?.watch.clone();
+    let host = Rc::clone(&cx.try_global::<Host>()?.watch);
     host(id, changed, cx)
 }
 
@@ -310,7 +309,7 @@ pub fn serve_fit(
 
 /// The columns and rows a terminal view draws in `size`; `None` with no host.
 pub fn fit(size: Size<Pixels>, window: &mut Window, cx: &mut App) -> Option<(u16, u16)> {
-    let fit = cx.try_global::<Fit>()?.0.clone();
+    let fit = Rc::clone(&cx.try_global::<Fit>()?.0);
     Some(fit(size, window, cx))
 }
 
@@ -331,26 +330,31 @@ pub fn serve_grid(
     cx.set_global(GridOf(Rc::new(grid)));
 }
 
-/// The cell a terminal view draws and what its pane takes besides whole cells along each axis
-/// (the inset on both sides): what a split snaps a terminal's pane to (`docs/decisions/
-/// layout.md`, "One session per view, splits on demand"). `None` with no host.
+/// The cell a terminal view draws and what its pane takes besides whole cells along each axis.
+///
+/// The second is the inset on both sides. Together they are what a split snaps a terminal's pane
+/// to (`docs/decisions/layout.md`, "One session per view, splits on demand"). `None` with no
+/// host.
 pub fn grid(window: &mut Window, cx: &mut App) -> Option<(Size<Pixels>, Size<Pixels>)> {
-    let grid = cx.try_global::<GridOf>()?.0.clone();
+    let grid = Rc::clone(&cx.try_global::<GridOf>()?.0);
     let (cell, inset) = grid(window, cx);
     Some((cell, Size { width: inset * 2.0, height: inset * 2.0 }))
 }
 
-/// How much narrower and shorter than its bounds each held terminal view fits its grid, by the
-/// view's entity ([`hold_fit`]).
+/// How much narrower and shorter than its bounds each held terminal view fits its grid.
+///
+/// By the view's entity ([`hold_fit`]).
 #[derive(Default)]
 struct FitHolds(Vec<(gpui::EntityId, Size<Pixels>)>);
 
 impl Global for FitHolds {}
 
 /// Hold the grid of the terminal drawn as `view` `by` narrower and shorter than its bounds, or
-/// let it go with zero. The shell holds its session's terminal while the panes around it glide,
-/// so the TUI in it reflows once for a glide rather than once a frame (`docs/decisions/ui.md`,
-/// "A glide reflows the TUI once").
+/// let it go with zero.
+///
+/// The shell holds its session's terminal while the panes around it glide, so the TUI in it
+/// reflows once for a glide rather than once a frame (`docs/decisions/ui.md`, "A glide reflows
+/// the TUI once").
 pub fn hold_fit(view: gpui::EntityId, by: Size<Pixels>, cx: &mut App) {
     let held = by.width > Pixels::ZERO || by.height > Pixels::ZERO;
     if !held && !cx.has_global::<FitHolds>() {
@@ -379,9 +383,10 @@ struct Keys(Rc<KeysFn>);
 
 impl Global for Keys {}
 
-/// Slopty's views' own key bindings (a terminal's ⌘F, ⌘K): `bind` binds them, and runs again
-/// each time the shell binds its keymap, which clears every binding first. Install it before the
-/// shell's window opens; installed later, it binds at once.
+/// Slopty's views' own key bindings (a terminal's ⌘F, ⌘K).
+///
+/// `bind` binds them, and runs again each time the shell binds its keymap, which clears every
+/// binding first. Install it before the shell's window opens; installed later, it binds at once.
 pub fn keys(cx: &mut App, bind: impl Fn(&mut App) + 'static) {
     let bind: Rc<KeysFn> = Rc::new(bind);
     let late = cx.has_global::<Keys>();
@@ -457,10 +462,12 @@ pub fn serve_dim(cx: &mut App, dim: impl Fn(&AnyView, bool, &mut App) + 'static)
     cx.set_global(Dim(Rc::new(dim)));
 }
 
-/// Dim the terminal drawn as `view`, or bring it back: while a view holds more than one pane,
-/// each pane without the keyboard is dimmed by brightness alone, in its own element
-/// (`docs/decisions/layout.md`, "One session per view, splits on demand"). The split calls this
-/// for every terminal pane it holds as the keyboard moves; nothing with no host.
+/// Dim the terminal drawn as `view`, or bring it back.
+///
+/// While a view holds more than one pane, each pane without the keyboard is dimmed by brightness
+/// alone, in its own element (`docs/decisions/layout.md`, "One session per view, splits on
+/// demand"). The split calls this for every terminal pane it holds as the keyboard moves; nothing
+/// with no host.
 pub fn dim(view: &AnyView, dimmed: bool, cx: &mut App) {
     let Some(Dim(dim)) = cx.try_global::<Dim>().cloned() else { return };
     dim(view, dimmed, cx);
@@ -519,10 +526,11 @@ pub enum PagePresence {
     Live,
 }
 
-/// A page an agent shows inline, as the app hosts it (`slopty_platform::web::page`): the card
-/// is the shell's (`crate::page`), the web view the app's, handed over by the page's key
+/// A page an agent shows inline, as the app hosts it (`slopty_platform::web::page`).
+///
+/// The card is the shell's (`crate::page`), the web view the app's, handed over by the page's key
 /// (`slopty_view_doc::PageCard::page`).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HostedPage {
     /// How it stands.
     pub presence: PagePresence,
@@ -593,13 +601,13 @@ pub fn serve_pages(
 
 /// The page `key` as it stands in `window`; `None` with no host, or none for that key.
 pub fn page(key: &str, window: &mut Window, cx: &mut App) -> Option<HostedPage> {
-    let host = cx.try_global::<Pages>()?.page.clone();
+    let host = Rc::clone(&cx.try_global::<Pages>()?.page);
     host(key, window, cx)
 }
 
 /// Ask the host of page `key` for `act`; nothing with no host.
 pub fn page_act(key: &str, act: PageAct, cx: &mut App) {
-    if let Some(host) = cx.try_global::<Pages>().map(|pages| pages.act.clone()) {
+    if let Some(host) = cx.try_global::<Pages>().map(|pages| Rc::clone(&pages.act)) {
         host(key, act, cx);
     }
 }
@@ -610,7 +618,7 @@ pub fn watch_page(
     changed: Box<dyn FnMut(&mut App)>,
     cx: &mut App,
 ) -> Option<Subscription> {
-    let host = cx.try_global::<Pages>()?.watch.clone();
+    let host = Rc::clone(&cx.try_global::<Pages>()?.watch);
     host(key, changed, cx)
 }
 
@@ -619,14 +627,21 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
-    use gpui::{KeyBinding, TestAppContext, actions};
+    use gpui::{KeyBinding, TestAppContext};
 
-    actions!(live_tests, [Marked]);
+    mod marked {
+        #![expect(
+            clippy::derive_partial_eq_without_eq,
+            reason = "gpui::actions! derives PartialEq only"
+        )]
+        gpui::actions!(live_tests, [Marked]);
+    }
+    use marked::Marked;
 
     /// Slopty's keys are bound with the shell's keymap and again each time the shell binds it,
     /// which clears every binding first; installed late, they bind at once.
     #[gpui::test]
-    fn slopty_s_keys_outlive_the_shell_s_keymap(cx: &mut TestAppContext) {
+    fn slopty_s_keys_outlive_the_shell_s_keymap(cx: &TestAppContext) {
         let binds = Rc::new(Cell::new(0_u32));
         let counted = Rc::clone(&binds);
         let marked = |cx: &mut gpui::App| {
@@ -635,7 +650,7 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(crate::theme::Theme::default());
             super::keys(cx, move |cx| {
-                counted.set(counted.get() + 1);
+                counted.set(counted.get().saturating_add(1));
                 cx.bind_keys([KeyBinding::new("cmd-shift-y", Marked, Some("Terminal"))]);
             });
             assert_eq!(binds.get(), 0, "first installed: the shell's keymap binds them");

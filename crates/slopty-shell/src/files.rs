@@ -1,24 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
 //! Workspace file browsing surface.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::clone_on_ref_ptr,
-    clippy::derive_partial_eq_without_eq,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::suboptimal_flops,
-    clippy::too_many_arguments,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -34,6 +15,7 @@ use crate::composer::{ComposerInput, ComposerInputEvent};
 use crate::motion::HoverFade as _;
 use crate::state::AppState;
 
+/// The engine calls of a chat's folder: listings, reads, writes, moves, search and the watch.
 pub mod client;
 mod context_menu;
 pub mod document;
@@ -44,14 +26,19 @@ mod git_status;
 mod image_preview;
 pub(crate) mod markdown_media;
 mod markdown_preview;
+/// The file tree as loaded: its directories, their load states and the rows it shows.
 pub mod model;
 pub mod mutations;
+/// The open documents: reading, editing, autosave and the close that waits for a save.
 pub mod preview;
 mod rename;
+/// Finding files by name and by content, and revealing a path in the tree.
 pub mod search;
 #[cfg(test)]
 pub(crate) mod test_support;
+/// The tree's rows as drawn, and what a press on one does.
 pub mod tree;
+/// The folder's watch, and the tree and documents brought up to its changes.
 pub mod watch;
 
 use client::{FilesRequestContext, WorkspaceFilesClient};
@@ -80,10 +67,27 @@ pub(super) fn path_is_outside(path: &str) -> bool {
 // The files surface's own keys, bound in its key context: Finder's ⇧⌘. for hidden files,
 // VS Code's ⇧⌘V (Markdown preview) and ⌥Z (word wrap), and in the tree Zed's ⌘⌫ (delete, with its
 // confirm) and ⌥⌘C (copy path). Raw F2 (rename) and fn-⌫ (delete) stay.
-gpui::actions!(
-    files,
-    [ToggleHiddenFiles, ToggleMarkdownPreview, ToggleWordWrap, CopyPath, DeleteSelection]
-);
+#[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
+mod actions {
+    gpui::actions!(
+        files,
+        [
+            /// Show or hide the files git ignores.
+            ToggleHiddenFiles,
+            /// Show a Markdown file rendered, or its source.
+            ToggleMarkdownPreview,
+            /// Wrap long lines in the editor, or not.
+            ToggleWordWrap,
+            /// Copy the selected entry's path.
+            CopyPath,
+            /// Delete the selected entries, once confirmed.
+            DeleteSelection,
+        ]
+    );
+}
+pub use actions::{
+    CopyPath, DeleteSelection, ToggleHiddenFiles, ToggleMarkdownPreview, ToggleWordWrap,
+};
 
 // The files speak of the chat's folder and name its machine, never "workspace".
 /// What a chat with no folder shows instead of its files.
@@ -164,6 +168,7 @@ pub(super) fn toolbar_button_keyed(
 
 /// [`toolbar_button_keyed`] for a toggle: latched while `on` (the pane's `icon_toggle` look),
 /// and a screen reader hears whether it is.
+#[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice C")]
 pub(super) fn toolbar_toggle_keyed(
     id: &'static str,
     label: &'static str,
@@ -222,7 +227,7 @@ fn toolbar_button_frame(
         .id(id)
         .group(press)
         .relative()
-        .size(px(CONTROL_SIZE + 2.0 * reach))
+        .size(px(2.0_f32.mul_add(reach, CONTROL_SIZE)))
         .flex_none()
         .flex()
         .items_center()
@@ -289,7 +294,9 @@ pub(crate) fn failure_state(
                 .flex()
                 .flex_row()
                 // On a touch screen the two presses side by side, not over each other.
-                .gap(px(6.0 + 2.0 * crate::surface_chrome::touch_reach(STATE_BUTTON_HEIGHT)))
+                .gap(px(
+                    2.0_f32.mul_add(crate::surface_chrome::touch_reach(STATE_BUTTON_HEIGHT), 6.0)
+                ))
                 .child(
                     state_button(SharedString::from(format!("{id}-retry")), "Try again", theme)
                         .on_click(on_retry),
@@ -361,7 +368,7 @@ pub(super) fn state_button(
         .relative()
         .role(gpui::Role::Button)
         .aria_label(label)
-        .h(px(STATE_BUTTON_HEIGHT + 2.0 * reach))
+        .h(px(2.0_f32.mul_add(reach, STATE_BUTTON_HEIGHT)))
         .m(px(-reach))
         // The words 12 pt inside the box's 1 pt border.
         .px(px(13.0 + reach))
@@ -511,35 +518,54 @@ pub(crate) fn workspace_path_drag_ghost(
     cx.new(|_| WorkspacePathDragGhost { payload })
 }
 
+/// What a files surface asks of the shell around it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesEvent {
     /// Pause autosave under these paths while a confirmation is open; an
     /// empty list releases the hold.
     HoldMutation {
+        /// The folder the confirmation is about: every surface sharing it holds.
         origin: mutations::WorkspaceInteractionOrigin,
+        /// The paths whose documents hold their autosave.
         paths: Vec<String>,
     },
+    /// A move, rename or delete for the shell to carry out.
     Mutate(mutations::MutationIntent),
     /// A multi-entry move or delete, applied in order.
     MutateMany(Vec<mutations::MutationIntent>),
+    /// Open this path in an editor of its own.
     OpenFile(String),
+    /// Show this path in the chat's explorer.
     RevealFile(String),
+    /// A link pressed in a rendered document, for the shell to follow.
     OpenWebLink(crate::markdown::render::LinkActivation),
+    /// The tab's title changed: a document opened, saved or edited.
     TitleChanged,
+    /// A file this surface has open was moved.
     FileRenamed {
+        /// Its path before.
         old_path: String,
+        /// Its path now.
         new_path: String,
     },
+    /// The person turned word wrap on or off: every editor follows.
     WordWrapChanged(bool),
+    /// The person showed or hid ignored files: every explorer follows.
     ShowAllFilesChanged(bool),
+    /// A close that waited on saves may go ahead.
     CloseReady,
+    /// The person kept the surface open rather than lose its edits.
     CloseCancelled,
 }
 
+/// Whether a files surface may close now ([`FilesSurface::prepare_close`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesCloseDisposition {
+    /// Nothing unsaved: close now.
     Allow,
+    /// Saving its edits: it says [`FilesEvent::CloseReady`] once they are saved.
     Pending,
+    /// An edit cannot be saved: the person decides, keep or discard.
     Blocked,
 }
 
@@ -563,6 +589,31 @@ struct EditorContextMenu {
     availability: editor::EditorMenuAvailability,
 }
 
+/// One row of the editor's context menu.
+#[derive(Clone, Copy)]
+struct EditorMenuRow {
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    action: editor::EditorContextAction,
+}
+
+/// How a files surface edits and lists, from the person's settings.
+#[derive(Debug, Clone, Copy)]
+struct FilesPrefs {
+    /// An edit saves itself after a pause.
+    autosave: bool,
+    /// That pause, in milliseconds.
+    autosave_delay_ms: u64,
+    /// The editor's font size, in points.
+    editor_font_size: f32,
+    /// Long lines wrap.
+    word_wrap: bool,
+    /// The tree lists the files git ignores too.
+    show_all_files: bool,
+}
+
+/// A chat's folder: its explorer (the tree and search), or an editor of one of its files.
 pub struct FilesSurface {
     surface_id: gpui::EntityId,
     interaction_generation: u64,
@@ -610,6 +661,18 @@ pub struct FilesSurface {
     started: bool,
     _observe: Subscription,
     _search_events: Subscription,
+}
+
+impl std::fmt::Debug for FilesSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FilesSurface")
+            .field("chat_id", &self.chat_id)
+            .field("presentation", &self.presentation)
+            .field("editor_path", &self.editor_path)
+            .field("started", &self.started)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Render for FilesSurface {
@@ -815,21 +878,19 @@ impl FilesSurface {
         show_all_files: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_presentation(
-            state,
-            chat_id,
-            FilesPresentation::Explorer,
-            None,
-            false,
-            1000,
-            13.0,
-            false,
+        let prefs = FilesPrefs {
+            autosave: false,
+            autosave_delay_ms: 1000,
+            editor_font_size: 13.0,
+            word_wrap: false,
             show_all_files,
-            cx,
-        )
+        };
+        Self::new_with_presentation(state, chat_id, FilesPresentation::Explorer, None, prefs, cx)
     }
 
+    /// An editor with no file open yet, as the tests drive one.
     #[cfg(test)]
+    #[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice A")]
     pub fn new(
         state: Entity<AppState>,
         chat_id: String,
@@ -840,20 +901,18 @@ impl FilesSurface {
         show_all_files: bool,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_presentation(
-            state,
-            chat_id,
-            FilesPresentation::Editor,
-            None,
-            autosave_enabled,
+        let prefs = FilesPrefs {
+            autosave: autosave_enabled,
             autosave_delay_ms,
             editor_font_size,
             word_wrap,
             show_all_files,
-            cx,
-        )
+        };
+        Self::new_with_presentation(state, chat_id, FilesPresentation::Editor, None, prefs, cx)
     }
 
+    /// An editor of the file at `path`, in `chat_id`'s folder.
+    #[expect(clippy::too_many_arguments, reason = "shell lint migration: seam, callers in slice A")]
     pub fn new_editor(
         state: Entity<AppState>,
         chat_id: String,
@@ -865,16 +924,19 @@ impl FilesSurface {
         show_all_files: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let prefs = FilesPrefs {
+            autosave: autosave_enabled,
+            autosave_delay_ms,
+            editor_font_size,
+            word_wrap,
+            show_all_files,
+        };
         Self::new_with_presentation(
             state,
             chat_id,
             FilesPresentation::Editor,
             Some(path),
-            autosave_enabled,
-            autosave_delay_ms,
-            editor_font_size,
-            word_wrap,
-            show_all_files,
+            prefs,
             cx,
         )
     }
@@ -884,11 +946,7 @@ impl FilesSurface {
         chat_id: String,
         presentation: FilesPresentation,
         editor_path: Option<String>,
-        autosave_enabled: bool,
-        autosave_delay_ms: u64,
-        editor_font_size: f32,
-        word_wrap: bool,
-        show_all_files: bool,
+        prefs: FilesPrefs,
         cx: &mut Context<Self>,
     ) -> Self {
         let search = cx.new(|cx| {
@@ -908,7 +966,7 @@ impl FilesSurface {
                     this.search_state.active = if *delta < 0 {
                         this.search_state.active.saturating_sub(1)
                     } else {
-                        (this.search_state.active + 1).min(len - 1)
+                        this.search_state.active.saturating_add(1).min(len.saturating_sub(1))
                     };
                     this.search_list.scroll_to_reveal_item(this.search_state.active);
                     cx.notify();
@@ -929,7 +987,7 @@ impl FilesSurface {
         let tree_list = ListState::new(0, ListAlignment::Top, px(560.0));
         let weak = cx.entity().downgrade();
         tree_list.set_scroll_handler(move |_, _, cx| {
-            weak.update(cx, |this: &mut Self, cx| this.on_tree_scrolled(cx)).ok();
+            let _gone = weak.update(cx, |this: &mut Self, cx| this.on_tree_scrolled(cx));
         });
         let mut surface = Self {
             surface_id: cx.entity_id(),
@@ -952,7 +1010,7 @@ impl FilesSurface {
             target_change_pending: false,
             selected_editor_path: None,
             pending_request_context: None,
-            tree: FileTreeModel::with_include_ignored(show_all_files),
+            tree: FileTreeModel::with_include_ignored(prefs.show_all_files),
             tree_list,
             tree_list_rows: Vec::new(),
             tree_list_generation: 0,
@@ -969,10 +1027,10 @@ impl FilesSurface {
             watch_sequence: None,
             watch_error: None,
             preview: FilePreviewState::new(
-                autosave_enabled,
-                autosave_delay_ms,
-                word_wrap,
-                editor_font_size,
+                prefs.autosave,
+                prefs.autosave_delay_ms,
+                prefs.word_wrap,
+                prefs.editor_font_size,
             ),
             tree_context_menu: crate::popover::Popup::default(),
             pending_line_navigation: None,
@@ -1008,30 +1066,28 @@ impl FilesSurface {
 
     fn dispatch_editor_context_action(
         &mut self,
-        editor: Entity<editor::FileEditorState>,
+        editor: &Entity<editor::FileEditorState>,
         action: editor::EditorContextAction,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.close_editor_context_menu(cx);
-        editor::dispatch_context_action(&editor, action, window, cx);
+        editor::dispatch_context_action(editor, action, window, cx);
     }
 
     fn editor_context_menu_row(
         theme: &crate::theme::Theme,
-        id: &'static str,
-        label: &'static str,
-        enabled: bool,
+        row: EditorMenuRow,
         editor: Entity<editor::FileEditorState>,
-        action: editor::EditorContextAction,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::AnyElement {
+        let EditorMenuRow { id, label, enabled, action } = row;
         crate::popover::menu_row(theme, false, id)
             .id(id)
             .when(!enabled, |row| row.opacity(crate::theme::DISABLED_OPACITY).cursor_default())
             .when(enabled, |row| {
                 row.on_click(cx.listener(move |this, _, window, cx| {
-                    this.dispatch_editor_context_action(editor.clone(), action, window, cx);
+                    this.dispatch_editor_context_action(&editor, action, window, cx);
                 }))
             })
             .child(label)
@@ -1039,9 +1095,9 @@ impl FilesSurface {
     }
 
     fn render_editor_context_menu(
-        &mut self,
+        &self,
         theme: &crate::theme::Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let theme = &theme.for_popup();
         let menu = self.editor_context_menu.get()?;
@@ -1057,39 +1113,47 @@ impl FilesSurface {
             .flex_col()
             .child(Self::editor_context_menu_row(
                 theme,
-                "files-editor-context-cut",
-                "Cut",
-                availability.cut,
+                EditorMenuRow {
+                    id: "files-editor-context-cut",
+                    label: "Cut",
+                    enabled: availability.cut,
+                    action: editor::EditorContextAction::Cut,
+                },
                 editor.clone(),
-                editor::EditorContextAction::Cut,
                 cx,
             ))
             .child(Self::editor_context_menu_row(
                 theme,
-                "files-editor-context-copy",
-                "Copy",
-                availability.copy,
+                EditorMenuRow {
+                    id: "files-editor-context-copy",
+                    label: "Copy",
+                    enabled: availability.copy,
+                    action: editor::EditorContextAction::Copy,
+                },
                 editor.clone(),
-                editor::EditorContextAction::Copy,
                 cx,
             ))
             .child(Self::editor_context_menu_row(
                 theme,
-                "files-editor-context-paste",
-                "Paste",
-                availability.paste,
+                EditorMenuRow {
+                    id: "files-editor-context-paste",
+                    label: "Paste",
+                    enabled: availability.paste,
+                    action: editor::EditorContextAction::Paste,
+                },
                 editor.clone(),
-                editor::EditorContextAction::Paste,
                 cx,
             ))
             .child(crate::popover::menu_separator())
             .child(Self::editor_context_menu_row(
                 theme,
-                "files-editor-context-select-all",
-                "Select All",
-                true,
+                EditorMenuRow {
+                    id: "files-editor-context-select-all",
+                    label: "Select All",
+                    enabled: true,
+                    action: editor::EditorContextAction::SelectAll,
+                },
                 editor,
-                editor::EditorContextAction::SelectAll,
                 cx,
             ))
             .into_any_element();
@@ -1097,6 +1161,7 @@ impl FilesSurface {
         Some(crate::popover::menu_at("files-editor-context-menu", position, card, closing))
     }
 
+    /// Wait `delay_ms` after an edit before saving it.
     pub fn set_autosave_delay_ms(&mut self, delay_ms: u64, cx: &mut Context<Self>) {
         let pending = self.preview.set_autosave_delay_ms(delay_ms);
         for path in pending {
@@ -1105,6 +1170,7 @@ impl FilesSurface {
         cx.notify();
     }
 
+    /// Save edits on their own after a pause, or only when asked.
     pub fn set_autosave_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         let pending = self.preview.set_autosave_enabled(enabled);
         for path in pending {
@@ -1113,19 +1179,24 @@ impl FilesSurface {
         cx.notify();
     }
 
+    /// Wrap the editor's long lines, or not.
     pub fn set_word_wrap(&mut self, word_wrap: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.apply_word_wrap(word_wrap, window, cx);
     }
 
+    /// Draw the editor's text at `editor_font_size` points.
     pub fn set_editor_font_size(&mut self, editor_font_size: f32, cx: &mut Context<Self>) {
         self.preview.set_editor_font_size(editor_font_size);
         cx.notify();
     }
 
+    /// List the files git ignores in the tree too, or not.
     pub fn set_show_all_files(&mut self, show_all_files: bool, cx: &mut Context<Self>) {
         self.apply_show_all_files(show_all_files, cx);
     }
 
+    /// Start what the surface shows, once its chat has a folder: the tree's root listing and the
+    /// watch, or an editor's file.
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         self.sync_target(cx);
         if self.request_context.is_none() {
@@ -1177,6 +1248,7 @@ impl FilesSurface {
         }
     }
 
+    /// List the tree's root again, after it failed.
     pub fn retry_root(&mut self, cx: &mut Context<Self>) {
         self.error = None;
         self.started = true;
@@ -1198,6 +1270,7 @@ impl FilesSurface {
         }
     }
 
+    /// The tab's title: an editor's file name, else "Files".
     pub fn tab_title(&self) -> SharedString {
         self.editor_path
             .as_deref()
@@ -1212,11 +1285,12 @@ impl FilesSurface {
         self.editor_path.as_deref()
     }
 
-    pub(super) fn open_tree_file(&mut self, path: String, cx: &mut Context<Self>) {
+    #[expect(clippy::unused_self, reason = "shell lint migration: seam, callers in slice C")]
+    pub(super) fn open_tree_file(&self, path: String, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::OpenFile(path));
     }
 
-    pub(crate) fn focus_explorer(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_explorer(&self, window: &Window, cx: &mut Context<Self>) {
         let focus = if self.search_state.query.is_empty() {
             self.tree_focus.clone()
         } else {
@@ -1251,7 +1325,7 @@ impl FilesSurface {
             && !self.target_change_pending
     }
 
-    fn toggle_ignored(&mut self, cx: &mut Context<Self>) {
+    fn toggle_ignored(&self, cx: &mut Context<Self>) {
         cx.emit(FilesEvent::ShowAllFilesChanged(!self.tree.include_ignored()));
     }
 
@@ -1273,6 +1347,7 @@ impl FilesSurface {
         }
     }
 
+    /// List `directory` (the root when empty) from `cursor`, a page at a time, into the tree.
     pub fn load_directory(
         &mut self,
         directory: String,
@@ -1315,14 +1390,14 @@ impl FilesSurface {
                 cx.background_executor().timer(Duration::from_millis(250)).await;
                 result = client.list_directory_snapshot(request, &cached_paths).await;
             }
-            let _ = this.update(cx, |surface, cx| {
+            let _gone = this.update(cx, |surface, cx| {
                 if surface.tree.generation() != generation {
                     return;
                 }
                 let reload = surface.tree.node(&directory).is_some_and(|node| node.stale);
                 match result {
                     Ok(page) => {
-                        surface.effective_checkout_id = page.checkout_id.clone();
+                        surface.effective_checkout_id.clone_from(&page.checkout_id);
                         surface.mutation_capabilities = page.mutation_capabilities;
                         surface.error = None;
                         surface.tree.apply_page(page, generation);
@@ -1349,14 +1424,17 @@ impl FilesSurface {
         cx.notify();
     }
 
+    /// The tree as loaded.
     pub const fn tree(&self) -> &FileTreeModel {
         &self.tree
     }
 
+    /// Why the tree's root could not be listed, when it could not.
     pub const fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
     }
 
+    /// The chat whose folder this is.
     pub fn chat_id(&self) -> &str {
         &self.chat_id
     }
@@ -1463,9 +1541,9 @@ impl FilesSurface {
     /// The explorer's secondary header: the same toolbar band the editor
     /// carries directly under the titlebar (search field + visibility eye).
     fn render_explorer_header(
-        &mut self,
+        &self,
         theme: &crate::theme::Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui::AnyElement {
         use gpui::Focusable as _;
         let include_ignored = self.tree.include_ignored();
@@ -1561,7 +1639,7 @@ mod explorer_tests {
         });
         cx.update(|window, _| window.activate_window());
         let show_all = Rc::new(RefCell::new(None));
-        let emitted = show_all.clone();
+        let emitted = Rc::clone(&show_all);
         let _events = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| {
                 if let FilesEvent::ShowAllFilesChanged(value) = event {
@@ -1593,7 +1671,7 @@ mod explorer_tests {
         cx.update(|window, cx| window.focus(&files.read(cx).search.focus_handle(cx), cx));
         cx.simulate_keystrokes("escape");
         files.read_with(cx, |files, cx| {
-            assert!(files.search.read(cx).text().is_empty());
+            assert_eq!(files.search.read(cx).text(), "");
         });
         // The keystroke's redraw consumes the restore flag and moves focus.
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1609,7 +1687,7 @@ mod explorer_tests {
 
     impl Render for Failure {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let tries = self.tries.clone();
+            let tries = Rc::clone(&self.tries);
             div().size_full().flex().child(failure_state(
                 "files-failure",
                 "Couldn't open this file",
@@ -1663,7 +1741,7 @@ mod explorer_tests {
 
         let (files, cx) = bare_explorer(cx, true);
         let shown = Rc::new(RefCell::new(None));
-        let emitted = shown.clone();
+        let emitted = Rc::clone(&shown);
         let _events = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| {
                 if let FilesEvent::ShowAllFilesChanged(value) = event {
@@ -1713,7 +1791,7 @@ mod explorer_tests {
             cx.set_global(crate::theme::Theme::default());
         });
         let tries = Rc::new(std::cell::Cell::new(0));
-        let counted = tries.clone();
+        let counted = Rc::clone(&tries);
         let (_failure, cx) = cx.add_window_view(move |_, _| Failure { tries: counted });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let retry = cx.debug_bounds("files-failure-retry").unwrap();
@@ -1755,7 +1833,7 @@ mod explorer_tests {
         let (files, cx) = test_support::setup(cx);
         cx.update(|_, cx| bind_keys(cx));
         let shown = Rc::new(RefCell::new(None));
-        let emitted = shown.clone();
+        let emitted = Rc::clone(&shown);
         let _events = cx.update(|_, cx| {
             cx.subscribe(&files, move |_, event, _| {
                 if let FilesEvent::ShowAllFilesChanged(value) = event {
@@ -1781,7 +1859,7 @@ mod explorer_tests {
             FilesSurface::new_explorer(state, "chat".into(), false, cx)
         });
         let paths = Rc::new(RefCell::new(Vec::new()));
-        let emitted = paths.clone();
+        let emitted = Rc::clone(&paths);
         let _sub = cx.update(|cx| {
             cx.subscribe(&surface, move |_, event, _| {
                 if let FilesEvent::OpenFile(path) = event {

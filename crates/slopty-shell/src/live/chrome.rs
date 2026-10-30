@@ -7,16 +7,6 @@
 //! [`crate::settings::widgets`] and [`floating_pill`]. What zeron keeps to the
 //! crate (the surface toolbars' control metrics) is handed out here, unchanged, so nothing is
 //! drawn twice.
-#![allow(
-    missing_debug_implementations,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -68,17 +58,20 @@ pub fn chip(id: impl Into<gpui::ElementId>, on: bool, theme: &Theme) -> gpui::St
         .map(keep_keyboard)
 }
 
-/// `el` pressed by the pointer without taking the keyboard: a float over a terminal or a remote
-/// window (a pill, a find bar's toggle, a paste's buttons) leaves the keyboard where it was, as a
-/// Mac's buttons do. Tab still reaches it, and its ring shows then.
+/// `el` pressed by the pointer without taking the keyboard.
+///
+/// A float over a terminal or a remote window (a pill, a find bar's toggle, a paste's buttons)
+/// leaves the keyboard where it was, as a Mac's buttons do. Tab still reaches it, and its ring
+/// shows then.
 pub fn keep_keyboard<E: gpui::InteractiveElement>(el: E) -> E {
     el.on_mouse_down(gpui::MouseButton::Left, |_ev, window, _cx| window.prevent_default())
 }
 
-/// A square button round one icon, a surface toolbar's: the pane's one icon button
-/// ([`crate::surface_chrome::icon_button`]), `label` as its accessible name and its tooltip at
-/// the house delay. `id` is also its debug selector and keys its hover fade, so it is unique
-/// app-wide. A press leaves the keyboard where it was.
+/// A square button round one icon, a surface toolbar's.
+///
+/// It is the pane's one icon button (`crate::surface_chrome::icon_button`), `label` as its
+/// accessible name and its tooltip at the house delay. `id` is also its debug selector and keys
+/// its hover fade, so it is unique app-wide. A press leaves the keyboard where it was.
 // One recipe for every pane button; this one drew its own ink washes and showed its
 // tooltip at gpui's 500 ms.
 #[must_use]
@@ -189,8 +182,9 @@ pub fn loading(
         .child(crate::loaders::pending(format!("live-loading-{caption}"), caption))
 }
 
-/// What a pane says when it has nothing to show or cannot go on, in opencode's quiet voice: an
-/// optional 20 pt mark in `text_faint`, a 14 pt medium headline 8 under it, a 13 pt line in
+/// What a pane says when it has nothing to show or cannot go on, in opencode's quiet voice.
+///
+/// An optional 20 pt mark in `text_faint`, a 14 pt medium headline 8 under it, a 13 pt line in
 /// `text_muted` 8 under that (282 to 360 wide), and an optional action 16 lower, fading in. It
 /// fills its region and sits at the optical centre, lifted by the smaller of 18 % of the region
 /// and 160 (opencode's `padding-bottom: 160px`), not the middle.
@@ -255,12 +249,14 @@ pub fn optically_centred(content: impl IntoElement) -> Div {
         .child(div().h(gpui::relative(OPTICAL_LIFT_SHARE)).max_h(px(OPTICAL_LIFT_MAX)))
 }
 
-/// The transcript's "Scroll to bottom" pill as a free function, so Slopty's own views
-/// float theirs with it (a terminal's lines below, a remote window's controls): 30 tall and
-/// round, the popup plane inside the hairline (frosted, or raised under `shadow_md`). `content`,
-/// given the popup's theme, is its glyph and its words, 6 apart; it enters by `dialog_in`.
-/// `hover_key` names its hover fade (unique app-wide); `None` keeps the plate still, for a pill
-/// that only says something or holds buttons. `interact` hangs the caller's click on it.
+/// The transcript's "Scroll to bottom" pill as a free function.
+///
+/// Slopty's own views float theirs with it (a terminal's lines below, a remote window's
+/// controls): 30 tall and round, the popup plane inside the hairline (frosted, or raised under
+/// `shadow_md`). `content`, given the popup's theme, is its glyph and its words, 6 apart; it enters
+/// by `dialog_in`. `hover_key` names its hover fade (unique app-wide); `None` keeps the plate
+/// still, for a pill that only says something or holds buttons. `interact` hangs the caller's click
+/// on it.
 pub fn floating_pill(
     anim_key: impl Into<SharedString>,
     hover_key: Option<SharedString>,
@@ -361,9 +357,11 @@ pub const TOOLTIP_MAX_WIDTH: f32 = 240.0;
 
 // Legible as Claude desktop's and T3's: 12 pt words in the primary ink, on the spacing ladder,
 // 240 wide at most; frosted, since an inverted chip would be a seam beside the frosted menus.
-/// The chip every tooltip is: frosted, ringed, 12 pt in the primary ink at the font-size
-/// setting, entering with [`crate::motion::tooltip_in`] (none under reduced motion). It is one
-/// `Tooltip` node for assistive tech, `spoken` as its label and value (the words, then the key).
+/// The chip every tooltip is.
+///
+/// Frosted, ringed, 12 pt in the primary ink at the font-size setting, entering with
+/// [`crate::motion::tooltip_in`] (none under reduced motion). It is one `Tooltip` node for
+/// assistive tech, `spoken` as its label and value (the words, then the key).
 pub fn tooltip_frame(
     theme: &Theme,
     spoken: (SharedString, Option<SharedString>),
@@ -395,6 +393,7 @@ pub fn tooltip_frame(
 
 /// A tooltip's keys, each drawn as its own cap (opencode's keybind: 14 px tall, at least as wide,
 /// 4 px each side, radius 2, a faint fill, the glyph at 11 px in the system face so ⇧ ⌥ ⏎ draw).
+#[expect(clippy::needless_pass_by_value, reason = "shell lint migration: seam, callers in slice D")]
 pub fn tooltip_keys(theme: &Theme, keys: SharedString) -> Div {
     div().flex_none().flex().items_center().gap(px(2.0)).children(key_caps(&keys).into_iter().map(
         |cap| {
@@ -447,7 +446,7 @@ fn cap_lip(shown: f32) -> gpui::BoxShadow {
 }
 
 /// The keys held down in the focused palette or picker, each with when it went down or came up.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct HeldKeys {
     keys: std::collections::HashMap<SharedString, (bool, std::time::Instant)>,
 }
@@ -514,7 +513,7 @@ fn cap_key(cap: &str) -> Option<&'static str> {
 
 /// `cap`, a key cap resting on `fill` (an `ink` alpha) for `keys` (glyphs or words split by
 /// spaces, "↑ ↓" one cap for both), drawn with its lip, sunk while one of its keys is held.
-pub fn pressable_cap(cap: Div, keys: &str, fill: f32, window: &mut gpui::Window, cx: &App) -> Div {
+pub fn pressable_cap(cap: Div, keys: &str, fill: f32, window: &gpui::Window, cx: &App) -> Div {
     let (pressed, moving) = keys
         .split_whitespace()
         .filter_map(cap_key)
@@ -536,7 +535,8 @@ fn key_caps(keys: &str) -> Vec<String> {
     let mut caps = Vec::new();
     for word in keys.split([' ', '+']).filter(|word| !word.is_empty()) {
         let key = word.trim_start_matches(MODIFIERS);
-        caps.extend(word[..word.len() - key.len()].chars().map(String::from));
+        let modifiers = word.strip_suffix(key).unwrap_or_default();
+        caps.extend(modifiers.chars().map(String::from));
         if !key.is_empty() {
             caps.push(key.to_owned());
         }
@@ -684,7 +684,7 @@ mod tests {
         let focus = footer.read_with(cx, |footer, _| footer.focus.clone());
         cx.update(|window, cx| window.focus(&focus, cx));
         let top = |cx: &mut gpui::VisualTestContext| {
-            cx.executor().advance_clock(CAP_PRESS.total() * 2);
+            cx.executor().advance_clock(CAP_PRESS.total().saturating_mul(2));
             cx.update(|window, cx| {
                 window.refresh();
                 window.draw(cx).clear(cx);

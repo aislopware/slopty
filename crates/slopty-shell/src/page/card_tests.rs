@@ -2,16 +2,10 @@
 //! header's actions, and the line it leaves while its page shows in the pane. Each test draws a
 //! real card in a test window, its page served by a stand-in host, and judges by the
 //! accessibility tree.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::format_push_string,
-    clippy::needless_pass_by_ref_mut,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -102,10 +96,10 @@ struct Stand {
 
 type Shared = Rc<RefCell<Stand>>;
 
-fn serve(cx: &mut gpui::TestAppContext, page: HostedPage) -> Shared {
+fn serve(cx: &gpui::TestAppContext, page: HostedPage) -> Shared {
     let stand: Shared = Rc::new(RefCell::new(Stand { page: Some(page), acts: Vec::new() }));
     let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-    let (served, acted) = (stand.clone(), stand.clone());
+    let (served, acted) = (Rc::clone(&stand), Rc::clone(&stand));
     cx.update(|cx| {
         gpui_base::init(cx);
         cx.set_global(Theme::dark());
@@ -194,8 +188,8 @@ fn a_pdf_shows_its_first_page_and_names_its_count(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn a_csv_shows_as_a_table_of_its_rows(cx: &mut gpui::TestAppContext) {
     let mut text = String::from("region,p99\n");
-    for n in 0..10 {
-        text.push_str(&format!("r{n},{}\n", 100 + n));
+    for n in 0..10_u32 {
+        writeln!(text, "r{n},{}", n.saturating_add(100)).unwrap();
     }
     let table = PageTable::parse(&text, ',');
     serve(cx, hosted(Some(PageDoc::Table(Arc::new(table)))));

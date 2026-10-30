@@ -5,15 +5,6 @@
 //! "page 1 of N"; the pane shows every page. A table shows its first rows in the card in the
 //! markdown table's chrome (hairlines between rows, the header at weight 700), and every row in
 //! the pane. Both are a11y nodes of their own: an image per page, a table of rows and cells.
-#![allow(
-    missing_debug_implementations,
-    clippy::clone_on_ref_ptr,
-    clippy::format_push_string,
-    clippy::needless_pass_by_value,
-    clippy::too_long_first_doc_paragraph,
-    clippy::too_many_arguments,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,7 +19,7 @@ use crate::markdown::render::{
 use crate::theme::Theme;
 
 /// What a page is when the app draws it itself.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum PageDoc {
     /// A PDF, as far as it is drawn.
     Pdf(Arc<PdfDoc>),
@@ -37,7 +28,7 @@ pub enum PageDoc {
 }
 
 /// A PDF, as far as the app has drawn it.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct PdfDoc {
     /// How many pages it has.
     pub pages: usize,
@@ -54,13 +45,13 @@ impl PdfDoc {
     #[must_use]
     pub fn picture(&self, index: usize, width: f32) -> Option<Arc<RenderImage>> {
         let (drawn, picture) = self.drawn.get(&index)?;
-        ((drawn - width).abs() <= width * 0.1).then(|| picture.clone())
+        ((drawn - width).abs() <= width * 0.1).then(|| Arc::clone(picture))
     }
 
     /// The best picture of page `index` there is, whatever width it was drawn for.
     #[must_use]
     pub fn any_picture(&self, index: usize) -> Option<Arc<RenderImage>> {
-        self.drawn.get(&index).map(|(_, picture)| picture.clone())
+        self.drawn.get(&index).map(|(_, picture)| Arc::clone(picture))
     }
 
     /// Page `index`'s height over its width.
@@ -229,13 +220,13 @@ pub fn pdf_first_page(
     theme: &Theme,
 ) -> AnyElement {
     let aspect = doc.aspect_of(0);
-    let (shown_width, shown_height) = fit(width, cap, aspect);
-    let picture = doc.picture(0, shown_width).or_else(|| doc.any_picture(0));
+    let shown = fit(width, cap, aspect);
+    let picture = doc.picture(0, shown.0).or_else(|| doc.any_picture(0));
     div()
         .w_full()
         .flex()
         .justify_center()
-        .child(page_image(id, picture, shown_width, shown_height, 0, doc.pages, theme))
+        .child(page_image(id, picture, shown, 0, doc.pages, theme))
         .into_any_element()
 }
 
@@ -246,12 +237,12 @@ pub fn fit(width: f32, cap: f32, aspect: f32) -> (f32, f32) {
     if height <= cap || height <= 0.0 { (width, height) } else { (cap / aspect, cap) }
 }
 
-/// One page of a PDF: its picture once drawn, the paper's place while it draws.
+/// One page of a PDF, `(width, height)` points: its picture once drawn, the paper's place while
+/// it draws.
 pub fn page_image(
     id: SharedString,
     picture: Option<Arc<RenderImage>>,
-    width: f32,
-    height: f32,
+    (width, height): (f32, f32),
     index: usize,
     pages: usize,
     theme: &Theme,
@@ -318,11 +309,12 @@ pub fn table_row(
 /// The height of one row of a table, its hairline above it included.
 pub const TABLE_ROW_HEIGHT: f32 = MD_LINE_HEIGHT + 2.0 * TABLE_CELL_PADDING + TABLE_DIVIDER;
 
-/// A table's first `limit` rows in the markdown table's chrome: a table node labelled `label`,
-/// a row node per record (the header first), a cell node per field. It scrolls sideways when its
-/// columns' floors do not fit, as the markdown table does.
+/// A table's first `limit` rows in the markdown table's chrome.
+///
+/// That is a table node labelled `label`, a row node per record (the header first), a cell node
+/// per field. It scrolls sideways when its columns' floors do not fit, as the markdown table does.
 pub fn table(
-    id: SharedString,
+    id: &str,
     label: SharedString,
     table: &PageTable,
     limit: usize,
@@ -332,12 +324,12 @@ pub fn table(
     let hairline = table_hairline();
     let mut inner = div().flex().flex_col().w_full().min_w(px(geometry.min_table_width));
     if !table.header.is_empty() {
-        inner = inner.child(table_row(&id, 0, &table.header, true, &geometry, theme));
+        inner = inner.child(table_row(id, 0, &table.header, true, &geometry, theme));
     }
     for (ix, record) in table.rows.iter().take(limit).enumerate() {
         inner = inner
             .child(div().flex_none().h(px(TABLE_DIVIDER)).w_full().bg(hairline))
-            .child(table_row(&id, ix.saturating_add(1), record, false, &geometry, theme));
+            .child(table_row(id, ix.saturating_add(1), record, false, &geometry, theme));
     }
     div()
         .id(SharedString::from(format!("{id}-table")))
@@ -362,6 +354,8 @@ pub fn more_rows_words(table: &PageTable, shown: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     /// RFC 4180: quoted fields keep delimiters, line breaks and doubled quotes; CRLF and a BOM
@@ -386,7 +380,7 @@ mod tests {
     fn a_long_table_counts_what_it_does_not_keep() {
         let mut text = String::from("n\n");
         for n in 0..PageTable::MAX_ROWS + 5 {
-            text.push_str(&format!("{n}\n"));
+            writeln!(text, "{n}").unwrap();
         }
         let table = PageTable::parse(&text, ',');
         assert_eq!(table.rows.len(), PageTable::MAX_ROWS);

@@ -5,15 +5,6 @@
 //! keeps its place in the transcript as one quiet line. A PDF shows every page there, each drawn
 //! as it scrolls into view, and a table every row. Closing the tab, or the card's "Bring back",
 //! puts the page back in its card.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::clone_on_ref_ptr,
-    clippy::needless_pass_by_ref_mut,
-    clippy::suboptimal_flops,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -42,6 +33,7 @@ pub struct PagePaneAsk {
     pub title: String,
     /// Show it, or take it out.
     pub show: bool,
+    /// One more than the ask before, so the shell sees each ask as new.
     pub seq: u64,
 }
 
@@ -78,7 +70,19 @@ pub struct PagePaneView {
     _host: Option<Subscription>,
 }
 
+impl std::fmt::Debug for PagePaneView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PagePaneView")
+            .field("page", &self.page)
+            .field("title", &self.title)
+            .field("chat", &self.chat)
+            .field("width", &self.width)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PagePaneView {
+    /// The pane's tab for page `page`, titled `title`, in `chat`'s right pane.
     pub fn new(
         page: String,
         title: String,
@@ -90,7 +94,7 @@ impl PagePaneView {
         let host = live::watch_page(
             &page,
             Box::new(move |cx| {
-                weak.update(cx, |_, cx| cx.notify()).ok();
+                let _gone = weak.update(cx, |_, cx| cx.notify());
             }),
             cx,
         );
@@ -122,12 +126,12 @@ impl PagePaneView {
     }
 
     /// A PDF's pages, each drawn as it scrolls into view.
-    fn pdf_pages(&self, pages: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn pdf_pages(&self, pages: usize, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity();
         uniform_list("page-pane-pdf", pages, move |range, window, app| {
             entity.update(app, |this, cx| {
                 let theme = Theme::of(cx).clone();
-                let width = (this.width - 2.0 * PAGE_GAP).clamp(120.0, PAGE_MAX_WIDTH);
+                let width = (-2.0_f32).mul_add(PAGE_GAP, this.width).clamp(120.0, PAGE_MAX_WIDTH);
                 let Some(PageDoc::Pdf(pdf)) =
                     live::page(&this.page, window, cx).and_then(|page| page.doc)
                 else {
@@ -150,8 +154,7 @@ impl PagePaneView {
                             .child(doc::page_image(
                                 SharedString::from(format!("{}-pane-page-{index}", this.page)),
                                 picture,
-                                width,
-                                height,
+                                (width, height),
                                 index,
                                 pdf.pages,
                                 &theme,
@@ -167,12 +170,7 @@ impl PagePaneView {
     }
 
     /// A table's every row, its header held over them.
-    fn table_rows(
-        &self,
-        table: &doc::PageTable,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn table_rows(&self, table: &doc::PageTable, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let entity = cx.entity();
         let geometry = table.geometry();
         let id = format!("{}-pane", self.page);
@@ -238,7 +236,7 @@ impl PagePaneView {
 }
 
 /// Ask the view model to lay page `page` out for the pane (`pane`) or for its card.
-pub(crate) fn move_page(engine: Option<EngineHandle>, page: &str, pane: bool, cx: &mut App) {
+pub(crate) fn move_page(engine: Option<EngineHandle>, page: &str, pane: bool, cx: &App) {
     let Some(engine) = engine else { return };
     let params = serde_json::json!({ "page": page, "to": if pane { "pane" } else { "inline" } });
     cx.spawn(async move |_| {
@@ -280,7 +278,7 @@ impl Render for PagePaneView {
                 self.pdf_pages(pdf.pages, cx)
             }
             Some(live::HostedPage { doc: Some(PageDoc::Table(table)), .. }) => {
-                let table = table.clone();
+                let table = std::sync::Arc::clone(table);
                 self.table_rows(&table, &theme, cx)
             }
             Some(live::HostedPage {
@@ -290,7 +288,7 @@ impl Render for PagePaneView {
                 .size_full()
                 .into_any_element(),
             Some(live::HostedPage { snapshot: Some(picture), .. }) => {
-                img(gpui::ImageSource::Render(picture.clone()))
+                img(gpui::ImageSource::Render(std::sync::Arc::clone(picture)))
                     .size_full()
                     .object_fit(ObjectFit::Contain)
                     .into_any_element()
@@ -314,7 +312,7 @@ impl Render for PagePaneView {
                 (self.page.clone(), self.title.to_string(), self.chat.clone());
             move |_, _, cx| ask_pane(&chat, &page, &title, false, cx)
         });
-        let probe = self.bounds.clone();
+        let probe = Rc::clone(&self.bounds);
         div()
             .id(SharedString::from(format!("{}-pane", self.page)))
             .role(gpui::Role::Group)

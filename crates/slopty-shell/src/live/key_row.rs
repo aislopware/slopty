@@ -1,6 +1,7 @@
-//! The touch screen's key row, as Slopty's own views meet it (`docs/decisions/layout.md`, "iPhone
-//! is a list, then the terminal"): the modifiers it arms for the keys that follow, and whether a
-//! hardware keyboard stands in for it.
+//! The touch screen's key row, as Slopty's own views meet it.
+//!
+//! That is the modifiers it arms for the keys that follow, and whether a hardware keyboard stands
+//! in for it (`docs/decisions/layout.md`, "iPhone is a list, then the terminal").
 //!
 //! The modifiers behave as iPadOS's own sticky modifiers and Blink Shell's key row do: a tap arms
 //! one for the next key, a second tap puts it off, and one held under a finger goes with every key
@@ -15,11 +16,6 @@
 //! An iPad, laid out as the Mac, has no row: its keys sit in the system keyboard's own shortcut
 //! bar, which only the app's platform layer can fill. The shell says here what the bar holds
 //! ([`set_bar`]) and the platform layer draws it and passes its taps back ([`press_bar`]).
-#![allow(
-    clippy::or_fun_call,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 
 use gpui::{App, Global, KeyUpEvent, Keystroke, PlatformInput, Subscription};
 
@@ -310,7 +306,9 @@ pub fn bar(cx: &App) -> Bar {
 
 /// The shell says what the shortcut bar holds; its observers hear only a change.
 pub fn set_bar(bar: Bar, cx: &mut App) {
-    let same = cx.try_global::<SharedBar>().map_or(bar == Bar::default(), |shared| shared.0 == bar);
+    let same = cx
+        .try_global::<SharedBar>()
+        .map_or_else(|| bar == Bar::default(), |shared| shared.0 == bar);
     if !same {
         cx.set_global(SharedBar(bar));
     }
@@ -322,8 +320,9 @@ pub fn observe_bar(cx: &mut App, mut changed: impl FnMut(&mut App) + 'static) ->
     cx.observe_global::<SharedBar>(move |cx| changed(cx))
 }
 
-/// The person tapped the shortcut bar's `index`th key on its leading edge, or its trailing one:
-/// a modifier is tapped, and a key goes into the window holding the keyboard, which takes it as
+/// The person tapped the shortcut bar's `index`th key on its leading edge, or its trailing one.
+///
+/// A modifier is tapped, and a key goes into the window holding the keyboard, which takes it as
 /// a hardware key. A key the bar no longer holds does nothing.
 pub fn press_bar(leading: bool, index: usize, cx: &mut App) {
     let bar = bar(cx);

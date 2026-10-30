@@ -1,25 +1,9 @@
-//! A remote window or desktop as a right-pane surface: first the chat's machine's desktops and
-//! windows to choose from, in a searchable picker (zeron's model picker anatomy: a search row,
-//! sections, 32 pt rows, ↑ ↓ and ↩), then the chosen one's live picture, Slopty's own view of it
-//! ([`crate::live::screen`]). The pane's takeover makes it the window.
-#![allow(
-    let_underscore_drop,
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::broken_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::indexing_slicing,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_collect,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::suboptimal_flops,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_self,
-    clippy::used_underscore_binding,
-    reason = "shell lint migration: slice C"
-)]
+//! A remote window or desktop as a right-pane surface.
+//!
+//! First the chat's machine's desktops and windows to choose from, in a searchable picker (zeron's
+//! model picker anatomy: a search row, sections, 32 pt rows, ↑ ↓ and ↩), then the chosen one's live
+//! picture, Slopty's own view of it ([`crate::live::screen()`]). The pane's takeover makes it the
+//! window.
 
 use gpui::prelude::*;
 use gpui::{
@@ -101,21 +85,20 @@ fn visible(choices: &[Choice], query: &str) -> (Vec<usize>, Vec<usize>) {
     if query.trim().is_empty() {
         kept.sort_unstable();
     }
-    let displays: Vec<usize> = kept.iter().copied().filter(|ix| choices[*ix].display()).collect();
-    let mut windows: Vec<usize> = kept.into_iter().filter(|ix| !choices[*ix].display()).collect();
+    let is_display = |ix: &usize| choices.get(*ix).is_some_and(Choice::display);
+    let displays: Vec<usize> = kept.iter().copied().filter(is_display).collect();
+    let mut windows: Vec<usize> = kept.into_iter().filter(|ix| !is_display(ix)).collect();
     // Each app's windows together, the apps in the order their first window came.
-    let first = |app: &str| windows.iter().position(|ix| choices[*ix].app == app);
-    let order: Vec<(usize, usize)> = windows
-        .iter()
-        .enumerate()
-        .map(|(at, ix)| (first(&choices[*ix].app).unwrap_or(at), at))
-        .collect();
-    let mut keyed: Vec<((usize, usize), usize)> = order.into_iter().zip(windows.clone()).collect();
+    let app_of = |ix: usize| choices.get(ix).map(|choice| choice.app.as_str());
+    let first = |app| windows.iter().position(|ix| app_of(*ix) == app);
+    let order = windows.iter().enumerate().map(|(at, ix)| (first(app_of(*ix)).unwrap_or(at), at));
+    let mut keyed: Vec<((usize, usize), usize)> = order.zip(windows.clone()).collect();
     keyed.sort_by_key(|(key, _)| *key);
     windows = keyed.into_iter().map(|(_, ix)| ix).collect();
     (displays, windows)
 }
 
+/// A right-pane surface showing one of a chat's machine's windows or desktops, once chosen.
 pub struct ScreenSurface {
     state: Entity<AppState>,
     chat: String,
@@ -138,8 +121,19 @@ pub struct ScreenSurface {
     // The list's floating rail, as every scrolling list has (M26).
     rail: popover::MenuScrollbarState,
     _search_events: Subscription,
-    _watch: Option<Subscription>,
-    _task: Option<Task<()>>,
+    watch: Option<Subscription>,
+    task: Option<Task<()>>,
+}
+
+impl std::fmt::Debug for ScreenSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScreenSurface")
+            .field("chat", &self.chat)
+            .field("target", &self.target)
+            .field("chosen", &self.chosen)
+            .field("query", &self.query)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScreenSurface {
@@ -160,7 +154,7 @@ impl ScreenSurface {
         let mut surface = Self::blank(state, cx);
         let choice = Choice { id: screen, title, app: String::new(), kind: String::new() };
         surface.again = true;
-        surface.choose(choice, cx);
+        surface.choose(&choice, cx);
         surface
     }
 
@@ -210,8 +204,8 @@ impl ScreenSurface {
             scroll: ScrollHandle::new(),
             rail: popover::MenuScrollbarState::default(),
             _search_events: events,
-            _watch: None,
-            _task: None,
+            watch: None,
+            task: None,
         }
     }
 
@@ -242,7 +236,7 @@ impl ScreenSurface {
     }
 
     /// Ask the machine again what it can show.
-    fn list(&mut self, cx: &mut Context<Self>) {
+    fn list(&mut self, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.stage = Stage::Failed(format!("Couldn't reach {}", self.host(cx)).into());
             return;
@@ -250,9 +244,9 @@ impl ScreenSurface {
         let host = self.host(cx);
         self.stage = Stage::Listing;
         let params = self.params(serde_json::json!({}));
-        self._task = Some(cx.spawn(async move |this, cx| {
+        self.task = Some(cx.spawn(async move |this, cx| {
             let listed = engine.client().call_as::<Vec<Choice>>(calls::LIST, params).await;
-            let _ = this.update(cx, |this, cx| {
+            let _gone = this.update(cx, |this, cx| {
                 this.stage = match listed {
                     Ok(choices) if choices.is_empty() => {
                         Stage::Failed(format!("No windows open on {host}").into())
@@ -268,7 +262,7 @@ impl ScreenSurface {
         }));
     }
 
-    fn choose(&mut self, choice: Choice, cx: &mut Context<Self>) {
+    fn choose(&mut self, choice: &Choice, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             self.stage = Stage::Failed(format!("Couldn't reach {}", self.host(cx)).into());
             return;
@@ -280,9 +274,9 @@ impl ScreenSurface {
             "screen": choice.id,
             "title": choice.title,
         }));
-        self._task = Some(cx.spawn(async move |this, cx| {
+        self.task = Some(cx.spawn(async move |this, cx| {
             let opened = engine.client().call(calls::OPEN, params).await;
-            let _ = this.update(cx, |this, cx| {
+            let _gone = this.update(cx, |this, cx| {
                 let opened =
                     opened.map_err(|err| SharedString::from(err.to_string())).and_then(|value| {
                         value
@@ -310,10 +304,10 @@ impl ScreenSurface {
 
     fn show(&mut self, id: String, title: SharedString, cx: &mut Context<Self>) {
         let surface = cx.weak_entity();
-        self._watch = super::watch(
+        self.watch = super::watch(
             &id,
             Box::new(move |cx| {
-                let _ = surface.update(cx, |_, cx| cx.notify());
+                let _gone = surface.update(cx, |_, cx| cx.notify());
             }),
             cx,
         );
@@ -345,7 +339,9 @@ impl ScreenSurface {
         };
         let params = serde_json::json!({ "id": id });
         cx.background_spawn(async move {
-            let _ = engine.client().call(calls::CLOSE, params).await;
+            if let Err(err) = engine.client().call(calls::CLOSE, params).await {
+                tracing::warn!(error = %err, "the machine did not stop showing a window");
+            }
         })
         .detach();
     }
@@ -369,7 +365,7 @@ impl ScreenSurface {
         let at = self.active.unwrap_or(0);
         let Stage::Choices(choices) = &self.stage else { return };
         if let Some(choice) = shown.get(at).and_then(|ix| choices.get(*ix)).cloned() {
-            self.choose(choice, cx);
+            self.choose(&choice, cx);
             cx.notify();
         }
     }
@@ -377,7 +373,7 @@ impl ScreenSurface {
 
 impl ScreenSurface {
     /// A failure in the machine's own words, and the way to ask again.
-    fn failed(&self, why: &SharedString, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn failed(why: &SharedString, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let again =
             super::chrome::button("screen-try-again", TRY_AGAIN, super::chrome::Tone::Ghost, theme)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -417,7 +413,7 @@ impl ScreenSurface {
     fn choices(&mut self, choices: &[Choice], theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let theme = theme.for_popup();
         let (displays, windows) = visible(choices, &self.query);
-        let shown = displays.len() + windows.len();
+        let shown = displays.len().saturating_add(windows.len());
         let mut list = div()
             .id("screen-choices-list")
             .track_scroll(&self.scroll)
@@ -437,10 +433,9 @@ impl ScreenSurface {
                 continue;
             }
             list = list.child(popover::menu_heading(&theme, heading));
-            for &ix in section {
-                let choice = &choices[ix];
+            for choice in section.iter().filter_map(|ix| choices.get(*ix)) {
                 list = list.child(self.choice_row(choice, at, &theme, cx));
-                at += 1;
+                at = at.saturating_add(1);
             }
         }
         if shown == 0 {
@@ -493,7 +488,7 @@ impl ScreenSurface {
         choice: &Choice,
         at: usize,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let glyph = if choice.display() { icons::MONITOR } else { icons::WINDOW_RESTORE };
         let label: SharedString = choice.title.clone().into();
@@ -506,7 +501,7 @@ impl ScreenSurface {
             .role(gpui::Role::Button)
             .aria_label(label.clone())
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.choose(picked.clone(), cx);
+                this.choose(&picked, cx);
                 cx.notify();
             }))
             .child(popover::picker_icon_slot(
@@ -579,7 +574,7 @@ impl Render for ScreenSurface {
             Stage::Listing | Stage::Opening(_) => gpui::Empty.into_any_element(),
             Stage::Failed(why) => {
                 let why = why.clone();
-                self.failed(&why, &theme, cx)
+                Self::failed(&why, &theme, cx)
             }
             Stage::Choices(choices) => {
                 if std::mem::take(&mut self.focus_pending) {
@@ -732,8 +727,11 @@ mod tests {
                 // The hover wash, ink at 5 %, whichever ink the theme draws in.
                 window.painted_quads().iter().any(|quad| {
                     format!("{:?}", quad.background).contains("a: 0.05")
-                        && (quad.bounds.origin.y.0 - f32::from(row.origin.y) * scale).abs() < 0.5
-                        && (quad.bounds.size.height.0 - f32::from(row.size.height) * scale).abs()
+                        && f32::from(row.origin.y).mul_add(-scale, quad.bounds.origin.y.0).abs()
+                            < 0.5
+                        && f32::from(row.size.height)
+                            .mul_add(-scale, quad.bounds.size.height.0)
+                            .abs()
                             < 0.5
                 })
             })

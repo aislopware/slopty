@@ -1,7 +1,8 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 46d4e42), see THIRD_PARTY_NOTICES.md
-//! Our own markdown stack — pulldown-cmark parse into a [`parser::BlockTree`],
-//! block-level incremental reparse for streaming, gpui rendering, and a
-//! Tree-sitter paint-only syntax highlighting. No zed GPL crates.
+//! Our own markdown stack, with no zed GPL crates.
+//!
+//! A pulldown-cmark parse into a [`parser::BlockTree`], block-level incremental reparse for
+//! streaming, gpui rendering, and a Tree-sitter paint-only syntax highlighting.
 //!
 //! Design:
 //! - the parse is block-granular and append-incremental: streaming reparses only from the last
@@ -15,7 +16,6 @@
 //!   parse settles honestly on completion.
 
 // Find in a thread, the paint half.
-#![allow(clippy::too_long_first_doc_paragraph, reason = "shell lint migration: slice C")]
 pub mod find;
 pub(crate) mod inline_code_links;
 mod link_destination;

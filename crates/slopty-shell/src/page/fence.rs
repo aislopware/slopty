@@ -5,7 +5,6 @@
 //! `slopty-fence:{row}-chart-{n}`: the view model reads the fence here ([`fence`]) and builds
 //! the page from the chart libraries the app vendors, served from the page's own origin, so a
 //! chart draws offline and reaches no network. A fence that is not a chart's JSON stays code.
-#![allow(missing_debug_implementations, reason = "shell lint migration: slice C")]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -92,6 +91,15 @@ pub struct FenceChart {
     pub engine: Option<EngineHandle>,
     /// The transcript's fence cards.
     pub cards: FenceCards,
+}
+
+impl std::fmt::Debug for FenceChart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FenceChart")
+            .field("key", &self.key)
+            .field("fence", &self.fence)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FenceChart {

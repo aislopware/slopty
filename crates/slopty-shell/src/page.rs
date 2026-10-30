@@ -24,21 +24,6 @@
 //! person's Allow, network its app declares waits for theirs too, and each call made says so
 //! under the page. A message it sends lands in the chat's draft and context it offers rides
 //! there as a chip, both the view model's.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::match_same_arms,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -181,13 +166,20 @@ fn fnv(bytes: &[u8]) -> u64 {
     })
 }
 
-/// The theme a page draws in, as MCP Apps' CSS variables: the transcript's surface, text and
-/// hairlines, its sans and mono faces (in single quotes: the host drops a value with a double
-/// quote), and the six chart colours charts draw their series in.
+/// A channel from 0.0–1.0 to a byte.
+#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to 0–255")]
+fn byte(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The theme a page draws in, as MCP Apps' CSS variables.
+///
+/// They are the transcript's surface, text and hairlines, its sans and mono faces (in single
+/// quotes: the host drops a value with a double quote), and the six chart colours charts draw
+/// their series in.
 pub fn theme_variables(theme: &Theme) -> Vec<(String, String)> {
     let css = |color: gpui::Hsla| {
         let rgba = gpui::Rgba::from(color);
-        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         format!("#{:02x}{:02x}{:02x}", byte(rgba.r), byte(rgba.g), byte(rgba.b))
     };
     let mut variables = vec![
@@ -201,7 +193,7 @@ pub fn theme_variables(theme: &Theme) -> Vec<(String, String)> {
         ("--font-mono".to_owned(), format!("'{}', ui-monospace, monospace", theme.font_mono)),
     ];
     for (n, color) in crate::visuals::chart_series(theme).into_iter().enumerate() {
-        variables.push((format!("--color-chart-{}", n + 1), css(color)));
+        variables.push((format!("--color-chart-{}", n.saturating_add(1)), css(color)));
     }
     variables
 }
@@ -219,8 +211,9 @@ pub const fn presence_words(
     match presence {
         _ if failed => "error",
         Some(PagePresence::Live) if loaded => "live",
-        Some(PagePresence::Live) if snapshot => "snapshot",
-        Some(PagePresence::Warm | PagePresence::Cold) if snapshot => "snapshot",
+        Some(PagePresence::Live | PagePresence::Warm | PagePresence::Cold) if snapshot => {
+            "snapshot"
+        }
         _ => "loading",
     }
 }
@@ -230,9 +223,10 @@ pub fn waiting_words(machine: &str) -> SharedString {
     format!("Waiting for {machine}…").into()
 }
 
-/// A page card's header words past its title: where the page comes from, an MCP App's
-/// server, a file's path or a chart's language. The tool that showed it is never named: HTML the
-/// agent wrote (`show_page`) has no source of its own.
+/// A page card's header words past its title: where the page comes from.
+///
+/// That is an MCP App's server, a file's path or a chart's language. The tool that showed it is
+/// never named: HTML the agent wrote (`show_page`) has no source of its own.
 pub fn source_words(card: &PageCard) -> Option<String> {
     let words = match card.kind.as_str() {
         PageCard::APP => card.server.clone()?,
@@ -270,7 +264,21 @@ pub struct PageCardView {
     _host: Option<Subscription>,
 }
 
+impl std::fmt::Debug for PageCardView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PageCardView")
+            .field("page", &self.card.page)
+            .field("chat", &self.chat)
+            .field("width", &self.width)
+            .field("placed_live", &self.placed_live)
+            .field("engaged", &self.engaged)
+            .field("expanded", &self.expanded)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PageCardView {
+    /// The card for `card` in `chat`'s transcript, watching its page through `engine`.
     pub fn new(
         card: Arc<PageCard>,
         chat: Option<String>,
@@ -309,7 +317,7 @@ impl PageCardView {
         let host = live::watch_page(
             &card.page,
             Box::new(move |cx| {
-                weak.update(cx, |_, cx| cx.notify()).ok();
+                let _gone = weak.update(cx, |_, cx| cx.notify());
             }),
             cx,
         );
@@ -326,7 +334,7 @@ impl PageCardView {
             placed_live: false,
             engaged: false,
             expanded: false,
-            answered: Default::default(),
+            answered: std::collections::HashSet::default(),
             done: None,
             rest: None,
             _watch: watch,
@@ -380,22 +388,21 @@ impl PageCardView {
         }
     }
 
-    fn leave(&mut self, cx: &mut Context<Self>) {
+    fn leave(&mut self, cx: &Context<Self>) {
         self.engaged = false;
         let page = self.card.page.clone();
         self.rest = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(REST_AFTER).await;
-            this.update(cx, |this, cx| {
+            let _gone = this.update(cx, |this, cx| {
                 this.rest = None;
                 if !this.engaged {
                     live::page_act(&page, PageAct::Rest, cx);
                 }
-            })
-            .ok();
+            });
         }));
     }
 
-    fn call(&self, method: &'static str, params: serde_json::Value, cx: &mut Context<Self>) {
+    fn call(&self, method: &'static str, params: serde_json::Value, cx: &Context<Self>) {
         let Some(engine) = self.engine.clone() else { return };
         cx.spawn(async move |_, _| {
             if let Err(err) = engine.client().call(method, params).await {
@@ -405,8 +412,8 @@ impl PageCardView {
         .detach();
     }
 
-    fn answer(&mut self, request: String, allow: bool, cx: &mut Context<Self>) {
-        if !self.answered.insert(request.clone()) {
+    fn answer(&mut self, request: &str, allow: bool, cx: &mut Context<Self>) {
+        if !self.answered.insert(request.to_owned()) {
             return;
         }
         let params =
@@ -424,7 +431,7 @@ impl PageCardView {
     }
 
     /// Call `method`, and show `action` done once it answers.
-    fn call_done(&mut self, action: &'static str, method: &'static str, cx: &mut Context<Self>) {
+    fn call_done(&self, action: &'static str, method: &'static str, cx: &Context<Self>) {
         let Some(engine) = self.engine.clone() else { return };
         let params = serde_json::json!({ "page": self.card.page });
         cx.spawn(async move |this, cx| match engine.client().call(method, params).await {
@@ -468,12 +475,7 @@ impl PageCardView {
     }
 
     /// The header's actions for what the page is.
-    fn actions(
-        &self,
-        doc: Option<&PageDoc>,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    fn actions(&self, doc: Option<&PageDoc>, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
         let page = self.card.page.clone();
         let id = |name: &str| SharedString::from(format!("{page}-{name}"));
         let done = |action: &str| self.done.as_ref().is_some_and(|(done, _)| *done == action);
@@ -583,7 +585,7 @@ impl PageCardView {
     }
 
     /// The card's quiet line while its page shows in the pane.
-    fn pane_line(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn pane_line(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         div()
             .id(SharedString::from(format!("{}-in-pane", self.card.page)))
             .role(gpui::Role::Group)
@@ -632,7 +634,7 @@ impl PageCardView {
     }
 
     /// The header's source: a file opens in the chat's Files pane.
-    fn source(&self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn source(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let text = div()
             .min_w_0()
             .truncate()
@@ -804,7 +806,7 @@ impl Render for PageCardView {
                 },
             },
         };
-        let probe = self.bounds.clone();
+        let probe = Rc::clone(&self.bounds);
         // The card is built again when where it lies asks something of it (a live page
         // gone into a fade band rests, a new width is told to the page), so the frame shown is
         // the one a frame built from scratch, which reads the same bounds, draws.
@@ -822,7 +824,7 @@ impl Render for PageCardView {
                         if (live_now && out) || resized {
                             let card = card;
                             cx.defer(move |cx| {
-                                card.update(cx, |_, cx| cx.notify()).ok();
+                                let _gone = card.update(cx, |_, cx| cx.notify());
                             });
                         }
                     }
@@ -863,7 +865,7 @@ impl Render for PageCardView {
                     .flex_col()
                     .w_full()
                     .child(doc::table(
-                        SharedString::from(self.card.page.clone()),
+                        &self.card.page,
                         SharedString::from(self.card.title.clone()),
                         table,
                         PageTable::INLINE_ROWS,
@@ -898,7 +900,7 @@ impl Render for PageCardView {
             }))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.engage(cx)))
             .child(body_content)
-            .child(measure(probe.clone()));
+            .child(measure(Rc::clone(&probe)));
         let body: AnyElement = if in_pane {
             self.pane_line(&theme, cx)
         } else if let Some(doc_body) = doc_body {
@@ -980,14 +982,14 @@ impl Render for PageCardView {
                         "Allow the call",
                         "Allow",
                         listener(cx.listener(move |this, _, _, cx| {
-                            this.answer(allow.clone(), true, cx);
+                            this.answer(&allow, true, cx);
                         })),
                     ),
                     (
                         "Deny the call",
                         "Deny",
                         listener(cx.listener(move |this, _, _, cx| {
-                            this.answer(deny.clone(), false, cx);
+                            this.answer(&deny, false, cx);
                         })),
                     ),
                 ],
@@ -1269,7 +1271,9 @@ mod tests {
                 move |_, window, cx| {
                     let mut native = serve.borrow_mut();
                     if native.is_none() {
-                        *native = window.create_native_host(Default::default(), cx).ok();
+                        *native = window
+                            .create_native_host(gpui::composition::NativeHostOptions::default(), cx)
+                            .ok();
                     }
                     Some(live::HostedPage {
                         presence: PagePresence::Live,

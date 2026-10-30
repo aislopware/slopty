@@ -1,8 +1,10 @@
-//! The one menu Slopty's own views open (a terminal's right click, a remote window's "…"), drawn
-//! as the shell's menus are: [`popover::popover_card`] holding [`popover::menu_row_nav`] rows,
-//! parted by [`popover::menu_separator`], each with its shortcut as [`popover::kbd_hint`]. The
-//! owner mounts the panel with [`popover::menu_at`] or [`popover::anchored_menu_below_end`], which
-//! frost it and play its motion, and closes it in `on_close`; the panel says when to.
+//! The one menu Slopty's own views open (a terminal's right click, a remote window's "…").
+//!
+//! It is drawn as the shell's menus are: [`popover::popover_card`] holding
+//! [`popover::menu_row_nav`] rows, parted by [`popover::menu_separator`], each with its shortcut as
+//! [`popover::kbd_hint`]. The owner mounts the panel with [`popover::menu_at`] or
+//! [`popover::anchored_menu_below_end`], which frost it and play its motion, and closes it in
+//! `on_close`; the panel says when to.
 //!
 //! The keyboard model is Finder's, after Ely GPUI Components (`src/menus/menu.rs`), MIT OR
 //! Apache-2.0:
@@ -16,11 +18,6 @@
 //!   opened the menu never chooses in it.
 //! - Esc and a press outside close it; choosing a row closes it first, then runs the row, so the
 //!   row runs with the keyboard back where it was.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::too_long_first_doc_paragraph,
-    reason = "shell lint migration: slice C"
-)]
 
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -376,7 +373,7 @@ impl RenderOnce for MenuPanel {
                     }
                     let marked = marked == Some(n);
                     rows.push(row(&id, n, item, marked, &menu, &cursor, &on_close, &theme));
-                    n += 1;
+                    n = n.saturating_add(1);
                 }
             }
         }
