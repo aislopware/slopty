@@ -5859,12 +5859,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and "Undo close", a pointing or an offered page lapsed unseen.
   - **A thread's notice shows up to three lines**, then "Show all", where it showed only its
     first line (an agent's error often says what to do on its second).
-  - **A usage limit says when it resets** where the agent says (`AgentStatus::Failed` with
-    `until_ms`): "Hit its usage limit · resets 14:05".
   - Tests: `workspace::tests::toasts::a_notice_waits_while_the_app_is_not_in_front`,
     `a_failure_stays_until_dismissed_and_copies`,
-    `conversation::thread::view::notes::tests::a_notice_shows_three_lines_and_says_when_there_is_more`,
-    `workspace::agents::tests::a_failed_turn_says_why_and_when_a_limit_resets`.
+    `conversation::thread::view::notes::tests::a_notice_shows_three_lines_and_says_when_there_is_more`.
 
 - ✅ **A surface that comes and goes is one reversible value, and a hint answers the keyboard**
   (2026-10-04, lane F's gpui-fast #23 and #24, pinned at cc85e69; the ranked list's "waiting on
@@ -6312,12 +6309,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Branch asks nothing, since the worker refuses it then. The thread it starts opens as a
     tile (`HubEvent::Started`). The model chip is a button only where models can switch.
   - **Send later is gone.** The clock beside the send button, its menu of times and other
-    threads, and "Send later…" in the palette went. The one moment worth waiting for is a
-    usage limit's reset, which the agent names (`TurnState::Failed::until_ms`): while a limit
-    holds a thread whose agent takes a message kept for later (`Cap::SCHEDULE`), a line over
-    the field says "The usage limit lifts at 14:35", and "Continue at 14:35" sends the draft
-    (or "Continue", with nothing typed) to go then. Once that message waits, the tray says
-    when it goes and the line goes.
+    threads, and "Send later…" in the palette went.
   - **Edit… on an approval is gone.** Changing an edit's text before allowing it was rarely
     used and doubled the tray's states. Deny… with a reason stays. The wire's
     `Request::editable` is lane A's to remove.
@@ -12256,7 +12248,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   machine, since the worker clones only from a remote that becomes the clone's origin. `CloneRepo`
   `{url, parentPath}` clones into the open folder and adds the project itself, and the window
   lands in it; a spinner notice stays up while it runs, and a failure says why in an error notice.
-- ✅ **A transcript's Run, the mode chip, plan meters and kept review aids (2026-10-16).**
+- ✅ **A transcript's Run, the mode chip and kept review aids (2026-10-16).**
   - **Run.** On the person's click, a code line's Run types the line into the chat's own shell
     terminal: a bottom-drawer tab the shell opens for runs, never one that runs an agent or a
     project action. A plain one-line command runs at once. Some lines are typed but left at the
@@ -12267,9 +12259,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Mode chip.** The agent's modes (Claude Code's permission modes, an ACP agent's session
     modes, offered as the model option `mode`) sit in a chip left of the model chip, as in Claude
     desktop's composer row. The chip opens the model menu at its Mode choices.
-  - **Plan meters.** The Agents page draws zeron's usage meters under each agent with the plan
-    windows its threads last published. The `ListHarnesses` row's `usage` carries them; the
-    newest reading across machines wins, and an agent that said none has no meters.
   - **Kept review aids.** The diff's whitespace filter and file tree are settings
     (`diffIgnoreWhitespace`, `diffShowTree`), kept across launches.
 - ✅ **Slopty's own views draw with the shell's helpers (2026-10-16).** From
@@ -13637,7 +13626,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the first frame still rises in as zeron's
     (`each_move_between_settings_and_the_chats_fades_the_page_in`).
   - Rejected: marking the open chat read in the e2e golden (the shell marks it seen while the
-    window is in front, which the e2e window never is). Sentence-case menu headings were first
+    window is in front, which the e2e window never was; since 2026-10-30 it counts as looked
+    at, "The e2e window is looked at"). Sentence-case menu headings were first
     kept as zeron's tracked capitals; the entry below adopts them. Measured against Claude
     desktop's 24/28 px controls and 32 px rows: sidebar rows 29, headers 28, window controls 24,
     header buttons 28, picker rows 32, none looser; the palette's 30 px rows grew to 32 below.
@@ -14604,7 +14594,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   in New session, the title bar's hint, the palette's rows and the phone's page, but the rest
   still said chat: Settings → Shortcuts ("Chats", "Jump to chat 1", "Archive chat", "Next chat
   that needs you"), the Go menu, File's "New Chat", the palette's sections ("Recent chats", "In
-  chats"), its field and its empty line, the phone's tab and its back button, the sidebar's "No
+  chats"), its field and its empty line, the phone's tab and both its back buttons, the sidebar's "No
   chats yet" and "No inactive chats", Find's field, the notification setting "Chat sounds", and
   the words for a session's machine, its folder and an untitled one. Each now says session. The
   code's own names (`chat_id`, `selected_chat`) and the view model's methods stay, as the
@@ -14623,3 +14613,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   label, so "Working tree" stood on the tab and again on the scope picker straight under it. The
   tab now names the pane, "Changes", as every other tab names its surface, and the picker under
   it is the one place the scope ("Working tree", "Branch changes") is said and changed.
+- ✅ **The e2e window is looked at (2026-10-30).** The shell marks the session open in the window
+  seen, as a turn of it ends and as the window comes back to the front, only while the person
+  looks, which it read as the window being the active one. A guest's window is in front or not
+  as the guest's other apps decide, so a session a test had open read as seen on one run and
+  unread on the next, its sidebar row differed between frames, and the tests waited for the
+  mark and looked again. The e2e socket now holds the window as looked at
+  (`slopty_shell::presence::hold`); `presence::looking` is the one read behind the seen mark,
+  the sync nudge on coming back and the invariants' watch, and the tests' second look and waits
+  went. `SLOPTY_E2E_AWAY` keeps the OS's word for a test that needs it. The server's presence
+  and the notes still read the OS: the self-test's notes go nowhere, and a test of a notice by
+  presence needs the window away.

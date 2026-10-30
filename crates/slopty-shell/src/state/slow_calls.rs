@@ -69,9 +69,6 @@ fn long_by_design(method: &str) -> bool {
                 | methods::ANSWER_ADD_DEVICE
                 | methods::LOOK_ON_TAILNET
                 | methods::DEVICE_ACTION
-                | methods::START_AGENT_LOGIN
-                | methods::COMPLETE_AGENT_LOGIN
-                | methods::POLL_AGENT_LOGIN
                 | methods::STOP_ENGINE
         )
 }

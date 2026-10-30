@@ -123,10 +123,7 @@ pub mod methods {
     pub const GET_CHECKOUT_DIFF: &str = "GetCheckoutDiff";
     // slopty: no Discard changes (ruled out).
     pub const GET_CHECKOUT_FILE_DIFF_TEXT: &str = "GetCheckoutFileDiffText";
-    // Agent accounts (ControlRpc, relay-forwardable — CLI logins are per-device).
-    pub const START_AGENT_LOGIN: &str = "StartAgentLogin";
-    pub const COMPLETE_AGENT_LOGIN: &str = "CompleteAgentLogin";
-    pub const POLL_AGENT_LOGIN: &str = "PollAgentLogin";
+    // slopty: no agent accounts or logins: an agent signs in in its own TUI.
     // Attachments read back (ControlRpc, relay-forwardable — target the chat's host device).
     pub const READ_ATTACHMENT_CHUNK: &str = "ReadAttachmentChunk";
     // slopty: no agent visuals.

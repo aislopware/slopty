@@ -901,20 +901,6 @@ mod tests {
     }
 }
 
-/// Host-owned context snapshot, replicated with the chat document.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextUsage {
-    pub tokens: Option<u64>,
-    pub window: Option<u64>,
-}
-
-impl ContextUsage {
-    pub fn fraction(self) -> Option<f64> {
-        Some(self.tokens? as f64 / self.window.filter(|n| *n > 0)? as f64)
-    }
-}
-
 #[cfg(test)]
 mod generated_image_tests {
     use super::*;
