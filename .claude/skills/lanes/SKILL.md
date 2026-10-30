@@ -26,10 +26,12 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   before it checks, and the first red ends the check (a failure here cancels the runners' run),
   so a red comes back in seconds: fix it and check again. No cargo in the checkout itself.
   Checks run in the background while the lane moves on, and it reports a checkpoint on green.
-- E2e while iterating: one filtered case, `--e2e app -E 'test(<the tests the change touches>)'`,
-  and after a red `--e2e app -E failed` reruns just the tests the last run of that name failed.
-  It runs in this Mac's e2e guest in a minute or two, not on a runner Mac. The whole suite
-  (`--e2e app` with no filter) runs once per batch, before its checkpoint, not after each edit.
+- E2e runs once per round, after every lane's work has landed: one whole suite (`--e2e app`,
+  then `--e2e ios`) and one golden accept, reviewed by eye, with its reds going back to the
+  lanes that own them. A checkpoint lands on its quick check; a behaviour is proved by a
+  headless GPUI or model test in that check, and a new e2e case is written then but first run in
+  the round's suite. A lane runs a filtered case (`--e2e app -E 'test(...)'`; after a red
+  `-E failed`) only to chase a bug no headless test can reach, and accepts no goldens itself.
 - This Mac's cores are the limit, not the number of agents: at most 4 lanes at once, at most 2 of
   them building GUI crates here. A lane spawns no sub-agents and keeps one check in flight under
   its own lane name, the same name every time (a new name, `C2x` beside `C2`, is a cold target
