@@ -1,15 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Bounded media decoding. SVG resources are resolved in memory, never on the UI host.
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assertions_on_result_states,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::partial_pub_fields,
-    reason = "shell lint migration: slice B"
-)]
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
@@ -27,12 +17,18 @@ pub fn release_media(images: impl IntoIterator<Item = MediaImage>, cx: &mut gpui
 
 #[derive(Clone)]
 pub struct MediaImage {
+    /// The image as GPUI draws it: a static PNG, or an SVG wrapper sized for one raster.
     pub image: Arc<Image>,
+    /// Its natural width, in pixels.
     pub width: f32,
+    /// Its natural height, in pixels.
     pub height: f32,
+    /// The memory it holds: encoded bytes plus the CPU and GPU copies of its raster.
     pub bytes: usize,
-    svg: Option<Arc<str>>,
-    raster_size: Option<(u32, u32)>,
+    /// An SVG's sanitized source, which every re-raster wraps.
+    pub svg: Option<Arc<str>>,
+    /// The raster an SVG's wrapper asks for, once it asks for one.
+    pub raster_size: Option<(u32, u32)>,
 }
 
 const PREVIEW_PIXELS: usize = 1024 * 1024;
@@ -50,16 +46,25 @@ fn raster_size(
     let (w, h) = (f64::from(width), f64::from(height));
     let dpi = f64::from(dpi.clamp(1.0, 4.0));
     let fit = (f64::from(viewport.0.max(1.0)) / w).min(f64::from(viewport.1.max(1.0)) / h).min(1.0);
+    let budget = pixels.max(1);
+    // Exact to `u32::MAX` pixels, far past any budget.
+    let budget_f = u32::try_from(budget).map_or_else(|_| f64::from(u32::MAX), f64::from);
     let scale = (fit * dpi)
         .min(MAX_RASTER_SIDE / w)
         .min(MAX_RASTER_SIDE / h)
-        .min((pixels.max(1) as f64 / (w * h)).sqrt());
-    let mut size = ((w * scale).floor().max(1.0) as u32, (h * scale).floor().max(1.0) as u32);
-    if size.0 as usize * size.1 as usize > pixels.max(1) {
+        .min((budget_f / (w * h)).sqrt());
+    let whole = |side: f64| crate::transcript::num::whole_side(side.floor().max(1.0));
+    let mut size = (whole(w * scale), whole(h * scale));
+    if (size.0 as usize).saturating_mul(size.1 as usize) > budget {
+        // The longer side gives way to the budget; the other is at least 1.
+        let give = |other: u32| {
+            let side = budget.checked_div(other as usize).unwrap_or(budget).max(1);
+            u32::try_from(side).unwrap_or(u32::MAX)
+        };
         if size.0 > size.1 {
-            size.0 = (pixels.max(1) / size.1 as usize).max(1) as u32;
+            size.0 = give(size.1);
         } else {
-            size.1 = (pixels.max(1) / size.0 as usize).max(1) as u32;
+            size.1 = give(size.0);
         }
     }
     size
@@ -68,7 +73,8 @@ fn raster_size(
 /// Memory a prepared SVG holds: its source and wrapper copies, plus both the
 /// CPU pixels and GPU texture of one raster.
 const fn svg_retained_bytes(svg: &str, raster: (u32, u32)) -> usize {
-    svg.len() * 2 + 1024 + raster.0 as usize * raster.1 as usize * 8
+    let pixels = (raster.0 as usize).saturating_mul(raster.1 as usize);
+    svg.len().saturating_mul(2).saturating_add(1024).saturating_add(pixels.saturating_mul(8))
 }
 
 impl MediaImage {
@@ -122,8 +128,9 @@ impl MediaImage {
         let Some(svg) = &self.svg else {
             return self.clone();
         };
-        let pixels = available.saturating_sub(svg.len() * 2 + 1024) / 8;
-        if pixels < self.raster_size.map_or(0, |(w, h)| w as usize * h as usize) {
+        // What is left past the source and wrapper copies, at 8 bytes a pixel.
+        let pixels = available.saturating_sub(svg_retained_bytes(svg, (0, 0))) / 8;
+        if pixels < self.raster_size.map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize)) {
             return self.clone();
         }
         let pixels = pixels.min(2 * PREVIEW_PIXELS);
@@ -157,28 +164,28 @@ pub fn preview_element(
             cx.stop_propagation();
             on_click(window, cx);
         })
-        .child(gpui::img(loaded.image.clone()).size_full().object_fit(gpui::ObjectFit::Contain))
+        .child(
+            gpui::img(Arc::clone(&loaded.image)).size_full().object_fit(gpui::ObjectFit::Contain),
+        )
         .into_any_element()
 }
 
 pub fn svg_options() -> usvg::Options<'static> {
     static FONTS: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
-    let fonts = FONTS
-        .get_or_init(|| {
-            let mut db = fontdb::Database::new();
-            db.load_system_fonts();
-            for face in crate::typography::bundled_font_faces() {
-                db.load_font_data(face.to_vec());
-            }
-            db.set_sans_serif_family("Geist");
-            db.set_monospace_family("Geist Mono");
-            // usvg appends generic serif when a requested family is unavailable
-            // (including GPUI's virtual .SystemUIFont). Its default may refer to
-            // an uninstalled font, silently deleting text during outlining.
-            db.set_serif_family("Geist");
-            Arc::new(db)
-        })
-        .clone();
+    let fonts = Arc::clone(FONTS.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        for face in crate::typography::bundled_font_faces() {
+            db.load_font_data(face.to_vec());
+        }
+        db.set_sans_serif_family("Geist");
+        db.set_monospace_family("Geist Mono");
+        // usvg appends generic serif when a requested family is unavailable
+        // (including GPUI's virtual .SystemUIFont). Its default may refer to
+        // an uninstalled font, silently deleting text during outlining.
+        db.set_serif_family("Geist");
+        Arc::new(db)
+    }));
     usvg::Options {
         fontdb: fonts,
         image_href_resolver: usvg::ImageHrefResolver {
@@ -289,12 +296,14 @@ fn decode_raster_image_bounded(
     } else {
         decoded
     };
-    let (width, height) = (decoded.width() as f32, decoded.height() as f32);
+    let side = crate::transcript::num::side;
+    let (width, height) = (side(decoded.width()), side(decoded.height()));
     let mut png = Cursor::new(Vec::new());
     decoded.write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
     let bytes = png.into_inner();
     // GPUI retains decoded CPU pixels as well as the uploaded GPU texture.
-    let retained = bytes.len() + decoded.width() as usize * decoded.height() as usize * 8;
+    let pixels = (decoded.width() as usize).saturating_mul(decoded.height() as usize);
+    let retained = bytes.len().saturating_add(pixels.saturating_mul(8));
     Ok(MediaImage {
         image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
         width,
@@ -361,19 +370,17 @@ mod tests {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="file:///etc/passwd" width="20" height="20"/><rect width="10" height="10"/></svg>"#;
         let media = decode_image("image/svg+xml", svg.to_vec()).unwrap();
         assert!(!media.svg.unwrap().contains("file:///etc/passwd"));
-        assert!(
-            decode_image(
-                "image/svg+xml",
-                br#"<svg xmlns="http://www.w3.org/2000/svg" width="99999" height="10"/>"#.to_vec()
-            )
-            .is_ok()
-        );
+        decode_image(
+            "image/svg+xml",
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="99999" height="10"/>"#.to_vec(),
+        )
+        .unwrap();
         assert!(decode_image("image/png", b"not an image".to_vec()).is_err());
     }
 
     #[test]
     fn large_svgs_keep_the_complete_viewbox_at_bounded_resolutions() {
-        for (width, height) in [(40000, 500), (500, 40000), (40000, 40000)] {
+        for (width, height) in [(40000_u16, 500_u16), (500, 40000), (40000, 40000)] {
             let source = format!(
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="100 200 {width} {height}"><rect x="100" y="200" width="{width}" height="{height}" fill="red"/><rect x="{}" y="{}" width="{}" height="{}" fill="blue"/></svg>"#,
                 100 + width / 2,
@@ -382,7 +389,7 @@ mod tests {
                 height / 2
             );
             let media = decode_image("image/svg+xml", source.into_bytes()).unwrap();
-            assert_eq!((media.width, media.height), (width as f32, height as f32));
+            assert_eq!((media.width, media.height), (f32::from(width), f32::from(height)));
             for dpi in [1.0, 2.0, 4.0] {
                 let thumbnail = media.preview_for_view((600.0, 480.0), dpi);
                 let enlarged = media.enlarged((1600.0, 1000.0), dpi, 32 * 1024 * 1024, None);

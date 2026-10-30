@@ -3,12 +3,6 @@
 //! glows: the theme's accent high on the left, and a cool blue and a warm clay rising from
 //! beyond its right edge. In dark, a hairline of the text's own ink rings it. A high-contrast
 //! theme, or a system asked for more contrast or less transparency, keeps the flat wash.
-#![allow(
-    clippy::cfg_not_test,
-    clippy::float_cmp,
-    clippy::multiple_unsafe_ops_per_block,
-    reason = "shell lint migration: slice B"
-)]
 
 use gpui::{
     App, Background, Bounds, Hsla, IntoElement, Pixels, Styled as _, Window, canvas, fill, point,
@@ -146,23 +140,33 @@ pub fn light_over(radius: Pixels, theme: &Theme) -> Option<impl IntoElement + us
 }
 
 /// Whether the person asked the system for more contrast or less transparency.
+#[expect(
+    clippy::cfg_not_test,
+    reason = "a test build must not read the host's accessibility settings: the renders would \
+              then depend on the machine that draws them"
+)]
 #[cfg(all(target_os = "macos", not(test)))]
 fn plain_display() -> bool {
     use objc2::runtime::{AnyObject, Bool};
     use objc2::{class, msg_send};
-    // SAFETY: `NSWorkspace.sharedWorkspace` and its accessibility display flags are plain
-    // getters, called on the main thread like every view's render.
-    let (contrast, transparency): (Bool, Bool) = unsafe {
-        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
-        (
-            msg_send![workspace, accessibilityDisplayShouldIncreaseContrast],
-            msg_send![workspace, accessibilityDisplayShouldReduceTransparency],
-        )
-    };
+    // SAFETY: `NSWorkspace.sharedWorkspace` is a plain getter, called on the main thread like
+    // every view's render.
+    let workspace: *mut AnyObject = unsafe { msg_send![class!(NSWorkspace), sharedWorkspace] };
+    // SAFETY: a plain getter of the shared workspace, on the main thread.
+    let contrast: Bool =
+        unsafe { msg_send![workspace, accessibilityDisplayShouldIncreaseContrast] };
+    // SAFETY: a plain getter of the shared workspace, on the main thread.
+    let transparency: Bool =
+        unsafe { msg_send![workspace, accessibilityDisplayShouldReduceTransparency] };
     contrast.as_bool() || transparency.as_bool()
 }
 
 /// Whether the person asked the system for more contrast or less transparency.
+#[expect(
+    clippy::cfg_not_test,
+    reason = "a test build must not read the host's accessibility settings: the renders would \
+              then depend on the machine that draws them"
+)]
 #[cfg(all(target_os = "ios", not(test)))]
 fn plain_display() -> bool {
     #[link(name = "UIKit", kind = "framework")]
@@ -170,10 +174,11 @@ fn plain_display() -> bool {
         fn UIAccessibilityDarkerSystemColorsEnabled() -> bool;
         fn UIAccessibilityIsReduceTransparencyEnabled() -> bool;
     }
-    // SAFETY: UIKit accessibility getters with no arguments, called on the main thread.
-    unsafe {
-        UIAccessibilityDarkerSystemColorsEnabled() || UIAccessibilityIsReduceTransparencyEnabled()
-    }
+    // SAFETY: a UIKit accessibility getter with no arguments, called on the main thread.
+    let darker = unsafe { UIAccessibilityDarkerSystemColorsEnabled() };
+    // SAFETY: a UIKit accessibility getter with no arguments, called on the main thread.
+    let clear = unsafe { UIAccessibilityIsReduceTransparencyEnabled() };
+    darker || clear
 }
 
 #[cfg(any(test, not(any(target_os = "macos", target_os = "ios"))))]
@@ -198,7 +203,7 @@ mod tests {
             "the accent's own hue"
         );
         assert!((from.a - CENTRE_ALPHA).abs() < 1e-6 && (to.a - EDGE_ALPHA).abs() < 1e-6);
-        assert!(cool.from.h != warm.from.h, "a cool and a warm light");
+        assert_ne!(cool.from.h.to_bits(), warm.from.h.to_bits(), "a cool and a warm light");
         assert_eq!(cool.from.s, accent.s, "at the accent's saturation, never grey");
         assert_eq!(first.radii.1, 5.0, "400 px down, whatever the bubble's height");
         assert_eq!(glows(accent, 800.0, 2.0)[0].radii.1, 0.5);

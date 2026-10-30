@@ -6,21 +6,6 @@
 //! Collapsing starts a short grace; when it lapses the CPU frame and the GPU
 //! atlas tiles are released. Rapid toggling inside the grace reuses the
 //! texture instead of re-reading and re-decoding the file.
-#![allow(
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::expect_used,
-    clippy::format_collect,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::unused_result_ok,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -66,9 +51,7 @@ fn is_remote_or_device_path(path: &str) -> bool {
     let separator = |b: Option<&u8>| matches!(b, Some(b'/' | b'\\'));
     (separator(bytes.first()) && separator(bytes.get(1)))
         || path.starts_with(r"\??\")
-        || (bytes.len() >= 2
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
+        || (matches!(bytes, [drive, b':', ..] if drive.is_ascii_alphabetic())
             && !separator(bytes.get(2)))
 }
 
@@ -154,10 +137,7 @@ pub fn image_paths(call: &ToolCall, output: Option<&str>) -> Arc<[SharedString]>
 pub fn resolve_path(path: &str, cwd: Option<&str>) -> String {
     let bytes = path.as_bytes();
     let absolute = path.starts_with(['/', '\\'])
-        || (bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\'));
+        || matches!(bytes, [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic());
     match cwd.filter(|_| !absolute) {
         Some(cwd) if cwd.contains('\\') => format!(
             "{}\\{}",
@@ -192,7 +172,10 @@ pub enum Thumb {
 
 enum State {
     /// The read/decode task; dropping it cancels the load.
-    Loading(#[expect(dead_code)] Task<()>, Option<f32>),
+    Loading(
+        #[expect(dead_code, reason = "held for its drop, which cancels the load")] Task<()>,
+        Option<f32>,
+    ),
     Ready {
         image: Arc<RenderImage>,
         aspect: f32,
@@ -241,22 +224,24 @@ impl ToolImages {
         keys: Vec<ImageKey>,
         loader: &Loader,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) -> Vec<Thumb> {
         let now = cx.background_executor().now();
         let thumbs = keys
             .iter()
             .map(|key| {
                 if !self.entries.contains_key(key) {
-                    self.start_load(key.clone(), loader, get, cx);
+                    let state = Self::load(key, loader, get, cx);
+                    self.entries.insert(key.clone(), Entry { state, release_at: None });
                 }
-                let entry = self.entries.get_mut(key).expect("inserted above");
+                // Inserted just above when it was not there.
+                let Some(entry) = self.entries.get_mut(key) else { return Thumb::Failed };
                 entry.release_at = None;
                 match &mut entry.state {
                     State::Loading(_, aspect) => Thumb::Loading { aspect: *aspect },
                     State::Ready { image, aspect, painted, .. } => {
                         *painted = now;
-                        Thumb::Ready { image: image.clone(), aspect: *aspect }
+                        Thumb::Ready { image: Arc::clone(image), aspect: *aspect }
                     }
                     State::Failed => Thumb::Failed,
                 }
@@ -277,7 +262,7 @@ impl ToolImages {
         &mut self,
         chip: &SharedString,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) {
         let Some(keys) = self.holders.remove(chip) else {
             return;
@@ -290,9 +275,10 @@ impl ToolImages {
         &mut self,
         keys: Vec<ImageKey>,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) {
-        let at = cx.background_executor().now() + RELEASE_GRACE;
+        let now = cx.background_executor().now();
+        let at = now.checked_add(RELEASE_GRACE).unwrap_or(now);
         for key in keys {
             if self.holders.values().any(|held| held.contains(&key)) {
                 continue;
@@ -309,7 +295,7 @@ impl ToolImages {
         &mut self,
         row: &str,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) {
         if self.holders.is_empty() {
             return;
@@ -326,7 +312,7 @@ impl ToolImages {
         &mut self,
         live: impl Fn(&str) -> bool,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
+        cx: &Context<V>,
     ) {
         if self.holders.is_empty() {
             return;
@@ -347,16 +333,16 @@ impl ToolImages {
         free(released, cx);
     }
 
-    fn start_load<V: 'static>(
-        &mut self,
-        key: ImageKey,
+    /// The state of `key` as its load starts: the read and decode under way, or failed at
+    /// once with no engine to read through.
+    fn load<V: 'static>(
+        key: &ImageKey,
         loader: &Loader,
         get: fn(&mut V) -> &mut Self,
-        cx: &mut Context<V>,
-    ) {
+        cx: &Context<V>,
+    ) -> State {
         let Some(engine) = loader.engine.clone() else {
-            self.entries.insert(key, Entry { state: State::Failed, release_at: None });
-            return;
+            return State::Failed;
         };
         let target = (loader.local_device.as_deref() != Some(key.device.as_str()))
             .then(|| key.device.clone());
@@ -376,13 +362,12 @@ impl ToolImages {
                     let Some((width, height)) = crate::image_media::header_size(head) else {
                         return;
                     };
-                    let aspect = width as f32 / height as f32;
-                    sized_view
-                        .update(&mut sized_cx, |view, cx| {
-                            get(view).sized(&sized_key, aspect);
-                            cx.notify();
-                        })
-                        .ok();
+                    let side = crate::transcript::num::side;
+                    let aspect = side(width) / side(height);
+                    let _gone = sized_view.update(&mut sized_cx, |view, cx| {
+                        get(view).sized(&sized_key, aspect);
+                        cx.notify();
+                    });
                 },
             )
             .await;
@@ -392,13 +377,12 @@ impl ToolImages {
                 }
                 None => None,
             };
-            view.update(cx, |view, cx| {
-                get(view).finish(task_key, decoded, cx);
+            let _gone = view.update(cx, |view, cx| {
+                get(view).finish(&task_key, decoded, cx);
                 cx.notify();
-            })
-            .ok();
+            });
         });
-        self.entries.insert(key, Entry { state: State::Loading(task, None), release_at: None });
+        State::Loading(task, None)
     }
 
     /// A load's first bytes said its shape.
@@ -410,12 +394,12 @@ impl ToolImages {
 
     fn finish(
         &mut self,
-        key: ImageKey,
+        key: &ImageKey,
         decoded: Option<(Arc<RenderImage>, f32)>,
         cx: &mut gpui::App,
     ) {
         // Released while loading: the result is simply dropped (never uploaded).
-        let Some(entry) = self.entries.get_mut(&key) else {
+        let Some(entry) = self.entries.get_mut(key) else {
             return;
         };
         if !matches!(entry.state, State::Loading(..)) {
@@ -424,13 +408,13 @@ impl ToolImages {
         entry.state = match decoded {
             Some((image, aspect)) => {
                 let bytes = retained_bytes(&image);
-                self.bytes += bytes;
+                self.bytes = self.bytes.saturating_add(bytes);
                 State::Ready { image, aspect, bytes, painted: cx.background_executor().now() }
             }
             None => State::Failed,
         };
         tracing::debug!(path = %key.path, retained = self.bytes, "tool image decoded");
-        self.enforce_budget(&key, cx);
+        self.enforce_budget(key, cx);
     }
 
     /// Over budget: drop the least recently painted offscreen previews. The
@@ -454,7 +438,7 @@ impl ToolImages {
                 .min_by_key(|(painted, _)| *painted);
             let Some((_, key)) = oldest else { break };
             if let Some(entry) = self.entries.remove(&key) {
-                self.bytes -= state_bytes(&entry.state);
+                self.bytes = self.bytes.saturating_sub(state_bytes(&entry.state));
                 released.push(entry.state);
             }
         }
@@ -472,7 +456,7 @@ impl ToolImages {
         let mut released = Vec::with_capacity(expired.len());
         for key in expired {
             if let Some(entry) = self.entries.remove(&key) {
-                self.bytes -= state_bytes(&entry.state);
+                self.bytes = self.bytes.saturating_sub(state_bytes(&entry.state));
                 released.push(entry.state);
             }
         }
@@ -488,7 +472,7 @@ impl ToolImages {
 
     /// One timer for the earliest pending release. Grace is constant, so a
     /// later release never precedes the one already scheduled.
-    fn schedule_sweep<V: 'static>(&mut self, get: fn(&mut V) -> &mut Self, cx: &mut Context<V>) {
+    fn schedule_sweep<V: 'static>(&mut self, get: fn(&mut V) -> &mut Self, cx: &Context<V>) {
         if self.sweeper.is_some() {
             return;
         }
@@ -498,13 +482,12 @@ impl ToolImages {
         let delay = at.saturating_duration_since(cx.background_executor().now());
         self.sweeper = Some(cx.spawn(async move |view, cx| {
             cx.background_executor().timer(delay).await;
-            view.update(cx, |view, cx| {
+            let _gone = view.update(cx, |view, cx| {
                 let images = get(view);
                 images.sweeper = None;
                 images.sweep(cx);
                 images.schedule_sweep(get, cx);
-            })
-            .ok();
+            });
         }));
     }
 }
@@ -515,7 +498,7 @@ fn chip_row(chip: &str) -> &str {
 
 fn retained_bytes(image: &RenderImage) -> usize {
     // GPUI keeps the CPU frame for atlas re-uploads plus the GPU copy.
-    image.as_bytes(0).map_or(0, |b| b.len() * 2)
+    image.as_bytes(0).map_or(0, |b| b.len().saturating_mul(2))
 }
 
 const fn state_bytes(state: &State) -> usize {
@@ -573,34 +556,42 @@ fn decode_thumbnail(mime: &str, bytes: Vec<u8>) -> Option<(Arc<RenderImage>, f32
     }
     Some((
         Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])),
-        width as f32 / height as f32,
+        crate::transcript::num::side(width) / crate::transcript::num::side(height),
     ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use gpui::AppContext as _;
 
     use super::*;
 
-    fn paths(call: ToolCall, output: Option<&str>) -> Vec<String> {
-        image_paths(&call, output).iter().map(ToString::to_string).collect()
+    fn paths(call: &ToolCall, output: Option<&str>) -> Vec<String> {
+        image_paths(call, output).iter().map(ToString::to_string).collect()
     }
 
     #[test]
     fn finds_images_in_paths_commands_output_and_json() {
-        assert_eq!(paths(ToolCall::ReadFile { path: "shots/A.PNG".into() }, None), ["shots/A.PNG"]);
-        assert!(paths(ToolCall::ReadFile { path: "src/main.rs".into() }, None).is_empty());
+        assert_eq!(
+            paths(&ToolCall::ReadFile { path: "shots/A.PNG".into() }, None),
+            ["shots/A.PNG"]
+        );
+        assert_eq!(
+            paths(&ToolCall::ReadFile { path: "src/main.rs".into() }, None),
+            Vec::<String>::new()
+        );
         assert_eq!(
             paths(
-                ToolCall::Exec { command: "python plot.py --out=chart.png".into() },
+                &ToolCall::Exec { command: "python plot.py --out=chart.png".into() },
                 Some("Saved to /tmp/x/chart.png.\nsee https://a.b/c.png and **/*.jpg")
             ),
             ["chart.png", "/tmp/x/chart.png"]
         );
         assert_eq!(
             paths(
-                ToolCall::Mcp {
+                &ToolCall::Mcp {
                     server: "browser".into(),
                     tool: "screenshot".into(),
                     input: Some(serde_json::json!({"opts": {"file": r"C:\shots\home.webp"}}))
@@ -609,8 +600,11 @@ mod tests {
             ),
             [r"C:\shots\home.webp"]
         );
-        let many = (0..9).map(|i| format!("{i}.jpg ")).collect::<String>();
-        assert_eq!(paths(ToolCall::Exec { command: many }, None).len(), MAX_IMAGES_PER_TOOL);
+        let many = (0..9).fold(String::new(), |mut many, i| {
+            let _written = write!(many, "{i}.jpg ");
+            many
+        });
+        assert_eq!(paths(&ToolCall::Exec { command: many }, None).len(), MAX_IMAGES_PER_TOOL);
     }
 
     #[test]
@@ -638,15 +632,16 @@ mod tests {
             "C:i.png",
         ]
         .join("\n");
-        let found = paths(ToolCall::Exec { command: "open ok.png".into() }, Some(&output));
+        let found = paths(&ToolCall::Exec { command: "open ok.png".into() }, Some(&output));
         assert_eq!(found, ["ok.png"]);
-        assert!(
-            paths(ToolCall::ReadFile { path: r"\\attacker\share\a.png".into() }, None).is_empty()
+        assert_eq!(
+            paths(&ToolCall::ReadFile { path: r"\\attacker\share\a.png".into() }, None),
+            Vec::<String>::new()
         );
         // Ordinary absolute paths in both styles still preview.
         assert_eq!(
             paths(
-                ToolCall::Exec { command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into() },
+                &ToolCall::Exec { command: r"cp /tmp/a.png C:\shots\b.png D:/c.png".into() },
                 None
             ),
             ["/tmp/a.png", r"C:\shots\b.png", "D:/c.png"]
@@ -661,7 +656,10 @@ mod tests {
             .unwrap();
         let (image, aspect) = decode_thumbnail("image/png", png.into_inner()).unwrap();
         let size = image.size(0);
-        assert!(size.width.0 as u32 <= THUMB_MAX.0 && size.height.0 as u32 <= THUMB_MAX.1);
+        assert!(
+            u32::try_from(size.width.0).is_ok_and(|width| width <= THUMB_MAX.0)
+                && u32::try_from(size.height.0).is_ok_and(|height| height <= THUMB_MAX.1)
+        );
         assert_eq!(aspect, 4.0);
         // Red in RGBA is [0, 0, 255, 255] in BGRA.
         assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
@@ -694,7 +692,7 @@ mod tests {
                 Entry { state: State::Loading(Task::ready(()), None), release_at: None },
             );
             host.images.finish(
-                key.clone(),
+                &key,
                 Some((Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), 2.0)),
                 cx,
             );
@@ -707,7 +705,7 @@ mod tests {
             }
             assert!(!host.images.is_idle());
         });
-        cx.executor().advance_clock(RELEASE_GRACE / 2);
+        cx.executor().advance_clock(RELEASE_GRACE.checked_div(2).unwrap());
         cx.run_until_parked();
         host.update(cx, |host, _| assert!(!host.images.is_idle()));
         cx.executor().advance_clock(RELEASE_GRACE);
@@ -722,7 +720,7 @@ mod tests {
             assert!(matches!(thumbs[0], Thumb::Failed));
             host.images.release(&chip, get, cx);
         });
-        cx.executor().advance_clock(RELEASE_GRACE * 2);
+        cx.executor().advance_clock(RELEASE_GRACE.saturating_mul(2));
         cx.run_until_parked();
         host.update(cx, |host, _| assert!(host.images.is_idle()));
     }
@@ -745,7 +743,7 @@ mod tests {
             host.images.release_row("r2", get, cx);
             assert!(host.images.holders.is_empty());
         });
-        cx.executor().advance_clock(RELEASE_GRACE * 2);
+        cx.executor().advance_clock(RELEASE_GRACE.saturating_mul(2));
         cx.run_until_parked();
         host.update(cx, |host, _| assert!(host.images.is_idle()));
     }
@@ -764,7 +762,7 @@ mod tests {
             assert!(host.images.entries[&a].release_at.is_some());
             assert!(host.images.entries[&b].release_at.is_none());
         });
-        cx.executor().advance_clock(RELEASE_GRACE * 2);
+        cx.executor().advance_clock(RELEASE_GRACE.saturating_mul(2));
         cx.run_until_parked();
         host.update(cx, |host, _| {
             assert!(!host.images.entries.contains_key(&a));
@@ -784,7 +782,7 @@ mod tests {
             // 2048² BGRA = 16 MiB CPU + 16 MiB GPU per preview.
             let image =
                 RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(2048, 2048))]);
-            host.images.finish(key, Some((Arc::new(image), 1.0)), cx);
+            host.images.finish(&key, Some((Arc::new(image), 1.0)), cx);
         };
         host.update(cx, |host, cx| {
             for i in 0..3 {
@@ -794,7 +792,7 @@ mod tests {
             assert_eq!(host.images.entries.len(), 3);
             assert!(host.images.retained_bytes() > BUDGET_BYTES);
         });
-        cx.executor().advance_clock(STALE_AFTER * 2);
+        cx.executor().advance_clock(STALE_AFTER.saturating_mul(2));
         host.update(cx, |host, cx| {
             insert(host, 3, cx);
             assert!(host.images.retained_bytes() <= BUDGET_BYTES);

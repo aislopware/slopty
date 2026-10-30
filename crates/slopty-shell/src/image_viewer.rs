@@ -1,11 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
 //! Shared image geometry and native pointer gestures. Scaling reuses the texture.
-#![allow(
-    clippy::suboptimal_flops,
-    clippy::too_many_arguments,
-    clippy::unreadable_literal,
-    reason = "shell lint migration: slice B"
-)]
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,8 +10,20 @@ use gpui::{
     Window, div, point, px, size,
 };
 
+/// One picture's viewer: its fit, zoom and pan, and the drag under way, shared by every
+/// handler its element sets up.
 #[derive(Clone, Default)]
 pub struct ImageView(Rc<RefCell<ViewState>>);
+
+impl std::fmt::Debug for ImageView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.0.borrow();
+        f.debug_struct("ImageView")
+            .field("geometry", &state.geometry)
+            .field("dragged", &state.dragged)
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Default)]
 struct ViewState {
@@ -81,8 +87,8 @@ impl Geometry {
 
     fn clamp_pan(&mut self) {
         let limit = point(
-            ((self.natural.width * self.scale - self.viewport.width) / 2.0).max(0.0),
-            ((self.natural.height * self.scale - self.viewport.height) / 2.0).max(0.0),
+            (self.natural.width.mul_add(self.scale, -self.viewport.width) / 2.0).max(0.0),
+            (self.natural.height.mul_add(self.scale, -self.viewport.height) / 2.0).max(0.0),
         );
         self.pan.x = self.pan.x.clamp(-limit.x, limit.x);
         self.pan.y = self.pan.y.clamp(-limit.y, limit.y);
@@ -93,15 +99,15 @@ impl Geometry {
             return;
         }
         // Bound layout coordinates even for SVGs with enormous logical dimensions.
-        let maximum = (131072.0 / self.natural.width.max(self.natural.height))
+        let maximum = (131_072.0 / self.natural.width.max(self.natural.height))
             .min(32.0)
             .max(self.fit_scale());
         let scale = scale.clamp(self.fit_scale().min(0.01), maximum);
         let ratio = scale / self.scale;
         let anchor = anchor - point(self.viewport.width / 2.0, self.viewport.height / 2.0);
         self.pan = point(
-            anchor.x - (anchor.x - self.pan.x) * ratio,
-            anchor.y - (anchor.y - self.pan.y) * ratio,
+            (anchor.x - self.pan.x).mul_add(-ratio, anchor.x),
+            (anchor.y - self.pan.y).mul_add(-ratio, anchor.y),
         );
         self.scale = scale;
         self.fitted = false;
@@ -120,8 +126,8 @@ impl Geometry {
 
     fn image_origin(&self) -> Point<f32> {
         point(
-            (self.viewport.width - self.natural.width * self.scale) / 2.0 + self.pan.x,
-            (self.viewport.height - self.natural.height * self.scale) / 2.0 + self.pan.y,
+            self.natural.width.mul_add(-self.scale, self.viewport.width) / 2.0 + self.pan.x,
+            self.natural.height.mul_add(-self.scale, self.viewport.height) / 2.0 + self.pan.y,
         )
     }
 }
@@ -196,23 +202,34 @@ impl ViewState {
     }
 }
 
+/// What a click on the picture itself (not the room around it) does.
 pub type ImageClick = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl ImageView {
+    /// A press begins: what follows is a click until it drags.
     pub fn begin_click(&self) {
         let mut state = self.0.borrow_mut();
         state.drag = None;
         state.dragged = false;
     }
 
+    /// Whether the press under way dragged the picture, so its release is no click.
+    #[must_use]
     pub fn dragged(&self) -> bool {
         self.0.borrow().dragged
     }
 
+    /// Back to the picture fitted, nothing under way: a viewer opened afresh.
     pub fn reset(&self) {
         *self.0.borrow_mut() = ViewState::default();
     }
 
+    /// `image` at `natural` size, fitted to the room it is given until zoomed (a pinch, or the
+    /// wheel with Control) and dragged; `plate` fills behind a transparent one.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "shell lint migration: seam, callers in slice C (`_window` and `_cx` are unused)"
+    )]
     pub fn render(
         &self,
         image: Arc<Image>,
@@ -286,8 +303,8 @@ impl ImageView {
                 let origin = geometry.image_origin();
                 let inside = local.x >= origin.x
                     && local.y >= origin.y
-                    && local.x <= origin.x + geometry.natural.width * geometry.scale
-                    && local.y <= origin.y + geometry.natural.height * geometry.scale;
+                    && local.x <= geometry.natural.width.mul_add(geometry.scale, origin.x)
+                    && local.y <= geometry.natural.height.mul_add(geometry.scale, origin.y);
                 drop(state);
                 if inside && let Some(on_click) = &on_image_click {
                     cx.stop_propagation();

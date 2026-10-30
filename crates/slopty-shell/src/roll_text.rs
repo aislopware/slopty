@@ -15,17 +15,6 @@
 //! only exists for the ~0.7s a roll takes. Glyphs are painted from the shaped
 //! lines themselves, so kerning matches the plain label and the hand-off at
 //! the end is invisible.
-#![allow(
-    let_underscore_drop,
-    clippy::arithmetic_side_effects,
-    clippy::cast_precision_loss,
-    clippy::let_underscore_must_use,
-    clippy::let_underscore_untyped,
-    clippy::needless_pass_by_value,
-    clippy::renamed_function_params,
-    clippy::string_slice,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -101,6 +90,10 @@ pub fn roll_text(
 
 /// The rolling element while `key`'s label is mid-roll, else `None` — for
 /// callers with their own at-rest presentation. Records `text` either way.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "shell lint migration: seam, callers in slice A (`text` could be borrowed)"
+)]
 pub fn rolling(
     key: impl Into<SharedString>,
     text: SharedString,
@@ -140,15 +133,19 @@ pub fn rolling(
 fn shared_ends(from: &str, to: &str) -> (usize, usize) {
     let prefix: usize =
         from.chars().zip(to.chars()).take_while(|(a, b)| a == b).map(|(c, _)| c.len_utf8()).sum();
-    let room = (from.len() - prefix).min(to.len() - prefix);
-    let suffix: usize = from[prefix..]
+    // The prefix ends on a char boundary of both: it is the bytes of chars they share.
+    let (Some(from_rest), Some(to_rest)) = (from.get(prefix..), to.get(prefix..)) else {
+        return (prefix, 0);
+    };
+    let room = from_rest.len().min(to_rest.len());
+    let suffix: usize = from_rest
         .chars()
         .rev()
-        .zip(to[prefix..].chars().rev())
+        .zip(to_rest.chars().rev())
         .take_while(|(a, b)| a == b)
         .map(|(c, _)| c.len_utf8())
-        .scan(0, |sum, len| {
-            *sum += len;
+        .scan(0_usize, |sum, len| {
+            *sum = sum.saturating_add(len);
             Some(*sum)
         })
         .take_while(|sum| *sum <= room)
@@ -266,24 +263,26 @@ impl Element for RollText {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        shaped: &mut Shaped,
+        request_layout: &mut Shaped,
         _prepaint: &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {
+        let shaped = &*request_layout;
         let elapsed = self.elapsed(window, cx);
         let duration = DURATION.as_secs_f32();
         let color = window.text_style().color;
         let font_size = shaped.font_size;
         let travel = f32::from(font_size) * TRAVEL_EM;
         let (prefix, suffix) = shared_ends(&self.roll.from, &self.roll.to);
-        let from_len = self.roll.from.len();
-        let to_len = self.roll.to.len();
+        // Where each side's shared tail begins.
+        let from_tail = self.roll.from.len().saturating_sub(suffix);
+        let to_tail = self.roll.to.len().saturating_sub(suffix);
         // The trailing run slides from its old x to its new one with the width.
         let slide = layout_progress(elapsed);
-        let suffix_dx = f32::from(
-            shaped.from.x_for_index(from_len - suffix) - shaped.to.x_for_index(to_len - suffix),
-        ) * (1.0 - slide);
+        let suffix_dx =
+            f32::from(shaped.from.x_for_index(from_tail) - shaped.to.x_for_index(to_tail))
+                * (1.0 - slide);
 
         // Glyphs of one line with their x extents and role.
         let glyphs = |line: &ShapedLine| {
@@ -318,20 +317,22 @@ impl Element for RollText {
         };
         let from_glyphs = glyphs(&shaped.from);
         let to_glyphs = glyphs(&shaped.to);
-        let changed = |index: usize, len: usize| index >= prefix && index < len - suffix;
+        let changed = |index: usize, tail: usize| index >= prefix && index < tail;
         // Stagger sweeps left to right across each side's changed glyphs.
-        let sweep = |list: &[Glyph], len: usize| {
-            let xs: Vec<f32> = list.iter().filter(|g| changed(g.index, len)).map(|g| g.x).collect();
-            let count = xs.len();
+        let sweep = |list: &[Glyph], tail: usize| {
+            let xs: Vec<f32> =
+                list.iter().filter(|g| changed(g.index, tail)).map(|g| g.x).collect();
             let min = xs.iter().copied().fold(f32::INFINITY, f32::min);
             let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let spread = duration * STAGGER * count.saturating_sub(1) as f32 / count.max(1) as f32;
+            let count = crate::transcript::num::count;
+            let spread =
+                duration * STAGGER * count(xs.len().saturating_sub(1)) / count(xs.len().max(1));
             move |x: f32| {
                 if max > min { spread * ((x - min) / (max - min)).clamp(0.0, 1.0) } else { 0.0 }
             }
         };
-        let from_delay = sweep(&from_glyphs, from_len);
-        let to_delay = sweep(&to_glyphs, to_len);
+        let from_delay = sweep(&from_glyphs, from_tail);
+        let to_delay = sweep(&to_glyphs, to_tail);
 
         let padding_top = (shaped.line_height - shaped.to.ascent - shaped.to.descent) / 2.0;
         let baseline = bounds.origin.y + padding_top + shaped.to.ascent;
@@ -367,31 +368,37 @@ impl Element for RollText {
                     return;
                 }
                 let origin = point(px(left + dx), px(f32::from(baseline) + glyph.y + dy));
-                let _ = window.paint_emoji(origin, glyph.font, glyph.id, font_size);
+                if let Err(error) = window.paint_emoji(origin, glyph.font, glyph.id, font_size) {
+                    tracing::debug!(%error, "roll emoji");
+                }
                 return;
             }
             if motion <= 0.0 && dx == 0.0 && dy == 0.0 {
                 // At rest (the shared runs): the ordinary pipeline, so these
                 // glyphs antialias exactly like the label they hand off to.
-                let _ = window.paint_glyph(
+                if let Err(error) = window.paint_glyph(
                     rest_origin,
                     glyph.font,
                     glyph.id,
                     font_size,
                     color.opacity(alpha.min(1.0)),
-                );
+                ) {
+                    tracing::debug!(%error, "roll glyph");
+                }
                 return;
             }
             if scale >= 1.0 && motion <= 0.0 {
                 // The sliding tail: a pure translation, same pipeline.
                 let origin = point(px(left + dx), px(f32::from(baseline) + glyph.y + dy));
-                let _ = window.paint_glyph(
+                if let Err(error) = window.paint_glyph(
                     origin,
                     glyph.font,
                     glyph.id,
                     font_size,
                     color.opacity(alpha.min(1.0)),
-                );
+                ) {
+                    tracing::debug!(%error, "roll glyph");
+                }
                 return;
             }
             // Mid-roll: one full-size raster, scaled and tilted about the
@@ -402,7 +409,7 @@ impl Element for RollText {
                 .rotate(Radians((TILT_DEG * motion).to_radians()))
                 .scale(gpui::size(scale, scale))
                 .translate(point(dev(-center_x), dev(-center_y)));
-            let _ = window.paint_glyph_transformed(
+            if let Err(error) = window.paint_glyph_transformed(
                 rest_origin,
                 glyph.font,
                 glyph.id,
@@ -410,11 +417,13 @@ impl Element for RollText {
                 color.opacity(alpha.min(1.0)),
                 transformation,
                 px(f32::from(font_size) * BLUR_EM * motion),
-            );
+            ) {
+                tracing::debug!(%error, "roll glyph");
+            }
         };
         window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
             for glyph in &from_glyphs {
-                if !changed(glyph.index, from_len) {
+                if !changed(glyph.index, from_tail) {
                     continue; // the new line paints the shared runs
                 }
                 let progress =
@@ -432,7 +441,7 @@ impl Element for RollText {
             for glyph in &to_glyphs {
                 if glyph.index < prefix {
                     paint(window, glyph, 0.0, 0.0, 1.0, 0.0, 1.0);
-                } else if glyph.index >= to_len - suffix {
+                } else if glyph.index >= to_tail {
                     paint(window, glyph, suffix_dx, 0.0, 1.0, 0.0, 1.0);
                 } else {
                     let progress =
@@ -479,8 +488,8 @@ mod tests {
         assert_eq!(GLIDE.eval(0.0), 0.0);
         assert_eq!(GLIDE.eval(1.0), 1.0);
         let mut last = 0.0;
-        for i in 0..=200 {
-            let value = GLIDE.eval(i as f32 / 200.0);
+        for i in 0..=200_u8 {
+            let value = GLIDE.eval(f32::from(i) / 200.0);
             assert!(value <= 1.0, "overshoot at {i}: {value}");
             assert!(value >= last, "not monotonic at {i}");
             last = value;

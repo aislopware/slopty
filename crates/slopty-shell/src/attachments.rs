@@ -6,32 +6,10 @@
 //! ([`parse_user_message_images`]); the decoded images are cached by `(deviceId, path)`.
 //!
 //! TUI-first, nothing is staged or uploaded here: the GUI sends the agent nothing.
-#![allow(
-    missing_debug_implementations,
-    missing_docs,
-    rustdoc::private_intra_doc_links,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assertions_on_result_states,
-    clippy::assigning_clones,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::clone_on_ref_ptr,
-    clippy::default_trait_access,
-    clippy::field_scoped_visibility_modifiers,
-    clippy::implicit_hasher,
-    clippy::indexing_slicing,
-    clippy::needless_pass_by_value,
-    clippy::partial_pub_fields,
-    clippy::significant_drop_tightening,
-    clippy::string_slice,
-    clippy::too_long_first_doc_paragraph,
-    clippy::unreachable,
-    reason = "shell lint migration: slice B"
-)]
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -42,11 +20,14 @@ use gpui::{AnyElement, BackgroundExecutor, Image, ImageFormat, SharedString, Siz
 use parking_lot::Mutex;
 use slopty_view_rpc::methods;
 
+pub use crate::image_viewer::ImageView;
 use crate::state::EngineHandle;
 use crate::theme::ink;
 
 /// The largest attachment read back.
-pub const MAX_ATTACHMENT_BYTES: u64 = 24 * 1024 * 1024;
+pub const MAX_ATTACHMENT_BYTES: usize = 24 * 1024 * 1024;
+/// [`MAX_ATTACHMENT_BYTES`] as base64.
+const MAX_ATTACHMENT_B64: usize = MAX_ATTACHMENT_BYTES.div_ceil(3) * 4;
 /// The most chunks one read-back takes, which bounds its loop.
 const MAX_READ_CHUNKS: usize = 1_000;
 /// How much of a file's first chunk a head reader sees, as base64 (64 KiB of bytes).
@@ -90,15 +71,20 @@ pub(crate) fn with_attachments(text: &str, paths: &[String]) -> String {
 /// An attachment ref parsed back out of a user message's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserImageAttachment {
+    /// Its place in the trailer and its path (`0:/a/b.png`), unique in its message.
     pub id: String,
+    /// Where it is on the machine that holds it.
     pub path: String,
+    /// Its file name, or `image` when the path has none.
     pub name: String,
 }
 
+/// A user message's words and the pictures its trailer names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUserMessage {
     /// The visible words (the refs trailer stripped; empty when a message is only pictures).
     pub text: String,
+    /// The pictures, in the trailer's order.
     pub attachments: Vec<UserImageAttachment>,
 }
 
@@ -111,16 +97,19 @@ fn name_from_path(path: &str) -> String {
 /// with `Attached images (local files` and ending `):`. Returns
 /// `(body_end, refs_start)` byte offsets.
 fn find_refs_marker(content: &str) -> Option<(usize, usize)> {
+    // ASCII lowercasing keeps every byte where it was, so an offset in `lower` is one in
+    // `content`, and the needle's ASCII bounds are char boundaries in both.
     let lower = content.to_ascii_lowercase();
     let needle = "\n\nattached images (local files";
     let mut from = 0_usize;
-    while let Some(rel) = lower[from..].find(needle) {
-        let gap = from + rel;
-        let line_start = gap + 2;
-        let line_end = content[line_start..].find('\n').map_or(content.len(), |p| line_start + p);
-        let line = content[line_start..line_end].trim_end_matches('\r');
+    while let Some(rel) = lower.get(from..)?.find(needle) {
+        let gap = from.saturating_add(rel);
+        let line_start = gap.saturating_add(2);
+        let rest = content.get(line_start..)?;
+        let line_end = rest.find('\n').map_or(content.len(), |p| line_start.saturating_add(p));
+        let line = content.get(line_start..line_end)?.trim_end_matches('\r');
         if line.ends_with("):") {
-            let refs_start = (line_end + 1).min(content.len());
+            let refs_start = line_end.saturating_add(1).min(content.len());
             return Some((gap, refs_start));
         }
         from = line_start;
@@ -133,8 +122,11 @@ pub fn parse_user_message_images(content: &str) -> ParsedUserMessage {
     let Some((body_end, refs_start)) = find_refs_marker(content) else {
         return ParsedUserMessage { text: content.to_owned(), attachments: Vec::new() };
     };
-    let body = content[..body_end].trim_end();
-    let attachments: Vec<UserImageAttachment> = content[refs_start..]
+    let (Some(body), Some(refs)) = (content.get(..body_end), content.get(refs_start..)) else {
+        return ParsedUserMessage { text: content.to_owned(), attachments: Vec::new() };
+    };
+    let body = body.trim_end();
+    let attachments: Vec<UserImageAttachment> = refs
         .lines()
         .filter_map(|line| {
             let path = line.trim_start().strip_prefix("- ")?.trim();
@@ -188,8 +180,19 @@ pub(crate) async fn call_with_timeout(
 
 /// A transcript image read back from the owning device.
 pub struct LoadedAttachmentImage {
+    /// Its file name.
     pub name: String,
+    /// The image, decoded.
     pub image: Arc<Image>,
+}
+
+impl std::fmt::Debug for LoadedAttachmentImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadedAttachmentImage")
+            .field("name", &self.name)
+            .field("bytes", &self.image.bytes.len())
+            .finish()
+    }
 }
 
 /// `ReadAttachmentChunk` loop: 45KB base64 chunks until `done` (bounded, with
@@ -240,19 +243,20 @@ pub(crate) async fn read_attachment_bytes_with(
         )
         .await
         .ok()?;
-        name = chunk.get("name")?.as_str()?.to_owned();
-        mime = chunk.get("mimeType")?.as_str()?.to_owned();
+        chunk.get("name")?.as_str()?.clone_into(&mut name);
+        chunk.get("mimeType")?.as_str()?.clone_into(&mut mime);
         if expected_raster_mime.is_some_and(|expected| expected != mime) {
             return None;
         }
         let data = chunk.get("data")?.as_str()?;
-        if b64.len().saturating_add(data.len()) > (MAX_ATTACHMENT_BYTES as usize).div_ceil(3) * 4 {
+        if b64.len().saturating_add(data.len()) > MAX_ATTACHMENT_B64 {
             return None;
         }
         if offset == 0 {
             // At most 64 KiB of the first chunk, cut on a base64 quantum.
-            let cut = data.len().min(HEAD_B64) / 4 * 4;
-            if let Ok(first) = BASE64.decode(&data.as_bytes()[..cut]) {
+            let cut = (data.len().min(HEAD_B64) / 4).saturating_mul(4);
+            if let Some(Ok(first)) = data.as_bytes().get(..cut).map(|quanta| BASE64.decode(quanta))
+            {
                 head(&first);
             }
         }
@@ -276,6 +280,10 @@ pub(crate) async fn read_attachment_bytes_with(
     Some((name, mime, bytes))
 }
 
+/// The image at `path` on `target_device_id` (this machine when `None`), read back and decoded.
+///
+/// With `expected_raster_mime`, only a raster of that type, normalised as a generated image is.
+/// `None` when it cannot be read or is not that.
 pub async fn read_attachment_image(
     engine: &EngineHandle,
     executor: &BackgroundExecutor,
@@ -298,13 +306,9 @@ pub async fn read_attachment_image(
         let expected = expected.to_owned();
         executor
             .spawn(async move {
-                crate::image_media::decode_generated_image(
-                    bytes,
-                    &expected,
-                    MAX_ATTACHMENT_BYTES as usize,
-                )
-                .ok()
-                .map(|media| media.image)
+                crate::image_media::decode_generated_image(bytes, &expected, MAX_ATTACHMENT_BYTES)
+                    .ok()
+                    .map(|media| media.image)
             })
             .await?
     } else {
@@ -324,18 +328,32 @@ pub async fn read_attachment_image(
 /// A decoded transcript image, ready for `img(...)`.
 #[derive(Clone)]
 pub struct CachedAttachmentImage {
+    /// Its file name.
     pub name: SharedString,
+    /// The image, decoded.
     pub image: Arc<Image>,
 }
 
+impl std::fmt::Debug for CachedAttachmentImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedAttachmentImage")
+            .field("name", &self.name)
+            .field("bytes", &self.image.bytes.len())
+            .finish()
+    }
+}
+
 /// What a render pass sees for one `(deviceId, path)` source.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum AttachmentSnapshot {
+    /// Being read, or not asked for yet.
     Loading,
+    /// Read and decoded.
     Loaded(CachedAttachmentImage),
     /// Load failed; `retry_in` is how long until `begin_load_for` would hand out
     /// another attempt (an exponential ladder from 2 s to 15 s).
     Error {
+        /// How long until the next attempt.
         retry_in: Duration,
     },
 }
@@ -381,25 +399,27 @@ struct ImageCache {
     pending_free: Vec<Arc<Image>>,
 }
 
+/// A PNG's width and height in pixels, read off its header; `None` for anything else, or a
+/// side of 0.
 pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+    if bytes.get(..8)? != PNG_SIGNATURE || bytes.get(12..16)? != b"IHDR" {
         return None;
     }
-    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    let width = u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?);
+    let height = u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?);
     (width > 0 && height > 0).then_some((width, height))
 }
 
 impl ImageCache {
-    fn insert_loaded(&mut self, key: AttachmentKey, image: CachedAttachmentImage) {
+    fn insert_loaded(&mut self, key: &AttachmentKey, image: CachedAttachmentImage) {
         // Generated rasters are normalized to PNG; account for their decoded
         // CPU/GPU copies as well as encoded bytes in the existing cache budget.
         let pixels = png_dimensions(&image.image.bytes)
             .map_or(0, |(w, h)| (w as usize).saturating_mul(h as usize));
         let bytes = image.image.bytes.len().saturating_add(pixels.saturating_mul(8));
         let generated = key.raster_mime.is_some();
-        self.tick += 1;
+        self.tick = self.tick.wrapping_add(1);
         if let Some(CacheEntry::Loaded { image, bytes, .. }) =
             self.map.insert(key.clone(), CacheEntry::Loaded { image, bytes, last_used: self.tick })
         {
@@ -426,7 +446,7 @@ impl ImageCache {
                 .map
                 .iter()
                 .filter(|(k, _)| {
-                    **k != key
+                    *k != key
                         && k.raster_mime.is_some() == generated
                         && (k.raster_mime.is_some()
                             || !shielded.contains(&(k.device.clone(), k.path.clone())))
@@ -474,15 +494,16 @@ fn protected() -> &'static Mutex<std::collections::HashSet<(String, String)>> {
     PROTECTED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Replace the eviction shield with the given keys (see [`protected`]).
-pub fn protect_attachments(keys: std::collections::HashSet<(String, String)>) {
-    *protected().lock() = keys;
+/// Shield `keys` (device id, path) from eviction, in place of those shielded before: the
+/// open transcript's pictures, which its rows may draw from their cache however long ago.
+pub fn protect_attachments(keys: impl IntoIterator<Item = (String, String)>) {
+    *protected().lock() = keys.into_iter().collect();
 }
 
 pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnapshot {
     let mut cache = cache().lock();
     let tick = {
-        cache.tick += 1;
+        cache.tick = cache.tick.wrapping_add(1);
         cache.tick
     };
     match cache.map.get_mut(source) {
@@ -498,9 +519,10 @@ pub(crate) fn attachment_snapshot_for(source: &AttachmentKey) -> AttachmentSnaps
     }
 }
 
-/// Release gpui's decoded copies of evicted images: the asset-system entry
-/// AND the sprite-atlas tiles (`ImageSource::evict` — `remove_asset` alone
-/// left the tiles resident forever). Pass the window being updated when
+/// Release gpui's decoded copies of evicted images.
+///
+/// Both the asset-system entry AND the sprite-atlas tiles (`ImageSource::evict` — `remove_asset`
+/// alone left the tiles resident forever). Pass the window being updated when
 /// calling from a render path, since that window is detached from
 /// `App::windows` during its own update. Cheap when nothing was evicted.
 pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) {
@@ -515,8 +537,7 @@ pub fn flush_evicted(mut window: Option<&mut gpui::Window>, cx: &mut gpui::App) 
 /// Errored sources hand out a retry only after their backoff has elapsed.
 pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
     let mut cache = cache().lock();
-    let entry = cache.map.entry(source.clone());
-    match entry {
+    let claimed = match cache.map.entry(source.clone()) {
         std::collections::hash_map::Entry::Vacant(v) => {
             v.insert(CacheEntry::Loading { attempts: 0 });
             true
@@ -531,7 +552,9 @@ pub(crate) fn begin_load_for(source: &AttachmentKey) -> bool {
             }
             _ => false,
         },
-    }
+    };
+    drop(cache);
+    claimed
 }
 
 /// A cancelled view/task must release its claim so reopening can retry it.
@@ -540,9 +563,9 @@ pub(crate) struct AttachmentLoadGuard(pub AttachmentKey);
 
 impl Drop for AttachmentLoadGuard {
     fn drop(&mut self) {
-        let mut cache = cache().lock();
-        if let Some(entry @ CacheEntry::Loading { .. }) = cache.map.get_mut(&self.0) {
-            let CacheEntry::Loading { attempts } = entry else { unreachable!() };
+        if let Some(entry) = cache().lock().map.get_mut(&self.0)
+            && let CacheEntry::Loading { attempts } = *entry
+        {
             *entry = CacheEntry::Error {
                 attempts: attempts.saturating_add(1),
                 at: crate::clock::stopwatch(), // a retry's wait, not a moment drawn
@@ -552,13 +575,13 @@ impl Drop for AttachmentLoadGuard {
 }
 
 pub(crate) fn store_loaded_for(source: &AttachmentKey, name: SharedString, image: Arc<Image>) {
-    cache().lock().insert_loaded(source.clone(), CachedAttachmentImage { name, image });
+    cache().lock().insert_loaded(source, CachedAttachmentImage { name, image });
 }
 
 pub(crate) fn store_error_for(source: &AttachmentKey) {
     let mut cache = cache().lock();
     let attempts = match cache.map.get(source) {
-        Some(CacheEntry::Loading { attempts }) => attempts + 1,
+        Some(CacheEntry::Loading { attempts }) => attempts.saturating_add(1),
         Some(CacheEntry::Error { attempts, .. }) => *attempts,
         _ => 1,
     };
@@ -578,16 +601,30 @@ pub(crate) fn store_error_for(source: &AttachmentKey) {
 /// A full-size preview target (staged strip or transcript thumbnail).
 #[derive(Clone)]
 pub struct PreviewImage {
+    /// Its file name, which the lightbox's caption and its dialog say.
     pub name: SharedString,
+    /// The image, decoded.
     pub image: Arc<Image>,
-    pub(crate) viewer: crate::image_viewer::ImageView,
+    /// Its viewer's fit, zoom and pan.
+    pub viewer: ImageView,
     /// Fill behind an image drawn on a transparent canvas (diagrams).
-    pub(crate) plate: Option<gpui::Hsla>,
+    pub plate: Option<gpui::Hsla>,
+}
+
+impl std::fmt::Debug for PreviewImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreviewImage")
+            .field("name", &self.name)
+            .field("bytes", &self.image.bytes.len())
+            .field("plate", &self.plate)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreviewImage {
+    /// Image `image`, named `name`, fitted, with no plate.
     pub fn new(name: impl Into<SharedString>, image: Arc<Image>) -> Self {
-        Self { name: name.into(), image, viewer: Default::default(), plate: None }
+        Self { name: name.into(), image, viewer: ImageView::default(), plate: None }
     }
 
     pub(crate) const fn with_plate(mut self, plate: gpui::Hsla) -> Self {
@@ -621,15 +658,22 @@ pub(crate) fn lightbox_with_size(
     let max_h = px(f32::from(viewport.height) * 0.85);
     let max_w = px(f32::from(viewport.width) * 0.9);
     let natural_size = natural_size.or_else(|| {
-        preview.image.clone().use_render_image(window, cx).map(|image| {
+        Arc::clone(&preview.image).use_render_image(window, cx).map(|image| {
             let dimensions = image.size(0);
-            gpui::size(px(dimensions.width.0 as f32), px(dimensions.height.0 as f32))
+            let side =
+                |pixels: i32| u32::try_from(pixels).map_or(0.0, crate::transcript::num::side);
+            gpui::size(px(side(dimensions.width.0)), px(side(dimensions.height.0)))
         })
     });
     let content = match natural_size {
-        Some(natural) => {
-            preview.viewer.render(preview.image.clone(), natural, None, preview.plate, window, cx)
-        }
+        Some(natural) => preview.viewer.render(
+            Arc::clone(&preview.image),
+            natural,
+            None,
+            preview.plate,
+            window,
+            cx,
+        ),
         // The house's pending line, shown only past its grace.
         None => {
             crate::loaders::pending("attachment-preview-load", "Loading image…").into_any_element()
@@ -647,9 +691,9 @@ pub(crate) fn lightbox_with_size(
         }
     });
     let caption_top = (viewport.height + fitted_h) / 2.0 + px(12.0);
-    let on_close = std::rc::Rc::new(on_close);
-    let close_on_key = on_close.clone();
-    let close_on_button = on_close.clone();
+    let on_close = Rc::new(on_close);
+    let close_on_key = Rc::clone(&on_close);
+    let close_on_button = Rc::clone(&on_close);
     let press_state = preview.viewer.clone();
     let click_state = preview.viewer.clone();
     // A close a screen reader and a finger reach (a phone has no Escape), clear of the
@@ -752,7 +796,7 @@ mod tests {
     struct Shown {
         preview: PreviewImage,
         focus: gpui::FocusHandle,
-        closed: std::rc::Rc<std::cell::Cell<bool>>,
+        closed: Rc<std::cell::Cell<bool>>,
     }
 
     impl Render for Shown {
@@ -761,7 +805,7 @@ mod tests {
             window: &mut gpui::Window,
             cx: &mut Context<Self>,
         ) -> impl IntoElement {
-            let closed = self.closed.clone();
+            let closed = Rc::clone(&self.closed);
             div().size_full().child(lightbox(
                 window,
                 &self.preview,
@@ -780,9 +824,9 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(crate::theme::Theme::dark());
         });
-        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let closed = Rc::new(std::cell::Cell::new(false));
         let (_, cx) = cx.add_window_view({
-            let closed = closed.clone();
+            let closed = Rc::clone(&closed);
             move |_, cx| {
                 let png = {
                     let mut bytes = std::io::Cursor::new(Vec::new());
@@ -881,7 +925,7 @@ mod tests {
     fn plain_text_passes_through_unchanged() {
         assert_eq!(with_attachments("hello", &[]), "hello");
         let parsed = parse_user_message_images("hello\n\nno images here");
-        assert!(parsed.attachments.is_empty());
+        assert_eq!(parsed.attachments, []);
         assert_eq!(parsed.text, "hello\n\nno images here");
     }
 
@@ -895,7 +939,7 @@ mod tests {
         let empty = parse_user_message_images(
             "hi\n\nAttached images (local files — open them to view):\nnothing",
         );
-        assert!(empty.attachments.is_empty());
+        assert_eq!(empty.attachments, []);
         assert!(empty.text.contains("Attached images"));
     }
 
@@ -934,7 +978,11 @@ mod generated_image_tests {
         let png = AttachmentKey::new(owner, path, Some("image/png"));
         let gif = AttachmentKey::new(owner, path, Some("image/gif"));
         let raw = Arc::new(Image::from_bytes(ImageFormat::Gif, b"GIF89a".to_vec()));
-        store_loaded_for(&AttachmentKey::new(owner, path, None), "image.gif".into(), raw.clone());
+        store_loaded_for(
+            &AttachmentKey::new(owner, path, None),
+            "image.gif".into(),
+            Arc::clone(&raw),
+        );
         assert!(matches!(attachment_snapshot_for(&png), AttachmentSnapshot::Loading));
         assert!(begin_load_for(&png));
         assert!(!begin_load_for(&png));
@@ -959,7 +1007,7 @@ mod generated_image_tests {
             bytes.extend_from_slice(&2048_u32.to_be_bytes());
             bytes.extend_from_slice(&2048_u32.to_be_bytes());
             cache.insert_loaded(
-                AttachmentKey::new("bounded-history", &format!("/{i}.png"), Some("image/png")),
+                &AttachmentKey::new("bounded-history", &format!("/{i}.png"), Some("image/png")),
                 CachedAttachmentImage {
                     name: "generated.png".into(),
                     image: Arc::new(Image::from_bytes(ImageFormat::Png, bytes)),
@@ -992,23 +1040,20 @@ mod generated_image_tests {
             crate::image_media::decode_generated_image(
                 bytes.clone(),
                 "image/jpeg",
-                MAX_ATTACHMENT_BYTES as usize
+                MAX_ATTACHMENT_BYTES
             )
             .is_err()
         );
-        let decoded = crate::image_media::decode_generated_image(
-            bytes,
-            "image/png",
-            MAX_ATTACHMENT_BYTES as usize,
-        )
-        .unwrap();
+        let decoded =
+            crate::image_media::decode_generated_image(bytes, "image/png", MAX_ATTACHMENT_BYTES)
+                .unwrap();
         assert_eq!(decoded.width, 2048.0);
         assert!(decoded.bytes < IMAGE_CACHE_BUDGET_BYTES);
         assert!(
             crate::image_media::decode_generated_image(
                 b"GIF89a".to_vec(),
                 "image/gif",
-                MAX_ATTACHMENT_BYTES as usize
+                MAX_ATTACHMENT_BYTES
             )
             .is_err()
         );
@@ -1029,12 +1074,9 @@ mod generated_image_tests {
                     .unwrap();
             }
         }
-        let decoded = crate::image_media::decode_generated_image(
-            bytes,
-            "image/gif",
-            MAX_ATTACHMENT_BYTES as usize,
-        )
-        .unwrap();
+        let decoded =
+            crate::image_media::decode_generated_image(bytes, "image/gif", MAX_ATTACHMENT_BYTES)
+                .unwrap();
         assert_eq!(image::guess_format(&decoded.image.bytes).unwrap(), image::ImageFormat::Png);
         let pixels = image::load_from_memory(&decoded.image.bytes).unwrap().to_rgba8();
         assert_eq!(pixels.get_pixel(0, 0).0, [255, 0, 0, 255]);
@@ -1108,7 +1150,7 @@ mod generated_image_tests {
                 .unwrap();
             let calls = Arc::new(Mutex::new(vec![]));
             let engine = EngineHandle::from_test_client(slopty_view_rpc::memory_client(Arc::new(
-                ImageRpc { calls: calls.clone(), bytes: png.into_inner() },
+                ImageRpc { calls: Arc::clone(&calls), bytes: png.into_inner() },
             )));
             let loaded = read_attachment_image(
                 &engine,
@@ -1148,10 +1190,7 @@ mod generated_image_tests {
         // Padding represents a large source with small dimensions; the intake
         // cap is 24 MiB, independent of the workspace preview's 8 MiB cap.
         bytes.resize(9 * 1024 * 1024, 0);
-        assert!(
-            crate::image_media::decode_raster_image(bytes.clone(), MAX_ATTACHMENT_BYTES as usize)
-                .is_ok()
-        );
+        crate::image_media::decode_raster_image(bytes.clone(), MAX_ATTACHMENT_BYTES).unwrap();
         assert!(crate::image_media::decode_raster_image(bytes, 8 * 1024 * 1024).is_err());
     }
 }

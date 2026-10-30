@@ -25,6 +25,17 @@ pub fn micros(span: std::time::Duration) -> u64 {
     u64::try_from(span.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// A side worked out in floats as whole pixels: truncated, with NaN and negatives at 0 and
+/// anything past `u32::MAX` at it.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a float-to-int `as` saturates at the bounds and takes NaN to 0, the clamp wanted"
+)]
+pub const fn whole_side(side: f64) -> u32 {
+    side as u32
+}
+
 /// An image's side in pixels as an `f32`.
 #[expect(
     clippy::cast_precision_loss,

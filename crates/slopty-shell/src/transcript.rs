@@ -5343,7 +5343,7 @@ impl Transcript {
         row_id: &SharedString,
         tools: &[ToolItem],
         steps: &[StepDraw],
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Vec<Option<Vec<(String, crate::tool_images::Thumb)>>> {
         if !tools.iter().any(chip_has_images) {
             return vec![None; tools.len()];
@@ -5395,7 +5395,7 @@ impl Transcript {
 
     /// Rows left the transcript (compact fold settled, history rebuilt):
     /// their chips' previews start the release grace.
-    fn release_departed_tool_images(&mut self, cx: &mut Context<Self>) {
+    fn release_departed_tool_images(&mut self, cx: &Context<Self>) {
         if self.tool_images.is_idle() {
             return;
         }
