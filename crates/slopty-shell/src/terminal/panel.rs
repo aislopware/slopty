@@ -779,6 +779,13 @@ impl Render for TerminalPanel {
         }
         // slopty: what a drop of files on the terminal does, as its view says.
         let drop = hosted.as_ref().and_then(|hosted| hosted.drop.clone());
+        let progress = self.active_tab(cx).and_then(|tab| tab.progress.map(|progress| (tab.key, progress)));
+        // A figureless report sweeps on the loaders' 30 Hz clock, which parks once it goes.
+        let view = cx.entity_id();
+        let sweep = match progress {
+            Some((_, live::Progress::Busy)) => crate::motion::pulse_delta(&crate::motion::SLOPTY_PULSE, view, cx),
+            _ => 0.0,
+        };
         let body = match (hosted, failure) {
             (Some(hosted), _) => hosted.view.into_any_element(),
             (None, Some(failure)) => div()
@@ -809,6 +816,7 @@ impl Render for TerminalPanel {
             .child(
                 div()
                     .id("terminal-body")
+                    .debug_selector(|| "terminal-body-bounds".into())
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -835,10 +843,53 @@ impl Render for TerminalPanel {
                         .absolute()
                         .size_full(),
                     )
-                    .children(drop.map(|words| drop_overlay(words, &theme))),
+                    .children(drop.map(|words| drop_overlay(words, &theme)))
+                    .children(progress.map(|(key, progress)| progress_bar(key, progress, sweep, &theme))),
             )
             .into_any_element()
     }
+}
+
+/// slopty: a running program's progress (`OSC 9;4`) as Ghostty draws it where there is no tab
+/// (`SurfaceProgressBar`): a 2 pt bar along the pane's top edge in the accent, in the danger hue
+/// on a failure and the warning's on a pause, a figureless pause or failure full. With no figure
+/// at all a quarter-wide segment crosses a faint track and back, 1.2 s each way on an ease-in-out,
+/// at `sweep` of its round (still under Reduce Motion). It fades in where it sits, takes no
+/// pointer, and a screen reader hears its share.
+fn progress_bar(key: u64, progress: live::Progress, sweep: f32, theme: &Theme) -> gpui::AnyElement {
+    const HEIGHT: f32 = 2.0;
+    let (hue, share) = match progress {
+        live::Progress::Share(share) => (theme.accent, Some(share)),
+        live::Progress::Busy => (theme.accent, None),
+        live::Progress::Paused(share) => (theme.warning, Some(share.unwrap_or(1.0))),
+        live::Progress::Failed(share) => (theme.danger, Some(share.unwrap_or(1.0))),
+    };
+    let (left, width) = match share {
+        Some(share) => (0.0, share.clamp(0.0, 1.0)),
+        None => {
+            let leg = if sweep < 0.5 { sweep * 2.0 } else { 2.0 - sweep * 2.0 };
+            (0.75 * crate::motion::EASE_IN_OUT.eval(leg), 0.25)
+        }
+    };
+    let fill = div().absolute().top_0().h_full().left(gpui::relative(left)).w(gpui::relative(width)).bg(hue);
+    let percent = progress.percent();
+    let bar = div()
+        .id(("terminal-progress", key))
+        .debug_selector(|| "terminal-progress".into())
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h(px(HEIGHT))
+        .overflow_hidden()
+        .when(share.is_none(), |el| el.bg(hue.opacity(0.3)))
+        .role(gpui::Role::ProgressIndicator)
+        .aria_label("Progress")
+        .when_some(percent, |el, percent| {
+            el.aria_numeric_value(f64::from(percent)).aria_value(SharedString::from(format!("{percent} %")))
+        })
+        .child(fill);
+    crate::motion::fade_quick(("terminal-progress-in", key), bar).into_any_element()
 }
 
 /// slopty: the hint while files are carried over a terminal, zeron's attachment overlay
@@ -998,11 +1049,19 @@ mod progress_tests {
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_some()));
         assert_eq!(tab(cx).and_then(|(_, _, progress)| progress), Some(Progress::Share(0.4)));
+        // Its bar along the pane's top edge, as wide as its share.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let bar = cx.debug_bounds("terminal-progress").expect("the progress bar");
+        let body = cx.debug_bounds("terminal-body-bounds").expect("the body");
+        assert_eq!((bar.top(), f32::from(bar.size.height)), (body.top(), 2.0), "{bar:?} {body:?}");
+        assert_eq!(bar.size.width, body.size.width, "across the pane");
 
         // The report ends (the program cleared it, or the shell's next prompt did): it goes.
         *reported.borrow_mut() = None;
         cx.update(|_, cx| heard.borrow_mut().iter_mut().for_each(|changed| changed(cx)));
         settle(cx, &|cx| tab(cx).is_some_and(|(_, _, progress)| progress.is_none()));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("terminal-progress").is_none(), "and its bar with it");
 
         // The program paints its own background (OSC 11): the tab keeps it as the shown ground,
         // and the chrome hears it once; the same ground said again is no news.
