@@ -151,7 +151,7 @@ fn publish_value<T: PartialEq>(sender: &watch::Sender<Option<Arc<T>>>, value: T)
 }
 
 /// A chat's transcript as the workspace says it.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Transcript {
     /// Its entries.
     pub entries: Vec<SessionMessageEntry>,

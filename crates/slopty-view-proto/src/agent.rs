@@ -1,5 +1,5 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Agent-side wire types: harness identity, streaming events, tool calls.
+//! Agent-side wire types: harness identity, tool calls, checklists and the questions an agent asks.
 
 use serde::{Deserialize, Serialize};
 
@@ -285,12 +285,6 @@ impl ToolCall {
 /// a new adapter naming it any of these needs no code change here.
 const SUBAGENT_MODEL_KEYS: [&str; 4] = ["model", "modelId", "model_id", "subagent_model"];
 
-/// The spawn-input keys tool-call sanitising must preserve so the
-/// chip can name the child's model. Deliberately tiny: everything else on a
-/// spawn's input (the whole prompt, most of all) stays host-local.
-pub const SUBAGENT_INPUT_KEEP: [&str; 5] =
-    ["model", "modelId", "model_id", "subagent_model", "subagent_type"];
-
 /// Where one checklist item stands. Claude's `TodoWrite`, opencode and ACP plans
 /// distinguish the item being worked on from those still waiting; Codex and
 /// Cursor only report done / not done.
@@ -368,18 +362,6 @@ where
     Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
-/// A slash command advertised by the agent (ACP `availableCommands`): typed as
-/// `/name` at the start of the composer, sent to the agent as prompt text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SlashCommand {
-    /// The command, without its slash.
-    pub name: String,
-    /// What it does, in the agent's words.
-    #[serde(default)]
-    pub description: String,
-}
-
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,210 +397,9 @@ pub struct UserInputQuestion {
     pub command: Option<String>,
 }
 
-/// How a turn ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum DoneStatus {
-    /// It finished.
-    Completed,
-    /// The person stopped it.
-    Interrupted,
-    /// It failed.
-    Errored,
-}
-
-/// The normalized streaming event every harness emits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum AgentEvent {
-    /// A session began.
-    #[serde(rename_all = "camelCase")]
-    SessionStarted {
-        /// The agent running it.
-        harness: HarnessId,
-        /// The model it runs on.
-        model: String,
-        /// The tools it has.
-        #[serde(default)]
-        tools: Vec<String>,
-        /// Where it runs.
-        cwd: String,
-        /// Harness-native session id (used for resume).
-        session_id: String,
-        /// The id of the reply it starts.
-        assistant_message_id: String,
-    },
-    /// More of the reply's text.
-    TextDelta {
-        /// The text added.
-        text: String,
-    },
-    /// A generated raster asset. The engine materializes this path before publication.
-    #[serde(rename_all = "camelCase")]
-    GeneratedImage {
-        /// The image's id.
-        id: String,
-        /// Where it is stored.
-        path: String,
-        /// Its file name.
-        name: String,
-        /// Its media type.
-        mime_type: String,
-    },
-    /// An agent-authored visual shown inline in the reply: a Luau script
-    /// that builds native UI (`slopty-visual`). The engine emits it when the
-    /// agent calls Slopty's `show_visual` MCP tool; `path` is the stored
-    /// script on the host device.
-    // The view model emits it from the thread's `show_visual` call; `path` names the
-    // script in that thread (`slopty_ui::view_model::transcript::visual_path`).
-    Visual {
-        /// The visual's id.
-        id: String,
-        /// Where its script is stored.
-        path: String,
-        /// Its title.
-        title: String,
-    },
-    /// More of the agent's thinking.
-    ReasoningDelta {
-        /// The text added.
-        text: String,
-    },
-    /// Backend-internal steering boundary marker.
-    #[serde(rename_all = "camelCase")]
-    AssistantMessageCompleted {
-        /// The reply that ended.
-        assistant_message_id: String,
-    },
-    /// A tool call began.
-    ToolCall {
-        /// The call's id.
-        id: String,
-        /// What it calls.
-        call: ToolCall,
-    },
-    /// A tool call ended.
-    #[serde(rename_all = "camelCase")]
-    ToolResult {
-        /// The call's id.
-        id: String,
-        /// Whether it failed.
-        is_error: bool,
-        /// Tool output text, capped by the emitting harness (ACP tool-call
-        /// content; claude/codex adapters never populate it). The doc-side
-        /// fold applies its own byte cap before anything persists.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        output: Option<String>,
-        /// Inline file diff for edit-shaped tools (ACP `Diff` content).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diff: Option<ToolDiff>,
-    },
-    /// Latest context occupancy, independent of cumulative billing usage.
-    /// Missing fields preserve the previous measurement; zero tokens is valid.
-    #[serde(rename_all = "camelCase")]
-    ContextUsage {
-        /// Tokens in the context now.
-        tokens: Option<u64>,
-        /// The context's size.
-        window: Option<u64>,
-    },
-    /// Kept as a harness passthrough (rate-limit probes); never persisted to docs.
-    #[serde(rename_all = "camelCase")]
-    Usage {
-        /// Tokens read.
-        input_tokens: u64,
-        /// Tokens written.
-        output_tokens: u64,
-    },
-    /// The agent advertised (or changed) its slash-command set — ACP
-    /// `available_commands_update`. The engine caches the latest list per
-    /// harness for the composer's `/` popup; never persisted to docs.
-    #[serde(rename_all = "camelCase")]
-    AvailableCommands {
-        /// The commands, as the agent lists them.
-        commands: Vec<SlashCommand>,
-    },
-    /// The agent failed.
-    Error {
-        /// What went wrong.
-        message: String,
-    },
-    /// The agent waits on the person.
-    #[serde(rename_all = "camelCase")]
-    InputRequested {
-        /// The request's id.
-        request_id: String,
-        /// What it asks.
-        questions: Vec<UserInputQuestion>,
-    },
-    /// A request was answered or withdrawn.
-    #[serde(rename_all = "camelCase")]
-    InputResolved {
-        /// The request's id.
-        request_id: String,
-    },
-    /// A confirmed new assignment. When tagged as Subagent, this reopens the
-    /// same child transcript even if the provider does not echo the user text.
-    #[serde(rename_all = "camelCase")]
-    Steered {
-        /// The reply the new words end, when one was under way.
-        assistant_message_id: Option<String>,
-        /// The reply the new words start.
-        next_assistant_message_id: Option<String>,
-    },
-    /// The turn ended.
-    #[serde(rename_all = "camelCase")]
-    Done {
-        /// How it ended.
-        status: DoneStatus,
-        /// The agent's last words, when it gave them.
-        result: Option<String>,
-        /// What went wrong, when it failed.
-        error: Option<String>,
-        /// The harness's session id, for resuming it.
-        session_id: Option<String>,
-    },
-    /// A USER-role message injected into a running session — today only seen
-    /// wrapped in [`AgentEvent::Subagent`]: the PARENT agent steering its
-    /// subagent mid-run (claude: a tagged user frame's text blocks). The
-    /// engine writes it to the subagent doc as its own user entry, closing
-    /// the streaming assistant segment above it — the subagent transcript
-    /// then reads like any steered chat. Never emitted untagged (the parent
-    /// chat's user messages come from doc commands, not the wire).
-    #[serde(rename_all = "camelCase")]
-    UserMessage {
-        /// The message.
-        text: String,
-    },
-    /// An event belonging to a SUBAGENT's nested transcript, attributed to
-    /// the spawning tool call (`parent_tool_use_id` = the parent-feed
-    /// `ToolCall::id` that launched it). Never folded into the parent chat
-    /// doc — the engine routes these to the subagent's own doc; the parent
-    /// keeps only the spawn chip. Additive: old consumers that don't match
-    /// this variant drop the nested traffic, which is the pre-subagent-viz
-    /// behavior.
-    #[serde(rename_all = "camelCase")]
-    Subagent {
-        /// The call that spawned the subagent.
-        parent_tool_use_id: String,
-        /// The subagent's event.
-        event: Box<Self>,
-    },
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn agent_event_round_trips() {
-        let ev = AgentEvent::ToolCall {
-            id: "t1".into(),
-            call: ToolCall::Exec { command: "cargo test".into() },
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
-    }
 
     /// Drivers spell the key differently; the chip must not care which one
     /// spawned the child. Non-spawns never answer, whatever they carry.
@@ -662,25 +443,6 @@ mod tests {
     #[test]
     fn harness_id_uses_kebab_case() {
         assert_eq!(serde_json::to_string(&HarnessId::CLAUDE_CODE).unwrap(), "\"claude-code\"");
-    }
-}
-
-#[cfg(test)]
-mod generated_image_tests {
-    use super::*;
-
-    #[test]
-    fn generated_image_event_round_trip() {
-        let event = AgentEvent::GeneratedImage {
-            id: "item:image".into(),
-            path: "/uploads/generated.png".into(),
-            name: "generated.png".into(),
-            mime_type: "image/png".into(),
-        };
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "generatedImage");
-        assert_eq!(value["mimeType"], "image/png");
-        assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
     }
 }
 

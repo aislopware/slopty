@@ -1,57 +1,48 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
-//! Message parts: the event fold, the render-only privacy policy, and continuation splitting.
-//!
-//! Ports of `packages/control/src/parts.ts` (fold) and
-//! `packages/session-doc/src/{render-parts,messages}.ts`.
+//! A transcript entry's parts as the view model serves them ([`MessagePart`]), and the line
+//! counts a tool part carries in place of its diff ([`ToolDiffStat`]).
 
 use serde::{Deserialize, Serialize};
+use slopty_view_proto::{ToolCall, ToolDiff, UserInputQuestion};
 
-use slopty_view_proto::{AgentEvent, SUBAGENT_INPUT_KEEP, ToolCall, ToolDiff, UserInputQuestion};
-
-use crate::constants::MSG_INLINE_MAX;
-
-/// Per-file diff stats persisted in place of inline diff text (t3's shape).
-/// The inline diff was the bigger bomb than outputs — 32KB/edit, unexercised
-/// only because the claude harness emits none. Full diff text lives in the
-/// sidecar behind `diff_ref`.
+/// One file's added and removed lines, which a tool part carries in place of its diff: a diff
+/// runs to tens of KB an edit, so the whole of it is fetched behind the part's `diff_ref`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDiffStat {
+    /// The file.
     pub path: String,
+    /// The lines added.
     pub additions: u64,
+    /// The lines removed.
     pub deletions: u64,
 }
 
 /// Line-level add/delete counts for one file's diff.
+#[must_use]
 pub fn diff_stat(diff: &ToolDiff) -> ToolDiffStat {
     let (additions, deletions) = match &diff.old_text {
-        None => (diff.new_text.lines().count() as u64, 0),
-        Some(old) => {
-            let text_diff = similar::TextDiff::from_lines(old.as_str(), diff.new_text.as_str());
-            let mut additions = 0u64;
-            let mut deletions = 0u64;
-            for change in text_diff.iter_all_changes() {
-                match change.tag() {
-                    similar::ChangeTag::Insert => additions += 1,
-                    similar::ChangeTag::Delete => deletions += 1,
-                    similar::ChangeTag::Equal => {}
-                }
-            }
-            (additions, deletions)
-        }
+        None => (u64::try_from(diff.new_text.lines().count()).unwrap_or(u64::MAX), 0),
+        Some(old) => similar::TextDiff::from_lines(old.as_str(), diff.new_text.as_str())
+            .iter_all_changes()
+            .fold((0_u64, 0_u64), |(added, removed), change| match change.tag() {
+                similar::ChangeTag::Insert => (added.saturating_add(1), removed),
+                similar::ChangeTag::Delete => (added, removed.saturating_add(1)),
+                similar::ChangeTag::Equal => (added, removed),
+            }),
     };
-    ToolDiffStat {
-        path: diff.path.clone(),
-        additions,
-        deletions,
-    }
+    ToolDiffStat { path: diff.path.clone(), additions, deletions }
 }
 
+/// How far an answer of the agent's has come.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MessageStatus {
+    /// The agent is still writing it.
     Streaming,
+    /// The agent finished it.
     Complete,
+    /// It stopped short: the turn was interrupted or failed.
     Aborted,
 }
 
@@ -59,88 +50,102 @@ pub enum MessageStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SubagentStatus {
+    /// It is still at work.
     Running,
+    /// It finished.
     Done,
+    /// It failed.
     Failed,
 }
 
 /// One rendered part of an assistant message.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "tool calls, the largest, are most of an agent's transcript: boxing them would add \
+              an allocation to most parts to spare the prose ones some bytes"
+)]
 pub enum MessagePart {
+    /// The agent's prose.
     Text {
+        /// The part's id.
         id: String,
+        /// What it says, in Markdown.
         text: String,
     },
+    /// An image the agent made or showed.
     #[serde(rename_all = "camelCase")]
     Image {
+        /// The part's id.
         id: String,
+        /// Where it is on the machine the session runs on.
         path: String,
+        /// Its file name.
         name: String,
+        /// Its type, as `image/png`.
         mime_type: String,
     },
-    /// An agent-authored visual (`show_visual`): a Luau script stored on the
-    /// host at `path`, rendered natively. Old desktop builds' unknown-kind
-    /// fallback yields an empty text part (invisible); iOS drops unknown kinds.
+    /// A visual the agent drew (`show_visual`): a Luau script on the session's machine at
+    /// `path`, drawn natively.
     Visual {
+        /// The part's id.
         id: String,
+        /// The script.
         path: String,
+        /// What the agent called it.
         title: String,
     },
-    /// Model thinking. Carries its body in a dedicated doc field (`reasoning`,
-    /// never `text`) so pre-reasoning desktop builds — whose unknown-kind
-    /// fallback renders `text` as prose — degrade to an invisible empty text
-    /// part instead of leaking raw thinking into the transcript. iOS drops
-    /// unknown kinds entirely.
+    /// The model's thinking.
     #[serde(rename_all = "camelCase")]
     Reasoning {
+        /// The part's id.
         id: String,
+        /// What it thought.
         text: String,
-        // How long the model thought, once known, for its group's "thought for 12s".
+        /// How long the model thought, once known, for its group's "thought for 12s".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thought_ms: Option<u64>,
     },
+    /// A tool call and what came of it.
     #[serde(rename_all = "camelCase")]
     Tool {
+        /// The part's id: the call's.
         id: String,
+        /// What the agent called, with its input.
         call: ToolCall,
+        /// The call failed.
         #[serde(default)]
         is_error: bool,
-        /// True once a ToolResult arrived.
+        /// Its result came.
         #[serde(default)]
         resolved: bool,
         /// The output's head as the thread holds it (a running command's
         /// tail); the whole is behind `output_ref` when this is cut.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output: Option<String>,
-        /// Inline file diff — written by pre-strip app versions only; new
-        /// folds persist [`Self::Tool::diff_stats`] + `diff_ref` instead.
-        /// Kept so old docs render their diffs.
+        /// The file diff inline. The view model sends `diff_stats` and `diff_ref` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<ToolDiff>,
-        /// Sidecar key (`{chatId}/{partId}`) of the full output — additive;
-        /// stamped by [`apply_sidecar_refs`] (the fold is chat-agnostic).
+        /// The key (`{chatId}/{partId}`) the whole output is fetched by.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_ref: Option<String>,
         /// Full-output byte length, so the UI can say "Show full output (12 KB)".
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_bytes: Option<u64>,
-        /// Sidecar key (`{chatId}/{partId}.diff`) of the full diff JSON.
+        /// The key (`{chatId}/{partId}.diff`) the whole diff is fetched by, as JSON.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_ref: Option<String>,
-        /// Per-file diff stats (additive replacement for inline `diff`).
+        /// Each changed file's line counts.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff_stats: Option<Vec<ToolDiffStat>>,
-        /// The SUBAGENT doc id this spawn chip indexes (additive; stamped by
-        /// the engine like the sidecar refs — the fold is chat-agnostic).
-        /// The chip IS the index: the client learns the doc/blob id from it,
-        /// there is no listing endpoint.
+        /// The transcript a subagent's spawn opens: the spawn card is the only way to it, as
+        /// there is no list of a session's subagents to ask.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_ref: Option<String>,
-        /// Subagent lifecycle, DISTINCT from `resolved`: under the eager-done
-        /// policy the spawn tool's own result lands while the subagent still
-        /// runs. `running` → the ref is a live doc (watch it); `done`/
-        /// `failed` → frozen (blob first, doc as fallback).
+        /// How the spawned subagent stands, apart from `resolved`: the spawn's own result can
+        /// come while the subagent still runs. While it runs its transcript is watched; once
+        /// done or failed it is read once.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subagent_status: Option<SubagentStatus>,
         /// The call's facts: its line in the TUI's words, what came of it, its timer, the tray
@@ -148,16 +153,24 @@ pub enum MessagePart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         facts: Option<Box<crate::part_kinds::ToolFacts>>,
     },
+    /// Questions the agent put to the person, answered in its TUI.
     #[serde(rename_all = "camelCase")]
     Input {
+        /// The part's id.
         id: String,
+        /// The agent's id for the request.
         request_id: String,
+        /// What it asked.
         questions: Vec<UserInputQuestion>,
+        /// The person answered.
         #[serde(default)]
         resolved: bool,
     },
+    /// A failure the transcript shows.
     Error {
+        /// The part's id.
         id: String,
+        /// The failure in Slopty's words.
         message: String,
         /// What the agent or its machine said, word for word, behind the copy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -166,861 +179,96 @@ pub enum MessagePart {
     /// A one-line divider between turns that no one wrote: "Compacted · 143k tokens →
     /// summary", "ui-lane came to rest".
     Marker {
+        /// The part's id.
         id: String,
+        /// The divider's words.
         text: String,
     },
-    /// The seam in a forked chat's transcript: everything above was copied
-    /// from `source_chat_id` when the fork was cut, everything below is this
-    /// chat's own. Written once by the fork RPC; renders as a labeled
-    /// divider. Old desktop builds' unknown-kind fallback yields an empty
-    /// text part (invisible); iOS drops unknown kinds.
     /// A background task's notice, a quiet row linked to its task's tray row
     /// ([`crate::part_kinds::TaskRow::row`], `task:{id}`): an agent finished or waits on its
     /// own work, a command exited, a monitor's event. Its part id is the thread item's.
     Task {
+        /// The part's id.
         id: String,
+        /// The row.
         task: Box<crate::part_kinds::TaskRow>,
     },
     /// A page shown inline by the call before it: `show_page`, an MCP App's UI, an `.html` or
     /// `.svg` file. Its part id is `{call part id}:page`; the app hosts its view by
     /// [`crate::page_card::PageCard::page`].
     Page {
+        /// The part's id.
         id: String,
+        /// The card.
         card: Box<crate::page_card::PageCard>,
     },
     /// A quiet row of the agent's own that is no failure: "Allowed cargo test", "Saved 2
     /// memories", a hook's word, a request tried again with its countdown.
     Note {
+        /// The part's id.
         id: String,
+        /// The row.
         note: Box<crate::part_kinds::NoteRow>,
     },
 }
 
 impl MessagePart {
+    /// The part's id.
+    #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            MessagePart::Text { id, .. }
-            | MessagePart::Image { id, .. }
-            | MessagePart::Visual { id, .. }
-            | MessagePart::Reasoning { id, .. }
-            | MessagePart::Tool { id, .. }
-            | MessagePart::Input { id, .. }
-            | MessagePart::Error { id, .. }
-            | MessagePart::Marker { id, .. }
-            | MessagePart::Task { id, .. }
-            | MessagePart::Page { id, .. }
-            | MessagePart::Note { id, .. } => id,
+            Self::Text { id, .. }
+            | Self::Image { id, .. }
+            | Self::Visual { id, .. }
+            | Self::Reasoning { id, .. }
+            | Self::Tool { id, .. }
+            | Self::Input { id, .. }
+            | Self::Error { id, .. }
+            | Self::Marker { id, .. }
+            | Self::Task { id, .. }
+            | Self::Page { id, .. }
+            | Self::Note { id, .. } => id,
         }
     }
 
+    /// About how many bytes the part holds: its text, or its serialized payload.
+    #[must_use]
     pub fn byte_len(&self) -> usize {
-        match self {
-            MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } => text.len(),
-            MessagePart::Tool {
-                call,
-                output,
-                diff,
-                diff_stats,
-                ..
-            } => {
-                serde_json::to_vec(call).map_or(0, |v| v.len())
-                    + output.as_ref().map_or(0, String::len)
-                    + diff
-                        .as_ref()
-                        .map_or(0, |d| serde_json::to_vec(d).map_or(0, |v| v.len()))
-                    + diff_stats
-                        .as_ref()
-                        .map_or(0, |s| serde_json::to_vec(s).map_or(0, |v| v.len()))
-            }
-            MessagePart::Input { questions, .. } => {
-                serde_json::to_vec(questions).map_or(0, |v| v.len())
-            }
-            MessagePart::Image {
-                id,
-                path,
-                name,
-                mime_type,
-            } => id.len() + path.len() + name.len() + mime_type.len(),
-            MessagePart::Visual { id, path, title } => id.len() + path.len() + title.len(),
-            MessagePart::Error {
-                message, detail, ..
-            } => message.len() + detail.as_ref().map_or(0, String::len),
-            MessagePart::Marker { text, .. } => text.len(),
-            MessagePart::Task { task, .. } => {
-                task.text.len() + task.title.len() + task.body.as_ref().map_or(0, String::len)
-            }
-            MessagePart::Page { card, .. } => serde_json::to_vec(card).map_or(0, |v| v.len()),
-            MessagePart::Note { note, .. } => {
-                note.text.len() + note.detail.as_ref().map_or(0, String::len)
-            }
+        fn json(value: &impl Serialize) -> usize {
+            serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
         }
-    }
-}
-
-/// Fold one agent event into a parts accumulator, in place.
-///
-/// In place because the fold runs once per streamed event: rebuilding the
-/// accumulator each time made long turns O(n²) in allocations.
-///
-/// Semantics from slopty `foldEventIntoParts`:
-/// - `SessionStarted` / `Steered` reset the accumulator (turn boundary — makes replay safe).
-/// - `TextDelta` appends to the trailing text part, or starts a new one if the trail is not text
-///   (a tool call in between breaks the text block).
-/// - `ToolCall` appends, or refreshes in place when the id already exists (SDK retry idempotence).
-/// - `ToolResult` marks the matching tool part resolved / errored in place.
-/// - `InputRequested` appends an input part; `InputResolved` marks it resolved.
-/// - `Error` and `Done{error}` become visible error parts.
-pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
-    match event {
-        AgentEvent::SessionStarted { .. } | AgentEvent::Steered { .. } => {
-            out.clear();
-        }
-        AgentEvent::TextDelta { text } => {
-            if let Some(MessagePart::Text { text: tail, .. }) = out.last_mut() {
-                tail.push_str(text);
-            } else {
-                let id = format!("t{}", out.len());
-                out.push(MessagePart::Text {
-                    id,
-                    text: text.clone(),
-                });
+        let optional = |text: Option<&str>| text.map_or(0, str::len);
+        let lengths: [usize; 4] = match self {
+            Self::Text { text, .. } | Self::Reasoning { text, .. } | Self::Marker { text, .. } => {
+                [text.len(), 0, 0, 0]
             }
-        }
-        AgentEvent::GeneratedImage {
-            id,
-            path,
-            name,
-            mime_type,
-        } => {
-            let image = MessagePart::Image {
-                id: id.clone(),
-                path: path.clone(),
-                name: name.clone(),
-                mime_type: mime_type.clone(),
-            };
-            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
-                *existing = image;
-            } else {
-                out.push(image);
+            Self::Tool { call, output, diff, diff_stats, .. } => [
+                json(call),
+                optional(output.as_deref()),
+                diff.as_ref().map_or(0, json),
+                diff_stats.as_ref().map_or(0, json),
+            ],
+            Self::Input { questions, .. } => [json(questions), 0, 0, 0],
+            Self::Image { id, path, name, mime_type } => {
+                [id.len(), path.len(), name.len(), mime_type.len()]
             }
-        }
-        AgentEvent::Visual { id, path, title } => {
-            let visual = MessagePart::Visual {
-                id: id.clone(),
-                path: path.clone(),
-                title: title.clone(),
-            };
-            if let Some(existing) = out.iter_mut().find(|p| p.id() == id) {
-                *existing = visual;
-            } else {
-                out.push(visual);
+            Self::Visual { id, path, title } => [id.len(), path.len(), title.len(), 0],
+            Self::Error { message, detail, .. } => {
+                [message.len(), optional(detail.as_deref()), 0, 0]
             }
-        }
-        AgentEvent::ReasoningDelta { text } => {
-            // Empty deltas are liveness heartbeats (redacted thinking) — the
-            // engine drops them before the fold, but stay tolerant here too.
-            if text.is_empty() {
-                return;
+            Self::Task { task, .. } => {
+                [task.text.len(), task.title.len(), optional(task.body.as_deref()), 0]
             }
-            if let Some(MessagePart::Reasoning { text: tail, .. }) = out.last_mut() {
-                tail.push_str(text);
-            } else {
-                let id = format!("r{}", out.len());
-                out.push(MessagePart::Reasoning {
-                    id,
-                    text: text.clone(),
-                    thought_ms: None,
-                });
-            }
-        }
-        AgentEvent::ToolCall { id, call } => {
-            if let Some(existing) = out.iter_mut().find_map(|p| match p {
-                MessagePart::Tool {
-                    id: pid, call: c, ..
-                } if pid == id => Some(c),
-                _ => None,
-            }) {
-                *existing = call.clone();
-            } else {
-                out.push(MessagePart::Tool {
-                    id: id.clone(),
-                    call: call.clone(),
-                    is_error: false,
-                    resolved: false,
-                    output: None,
-                    diff: None,
-                    output_ref: None,
-                    output_bytes: None,
-                    diff_ref: None,
-                    diff_stats: None,
-                    subagent_ref: None,
-                    subagent_status: None,
-                    facts: None,
-                });
-            }
-        }
-        AgentEvent::ToolResult {
-            id,
-            is_error,
-            output,
-            diff,
-        } => {
-            for p in out.iter_mut() {
-                if let MessagePart::Tool {
-                    id: pid,
-                    is_error: e,
-                    resolved,
-                    output: out_slot,
-                    diff: diff_slot,
-                    output_bytes,
-                    diff_stats,
-                    ..
-                } = p
-                    && pid == id
-                {
-                    *e = *is_error;
-                    *resolved = true;
-                    // Tool OUTPUTS never enter the doc (2026-08-10 product
-                    // call: chips are one-liners — name + call info — like
-                    // pre-output builds; the R2 sidecar is parked with them,
-                    // docs/chat2-sync.md A2). Full text lives only in the
-                    // host's run journal. Inline diffs die the same way:
-                    // stats only, never text. `is_error` still folds so
-                    // failed chips read as failed.
-                    let _ = output; // journal-only
-                    *out_slot = None;
-                    *output_bytes = None;
-                    *diff_slot = None;
-                    *diff_stats = diff.as_ref().map(|d| vec![diff_stat(d)]);
-                }
-            }
-        }
-        AgentEvent::InputRequested {
-            request_id,
-            questions,
-        } => {
-            let id = format!("in-{request_id}");
-            if !out.iter().any(|p| p.id() == id) {
-                out.push(MessagePart::Input {
-                    id,
-                    request_id: request_id.clone(),
-                    questions: questions.clone(),
-                    resolved: false,
-                });
-            }
-        }
-        AgentEvent::InputResolved { request_id } => {
-            for p in out.iter_mut() {
-                if let MessagePart::Input {
-                    request_id: rid,
-                    resolved,
-                    ..
-                } = p
-                    && rid == request_id
-                {
-                    *resolved = true;
-                }
-            }
-        }
-        AgentEvent::Error { message } => {
-            let id = format!("e{}", out.len());
-            out.push(MessagePart::Error {
-                id,
-                message: message.clone(),
-                detail: None,
-            });
-        }
-        AgentEvent::Done { error, .. } => {
-            if let Some(message) = error {
-                let id = format!("e{}", out.len());
-                out.push(MessagePart::Error {
-                    id,
-                    message: message.clone(),
-                    detail: None,
-                });
-            }
-        }
-        // Subagent-attributed CONTENT belongs to the subagent's own doc (the
-        // engine routes it there); the parent doc keeps only the spawn chip —
-        // which these events refresh in place: LIFECYCLE ONLY. A live tail
-        // was tried and rejected: rewriting the chip per delta batch grew
-        // the parent doc's oplog for the whole subagent run and rendered as
-        // distracting mid-stream fragments (user call, 2026-08-18).
-        AgentEvent::Subagent {
-            parent_tool_use_id,
-            event,
-        } => {
-            let status = match event.as_ref() {
-                AgentEvent::Done { status, .. } => Some(match status {
-                    slopty_view_proto::DoneStatus::Errored => SubagentStatus::Failed,
-                    _ => SubagentStatus::Done,
-                }),
-                // A new assignment reopens a settled chip. Providers may
-                // announce it with user text or a confirmed turn boundary.
-                AgentEvent::UserMessage { .. } | AgentEvent::Steered { .. } => {
-                    Some(SubagentStatus::Running)
-                }
-                _ => None,
-            };
-            for p in out.iter_mut() {
-                if let MessagePart::Tool {
-                    id,
-                    call,
-                    subagent_status,
-                    ..
-                } = p
-                    && id == parent_tool_use_id
-                    // Genus gate: only a SPAWN call ever carries subagent
-                    // lifecycle. A driver keying bug (claude's background
-                    // shells settled through the subagent subtype,
-                    // 2026-08-20) must not decorate an ordinary chip.
-                    && call.is_subagent_spawn()
-                {
-                    match status {
-                        Some(s) => *subagent_status = Some(s),
-                        // Any tagged traffic proves the subagent is live;
-                        // never regress a terminal state.
-                        None if !matches!(
-                            subagent_status,
-                            Some(SubagentStatus::Done) | Some(SubagentStatus::Failed)
-                        ) =>
-                        {
-                            *subagent_status = Some(SubagentStatus::Running);
-                        }
-                        None => {}
-                    }
-                }
-            }
-        }
-        // AvailableCommands feeds the engine's per-harness command cache, not
-        // the transcript. UserMessage becomes its own doc ENTRY (the engine's
-        // subagent sink writes it), never a part of the assistant message.
-        AgentEvent::AssistantMessageCompleted { .. }
-        | AgentEvent::Usage { .. }
-        | AgentEvent::ContextUsage { .. }
-        | AgentEvent::AvailableCommands { .. }
-        | AgentEvent::UserMessage { .. } => {}
-    }
-}
-
-/// Stamp sidecar keys onto resolved tool parts that have sidecar content.
-///
-/// Separate from the fold because the fold is chat-agnostic and pure; the
-/// caller (who knows the chat id) runs this right after each fold step, before
-/// the parts hit the doc. Idempotent. Key shape `{chatId}/{partId}` (+
-/// `.diff`) matches the edge's `/blob/{chatId}/{partId}` route.
-pub fn apply_sidecar_refs(chat_id: &str, parts: &mut [MessagePart]) {
-    for part in parts.iter_mut() {
-        if let MessagePart::Tool {
-            id,
-            resolved: true,
-            output_ref,
-            output_bytes,
-            diff_ref,
-            diff_stats,
-            ..
-        } = part
-        {
-            if output_ref.is_none() && output_bytes.is_some() {
-                *output_ref = Some(format!("{chat_id}/{id}"));
-            }
-            if diff_ref.is_none() && diff_stats.is_some() {
-                *diff_ref = Some(format!("{chat_id}/{id}.diff"));
-            }
-        }
-    }
-}
-
-/// What a [`AgentEvent::ToolResult`] owes the sidecar: the full output text
-/// and/or the full diff (as JSON), keyed by part id. `None` when the event
-/// carries nothing worth uploading.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SidecarPayload {
-    pub part_id: String,
-    pub output: Option<String>,
-    pub diff: Option<ToolDiff>,
-}
-
-pub fn sidecar_payload(event: &AgentEvent) -> Option<SidecarPayload> {
-    let AgentEvent::ToolResult {
-        id, output, diff, ..
-    } = event
-    else {
-        return None;
-    };
-    let output = output.clone().filter(|o| !o.trim().is_empty());
-    if output.is_none() && diff.is_none() {
-        return None;
-    }
-    Some(SidecarPayload {
-        part_id: id.clone(),
-        output,
-        diff: diff.clone(),
-    })
-}
-
-/// Render-only privacy policy — strip heavy/sensitive tool inputs before a call enters the doc.
-///
-/// Keeps: command / path / pattern / url / query / todo items / server+tool names,
-/// and a subagent spawn's model/type (see [`spawn_badge`] — a couple of short
-/// identifiers the chip names the child by).
-/// Drops: WriteFile content, EditFile old/new strings, WebFetch prompt, Mcp/Unknown input.
-/// Full inputs remain only in the host's local run journal. Idempotent.
-pub fn sanitize_tool_call(call: &ToolCall) -> ToolCall {
-    match call {
-        ToolCall::WriteFile { path, .. } => ToolCall::WriteFile {
-            path: path.clone(),
-            content: None,
-        },
-        ToolCall::EditFile { path, .. } => ToolCall::EditFile {
-            path: path.clone(),
-            old_string: None,
-            new_string: None,
-        },
-        ToolCall::WebFetch { url, .. } => ToolCall::WebFetch {
-            url: url.clone(),
-            prompt: None,
-        },
-        ToolCall::Mcp { server, tool, .. } => ToolCall::Mcp {
-            server: server.clone(),
-            tool: tool.clone(),
-            input: spawn_badge(call),
-        },
-        ToolCall::Unknown { name, .. } => ToolCall::Unknown {
-            name: name.clone(),
-            input: spawn_badge(call),
-        },
-        other => other.clone(),
-    }
-}
-
-/// The only slice of a tool input allowed into the doc: a subagent spawn's
-/// [`SUBAGENT_INPUT_KEEP`] keys, so the chip can say WHICH model the child
-/// runs on (`Agent · haiku`) without the reader opening the subagent tab.
-///
-/// Everything else — the prompt above all — stays in the host's run journal,
-/// so this stays a whitelist of short identifiers rather than a size cap.
-/// `None` for anything that is not a spawn, and for a spawn that named
-/// neither, which keeps it idempotent: re-sanitizing a sanitized call is a
-/// fixpoint (the kept keys are themselves kept).
-fn spawn_badge(call: &ToolCall) -> Option<serde_json::Value> {
-    if !call.is_subagent_spawn() {
-        return None;
-    }
-    let input = match call {
-        ToolCall::Unknown { input, .. } | ToolCall::Mcp { input, .. } => input.as_ref()?,
-        _ => return None,
-    };
-    let kept: serde_json::Map<String, serde_json::Value> = SUBAGENT_INPUT_KEEP
-        .iter()
-        .filter_map(|key| {
-            let value = input.get(key)?.as_str()?.trim();
-            (!value.is_empty()).then(|| ((*key).to_owned(), serde_json::Value::from(value)))
-        })
-        .collect();
-    (!kept.is_empty()).then(|| serde_json::Value::Object(kept))
-}
-
-/// Deterministic continuation id: `"{root}#c{n}"`.
-pub fn continuation_id(root: &str, index: usize) -> String {
-    format!("{root}#c{index}")
-}
-
-/// Split an oversized parts list into chunks each under `MSG_INLINE_MAX` bytes.
-///
-/// Splitting happens at part boundaries; an oversized text part is itself chunked at char
-/// boundaries. Returns one Vec per resulting entry — the first keeps the root id, the rest are
-/// continuations (`continuation_id(root, i)`), matching `splitMessageEntry` in slopty.
-pub fn split_parts(parts: &[MessagePart]) -> Vec<Vec<MessagePart>> {
-    let mut chunks: Vec<Vec<MessagePart>> = vec![Vec::new()];
-    let mut current_bytes = 0usize;
-
-    let push_part = |chunks: &mut Vec<Vec<MessagePart>>, current: &mut usize, part: MessagePart| {
-        let len = part.byte_len();
-        if *current > 0 && *current + len > MSG_INLINE_MAX {
-            chunks.push(Vec::new());
-            *current = 0;
-        }
-        *current += len;
-        chunks.last_mut().unwrap().push(part);
-    };
-
-    for part in parts {
-        // Both text-bodied kinds chunk the same way; extended thinking can
-        // exceed the cap just as easily as a long reply.
-        // A thought's duration stays on its first piece.
-        let (id, text, reasoning) = match part {
-            MessagePart::Text { id, text } if text.len() > MSG_INLINE_MAX => (id, text, None),
-            MessagePart::Reasoning { id, text, thought_ms } if text.len() > MSG_INLINE_MAX => {
-                (id, text, Some(*thought_ms))
-            }
-            other => {
-                push_part(&mut chunks, &mut current_bytes, other.clone());
-                continue;
-            }
+            Self::Page { card, .. } => [json(card), 0, 0, 0],
+            Self::Note { note, .. } => [note.text.len(), optional(note.detail.as_deref()), 0, 0],
         };
-        // Chunk oversized text at char boundaries.
-        let mut start = 0usize;
-        let mut piece = 0usize;
-        while start < text.len() {
-            let mut end = (start + MSG_INLINE_MAX).min(text.len());
-            while end < text.len() && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            // Guard: ensure forward progress on pathological boundaries.
-            if end <= start {
-                end = text.len();
-            }
-            let sub_id = if piece == 0 {
-                id.clone()
-            } else {
-                format!("{id}~{piece}")
-            };
-            let body = text[start..end].to_string();
-            let sub = if let Some(thought_ms) = reasoning {
-                MessagePart::Reasoning {
-                    id: sub_id,
-                    text: body,
-                    thought_ms: thought_ms.filter(|_| piece == 0),
-                }
-            } else {
-                MessagePart::Text {
-                    id: sub_id,
-                    text: body,
-                }
-            };
-            push_part(&mut chunks, &mut current_bytes, sub);
-            start = end;
-            piece += 1;
-        }
+        lengths.iter().sum()
     }
-    chunks
-}
-
-/// Render-time inverse of splitting: concatenate continuation entries' parts in list order.
-pub fn join_continuations(entries: Vec<Vec<MessagePart>>) -> Vec<MessagePart> {
-    entries.into_iter().flatten().collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn text_delta(s: &str) -> AgentEvent {
-        AgentEvent::TextDelta { text: s.into() }
-    }
-
-    #[test]
-    fn reasoning_deltas_fold_into_their_own_part() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ReasoningDelta {
-                text: "let me ".into(),
-            },
-        );
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ReasoningDelta {
-                text: "think".into(),
-            },
-        );
-        // Empty deltas (redacted-thinking heartbeats) never mint a part.
-        fold_event_into_parts(&mut parts, &AgentEvent::ReasoningDelta { text: "".into() });
-        assert_eq!(parts.len(), 1);
-        assert_eq!(
-            parts[0],
-            MessagePart::Reasoning {
-                id: "r0".into(),
-                text: "let me think".into(),
-                thought_ms: None,
-            }
-        );
-        // Text breaks the reasoning block; a later thought starts a new part.
-        fold_event_into_parts(&mut parts, &text_delta("Answer"));
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ReasoningDelta {
-                text: "more".into(),
-            },
-        );
-        assert_eq!(parts.len(), 3);
-        assert!(matches!(
-            &parts[2],
-            MessagePart::Reasoning { id, text, .. } if id == "r2" && text == "more"
-        ));
-    }
-
-    #[test]
-    fn oversized_reasoning_splits_like_text() {
-        let big = "x".repeat(MSG_INLINE_MAX + 10);
-        let parts = vec![MessagePart::Reasoning {
-            id: "r0".into(),
-            text: big,
-            thought_ms: None,
-        }];
-        let chunks = split_parts(&parts);
-        let flat = join_continuations(chunks);
-        assert!(flat.len() >= 2, "{}", flat.len());
-        assert!(
-            flat.iter()
-                .all(|p| matches!(p, MessagePart::Reasoning { .. }))
-        );
-        assert!(flat.iter().all(|p| p.byte_len() <= MSG_INLINE_MAX));
-        assert_eq!(flat[1].id(), "r0~1");
-    }
-
-    #[test]
-    fn generated_image_fold_is_ordered_atomic_and_idempotent() {
-        let mut parts = vec![];
-        fold_event_into_parts(&mut parts, &text_delta("before"));
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "i".into(),
-                call: ToolCall::Unknown {
-                    name: "Generate image".into(),
-                    input: None,
-                },
-            },
-        );
-        let event = AgentEvent::GeneratedImage {
-            id: "i:image".into(),
-            path: "/uploads/i.png".into(),
-            name: "generated.png".into(),
-            mime_type: "image/png".into(),
-        };
-        fold_event_into_parts(&mut parts, &event);
-        fold_event_into_parts(&mut parts, &text_delta("after"));
-        fold_event_into_parts(&mut parts, &event);
-        assert_eq!(parts.len(), 4);
-        assert!(matches!(&parts[2], MessagePart::Image { id, .. } if id == "i:image"));
-        assert_eq!(join_continuations(split_parts(&parts)), parts);
-    }
-
-    #[test]
-    fn text_deltas_merge_until_broken_by_tool() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(&mut parts, &text_delta("Hello "));
-        fold_event_into_parts(&mut parts, &text_delta("world"));
-        assert_eq!(parts.len(), 1);
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "tool-1".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
-                },
-            },
-        );
-        fold_event_into_parts(&mut parts, &text_delta("after"));
-        assert_eq!(parts.len(), 3);
-        match &parts[2] {
-            MessagePart::Text { text, .. } => assert_eq!(text, "after"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn session_started_resets_accumulator() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(&mut parts, &text_delta("junk"));
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::SessionStarted {
-                harness: slopty_view_proto::HarnessId::MOCK,
-                model: "m".into(),
-                tools: vec![],
-                cwd: "/".into(),
-                session_id: "s".into(),
-                assistant_message_id: "a".into(),
-            },
-        );
-        assert!(parts.is_empty());
-    }
-
-    #[test]
-    fn tool_call_refresh_is_idempotent() {
-        let call = AgentEvent::ToolCall {
-            id: "t".into(),
-            call: ToolCall::Exec {
-                command: "ls".into(),
-            },
-        };
-        let mut once = Vec::new();
-        fold_event_into_parts(&mut once, &call);
-        let mut twice = once.clone();
-        fold_event_into_parts(&mut twice, &call);
-        assert_eq!(once, twice);
-    }
-
-    #[test]
-    fn tool_result_marks_resolution() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "t".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
-                },
-            },
-        );
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolResult {
-                id: "t".into(),
-                is_error: true,
-                output: None,
-                diff: None,
-            },
-        );
-        match &parts[0] {
-            MessagePart::Tool {
-                is_error, resolved, ..
-            } => {
-                assert!(*is_error);
-                assert!(*resolved);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sanitize_strips_heavy_inputs_and_is_idempotent() {
-        let call = ToolCall::WriteFile {
-            path: "/x".into(),
-            content: Some("secret".into()),
-        };
-        let clean = sanitize_tool_call(&call);
-        assert_eq!(
-            clean,
-            ToolCall::WriteFile {
-                path: "/x".into(),
-                content: None
-            }
-        );
-        assert_eq!(sanitize_tool_call(&clean), clean);
-    }
-
-    /// A spawn keeps the two short identifiers its chip names the child by and
-    /// drops the prompt — the whole point of the whitelist. Still a fixpoint.
-    #[test]
-    fn sanitize_keeps_a_spawns_model_and_drops_its_prompt() {
-        let call = ToolCall::Unknown {
-            name: "Agent: Explore theme system".into(),
-            input: Some(serde_json::json!({
-                "description": "Explore theme system",
-                "subagent_type": "Explore",
-                "model": "haiku",
-                "prompt": "a very long private prompt",
-            })),
-        };
-        let clean = sanitize_tool_call(&call);
-        assert_eq!(
-            clean,
-            ToolCall::Unknown {
-                name: "Agent: Explore theme system".into(),
-                input: Some(serde_json::json!({
-                    "model": "haiku",
-                    "subagent_type": "Explore",
-                })),
-            }
-        );
-        assert_eq!(clean.subagent_model(), Some("haiku"));
-        assert_eq!(sanitize_tool_call(&clean), clean);
-    }
-
-    /// An ordinary tool's input still goes, even when it happens to carry a
-    /// `model` argument — the badge is gated on the spawn genus, not the key.
-    #[test]
-    fn sanitize_still_strips_a_non_spawn_carrying_a_model_argument() {
-        let call = ToolCall::Unknown {
-            name: "SomeTool".into(),
-            input: Some(serde_json::json!({ "model": "haiku", "prompt": "secret" })),
-        };
-        assert_eq!(
-            sanitize_tool_call(&call),
-            ToolCall::Unknown {
-                name: "SomeTool".into(),
-                input: None,
-            }
-        );
-    }
-
-    /// A spawn that named no model keeps no input at all — `None`, not an
-    /// empty object, so the doc gains nothing and the fixpoint is exact.
-    #[test]
-    fn sanitize_drops_a_spawn_input_that_names_nothing_worth_keeping() {
-        let call = ToolCall::Unknown {
-            name: "Agent".into(),
-            input: Some(serde_json::json!({ "prompt": "secret", "model": "  " })),
-        };
-        let clean = sanitize_tool_call(&call);
-        assert_eq!(
-            clean,
-            ToolCall::Unknown {
-                name: "Agent".into(),
-                input: None,
-            }
-        );
-        assert_eq!(clean.subagent_model(), None);
-    }
-
-    #[test]
-    fn split_and_join_round_trip() {
-        let big = "x".repeat(MSG_INLINE_MAX * 2 + 100);
-        let parts = vec![
-            MessagePart::Text {
-                id: "t0".into(),
-                text: big.clone(),
-            },
-            MessagePart::Tool {
-                id: "tool-1".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
-                },
-                is_error: false,
-                resolved: true,
-                output: None,
-                diff: None,
-                output_ref: None,
-                output_bytes: None,
-                diff_ref: None,
-                diff_stats: None,
-                subagent_ref: None,
-                subagent_status: None,
-                facts: None,
-            },
-        ];
-        let chunks = split_parts(&parts);
-        assert!(
-            chunks.len() >= 3,
-            "expected >=3 chunks, got {}",
-            chunks.len()
-        );
-        for chunk in &chunks {
-            let bytes: usize = chunk.iter().map(|p| p.byte_len()).sum();
-            assert!(bytes <= MSG_INLINE_MAX, "chunk over cap: {bytes}");
-        }
-        let joined = join_continuations(chunks);
-        let text: String = joined
-            .iter()
-            .filter_map(|p| match p {
-                MessagePart::Text { text, .. } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(text, big);
-        assert!(matches!(joined.last().unwrap(), MessagePart::Tool { .. }));
-    }
-
-    #[test]
-    fn continuation_ids_are_deterministic() {
-        assert_eq!(continuation_id("m1", 1), "m1#c1");
-    }
-
-    // ── A1 strip (docs/chat2-sync.md) ───────────────────────────────────────
 
     #[test]
     fn diff_stat_counts_line_changes() {
@@ -1039,255 +287,5 @@ mod tests {
             new_text: "one\ntwo\n".into(),
         });
         assert_eq!((stat.additions, stat.deletions), (2, 0));
-    }
-
-    #[test]
-    fn fold_strips_output_to_summary_and_diff_to_stats() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "t".into(),
-                call: ToolCall::Exec {
-                    command: "cargo test".into(),
-                },
-            },
-        );
-        let full = "running 42 tests\n".repeat(300); // ~5KB, was 4KB inline pre-strip
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolResult {
-                id: "t".into(),
-                is_error: false,
-                output: Some(full.clone()),
-                diff: Some(ToolDiff {
-                    path: "/w/a.rs".into(),
-                    old_text: Some("a\n".into()),
-                    new_text: "b\n".into(),
-                }),
-            },
-        );
-        match &parts[0] {
-            MessagePart::Tool {
-                output,
-                output_bytes,
-                diff,
-                diff_stats,
-                ..
-            } => {
-                // One-liner chips: outputs never enter the doc at all
-                // (journal-only); diff text neither — stats survive.
-                assert_eq!(output.as_deref(), None);
-                assert_eq!(*output_bytes, None);
-                assert!(diff.is_none(), "inline diff text must not enter the doc");
-                let stats = diff_stats.as_ref().unwrap();
-                assert_eq!(stats.len(), 1);
-                assert_eq!((stats[0].additions, stats[0].deletions), (1, 1));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn sidecar_refs_stamp_once_and_only_where_content_exists() {
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "t1".into(),
-                call: ToolCall::Exec {
-                    command: "ls".into(),
-                },
-            },
-        );
-        // Unresolved: no refs yet.
-        apply_sidecar_refs("chat-9", &mut parts);
-        assert!(matches!(
-            &parts[0],
-            MessagePart::Tool {
-                output_ref: None,
-                diff_ref: None,
-                ..
-            }
-        ));
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolResult {
-                id: "t1".into(),
-                is_error: false,
-                output: Some("hello".into()),
-                diff: Some(ToolDiff {
-                    path: "/w/a".into(),
-                    old_text: None,
-                    new_text: "x\n".into(),
-                }),
-            },
-        );
-        apply_sidecar_refs("chat-9", &mut parts);
-        apply_sidecar_refs("chat-9", &mut parts); // idempotent
-        match &parts[0] {
-            MessagePart::Tool {
-                output_ref,
-                diff_ref,
-                ..
-            } => {
-                // One-liner fold: outputs never reach the doc, so there is
-                // no output content to key even after resolution; diff
-                // STATS exist, so the diff ref still stamps.
-                assert_eq!(output_ref.as_deref(), None);
-                assert_eq!(diff_ref.as_deref(), Some("chat-9/t1.diff"));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn subagent_events_refresh_the_spawn_chip_in_place() {
-        use slopty_view_proto::DoneStatus;
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "toolu_sub".into(),
-                call: ToolCall::Unknown {
-                    name: "Agent".into(),
-                    input: None,
-                },
-            },
-        );
-        // Tagged traffic marks the chip running — and ONLY that: no text of
-        // the subagent's reaches the chip (per-delta chip rewrites polluted
-        // the parent doc).
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::TextDelta {
-                    text: "scanning\nfound 3 issues".into(),
-                }),
-            },
-        );
-        match &parts[0] {
-            MessagePart::Tool {
-                subagent_status,
-                output,
-                ..
-            } => {
-                assert_eq!(*subagent_status, Some(SubagentStatus::Running));
-                assert_eq!(*output, None);
-            }
-            other => panic!("{other:?}"),
-        }
-        // A tagged Done is terminal; later traffic must not regress it.
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                }),
-            },
-        );
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::TextDelta {
-                    text: "late flush".into(),
-                }),
-            },
-        );
-        match &parts[0] {
-            MessagePart::Tool {
-                subagent_status, ..
-            } => assert_eq!(*subagent_status, Some(SubagentStatus::Done)),
-            other => panic!("{other:?}"),
-        }
-        // A confirmed follow-up can reopen the same chip without user text.
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_sub".into(),
-                event: Box::new(AgentEvent::Steered {
-                    assistant_message_id: None,
-                    next_assistant_message_id: None,
-                }),
-            },
-        );
-        assert!(matches!(
-            &parts[0],
-            MessagePart::Tool {
-                subagent_status: Some(SubagentStatus::Running),
-                ..
-            }
-        ));
-        // Content never leaked into the parent parts.
-        assert_eq!(parts.len(), 1);
-    }
-
-    #[test]
-    fn subagent_events_never_decorate_a_non_spawn_chip() {
-        // Mis-keyed tagged traffic (claude's background shells settled
-        // through the subagent subtype, 2026-08-20) must not stamp lifecycle
-        // onto an ordinary tool chip — the genus gate is the CALL.
-        use slopty_view_proto::DoneStatus;
-        let mut parts = Vec::new();
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::ToolCall {
-                id: "toolu_bash".into(),
-                call: ToolCall::Exec {
-                    command: "git clone …".into(),
-                },
-            },
-        );
-        fold_event_into_parts(
-            &mut parts,
-            &AgentEvent::Subagent {
-                parent_tool_use_id: "toolu_bash".into(),
-                event: Box::new(AgentEvent::Done {
-                    status: DoneStatus::Completed,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                }),
-            },
-        );
-        match &parts[0] {
-            MessagePart::Tool {
-                subagent_status, ..
-            } => assert_eq!(*subagent_status, None),
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn sidecar_payload_carries_full_texts() {
-        assert_eq!(
-            sidecar_payload(&AgentEvent::TextDelta { text: "x".into() }),
-            None
-        );
-        assert_eq!(
-            sidecar_payload(&AgentEvent::ToolResult {
-                id: "t".into(),
-                is_error: false,
-                output: Some("   \n".into()),
-                diff: None,
-            }),
-            None,
-            "blank output uploads nothing"
-        );
-        let payload = sidecar_payload(&AgentEvent::ToolResult {
-            id: "t".into(),
-            is_error: true,
-            output: Some("full output".into()),
-            diff: None,
-        })
-        .unwrap();
-        assert_eq!(payload.part_id, "t");
-        assert_eq!(payload.output.as_deref(), Some("full output"));
     }
 }

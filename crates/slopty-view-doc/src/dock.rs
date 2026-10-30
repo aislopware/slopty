@@ -82,18 +82,17 @@ impl RetryLine {
     /// 5s · attempt 2/10".
     #[must_use]
     pub fn words(&self, in_ms: Option<u64>) -> String {
-        let mut out = self.what.clone();
-        match in_ms {
+        let retry = match in_ms {
             Some(ms) if ms >= 1_000 => {
-                out.push_str(&format!(" · Retrying in {}", crate::work::duration_words(ms)));
+                format!("Retrying in {}", crate::work::duration_words(ms))
             }
-            _ => out.push_str(" · Retrying now"),
-        }
-        match self.max {
-            Some(max) => out.push_str(&format!(" · attempt {}/{max}", self.attempt)),
-            None => out.push_str(&format!(" · attempt {}", self.attempt)),
-        }
-        out
+            _ => "Retrying now".to_owned(),
+        };
+        let attempt = match self.max {
+            Some(max) => format!("attempt {}/{max}", self.attempt),
+            None => format!("attempt {}", self.attempt),
+        };
+        format!("{} · {retry} · {attempt}", self.what)
     }
 }
 
@@ -133,8 +132,12 @@ mod tests {
     /// A retry counts down to its next attempt, out of the most it makes when it says.
     #[test]
     fn a_retry_reads_its_countdown_and_attempt() {
-        let retry =
-            RetryLine { attempt: 2, max: Some(10), what: "API error".into(), ..RetryLine::default() };
+        let retry = RetryLine {
+            attempt: 2,
+            max: Some(10),
+            what: "API error".into(),
+            ..RetryLine::default()
+        };
         assert_eq!(retry.words(Some(5_000)), "API error · Retrying in 5s · attempt 2/10");
         assert_eq!(retry.words(None), "API error · Retrying now · attempt 2/10");
     }

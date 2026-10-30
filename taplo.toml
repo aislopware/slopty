@@ -17,9 +17,6 @@ exclude = [
     "vendor/**",
     "workspace-hack/Cargo.toml",
     "crates/slopty-shell/Cargo.toml",
-    "crates/slopty-view-doc/Cargo.toml",
-    "crates/slopty-view-proto/Cargo.toml",
-    "crates/slopty-view-rpc/Cargo.toml",
 ]
 
 [formatting]

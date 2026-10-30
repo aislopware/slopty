@@ -11,7 +11,7 @@ description = "The wire types the Slopty shell and its view model share"
 workspace = true
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = [ "derive" ] }
 serde_json = "1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = [ "serde" ] }
 parking_lot.workspace = true

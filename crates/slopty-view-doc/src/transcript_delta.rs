@@ -8,8 +8,9 @@
 //! The view model makes the frames and the shell applies them, both through this module, so
 //! the two never disagree on a transcript.
 
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::parts::MessagePart;
 use crate::schema::SessionMessageEntry;
@@ -18,6 +19,7 @@ use crate::schema::SessionMessageEntry;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptUpdate {
+    /// The changes.
     #[serde(flatten)]
     pub frame: TranscriptFrame,
     /// Historical content included in this update, independent of reset/delta
@@ -27,11 +29,13 @@ pub struct TranscriptUpdate {
 }
 
 /// Compact presentation watermark: stable part ids and text byte lengths.
+///
 /// Keeping the cutoff (rather than a one-frame boolean) lets a viewport
 /// coalesce historical and live updates without animating the history or
 /// swallowing the first live arrival. No transcript text is duplicated.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranscriptBaseline {
+    /// Each entry's parts by id, with the bytes of text each held then.
     pub entries: HashMap<String, HashMap<String, usize>>,
 }
 
@@ -51,6 +55,7 @@ impl TranscriptBaseline {
         })
     }
 
+    /// The watermark of `entries` as they are now.
     pub fn capture(entries: &[SessionMessageEntry]) -> Self {
         Self {
             entries: entries
@@ -84,11 +89,7 @@ impl TranscriptBaseline {
                 return false;
             };
             if let MessagePart::Text { text, .. } | MessagePart::Reasoning { text, .. } = part {
-                let mut end = len.min(text.len());
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                text.truncate(end);
+                text.truncate(text.floor_char_boundary(len));
             }
             true
         });
@@ -100,14 +101,20 @@ impl TranscriptBaseline {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TranscriptFrame {
+    /// The whole transcript.
     Reset {
+        /// Its entries, in order.
         reset: Vec<SessionMessageEntry>,
     },
+    /// Only what changed.
     Delta {
+        /// Entries added or replaced.
         #[serde(default)]
         upsert: Vec<TranscriptUpsert>,
+        /// Text added to the end of a part.
         #[serde(default)]
         append: Vec<TextAppend>,
+        /// Entries removed, by id.
         #[serde(default)]
         remove: Vec<String>,
         /// Expected transcript length after applying this frame — the desync
@@ -121,31 +128,38 @@ pub enum TranscriptFrame {
 /// applying upserts in frame order always finds them settled.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptUpsert {
+    /// The entry it goes after; none for the head.
     pub after: Option<String>,
+    /// The entry.
     pub entry: SessionMessageEntry,
 }
 
-/// A pure text-tail append to one part — the streaming hot path. Entry-level
+/// A pure text-tail append to one part — the streaming hot path.
+///
+/// Entry-level
 /// upserts re-send the whole live entry per tick, which for a long single
 /// reply is the whole reply again (continuations re-join before the watch);
 /// this carries only the new tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextAppend {
+    /// The entry, by id.
     pub entry: String,
+    /// The part, by id.
     pub part: String,
+    /// The text added.
     pub text: String,
     /// Total text length of the part after the append (desync tripwire).
     pub len: usize,
 }
 
 impl TranscriptFrame {
+    /// A frame that is the whole of `entries`.
     pub fn reset(entries: &[SessionMessageEntry]) -> Self {
-        Self::Reset {
-            reset: entries.to_vec(),
-        }
+        Self::Reset { reset: entries.to_vec() }
     }
 
-    pub fn is_empty_delta(&self) -> bool {
+    /// Whether it is a delta that changes nothing.
+    pub const fn is_empty_delta(&self) -> bool {
         matches!(
             self,
             Self::Delta { upsert, append, remove, .. }
@@ -197,14 +211,21 @@ fn try_text_append(prev: &SessionMessageEntry, next: &SessionMessageEntry) -> Op
         append = Some(TextAppend {
             entry: next.id.clone(),
             part: nid.clone(),
-            text: nt[pt.len()..].to_string(),
+            text: nt.get(pt.len()..).unwrap_or_default().to_owned(),
             len: nt.len(),
         });
     }
     append
 }
 
-/// Diff two transcript states into a frame. An entry is upserted when it is
+/// The id of the entry before the one at `ix`; none for the head.
+fn before(entries: &[SessionMessageEntry], ix: usize) -> Option<&str> {
+    entries.get(ix.checked_sub(1)?).map(|entry| entry.id.as_str())
+}
+
+/// Diff two transcript states into a frame.
+///
+/// An entry is upserted when it is
 /// new, its content changed, or its predecessor changed (an entry can arrive
 /// mid-list). Falls back to `Reset` when the delta
 /// would carry most of the transcript anyway.
@@ -212,26 +233,20 @@ pub fn diff_transcript(
     prev: &[SessionMessageEntry],
     next: &[SessionMessageEntry],
 ) -> TranscriptFrame {
-    let prev_by_id: std::collections::HashMap<&str, (usize, &SessionMessageEntry)> = prev
-        .iter()
-        .enumerate()
-        .map(|(i, e)| (e.id.as_str(), (i, e)))
-        .collect();
+    let prev_by_id: HashMap<&str, (usize, &SessionMessageEntry)> =
+        prev.iter().enumerate().map(|(i, e)| (e.id.as_str(), (i, e))).collect();
     let next_ids: std::collections::HashSet<&str> = next.iter().map(|e| e.id.as_str()).collect();
 
-    let remove: Vec<String> = prev
-        .iter()
-        .filter(|e| !next_ids.contains(e.id.as_str()))
-        .map(|e| e.id.clone())
-        .collect();
+    let remove: Vec<String> =
+        prev.iter().filter(|e| !next_ids.contains(e.id.as_str())).map(|e| e.id.clone()).collect();
 
     let mut upsert = Vec::new();
     let mut append = Vec::new();
     for (i, entry) in next.iter().enumerate() {
-        let after = i.checked_sub(1).map(|p| next[p].id.as_str());
+        let after = before(next, i);
         match prev_by_id.get(entry.id.as_str()) {
             Some((prev_ix, prev_entry)) => {
-                let prev_after = prev_ix.checked_sub(1).map(|p| prev[p].id.as_str());
+                let prev_after = before(prev, *prev_ix);
                 if *prev_entry == entry && prev_after == after {
                     continue;
                 }
@@ -242,27 +257,20 @@ pub fn diff_transcript(
                     continue;
                 }
                 upsert.push(TranscriptUpsert {
-                    after: after.map(str::to_string),
+                    after: after.map(str::to_owned),
                     entry: entry.clone(),
                 });
             }
-            None => upsert.push(TranscriptUpsert {
-                after: after.map(str::to_string),
-                entry: entry.clone(),
-            }),
+            None => upsert
+                .push(TranscriptUpsert { after: after.map(str::to_owned), entry: entry.clone() }),
         }
     }
 
     // A delta touching most rows serializes like a reset but applies slower.
-    if upsert.len() * 2 >= next.len().max(1) && next.len() > 4 {
+    if upsert.len().saturating_mul(2) >= next.len().max(1) && next.len() > 4 {
         return TranscriptFrame::reset(next);
     }
-    TranscriptFrame::Delta {
-        upsert,
-        append,
-        remove,
-        count: next.len(),
-    }
+    TranscriptFrame::Delta { upsert, append, remove, count: next.len() }
 }
 
 /// A frame that could not be applied cleanly — the consumer's copy has
@@ -279,14 +287,8 @@ pub fn apply_transcript_frame(
     match frame {
         TranscriptFrame::Reset { reset } => {
             *current = reset;
-            Ok(())
         }
-        TranscriptFrame::Delta {
-            upsert,
-            append,
-            remove,
-            count,
-        } => {
+        TranscriptFrame::Delta { upsert, append, remove, count } => {
             if !remove.is_empty() {
                 let gone: std::collections::HashSet<&str> =
                     remove.iter().map(String::as_str).collect();
@@ -299,7 +301,7 @@ pub fn apply_transcript_frame(
                 let at = match &after {
                     None => 0,
                     Some(anchor) => match current.iter().position(|e| &e.id == anchor) {
-                        Some(ix) => ix + 1,
+                        Some(ix) => ix.saturating_add(1),
                         None => {
                             return Err(TranscriptDesync(format!("missing anchor {anchor}")));
                         }
@@ -307,13 +309,7 @@ pub fn apply_transcript_frame(
                 };
                 current.insert(at, entry);
             }
-            for TextAppend {
-                entry,
-                part,
-                text,
-                len,
-            } in append
-            {
+            for TextAppend { entry, part, text, len } in append {
                 let Some(target) = current.iter_mut().find(|e| e.id == entry) else {
                     return Err(TranscriptDesync(format!("missing append entry {entry}")));
                 };
@@ -342,9 +338,9 @@ pub fn apply_transcript_frame(
                     current.len()
                 )));
             }
-            Ok(())
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -357,10 +353,7 @@ mod tests {
         SessionMessageEntry {
             id: id.into(),
             role: MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "t0".into(),
-                text: text.into(),
-            }],
+            parts: vec![MessagePart::Text { id: "t0".into(), text: text.into() }],
             created_at: 0,
             device_id: "dev".into(),
             status: None,
@@ -384,8 +377,8 @@ mod tests {
         let a = entry("a", "hello");
         let b0 = entry("b", "wor");
         let b1 = entry("b", "world");
-        apply(&[], &[a.clone()]);
-        apply(&[a.clone()], &[a.clone(), b0.clone()]);
+        apply(&[], std::slice::from_ref(&a));
+        apply(std::slice::from_ref(&a), &[a.clone(), b0.clone()]);
         apply(&[a.clone(), b0], &[a, b1]);
     }
 
@@ -406,19 +399,14 @@ mod tests {
         let b1 = entry("b", "streaming… more");
         let frame = diff_transcript(&[a.clone(), b0.clone()], &[a.clone(), b1.clone()]);
         match &frame {
-            TranscriptFrame::Delta {
-                upsert,
-                append,
-                remove,
-                ..
-            } => {
+            TranscriptFrame::Delta { upsert, append, remove, .. } => {
                 // The hot path: only the new tokens travel, never the entry.
                 assert!(upsert.is_empty());
                 assert_eq!(append.len(), 1);
                 assert_eq!(append[0].text, " more");
-                assert!(remove.is_empty());
+                assert_eq!(remove, &Vec::<String>::new());
             }
-            other => panic!("expected delta, got {other:?}"),
+            other @ TranscriptFrame::Reset { .. } => panic!("expected delta, got {other:?}"),
         }
         apply(&[a.clone(), b0], &[a, b1]);
     }
@@ -444,7 +432,7 @@ mod tests {
                 assert_eq!(append.len(), 1);
                 assert_eq!(append[0].text, " more");
             }
-            other => panic!("expected delta, got {other:?}"),
+            other @ TranscriptFrame::Reset { .. } => panic!("expected delta, got {other:?}"),
         }
         apply(&[b0], &[b1]);
     }
@@ -454,13 +442,13 @@ mod tests {
         // Same id but a rewritten (non-prefix) text must re-send the entry.
         let b0 = entry("b", "draft text");
         let b1 = entry("b", "final");
-        let frame = diff_transcript(&[b0.clone()], &[b1.clone()]);
+        let frame = diff_transcript(std::slice::from_ref(&b0), std::slice::from_ref(&b1));
         match &frame {
             TranscriptFrame::Delta { upsert, append, .. } => {
                 assert_eq!(upsert.len(), 1);
                 assert!(append.is_empty());
             }
-            other => panic!("expected delta, got {other:?}"),
+            other @ TranscriptFrame::Reset { .. } => panic!("expected delta, got {other:?}"),
         }
         apply(&[b0], &[b1]);
     }
@@ -486,10 +474,7 @@ mod tests {
     fn large_change_falls_back_to_reset() {
         let prev: Vec<_> = (0..10).map(|i| entry(&format!("p{i}"), "x")).collect();
         let next: Vec<_> = (0..10).map(|i| entry(&format!("n{i}"), "y")).collect();
-        assert!(matches!(
-            diff_transcript(&prev, &next),
-            TranscriptFrame::Reset { .. }
-        ));
+        assert!(matches!(diff_transcript(&prev, &next), TranscriptFrame::Reset { .. }));
     }
 
     #[test]
@@ -522,10 +507,7 @@ mod context_update_tests {
         })
         .unwrap();
         let roundtrip: TranscriptUpdate = serde_json::from_value(value.clone()).unwrap();
-        assert_eq!(
-            roundtrip.replay_baseline,
-            Some(TranscriptBaseline::default())
-        );
+        assert_eq!(roundtrip.replay_baseline, Some(TranscriptBaseline::default()));
         assert!(matches!(
             serde_json::from_value::<TranscriptFrame>(value).unwrap(),
             TranscriptFrame::Reset { .. }
@@ -537,10 +519,7 @@ mod context_update_tests {
         let mut entry = SessionMessageEntry {
             id: "message".into(),
             role: crate::MessageRole::Assistant,
-            parts: vec![MessagePart::Text {
-                id: "text".into(),
-                text: "café".into(),
-            }],
+            parts: vec![MessagePart::Text { id: "text".into(), text: "café".into() }],
             created_at: 0,
             device_id: "host".into(),
             status: Some(crate::MessageStatus::Streaming),
@@ -549,10 +528,8 @@ mod context_update_tests {
         };
         let baseline = TranscriptBaseline::capture(&[entry.clone()]);
         assert!(baseline.covers(&entry));
-        entry.parts[0] = MessagePart::Text {
-            id: "text".into(),
-            text: "café recién hecho".into(),
-        };
+        entry.parts[0] =
+            MessagePart::Text { id: "text".into(), text: "café recién hecho".into() };
         entry.parts.push(MessagePart::Reasoning {
             id: "new".into(),
             text: "live".into(),
@@ -562,22 +539,13 @@ mod context_update_tests {
         let historical = baseline.historical_entry(&entry).unwrap();
         assert_eq!(
             historical.parts,
-            vec![MessagePart::Text {
-                id: "text".into(),
-                text: "café".into()
-            }]
+            vec![MessagePart::Text { id: "text".into(), text: "café".into() }]
         );
         // A replaced text can invalidate a former byte boundary.
-        entry.parts[0] = MessagePart::Text {
-            id: "text".into(),
-            text: "🙂🙂".into(),
-        };
+        entry.parts[0] = MessagePart::Text { id: "text".into(), text: "🙂🙂".into() };
         assert_eq!(
             baseline.historical_entry(&entry).unwrap().parts[0],
-            MessagePart::Text {
-                id: "text".into(),
-                text: "🙂".into()
-            }
+            MessagePart::Text { id: "text".into(), text: "🙂".into() }
         );
     }
 }

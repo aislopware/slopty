@@ -153,7 +153,7 @@ impl StepTime {
 }
 
 /// How long a call has run.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolTimer {
     /// How long it had run when the agent last said, in ms.
@@ -236,9 +236,10 @@ impl SubagentProgress {
     pub const WAITING: &'static str = "waiting";
 }
 
-/// A background task's notice, a quiet row of its own linked to its task
-/// ([`crate::MessagePart::Task`]): "Agent \"Look\" finished · 2m 5s", "Monitor event: STALL lane
-/// WATCH idle 20 min", "Background command \"x\" failed with exit code 2".
+/// A background task's notice: a quiet row of its own, linked to its task.
+///
+/// It is drawn for a [`crate::MessagePart::Task`]: "Agent \"Look\" finished · 2m 5s", "Monitor
+/// event: STALL lane WATCH idle 20 min", "Background command \"x\" failed with exit code 2".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskRow {
@@ -300,9 +301,11 @@ pub struct LinkRow {
     pub mime_type: Option<String>,
 }
 
-/// A quiet row of the agent's own that is no failure ([`crate::MessagePart::Note`]): "Allowed
-/// cargo test", "Saved 2 memories", "Switched to Sonnet due to high demand", "Goal achieved (5m ·
-/// 3 turns)", "All background agents stopped", a hook's word, a request tried again.
+/// A quiet row of the agent's own that is no failure ([`crate::MessagePart::Note`]).
+///
+/// "Allowed cargo test", "Saved 2 memories", "Switched to Sonnet due to high demand", "Goal
+/// achieved (5m · 3 turns)", "All background agents stopped", a hook's word, a request tried
+/// again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteRow {
@@ -338,9 +341,10 @@ impl NoteRow {
     pub const SUCCESS: &'static str = "success";
 }
 
-/// A turn's figures, on the row of the prompt that opened it (`docs/decisions/inspector.md`,
-/// "The turn is the root row"): how it stands, when it ran, the models that answered, the tokens
-/// it took by kind and the lines it changed.
+/// A turn's figures, on the row of the prompt that opened it.
+///
+/// How it stands, when it ran, the models that answered, the tokens it took by kind and the lines
+/// it changed (`docs/decisions/inspector.md`, "The turn is the root row").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnFacts {
@@ -368,16 +372,16 @@ pub struct TurnFacts {
 }
 
 impl TurnFacts {
-    /// The [`NoteRow::kind`] that carries a turn's figures.
-    pub const KIND: &'static str = "turn-root";
     /// Under way.
     pub const ACTIVE: &'static str = "active";
     /// The agent answered.
     pub const COMPLETE: &'static str = "complete";
-    /// The person stopped it.
-    pub const INTERRUPTED: &'static str = "interrupted";
     /// It ended on an error.
     pub const FAILED: &'static str = "failed";
+    /// The person stopped it.
+    pub const INTERRUPTED: &'static str = "interrupted";
+    /// The [`NoteRow::kind`] that carries a turn's figures.
+    pub const KIND: &'static str = "turn-root";
 
     /// How long it ran, until `now` while it runs.
     #[must_use]
@@ -390,10 +394,6 @@ impl TurnFacts {
     #[must_use]
     pub fn tokens_in_cached_out(&self) -> [u64; 3] {
         let of = |kind: &str| self.tokens.get(kind).copied().unwrap_or(0);
-        [
-            of("input").saturating_add(of("cache-write")),
-            of("cache-read"),
-            of("output"),
-        ]
+        [of("input").saturating_add(of("cache-write")), of("cache-read"), of("output")]
     }
 }

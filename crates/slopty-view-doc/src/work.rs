@@ -90,7 +90,7 @@ pub fn tokens_short(tokens: u64) -> String {
 #[must_use]
 pub fn bytes_short(bytes: u64) -> String {
     const NBSP: char = '\u{a0}';
-    let tenths = |unit: u64| bytes.saturating_mul(10) / unit;
+    let tenths = |unit: u64| bytes.saturating_mul(10).checked_div(unit).unwrap_or(0);
     let (unit, name) = match bytes {
         b if b >= 1 << 30 => (1 << 30, "GB"),
         b if b >= 1 << 20 => (1 << 20, "MB"),
