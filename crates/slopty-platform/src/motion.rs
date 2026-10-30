@@ -1,8 +1,8 @@
 //! The system's Reduce Motion setting, heard as it changes.
 //!
-//! [`crate::reduce_motion`] keeps its answer for a second; a change in System Settings (or iOS
-//! Settings) is heard at once here, so a spring already under way stops gliding and GPUI's own
-//! animations follow in the next frame.
+//! [`crate::reduce_motion`] reads it once, at launch; a change in System Settings (or iOS
+//! Settings) is heard here as it happens, so an animation already under way stops in the next
+//! frame.
 
 use std::ptr::NonNull;
 
@@ -19,8 +19,7 @@ pub struct Watch {
     observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
 }
 
-/// Call `changed` with the setting each time the system says it changed, on the main thread,
-/// and keep it for [`crate::reduce_motion`].
+/// Call `changed` with the setting each time the system says it changed, on the main thread.
 pub fn watch_reduce_motion(changed: impl Fn(bool) + 'static) -> Watch {
     #[cfg(target_os = "macos")]
     let (center, name) = (
@@ -34,11 +33,7 @@ pub fn watch_reduce_motion(changed: impl Fn(bool) + 'static) -> Watch {
         // SAFETY: an immutable `NSString` static UIKit defines (UIAccessibility.h).
         unsafe { objc2_ui_kit::UIAccessibilityReduceMotionStatusDidChangeNotification },
     );
-    observe(center, name, move || {
-        let on = crate::system_reduce_motion();
-        crate::REDUCE_MOTION.set(crate::since_epoch(), on);
-        changed(on);
-    })
+    observe(center, name, move || changed(crate::reduce_motion()))
 }
 
 /// Run `heard` on the main thread each time `center` posts `name`, until the watch drops.

@@ -27,6 +27,11 @@ side.
   `an_echo_owed_for_want_of_room_goes_when_room_returns`, the echo beside a flood) run on
   tokio's paused clock since 2026-10-30 and print no `MEASURE` line. The latencies the entries
   before it quote from them were measured on the wall clock, and stay as history.
+- `reduce_motion_is_kept_as_the_system_says` is gone with the kept answer it timed (2026-09-25,
+  "reading Reduce Motion"). Since 2026-10-31 nothing asks for the setting on a frame: the shell
+  holds GPUI's flag and the app hears each change through
+  `slopty_platform::motion::watch_reduce_motion`, so `slopty_platform::reduce_motion` reads the
+  system once, at launch. The entry stays as history.
 
 ## 2026-09-04 — control-stream round trip, loopback: iroh `fast-apple-datapath` costs 50 ms
 
