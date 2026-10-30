@@ -168,7 +168,7 @@ pub(super) fn show_more_row(
         .flex_row()
         .items_center()
         // slopty: its words at the rows' title edge, past the one leading slot.
-        .gap(px(super::SIDEBAR_LEADING_GAP))
+        .gap(px(super::sidebar::SIDEBAR_LEADING_GAP))
         .px(px(Theme::SPACE_SM))
         .rounded(px(8.0))
         .text_size(crate::typography::ui_rems(13.0))
@@ -179,7 +179,7 @@ pub(super) fn show_more_row(
         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
         .child(
             div()
-                .size(px(super::SIDEBAR_LEADING_SLOT))
+                .size(px(super::sidebar::SIDEBAR_LEADING_SLOT))
                 .flex_none()
                 .flex()
                 .items_center()
@@ -197,7 +197,7 @@ pub(super) fn empty_group_row(
     open: bool,
     theme: &Theme,
 ) -> (String, f32, AnyElement) {
-    let height = super::sidebar_row_height(false);
+    let height = super::sidebar::sidebar_row_height(false);
     let id = format!("sidebar-group-empty-{collapse_key}");
     let element = div()
         .id(SharedString::from(id.clone()))
@@ -207,7 +207,7 @@ pub(super) fn empty_group_row(
         .flex()
         .items_center()
         // slopty: at the rows' title edge.
-        .pl(px(Theme::SPACE_SM + super::SIDEBAR_LEADING_SLOT + super::SIDEBAR_LEADING_GAP))
+        .pl(px(Theme::SPACE_SM + super::sidebar::SIDEBAR_LEADING_SLOT + super::sidebar::SIDEBAR_LEADING_GAP))
         .pr(px(Theme::SPACE_SM))
         .text_size(crate::typography::ui_rems(13.0))
         .text_color(theme.text_muted.opacity(0.55))
@@ -231,7 +231,7 @@ impl super::Shell {
             return None;
         }
         // As the Archived shelf's: a row's height.
-        let height = super::sidebar_row_height(false);
+        let height = super::sidebar::sidebar_row_height(false);
         let key = collapse_key.to_owned();
         let id = SharedString::from(format!("sidebar-group-more-{collapse_key}"));
         let element = show_more_row(id, hidden, height, theme)

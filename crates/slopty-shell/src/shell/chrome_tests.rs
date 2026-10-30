@@ -243,7 +243,7 @@ fn a_row_at_rest_draws_no_dot(cx: &mut TestAppContext) {
 fn a_rows_mark_follows_its_state() {
     use crate::loaders::status_mark::MarkState;
     use slopty_view_proto::ChatIndicator;
-    let mark = super::sidebar_mark_state;
+    let mark = super::sidebar::sidebar_mark_state;
     assert_eq!(mark(ChatIndicator::Working), Some(MarkState::Working));
     assert_eq!(mark(ChatIndicator::AwaitingInput), Some(MarkState::Waiting));
     assert_eq!(mark(ChatIndicator::Completed), Some(MarkState::Done));

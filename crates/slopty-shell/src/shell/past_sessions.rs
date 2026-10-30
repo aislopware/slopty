@@ -84,8 +84,8 @@ const GAP: f32 = 2.0;
 const BODY_INSET: f32 = 2.0;
 /// A row's one leading slot, as a chat row's (`SIDEBAR_LEADING_SLOT`): the agent's mark, a past
 /// session having no state to say, then the air before its words.
-const ROW_SLOT: f32 = super::SIDEBAR_LEADING_SLOT;
-const ROW_SLOT_GAP: f32 = super::SIDEBAR_LEADING_GAP;
+const ROW_SLOT: f32 = super::sidebar::SIDEBAR_LEADING_SLOT;
+const ROW_SLOT_GAP: f32 = super::sidebar::SIDEBAR_LEADING_GAP;
 /// The agent's mark in the slot, as a chat row's.
 const ROW_MARK: f32 = 13.0;
 
@@ -613,7 +613,7 @@ impl Shell {
                     })
                     .flex_1()
                     .min_w_0()
-                    .child(super::sidebar_faded_label(
+                    .child(super::sidebar::sidebar_faded_label(
                     SharedString::from(format!("history-title-{}", row.key)),
                     true,
                     div()
@@ -1490,7 +1490,7 @@ mod tests {
             (inset - (Theme::SPACE_SM + ROW_SLOT + ROW_SLOT_GAP)).abs() < 0.5,
             "the words start where a chat row's do: {inset}"
         );
-        assert_eq!(f32::from(row.size.height), super::super::sidebar_row_height(false));
+        assert_eq!(f32::from(row.size.height), super::super::sidebar::sidebar_row_height(false));
     }
 
     // slopty: History's times read the sidebar's clock, taken as History opens, and the clock

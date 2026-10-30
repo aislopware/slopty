@@ -10,6 +10,7 @@
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
 
 use super::*;
+use super::sidebar::sidebar_row_height;
 use crate::pickers::{
     breadcrumbs, browser_rows, completion_prefix_len, escape_typed_path, folder_path_key,
     is_windows_path, parent_path, resolve_typed_path, same_folder_path, split_typed_leaf,
@@ -91,7 +92,7 @@ pub(super) fn every_device_reached(state: &AppState, now: chrono::DateTime<chron
 /// Convert viewport coordinates to the first pinned row, below its disclosure.
 fn pinned_session_pointer_y(pointer_y: f32, viewport_top: f32, scroll_top: f32) -> f32 {
     pointer_y - viewport_top + scroll_top
-        - super::SIDEBAR_LIST_PAD_TOP
+        - super::sidebar::SIDEBAR_LIST_PAD_TOP
         - SIDEBAR_DISCLOSURE_HEADER_HEIGHT
         - SIDEBAR_DISCLOSURE_BODY_INSET
 }
@@ -1224,7 +1225,7 @@ mod pinned_session_tests {
         assert_eq!(dragged_card.origin.x, source_bounds.origin.x);
         assert_eq!(
             f32::from(dragged_card.size.height),
-            super::super::sidebar_row_height(false)
+            super::super::sidebar::sidebar_row_height(false)
         );
         // Even a sub-row move follows the pointer immediately, before a drop slot changes.
         let pointer = from + gpui::point(px(8.0), px(7.0));
@@ -2037,7 +2038,7 @@ pub(super) fn sidebar_disclosure_header(
         })
         .aria_expanded(open)
         .children(icon)
-        .child(super::sidebar_faded_label(
+        .child(super::sidebar::sidebar_faded_label(
             "sidebar-disclosure-label".into(),
             false,
             div()
@@ -3846,7 +3847,7 @@ impl Shell {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
-                    .child(super::sidebar_faded_label(
+                    .child(super::sidebar::sidebar_faded_label(
                         "spaces-filter-label".into(),
                         false,
                         label,
