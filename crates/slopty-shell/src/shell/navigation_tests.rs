@@ -23,8 +23,11 @@ impl Render for NavigationHost {
                 .child(div().track_focus(&shell.unfocused))
                 .on_action(cx.listener(|shell, _: &NextSession, _, cx| shell.cycle_navigation(true, cx)))
                 .on_action(cx.listener(|shell, _: &PrevSession, _, cx| shell.cycle_navigation(false, cx)))
-                // slopty: the window's own keys (`chrome_keys`).
+                // slopty: the window's own keys (`chrome_keys`), and the keys the root's own
+                // listeners take (Esc out of a view among them).
                 .map(|el| shell.chrome_actions(el, cx))
+                .capture_key_down(cx.listener(Shell::on_key_down_capture))
+                .on_key_down(cx.listener(Shell::on_key_down))
                 .child(
                     div()
                         .id("navigation-main")
@@ -172,6 +175,18 @@ fn the_pane_keys_walk_the_panes_from_the_terminal_too(cx: &mut TestAppContext) {
         keyboard_in(&shell, cx, lands);
     }
     cx.update(|window, cx| assert!(!session_focus(&shell, cx).is_focused(window)));
+}
+
+/// Esc in a view that takes it for nothing of its own gives the keyboard back to the session's
+/// terminal, as the view's key again does.
+#[gpui::test]
+fn escape_in_a_view_gives_the_keyboard_back_to_the_terminal(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    keyboard_in(&shell, cx, Pane::View(RightSurface::Diff(2)));
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    keyboard_in(&shell, cx, Pane::Session);
+    shell.read_with(cx, |shell, cx| assert_eq!(shell.panes_now(cx).views().len(), 2, "the views stay"));
 }
 
 /// A press anywhere in a pane gives it the keyboard: on its header, which takes no keyboard of
