@@ -4,8 +4,8 @@ Slopty is a remote-coding workstation in three roles. **Workers** (macOS; Linux 
 and agents) expose shells, agents, windows and displays. One **server** keeps the worker
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
 iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show every worker's
-agents, terminals, files and screens in one interface, several workers mixed: zeron's shell,
-copied as Slopty's own (`slopty-shell`), fed by Slopty's view model. TUI-first: every agent
+agents, terminals, files and screens in one interface, several workers mixed: a terminal's
+window (`slopty-shell`, `docs/decisions/layout.md`), fed by Slopty's view model. TUI-first: every agent
 (Claude Code, Codex, pi) runs as its own TUI in a worker terminal; a Claude Code session is also
 one read-only thread in the agent-neutral model, read from its hooks, its live registry and its
 transcript, which the inspector shows; the GUI types nothing into an agent
@@ -37,7 +37,7 @@ This file is the map. Rulings and their evidence live under [docs/decisions/](DE
                      │ client (macOS app · iOS app · CLI)     ▼                              │
                      │ slopty-client: session state · line cache · prediction · items · layout│
                      │ slopty-ui (GPUI): workspace · view model · surface element · the views│
-                     │ slopty-shell (GPUI): the interface, zeron's shell copied              │
+                     │ slopty-shell (GPUI): the interface, a terminal's window               │
                      │ slopty-terminal: the terminal view · its element · find · copy mode   │
                      │ slopty-codec (decode) → CVPixelBuffer → gpui surface (zero copy)      │
                      └───────────────────────────────────────────────────────────────────────┘
@@ -861,8 +861,8 @@ advertise `WorkerCaps::virtual_displays`; Linux says no.
 
 ## 4. Workspace
 
-The window is zeron's interface, copied as `slopty-shell` (`docs/decisions/ui.md`, "The
-interface is zeron's UI and UX, copied as Slopty's own"), and nothing else draws in it. The
+The window is `slopty-shell`, a terminal's window rather than a GUI-first app's
+(`docs/decisions/layout.md`), and nothing else draws in it. The
 shell knows nothing of workers: it asks one RPC service, Slopty's view model
 (`slopty_ui::view_model::ViewModel`), in process through `slopty_view_rpc::memory_client`, and
 that service is fed by `slopty_ui::workspace::WorkspaceView`, which keeps every worker this
@@ -1073,7 +1073,7 @@ a list's or a scroll handle's state moved. Every other view is replayed from the
 a view must hear of everything it shows and must not read what changes more often than it
 does. The window itself tells the frame-time probe of every draw it makes, whichever views it
 built again (`frames::watch` on gpui-fast's `Window::observe_draws`), so no view is built again
-on the probe's account. The shell is zeron's and draws as zeron does (`docs/decisions/ui.md`).
+on the probe's account. The shell draws as `docs/decisions/layout.md` rules.
 A shell does not read where the pointer is while it draws, since that is news with every move
 over the window: its element lets the scrollbar go when the window goes inactive or the grid
 moves, and its listeners update the view only when a move changes something in it (a row
@@ -1249,8 +1249,7 @@ stops its arrival → present clock the same way. The iOS simulator reports no p
 there the next display tick stands in.
 
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`) holds what the shell's
-own Settings do not: the window's look, its fonts and its shortcuts are the shell's, as in
-zeron. `slopty-settings` owns the schema: `[terminal] minimum_contrast | copy_on_select |
+own Settings do not: the window's look, its fonts and its shortcuts are the shell's. `slopty-settings` owns the schema: `[terminal] minimum_contrast | copy_on_select |
 alert = never | hidden | always | option_as_alt = false | true | left | right |
 secure_keyboard_entry` (the ratio rides on `TerminalPalette`, copy-on-select, option-as-alt
 and secure entry on `Theme::behaviour`, option-as-alt travelling on every `KeyEvent` to the
@@ -1268,7 +1267,7 @@ sends the palette to every shell's worker, so a program asking for its colours (
 hears the ones it is drawn in; the terminal element re-measures its cell grid on the next
 frame and `fitted` resizes the session. iOS reads the same path, in its sandbox.
 
-**Keymap.** The shell's keymap is zeron's, set in its Settings > Shortcuts. A terminal's own
+**Keymap.** The shell's keymap is set in its Settings > Shortcuts. A terminal's own
 commands (`slopty_terminal::commands`: copy, paste, find, clear, the prompt jumps, copy mode,
 …) each carry their default chords and the terminal key context; `slopty_terminal::bindings`
 lays the file's `[keys.terminal]` over them (a chord in GPUI's syntax, `""` unbinding, a

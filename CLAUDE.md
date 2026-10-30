@@ -1,17 +1,17 @@
 # Slopty
 
-One app on macOS, iPhone and iPad for working on many remote machines as if they were one local
-one: coding agents in their own TUIs (Claude Code, Codex, pi), terminals, remote windows and
-desktops at Parsec quality or better, clipboard and files, in a sidebar and a side pane. Pure
-Rust on GPUI, over Tailscale or a VPN. Terminal and TUI first: the person works in each agent's
-own TUI, always complete and current, and the GUI supports it with what needs them at a glance
-and a read-only inspector of the running session that keeps only what helps inspect it, down to
-the TUI's own prompt box live (its draft and pasted images). Every surface feels
-local and the editor stays light, with no LSP. Its interface starts from zeron's UI (MIT),
-copied and made Slopty's own, and takes the best of the premium references wherever they are
-more elegant; `cargo xtask upstream adopt` keeps taking zeron's interface improvements. The
-person hands over whole goals and reviews only results; frontier models get open tools to
-orchestrate with, never a prescribed workflow.
+One app on macOS, iPhone and iPad for working on many remote machines as if they were one local one:
+coding agents in their own TUIs (Claude Code, Codex, pi), terminals, remote windows and desktops at
+Parsec quality or better, clipboard and files, in a sidebar beside the terminal and views summoned
+beside it. Pure Rust on GPUI, over Tailscale or a VPN. Terminal and TUI first: the person works in
+each agent's own TUI, always complete and current, and the GUI supports it with what needs them at a
+glance and a read-only inspector of the running session that keeps only what helps inspect it, down
+to the TUI's own prompt box live (its draft and pasted images). Every surface feels local and the
+editor stays light, with no LSP. Its interface is a terminal's, not a GUI-first app's: one row of
+chrome, the terminal owning the window, a stable session list whose marks carry the attention, after
+the premium terminals (Rex first; `docs/decisions/layout.md`); the zeron code it was copied from is
+no longer its base. The person hands over whole goals and reviews only results; frontier models get
+open tools to orchestrate with, never a prescribed workflow.
 
 Maps: `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/MEASUREMENTS.md`, `docs/DEV.md`,
 `docs/TESTING.md`. Progress lives in the memory's notes.

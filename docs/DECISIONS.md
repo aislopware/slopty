@@ -11,6 +11,7 @@ One file per topic under `docs/decisions/`; an entry is cited by its bold title 
 - [Topology](decisions/topology.md)
 - [Platform](decisions/platform.md)
 - [UI](decisions/ui.md)
+- [Layout](decisions/layout.md) (supersedes UI's zeron base for layout and components)
 - [Terminal](decisions/terminal.md)
 - [Transport](decisions/transport.md)
 - [Video](decisions/video.md)
