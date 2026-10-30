@@ -23,17 +23,6 @@
 //! the machine's load chose, and a stop no rerun found again. A short fixed-seed run is part of
 //! the suite; [`a_long_fuzz_of_the_shell`] is the nightly's (`SLOPTY_FUZZ_RUNS`,
 //! `SLOPTY_FUZZ_STEPS`).
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::clone_on_ref_ptr,
-    clippy::let_underscore_must_use,
-    clippy::map_with_unused_argument_over_ranges,
-    clippy::match_same_arms,
-    clippy::mem_forget,
-    clippy::needless_pass_by_ref_mut,
-    clippy::unwrap_in_result,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -157,7 +146,7 @@ impl Rng {
     }
 
     fn below(&mut self, n: usize) -> usize {
-        usize::try_from(self.next() % n as u64).unwrap_or(0)
+        usize::try_from(self.next().checked_rem(n as u64).unwrap_or(0)).unwrap_or(0)
     }
 
     fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
@@ -167,7 +156,7 @@ impl Rng {
 
 /// The screen a seed's run is on.
 fn screen_of(seed: u64) -> usize {
-    usize::try_from(seed % SCREENS.len() as u64).unwrap_or(0)
+    usize::try_from(seed.checked_rem(SCREENS.len() as u64).unwrap_or(0)).unwrap_or(0)
 }
 
 /// The steps a seed's run takes, `len` of them.
@@ -175,28 +164,28 @@ fn steps_of(seed: u64, len: usize) -> Vec<Step> {
     let mut rng = Rng(seed ^ 0x5106_7700);
     let resizes = RESIZES[screen_of(seed)].len();
     let mut ids: Vec<String> = START.iter().map(|(id, _)| (*id).to_owned()).collect();
-    let mut arrived = 0;
-    (0..len)
-        .map(|_| match rng.below(100) {
-            0..18 => Step::Key(rng.pick(KEYS)),
-            18..32 => Step::Open(rng.pick(&ids).clone()),
-            32..38 => Step::Back,
-            38..48 => Step::Terminal(rng.pick(&ids).clone(), rng.below(3) != 0),
-            48..56 => Step::Turn(rng.pick(&ids).clone(), rng.below(2) == 0),
-            56..64 => Step::Stream(rng.below(6)),
-            64..67 => {
-                arrived += 1;
-                let id = format!("new{arrived}");
-                ids.push(id.clone());
-                Step::Arrive(id)
-            }
-            67..75 => Step::Leave(rng.pick(&ids).clone()),
-            75..80 => Step::Resize(rng.below(resizes)),
-            80..86 => Step::Wait(*rng.pick(&[5, 40, 120, 400, 1500])),
-            86..94 => Step::Frames(1 + rng.below(6)),
-            _ => Step::Pause,
-        })
-        .collect()
+    let mut arrived = 0_u32;
+    std::iter::repeat_with(|| match rng.below(100) {
+        0..18 => Step::Key(rng.pick(KEYS)),
+        18..32 => Step::Open(rng.pick(&ids).clone()),
+        32..38 => Step::Back,
+        38..48 => Step::Terminal(rng.pick(&ids).clone(), rng.below(3) != 0),
+        48..56 => Step::Turn(rng.pick(&ids).clone(), rng.below(2) == 0),
+        56..64 => Step::Stream(rng.below(6)),
+        64..67 => {
+            arrived = arrived.saturating_add(1);
+            let id = format!("new{arrived}");
+            ids.push(id.clone());
+            Step::Arrive(id)
+        }
+        67..75 => Step::Leave(rng.pick(&ids).clone()),
+        75..80 => Step::Resize(rng.below(resizes)),
+        80..86 => Step::Wait(*rng.pick(&[5, 40, 120, 400, 1500])),
+        86..94 => Step::Frames(rng.below(6).saturating_add(1)),
+        _ => Step::Pause,
+    })
+    .take(len)
+    .collect()
 }
 
 /// What the model holds of the engine's side: the chats, their sessions and their terminals.
@@ -239,7 +228,7 @@ impl Model {
             .map(|(ago, (id, parent))| {
                 chat_row(
                     id,
-                    i64::try_from(ago).unwrap_or(0) + 1,
+                    i64::try_from(ago).unwrap_or(0).saturating_add(1),
                     parent.as_ref().map(|(p, i)| (p.as_str(), *i)),
                     now,
                 )
@@ -272,7 +261,7 @@ struct Failure {
 
 /// Now on the shell's clock, the test's dispatcher's: the date the engine's side stamps, which
 /// the shell's own dates ([`crate::clock::utc`]) are measured against.
-fn shell_now(cx: &mut VisualTestContext) -> DateTime<Utc> {
+fn shell_now(cx: &VisualTestContext) -> DateTime<Utc> {
     crate::clock::utc_at(cx.executor().now())
 }
 
@@ -292,7 +281,7 @@ fn apply_model(model: &Model, shell: &Entity<Shell>, cx: &mut VisualTestContext)
 }
 
 /// The selected chat.
-fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+fn selected(shell: &Entity<Shell>, cx: &VisualTestContext) -> Option<String> {
     shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
 }
 
@@ -319,7 +308,6 @@ fn take(
         Step::Open(id) if model.chats.iter().any(|(chat, _)| chat == id) => {
             shell.update(cx, |shell, cx| shell.open_chat(id.clone(), cx));
         }
-        Step::Open(_) => {}
         Step::Back => {
             if let Some(parent) = selected(shell, cx).and_then(|chat| model.parent(&chat)) {
                 shell.update(cx, |shell, cx| shell.open_chat(parent, cx));
@@ -358,8 +346,8 @@ fn take(
                 }
                 if let Some(MessagePart::Text { text, .. }) = last.parts.first_mut() {
                     for n in 0..*paragraphs {
-                        let _ =
-                            write!(text, "\n\nStreamed paragraph {n}, which says a little more.");
+                        write!(text, "\n\nStreamed paragraph {n}, which says a little more.")
+                            .expect("a String takes any write");
                     }
                 }
             }
@@ -384,7 +372,8 @@ fn take(
         Step::Wait(ms) => {
             cx.executor().advance_clock(Duration::from_millis(*ms));
         }
-        Step::Frames(_) | Step::Pause => {}
+        // An open of a chat not listed, frames and a pause change nothing here.
+        Step::Open(_) | Step::Frames(_) | Step::Pause => {}
     }
 }
 
@@ -403,7 +392,8 @@ fn a11y_fault(window: &Window) -> Option<String> {
             if !ids.contains_key(child) {
                 return Some(format!("{id:?} names a child {child:?} the tree does not hold"));
             }
-            *parents.entry(*child).or_default() += 1;
+            let count = parents.entry(*child).or_default();
+            *count = count.saturating_add(1);
         }
     }
     let root = tree.tree.as_ref().map(|tree| tree.root);
@@ -491,7 +481,7 @@ fn layout_fault(window: &Window, touch: bool) -> Option<String> {
                     break;
                 }
                 if depth < 4 {
-                    held.extend(n.children().iter().map(|child| (*child, depth + 1)));
+                    held.extend(n.children().iter().map(|child| (*child, depth.saturating_add(1))));
                 }
             }
             if !named {
@@ -520,7 +510,7 @@ fn layout_fault(window: &Window, touch: bool) -> Option<String> {
             .filter(|(_, _, r)| r.x1 - r.x0 > SLACK && r.y1 - r.y0 > SLACK)
             .collect();
         for (i, (a, an, ar)) in sides.iter().enumerate() {
-            for (b, bn, br) in &sides[i + 1..] {
+            for (b, bn, br) in sides.iter().skip(i.saturating_add(1)) {
                 let across = ar.x1.min(br.x1) - ar.x0.max(br.x0);
                 let down = ar.y1.min(br.y1) - ar.y0.max(br.y0);
                 if across > SLACK && down > SLACK {
@@ -564,12 +554,12 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
     let steps = steps.to_vec();
     // A fresh thread each run: the shell's thread-locals (a forced touch screen, the motion
     // morphs) start clean, and a panic ends only it.
-    let outcome = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name(format!("fuzz-{seed}"))
         .stack_size(64 << 20)
         .spawn(move || {
             let step_at = std::rc::Rc::new(std::cell::Cell::new(usize::MAX));
-            let at = step_at.clone();
+            let at = std::rc::Rc::clone(&step_at);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 // Leaked: a panic unwinds no app, whose teardown would panic again.
                 let app: &'static mut TestAppContext =
@@ -587,7 +577,10 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                     take(step, &shell, &mut model, screen, cx);
                     // A step followed by frames or a pause is judged mid-motion: one frame
                     // drawn, then those; any other comes to rest first.
-                    let paced = matches!(steps.get(ix + 1), Some(Step::Frames(_) | Step::Pause));
+                    let paced = matches!(
+                        steps.get(ix.saturating_add(1)),
+                        Some(Step::Frames(_) | Step::Pause)
+                    );
                     let one_frame = |cx: &mut VisualTestContext| {
                         cx.executor().advance_clock(Duration::from_millis(16));
                         cx.update(Window::simulate_next_frame);
@@ -653,22 +646,30 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
             match result {
                 Ok(outcome) => outcome,
                 Err(payload) => {
-                    let detail = payload
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                        .unwrap_or_else(|| "a panic".into());
-                    std::mem::forget(payload);
+                    let detail = panic_words(payload);
                     let step = step_at.get();
                     Err(Failure { step, kind: "panic", detail })
                 }
             }
-        })
-        .expect("a fuzz thread")
-        .join();
-    outcome.unwrap_or_else(|_| {
-        Err(Failure { step: usize::MAX, kind: "panic", detail: "the run's thread died".into() })
-    })
+        });
+    let died = |detail: &str| Failure { step: usize::MAX, kind: "panic", detail: detail.into() };
+    let Ok(thread) = spawned else {
+        return Err(died("no thread for the run"));
+    };
+    thread.join().unwrap_or_else(|_| Err(died("the run's thread died")))
+}
+
+/// What a run's panic said. Its payload is leaked, as the run's app is: nothing of a panicked
+/// run is dropped.
+#[expect(clippy::mem_forget, reason = "a panicked run's payload is leaked, as its app is")]
+fn panic_words(payload: Box<dyn std::any::Any + Send>) -> String {
+    let detail = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+        .unwrap_or_else(|| "a panic".into());
+    std::mem::forget(payload);
+    detail
 }
 
 /// The steps of `steps` kept by `keep`.
@@ -682,13 +683,14 @@ fn shrink(seed: u64, steps: &[Step], failed_at: usize, kind: &str) -> Vec<usize>
     // The frames or pause after the failing step are part of it: they had it judged mid-motion,
     // and the same step brought to rest may draw alike (seed 4255's stop, which no try without
     // its pause failed again).
-    let paced = matches!(steps.get(failed_at + 1), Some(Step::Frames(_) | Step::Pause));
-    let last = (failed_at + usize::from(paced)).min(steps.len() - 1);
+    let paced =
+        matches!(steps.get(failed_at.saturating_add(1)), Some(Step::Frames(_) | Step::Pause));
+    let last = failed_at.saturating_add(usize::from(paced)).min(steps.len().saturating_sub(1));
     let mut keep: Vec<usize> = (0..=last).collect();
     // Each try is a whole run: a bounded number of them, the shortest found by then kept.
     let tries = std::cell::Cell::new(0_u32);
     let fails = |keep: &[usize]| {
-        tries.set(tries.get() + 1);
+        tries.set(tries.get().saturating_add(1));
         tries.get() <= 300 && run(seed, &kept(steps, keep)).err().is_some_and(|f| f.kind == kind)
     };
     let mut chunk = keep.len() / 2;
@@ -696,12 +698,12 @@ fn shrink(seed: u64, steps: &[Step], failed_at: usize, kind: &str) -> Vec<usize>
         let mut start = 0;
         while start < keep.len() {
             let mut candidate = keep.clone();
-            let end = (start + chunk).min(candidate.len());
+            let end = start.saturating_add(chunk).min(candidate.len());
             candidate.drain(start..end);
             if !candidate.is_empty() && fails(&candidate) {
                 keep = candidate;
             } else {
-                start += chunk;
+                start = start.saturating_add(chunk);
             }
         }
         chunk /= 2;
@@ -721,7 +723,7 @@ fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
             .split(',')
             .map(|ix| ix.trim().parse().expect("SLOPTY_FUZZ_KEEP lists indices"))
             .collect();
-        let len = keep.iter().max().map_or(0, |max| max + 1).max(len);
+        let len = keep.iter().max().map_or(0, |max| max.saturating_add(1)).max(len);
         let steps = kept(&steps_of(seed, len), &keep);
         if let Err(failure) = run(seed, &steps) {
             panic!(
@@ -734,7 +736,7 @@ fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
         }
         return;
     }
-    for seed in first..first + runs {
+    for seed in first..first.saturating_add(runs) {
         let steps = steps_of(seed, len);
         let Err(failure) = run(seed, &steps) else { continue };
         assert!(
@@ -761,16 +763,18 @@ fn fuzz(first: u64, runs: u64, len: usize, shrink_it: bool) {
             keep.len()
         );
         for ix in &keep {
-            let _ = writeln!(report, "  {ix}: {:?}", steps[*ix]);
+            writeln!(report, "  {ix}: {:?}", steps[*ix]).expect("a String takes any write");
         }
         if let Some(minimal) = minimal {
-            let _ = write!(report, "\nwhich fails {}: {}\n", minimal.kind, minimal.detail);
+            write!(report, "\nwhich fails {}: {}\n", minimal.kind, minimal.detail)
+                .expect("a String takes any write");
         }
         let list = keep.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
-        let _ = write!(
+        write!(
             report,
             "\nrerun: SLOPTY_FUZZ_SEED={seed} SLOPTY_FUZZ_KEEP={list} cargo nextest run -p slopty-shell --run-ignored all a_long_fuzz_of_the_shell"
-        );
+        )
+        .expect("a String takes any write");
         panic!("{report}");
     }
 }

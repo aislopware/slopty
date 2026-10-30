@@ -24,21 +24,6 @@
 //! - **The jump.** The key to the next session that needs the person walks every session that waits
 //!   on them, then each that failed, then each finished unseen, across every project and machine,
 //!   each kind oldest first ([`needing_you`]).
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::clone_on_ref_ptr,
-    clippy::doc_paragraphs_missing_punctuation,
-    clippy::float_cmp_const,
-    clippy::indexing_slicing,
-    clippy::mem_forget,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::suspicious_operation_groupings,
-    clippy::unnecessary_wraps,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use chrono::{DateTime, Local, Utc};
 use gpui::prelude::*;
@@ -168,7 +153,10 @@ pub(super) fn list(
         let session = state.session_for(&chat.id);
         if let Some(session) = session {
             // `age_ms > SESSION_STALE_MS` first holds one millisecond past it.
-            note(session.updated_at + chrono::TimeDelta::milliseconds(SESSION_STALE_MS + 1));
+            let stale = chrono::TimeDelta::milliseconds(SESSION_STALE_MS.saturating_add(1));
+            if let Some(at) = session.updated_at.checked_add_signed(stale) {
+                note(at);
+            }
         }
         let mark = Mark::of(status, session, now);
         let row = Row {
@@ -179,7 +167,9 @@ pub(super) fn list(
             hint: None,
         };
         let (key, label) = place(state, chat);
-        let folds_at = touched(chat) + chrono::TimeDelta::hours(INACTIVE_AFTER_HOURS);
+        let folds_at = touched(chat)
+            .checked_add_signed(chrono::TimeDelta::hours(INACTIVE_AFTER_HOURS))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC);
         if matches!(row.mark, Mark::AtRest | Mark::DoneUnseen) && folds_at <= now {
             inactive.push((row, label));
             continue;
@@ -237,16 +227,12 @@ pub(super) fn shelf(state: &AppState, chats: Vec<Chat>, now: DateTime<Utc>) -> V
     let spans_machines = machines.len() > 1;
     let projects: Vec<SharedString> = chats.iter().map(|chat| place(state, chat).1).collect();
     let mut rows: Vec<Row> = chats
-        .iter()
+        .into_iter()
         .map(|chat| {
-            let status = state.display_status_for(chat, now);
-            Row {
-                chat: chat.clone(),
-                status,
-                mark: Mark::of(status, state.session_for(&chat.id), now),
-                hint: None,
-                cached: out_of_reach(state, &chat.device_id, now),
-            }
+            let status = state.display_status_for(&chat, now);
+            let mark = Mark::of(status, state.session_for(&chat.id), now);
+            let cached = out_of_reach(state, &chat.device_id, now);
+            Row { chat, status, mark, hint: None, cached }
         })
         .collect();
     hints(state, &mut rows, spans_machines, Some(&projects));
@@ -299,8 +285,9 @@ fn hints(
     branches.sort_unstable();
     branches.dedup();
     let spans_branches = branches.len() > 1;
-    let projects =
-        projects.filter(|projects| projects.iter().any(|project| project != &projects[0]));
+    let projects = projects.filter(|projects| {
+        projects.first().is_some_and(|first| projects.iter().any(|project| project != first))
+    });
     let lines: Vec<Option<SharedString>> = rows
         .iter()
         .enumerate()
@@ -422,11 +409,10 @@ impl super::Shell {
     /// The "Show more" line under the group `key`, when `hidden` rows wait: its key, its height
     /// with the list's gap above it, and the line, which shows another page.
     pub(super) fn render_group_more(
-        &self,
         key: &str,
         hidden: usize,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> Option<(String, f32, AnyElement)> {
         if hidden == 0 {
             return None;
@@ -461,16 +447,16 @@ pub(super) struct ChatCard {
     pub place: Option<SharedString>,
     /// Its folder, its middle elided when long.
     pub folder: Option<SharedString>,
-    /// "Claude Code · opus · High"
+    /// "Claude Code · opus · High".
     pub agent: Option<SharedString>,
     /// "Working for 3m", "Waiting on you since 14:02", "Done 5m ago", "Cached · studio is out of
-    /// reach"
+    /// reach".
     pub status: SharedString,
     /// What it needs of the person, its glyph and its agent's words (`marks::need`).
     pub need: Option<super::marks::Need>,
     /// The last line the agent wrote.
     pub last: Option<SharedString>,
-    /// "2 subagents running"
+    /// "2 subagents running".
     pub subagents: Option<SharedString>,
 }
 
@@ -485,10 +471,10 @@ fn elide_middle(path: &str) -> String {
     }
     let keep = FOLDER_CHARS - 1;
     let head = keep / 3;
-    let tail = keep - head;
-    let mut out: String = chars[..head].iter().collect();
+    let tail = keep.saturating_sub(head);
+    let mut out: String = chars.iter().take(head).collect();
     out.push('\u{2026}');
-    out.extend(&chars[chars.len() - tail..]);
+    out.extend(chars.iter().skip(chars.len().saturating_sub(tail)));
     out
 }
 
@@ -664,16 +650,26 @@ mod tests {
             chat_id: chat.into(),
             device_id: "local".into(),
             status,
-            started_at: Some(now - TimeDelta::minutes(5)),
+            started_at: Some(ago(now, TimeDelta::minutes(5))),
             updated_at: now,
             running_subagents: 0,
-            status_since: Some(now - TimeDelta::minutes(4)),
+            status_since: Some(ago(now, TimeDelta::minutes(4))),
             waiting_on: None,
         }
     }
 
-    fn wait(kind: &str, summary: Option<&str>) -> Option<SessionWait> {
-        Some(SessionWait { kind: kind.into(), summary: summary.map(str::to_owned) })
+    fn wait(kind: &str, summary: Option<&str>) -> SessionWait {
+        SessionWait { kind: kind.into(), summary: summary.map(str::to_owned) }
+    }
+
+    /// `by` before `at`.
+    fn ago(at: DateTime<Utc>, by: TimeDelta) -> DateTime<Utc> {
+        at.checked_sub_signed(by).expect("a date in range")
+    }
+
+    /// `by` after `at`.
+    fn later(at: DateTime<Utc>, by: TimeDelta) -> DateTime<Utc> {
+        at.checked_add_signed(by).expect("a date in range")
     }
 
     /// Chat `id` in space `space` (none for a session with no project), started `started` minutes
@@ -686,13 +682,13 @@ mod tests {
         now: DateTime<Utc>,
         unseen: bool,
     ) -> Chat {
-        let last = now - TimeDelta::minutes(touched);
+        let last = ago(now, TimeDelta::minutes(touched));
         serde_json::from_value(serde_json::json!({
             "id": id, "title": id, "deviceId": "local", "archived": false,
             "spaceId": space,
-            "createdAt": now - TimeDelta::minutes(started),
+            "createdAt": ago(now, TimeDelta::minutes(started)),
             "lastMessageAt": last,
-            "lastSeenAt": if unseen { last - TimeDelta::seconds(1) } else { last },
+            "lastSeenAt": if unseen { ago(last, TimeDelta::seconds(1)) } else { last },
         }))
         .unwrap()
     }
@@ -705,7 +701,7 @@ mod tests {
     ) -> slopty_view_proto::Space {
         serde_json::from_value(serde_json::json!({
             "id": id, "deviceId": device, "path": format!("/src/{name}"), "name": name,
-            "repositoryId": repository, "createdAt": Utc::now() - TimeDelta::days(30),
+            "repositoryId": repository, "createdAt": ago(Utc::now(), TimeDelta::days(30)),
         }))
         .unwrap()
     }
@@ -800,7 +796,7 @@ mod tests {
             chat("fresh", Some("s-app"), days(5), days(3) - 30, now, false),
         ];
         let mut asking = session("asking", SessionStatus::AwaitingInput, now);
-        asking.waiting_on = wait(SessionWait::QUESTION, None);
+        asking.waiting_on = Some(wait(SessionWait::QUESTION, None));
         state.apply_sessions(vec![asking, session("busy", SessionStatus::Working, now)]);
         let (groups, next) = list(&state, Filter::default(), now);
         assert_eq!(
@@ -920,7 +916,7 @@ mod tests {
         state.chats.iter_mut().find(|chat| chat.id == "zed-new").unwrap().device_id =
             "studio".into();
         let mut asking = session("zed-new", SessionStatus::AwaitingInput, now);
-        asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+        asking.waiting_on = Some(wait(SessionWait::APPROVAL, Some("run cargo test")));
         state.apply_sessions(vec![asking]);
         let cached = |state: &AppState| {
             let (groups, _) = list(state, Filter::default(), now);
@@ -936,7 +932,7 @@ mod tests {
         assert_eq!(card.status.as_ref(), "Cached \u{b7} studio is out of reach");
         assert_eq!(card.need, None, "no need said from a machine out of reach");
         state.devices[1].last_seen_at = Some(now);
-        assert!(cached(&state).is_empty());
+        assert_eq!(cached(&state), Vec::<String>::new());
         let card = chat_card(&state, "zed-new", now).unwrap();
         let need = card.need.expect("its need, live again");
         assert_eq!(
@@ -953,7 +949,7 @@ mod tests {
         let now = Utc::now();
         let mut state = state(now);
         let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
-        asking.waiting_on = wait(SessionWait::QUESTION, None);
+        asking.waiting_on = Some(wait(SessionWait::QUESTION, None));
         state.apply_sessions(vec![asking.clone()]);
         state.chats.iter_mut().find(|chat| chat.id == "zed-old").unwrap().last_message_preview =
             Some("Which accent reads best\non glass?".into());
@@ -964,7 +960,7 @@ mod tests {
         );
         assert_eq!(card.last.as_deref(), Some("Which accent reads best on glass?"));
         assert!(card.status.starts_with("Waiting on you since"), "{}", card.status);
-        asking.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+        asking.waiting_on = Some(wait(SessionWait::APPROVAL, Some("run cargo test")));
         state.apply_sessions(vec![asking.clone()]);
         let need = chat_card(&state, "zed-old", now).unwrap().need.unwrap();
         assert_eq!(
@@ -978,7 +974,7 @@ mod tests {
             Some("Needs input".into())
         );
         let mut busy = session("zed-old", SessionStatus::Working, now);
-        busy.waiting_on = wait(SessionWait::COMPACTING, None);
+        busy.waiting_on = Some(wait(SessionWait::COMPACTING, None));
         state.apply_sessions(vec![busy]);
         let compacting = chat_card(&state, "zed-old", now).unwrap();
         assert_eq!((compacting.status.as_ref(), compacting.need), ("Compacting its context", None));
@@ -1031,13 +1027,12 @@ mod tests {
     fn sidebar(
         cx: &mut gpui::TestAppContext,
     ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
-        let dir = tempfile::tempdir().unwrap();
+        let path = tempfile::tempdir().unwrap().keep();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
         });
-        let path = dir.path().to_path_buf();
         let (host, cx) = cx.add_window_view(move |_, cx| {
             SidebarHost(cx.new(|cx| {
                 let now = Utc::now();
@@ -1054,7 +1049,7 @@ mod tests {
                 shell.state.update(cx, |state, _| {
                     state.workspace_scope = Some(slopty_view_proto::WorkspaceScope::Local);
                     let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
-                    asking.waiting_on = wait(SessionWait::QUESTION, None);
+                    asking.waiting_on = Some(wait(SessionWait::QUESTION, None));
                     state.apply_sessions(vec![asking, session("app-new", SessionStatus::Working, now)]);
                     for chat in &mut state.chats {
                         chat.config = Some(
@@ -1066,7 +1061,6 @@ mod tests {
                 shell
             }))
         });
-        std::mem::forget(dir);
         let shell = host.read_with(cx, |host, _| host.0.clone());
         (shell, cx)
     }
@@ -1097,8 +1091,8 @@ mod tests {
         for id in ids {
             let row = bounds(cx, &format!("chat-{id}")).unwrap_or_else(|| panic!("{id}'s row"));
             assert_eq!(
-                f32::from(row.size.height),
-                super::super::sidebar::SIDEBAR_ROW_HEIGHT,
+                f32::from(row.size.height).to_bits(),
+                super::super::sidebar::SIDEBAR_ROW_HEIGHT.to_bits(),
                 "{id}: one line"
             );
             let program = bounds(cx, &format!("chat-agent-{id}")).expect("its program's mark");
@@ -1135,14 +1129,12 @@ mod tests {
         let hint = bounds(cx, "chat-hint-zed-new").expect("its machine, after its title");
         let title = bounds(cx, "chat-title-zed-new").unwrap();
         let slot = bounds(cx, "chat-status-zed-new").unwrap();
-        assert!(
-            title.left() < hint.left() && hint.right() <= slot.left(),
-            "{title:?} {hint:?} {slot:?}"
-        );
+        assert!(title.left() < hint.left(), "the hint after the title: {title:?} {hint:?}");
+        assert!(hint.right() <= slot.left(), "the hint before the mark: {hint:?} {slot:?}");
         let row = bounds(cx, "chat-zed-new").unwrap();
         assert_eq!(
-            f32::from(row.size.height),
-            super::super::sidebar::SIDEBAR_ROW_HEIGHT,
+            f32::from(row.size.height).to_bits(),
+            super::super::sidebar::SIDEBAR_ROW_HEIGHT.to_bits(),
             "still one line"
         );
     }
@@ -1158,9 +1150,9 @@ mod tests {
             shell.state.update(cx, |state, cx| {
                 let now = Utc::now();
                 let mut asking = session("zed-old", SessionStatus::AwaitingInput, now);
-                asking.waiting_on = wait(SessionWait::QUESTION, None);
+                asking.waiting_on = Some(wait(SessionWait::QUESTION, None));
                 let mut held = session("zed-new", SessionStatus::AwaitingInput, now);
-                held.waiting_on = wait(SessionWait::APPROVAL, Some("run cargo test"));
+                held.waiting_on = Some(wait(SessionWait::APPROVAL, Some("run cargo test")));
                 state.apply_sessions(vec![asking, held]);
                 cx.notify();
             });
@@ -1217,13 +1209,15 @@ mod tests {
         for round in 0..4_usize {
             shell.update(cx, |shell, cx| {
                 shell.state.update(cx, |state, cx| {
-                    let now = Utc::now() + TimeDelta::seconds(i64::try_from(round).unwrap());
+                    let now = later(Utc::now(), TimeDelta::seconds(i64::try_from(round).unwrap()));
                     let statuses =
                         [SessionStatus::Done, SessionStatus::AwaitingInput, SessionStatus::Working];
                     let sessions = ids
                         .iter()
                         .enumerate()
-                        .map(|(index, id)| session(id, statuses[(index + round) % 3], now))
+                        .map(|(index, id)| {
+                            session(id, statuses[index.wrapping_add(round) % 3], now)
+                        })
                         .collect();
                     state.apply_sessions(sessions);
                     for chat in &mut state.chats {
@@ -1350,7 +1344,7 @@ mod tests {
             .update(cx, |shell, cx| shell.sidebar_visible_order(cx))
             .iter()
             .position(|id| id == "b");
-        let key = format!("cmd-{}", slot.expect("b's row") + 1);
+        let key = format!("cmd-{}", slot.expect("b's row").saturating_add(1));
         cx.simulate_keystrokes(&key);
         frames(cx, tick, 120);
         let opened = shell.read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone());
@@ -1362,7 +1356,7 @@ mod tests {
         let heard = std::rc::Rc::new(std::cell::Cell::new(None::<bool>));
         let state = shell.read_with(cx, |shell, _| shell.state.clone());
         let _watch = cx.update(|_, cx| {
-            let heard = heard.clone();
+            let heard = std::rc::Rc::clone(&heard);
             cx.observe(&state, move |state, cx| {
                 heard.set(Some(
                     state.read(cx).chats.iter().any(|chat| chat.id == "b" && chat.unseen()),
@@ -1373,7 +1367,7 @@ mod tests {
             shell.update(cx, |shell, cx| {
                 shell.state.update(cx, |state, cx| {
                     if let Some(chat) = state.chats.iter_mut().find(|chat| chat.id == "b") {
-                        chat.last_message_at = Some(Utc::now() + TimeDelta::seconds(round));
+                        chat.last_message_at = Some(later(Utc::now(), TimeDelta::seconds(round)));
                         chat.last_seen_at = None;
                     }
                     cx.notify();
@@ -1463,16 +1457,16 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         count: usize,
     ) -> (gpui::Entity<super::super::Shell>, &mut gpui::VisualTestContext) {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap().keep();
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
-            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            crate::settings::init(crate::settings::UiSettings::default(), &dir, cx);
             crate::composer::init(cx);
             super::super::apply_keymap(cx, &crate::settings::KeymapConfig::default());
         });
-        let path = dir.path().to_path_buf();
+        let path = dir;
         let (shell, cx) = cx.add_window_view(move |_, cx| {
             let state = cx.new(|_| AppState::new());
             let shell = super::super::Shell::new(
@@ -1495,7 +1489,6 @@ mod tests {
             });
             shell
         });
-        std::mem::forget(dir);
         (shell, cx)
     }
 
@@ -1541,7 +1534,7 @@ mod tests {
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, _| {
                 for chat in &mut state.chats {
-                    chat.last_message_at = Some(Utc::now() - TimeDelta::days(4));
+                    chat.last_message_at = Some(ago(Utc::now(), TimeDelta::days(4)));
                     chat.last_seen_at = chat.last_message_at;
                 }
             });

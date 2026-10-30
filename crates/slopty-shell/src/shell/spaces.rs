@@ -8,28 +8,6 @@
 //! the sidebar's session list (never the tab strip) and hosts space
 //! management (add via the palette; rename/delete via row context menus).
 //! Child module of `shell` so it renders straight off `Shell`'s private state.
-#![allow(
-    rustdoc::broken_intra_doc_links,
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::assert_is_empty,
-    clippy::assigning_clones,
-    clippy::cast_possible_wrap,
-    clippy::cast_precision_loss,
-    clippy::indexing_slicing,
-    clippy::manual_let_else,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::or_fun_call,
-    clippy::string_slice,
-    clippy::suboptimal_flops,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::type_complexity,
-    clippy::unreachable,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use std::collections::HashSet;
 
@@ -103,7 +81,11 @@ mod sidebar_row_tests {
                         .map(|(ix, id)| {
                             serde_json::from_value(serde_json::json!({
                                 "id": id, "title": id, "deviceId": "local", "archived": false,
-                                "createdAt": Utc::now() - chrono::Duration::minutes(ix as i64),
+                                "createdAt": Utc::now()
+                                    .checked_sub_signed(chrono::Duration::minutes(
+                                        i64::try_from(ix).unwrap()
+                                    ))
+                                    .unwrap(),
                             }))
                             .unwrap()
                         })
@@ -204,7 +186,7 @@ pub(super) struct SidebarKeys {
 
 impl SidebarKeys {
     /// The focus of `chat`'s row, made on first ask.
-    pub(super) fn focus(&self, chat: &str, cx: &mut App) -> FocusHandle {
+    pub(super) fn focus(&self, chat: &str, cx: &App) -> FocusHandle {
         self.focus.borrow_mut().entry(chat.to_owned()).or_insert_with(|| cx.focus_handle()).clone()
     }
 
@@ -263,7 +245,6 @@ const SIDEBAR_DISCLOSURE_SECTION_HEIGHT: f32 =
 const ARCHIVED_INITIAL_ROWS: usize = 10;
 const ARCHIVED_PAGE_ROWS: usize = 25;
 
-/// `icon` leads the label — a project group's icon, which its rows then omit.
 /// Every sidebar section's header (Sessions, Archived, project groups and
 /// custom sections): a muted label, `count` as a muted badge
 /// beside it while the section is collapsed, then any action and the
@@ -275,29 +256,18 @@ const ARCHIVED_PAGE_ROWS: usize = 25;
 // group's always, since its rows are not there to say it holds any. So the header rests quiet.
 // The header is a button a screen reader names, with its count, and hears open or shut, and a
 // keyboard stop Enter or Space toggles. `id` is its element's; `key` names its fade among the
-// sidebar's; `hovered` is the caller's own hover listener, which the header calls beside its
-// fade (an element takes one).
-#[expect(clippy::too_many_arguments)]
+// sidebar's. `label` comes with its `count`, and the `chevron` with whether the section is
+// `open`.
 pub(super) fn sidebar_disclosure_header(
     theme: &Theme,
     id: impl Into<gpui::ElementId>,
     key: &str,
-    icon: Option<AnyElement>,
-    label: SharedString,
-    count: Option<usize>,
+    (label, count): (SharedString, Option<usize>),
     action: Option<AnyElement>,
-    chevron: AnyElement,
-    open: bool,
-    hovered: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+    (chevron, open): (AnyElement, bool),
 ) -> gpui::Stateful<gpui::Div> {
     let fade_key = SharedString::from(format!("sidebar-header-{key}"));
-    let fade = motion::hover_listener(fade_key.clone());
-    let hover = move |is: &bool, window: &mut Window, cx: &mut App| {
-        fade(is, window, cx);
-        if let Some(hovered) = &hovered {
-            hovered(is, window, cx);
-        }
-    };
+    let hover = motion::hover_listener(fade_key.clone());
     let header = div()
         .id(id)
         .flex()
@@ -314,7 +284,6 @@ pub(super) fn sidebar_disclosure_header(
             None => label.clone(),
         })
         .aria_expanded(open)
-        .children(icon)
         .child(sidebar::sidebar_faded_label(
             "sidebar-disclosure-label".into(),
             false,
@@ -388,6 +357,16 @@ fn group_rollup(
             )
         }))
         .into_any_element()
+}
+
+/// The height `rows` sidebar rows stand in, the list's gap between each two.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a sidebar holds far fewer rows than f32 counts exactly (2^24)"
+)]
+fn rows_height(rows: usize) -> f32 {
+    let gaps = rows.saturating_sub(1);
+    SIDEBAR_ROW_HEIGHT.mul_add(rows as f32, SIDEBAR_LIST_GAP * gaps as f32)
 }
 
 /// How far a sidebar fade `key` reveals what it shows only under the pointer: wholly on
@@ -633,13 +612,12 @@ fn request_home_folders(
     local: Option<String>,
     query: String,
     generation: Option<u64>,
-    cx: &mut Context<Shell>,
+    cx: &Context<Shell>,
 ) -> Task<()> {
     let request = SearchHomeFoldersRequest { query, limit: Some(HOME_FOLDER_RESULTS) };
     cx.spawn(async move |this, cx| {
-        let mut params = match serde_json::to_value(&request) {
-            Ok(serde_json::Value::Object(params)) => params,
-            _ => return,
+        let Ok(serde_json::Value::Object(mut params)) = serde_json::to_value(&request) else {
+            return;
         };
         add_space_target(&mut params, device_id.as_deref(), local.as_deref());
         let params = serde_json::Value::Object(params);
@@ -718,7 +696,7 @@ fn request_home_folders(
             // The stored task is dropped on edits, navigation or close. Wait
             // after the reply so slow hosts never accumulate parallel calls.
             cx.background_executor().timer(delay).await;
-            delay = (delay * 2).min(HOME_FOLDER_INDEX_RETRY_MAX);
+            delay = delay.saturating_mul(2).min(HOME_FOLDER_INDEX_RETRY_MAX);
             let current = this
                 .update(cx, |shell, _| {
                     shell.add_space_in_home()
@@ -877,7 +855,7 @@ fn fold_crumb_folders<T>(folders: &mut Vec<T>) -> Vec<T> {
     if folders.len() <= CRUMB_FOLDERS_MAX {
         return Vec::new();
     }
-    folders.drain(..folders.len() - CRUMB_FOLDERS_TAIL).collect()
+    folders.drain(..folders.len().saturating_sub(CRUMB_FOLDERS_TAIL)).collect()
 }
 
 struct Crumb {
@@ -949,7 +927,8 @@ fn remove_project_body(name: &str, device: &str, count: usize) -> String {
     }
 }
 
-/// The space-row Rename dialog (same shape as [`RenameChatDialog`]).
+/// The space-row Rename dialog: the space it renames, its name field, and whether that field
+/// takes focus on the next frame.
 pub(super) struct RenameSpaceDialog {
     pub space_id: String,
     pub input: Entity<ComposerInput>,
@@ -1018,7 +997,7 @@ impl Shell {
         let from = previous
             .filter(|motion| motion.animating(now))
             .map_or(resting_height, |motion| motion.current(now));
-        let epoch = previous.map_or(1, |motion| motion.epoch + 1);
+        let epoch = previous.map_or(1, |motion| motion.epoch.wrapping_add(1));
         self.sidebar_disclosure_motion
             .insert(key.to_owned(), SidebarDisclosureMotion::new(epoch, from, target_height, now));
     }
@@ -1049,7 +1028,7 @@ impl Shell {
                     let height = motion::lerp(tween.from, tween.to, t);
                     let reveal = (height / denominator).clamp(0.0, 1.0);
                     el.h(px(height))
-                        .opacity(0.35 + 0.65 * reveal)
+                        .opacity(reveal.mul_add(0.65, 0.35))
                         .relative()
                         .top(px(-3.0 * (1.0 - reveal)))
                 },
@@ -1110,7 +1089,7 @@ impl Shell {
     /// new-session canvas the space context follows the filter — the canvas
     /// default is "the space you're looking at".
     pub(super) fn set_space_filter(&mut self, filter: Option<String>, cx: &mut Context<Self>) {
-        self.settings.space_filter = filter.clone();
+        self.settings.space_filter.clone_from(&filter);
         if let Some(space_id) = filter
             && self.state.read(cx).selected_chat.is_none()
         {
@@ -1131,13 +1110,8 @@ impl Shell {
         }
     }
 
-    fn on_spaces_menu_list_hover(
-        &mut self,
-        hovered: &bool,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.spaces_menu_bar.set_list_hovered(*hovered) {
+    fn on_spaces_menu_list_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.spaces_menu_bar.set_list_hovered(hovered) {
             cx.notify();
         }
     }
@@ -1176,7 +1150,11 @@ impl Shell {
         let projects = state.projects();
         let names: Vec<String> = projects
             .iter()
-            .map(|members| state.representative_space(members[0]).display_name().to_owned())
+            .map(|members| {
+                members.first().map_or_else(String::new, |first| {
+                    state.representative_space(first).display_name().to_owned()
+                })
+            })
             .collect();
         let mut rows: Vec<SpacesMenuRow> = Vec::new();
         if query.trim().is_empty() {
@@ -1185,18 +1163,16 @@ impl Shell {
         rows.extend(
             popover::filter_indices(&query, &names)
                 .into_iter()
-                .map(|ix| SpacesMenuRow::Space(projects[ix][0].id.clone())),
+                .filter_map(|ix| Some(SpacesMenuRow::Space(projects.get(ix)?.first()?.id.clone()))),
         );
         // The machines after the projects, while there is more than one to tell apart:
         // the machine is a filter, not a level (`docs/decisions/layout.md`).
         if state.devices.len() > 1 {
             let machines: Vec<String> =
                 state.devices.iter().map(|device| device.name.clone()).collect();
-            rows.extend(
-                popover::filter_indices(&query, &machines)
-                    .into_iter()
-                    .map(|ix| SpacesMenuRow::Machine(state.devices[ix].id.clone())),
-            );
+            rows.extend(popover::filter_indices(&query, &machines).into_iter().filter_map(|ix| {
+                state.devices.get(ix).map(|device| SpacesMenuRow::Machine(device.id.clone()))
+            }));
         }
         rows
     }
@@ -1312,7 +1288,7 @@ impl Shell {
                 let rows = self.spaces_menu_rows(cx);
                 // +1: the pinned footer stays in the nav order, exactly as
                 // when it was the list's last row.
-                let count = rows.len() + 1;
+                let count = rows.len().saturating_add(1);
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(menu) = self.spaces_menu.open_mut() {
                     menu.active = popover::menu_step(Some(menu.active), count, delta).unwrap_or(0);
@@ -1329,11 +1305,7 @@ impl Shell {
                 let active = self.spaces_menu.get().map_or(0, |m| m.active);
                 let rows = self.spaces_menu_rows(cx);
                 // One past the scrollable rows is the pinned footer.
-                let row = if active < rows.len() {
-                    rows[active].clone()
-                } else {
-                    SpacesMenuRow::AddSpace
-                };
+                let row = rows.get(active).cloned().unwrap_or(SpacesMenuRow::AddSpace);
                 self.activate_spaces_menu_row(row, cx);
             }
             popover::MenuKey::Backspace | popover::MenuKey::Other => {}
@@ -1515,7 +1487,7 @@ impl Shell {
             "up" | "down" => {
                 let order = self.sidebar_visible_order(cx);
                 let Some(at) = order.iter().position(|id| id == chat) else { return false };
-                let next = if key.key == "up" { at.checked_sub(1) } else { Some(at + 1) };
+                let next = if key.key == "up" { at.checked_sub(1) } else { at.checked_add(1) };
                 if let Some(focus) =
                     next.and_then(|ix| order.get(ix)).and_then(|id| self.sidebar_keys.drawn(id))
                 {
@@ -1573,58 +1545,60 @@ impl Shell {
             let state = self.state.read(cx);
             let now = crate::clock::utc(cx);
             rows.into_iter()
-                .map(|row| match row {
-                    SpacesMenuRow::All => MenuDetail {
-                        row: SpacesMenuRow::All,
-                        label: SharedString::from("All projects"),
-                        selected: filter.is_none(),
-                        ..MenuDetail::default()
-                    },
-                    SpacesMenuRow::Machine(id) => {
-                        let device = state.devices.iter().find(|device| device.id == id);
-                        MenuDetail {
-                            label: SharedString::from(
-                                device.map_or("?", |device| device.name.as_str()).to_owned(),
-                            ),
-                            offline: sidebar_status::out_of_reach(state, &id, now),
-                            selected: machine.as_deref() == Some(id.as_str()),
-                            glyph: Some(device_glyph(
-                                device.map_or("", |device| device.platform.as_str()),
-                            )),
-                            turned_away: sidebar_status::turned_away(state, &id)
-                                .map(|why| SharedString::from(why.to_owned())),
-                            row: SpacesMenuRow::Machine(id),
+                .filter_map(|row| {
+                    Some(match row {
+                        SpacesMenuRow::All => MenuDetail {
+                            row: SpacesMenuRow::All,
+                            label: SharedString::from("All projects"),
+                            selected: filter.is_none(),
                             ..MenuDetail::default()
-                        }
-                    }
-                    SpacesMenuRow::Space(id) => match state.space_row(&id) {
-                        Some(space) => {
-                            let key = slopty_view_proto::view::project_key(space);
-                            let members = state.project_members(space);
-                            let (_, offline) = state.project_device_tag(&members, now);
+                        },
+                        SpacesMenuRow::Machine(id) => {
+                            let device = state.devices.iter().find(|device| device.id == id);
                             MenuDetail {
-                                row: SpacesMenuRow::Space(id),
-                                label: state
-                                    .representative_space(space)
-                                    .display_name()
-                                    .to_owned()
-                                    .into(),
-                                space: Some(space.clone()),
-                                offline,
-                                selected: filter_key.as_deref() == Some(key.as_str()),
+                                label: SharedString::from(
+                                    device.map_or("?", |device| device.name.as_str()).to_owned(),
+                                ),
+                                offline: sidebar_status::out_of_reach(state, &id, now),
+                                selected: machine.as_deref() == Some(id.as_str()),
+                                glyph: Some(device_glyph(
+                                    device.map_or("", |device| device.platform.as_str()),
+                                )),
+                                turned_away: sidebar_status::turned_away(state, &id)
+                                    .map(|why| SharedString::from(why.to_owned())),
+                                row: SpacesMenuRow::Machine(id),
                                 ..MenuDetail::default()
                             }
                         }
-                        None => MenuDetail {
-                            selected: filter.as_deref() == Some(id.as_str()),
-                            row: SpacesMenuRow::Space(id),
-                            label: SharedString::from("?"),
-                            ..MenuDetail::default()
+                        SpacesMenuRow::Space(id) => match state.space_row(&id) {
+                            Some(space) => {
+                                let key = slopty_view_proto::view::project_key(space);
+                                let members = state.project_members(space);
+                                let (_, offline) = state.project_device_tag(&members, now);
+                                MenuDetail {
+                                    row: SpacesMenuRow::Space(id),
+                                    label: state
+                                        .representative_space(space)
+                                        .display_name()
+                                        .to_owned()
+                                        .into(),
+                                    space: Some(space.clone()),
+                                    offline,
+                                    selected: filter_key.as_deref() == Some(key.as_str()),
+                                    ..MenuDetail::default()
+                                }
+                            }
+                            None => MenuDetail {
+                                selected: filter.as_deref() == Some(id.as_str()),
+                                row: SpacesMenuRow::Space(id),
+                                label: SharedString::from("?"),
+                                ..MenuDetail::default()
+                            },
                         },
-                    },
-                    // spaces_menu_rows never yields this variant — the
-                    // footer is rendered by the card, not the list.
-                    SpacesMenuRow::AddSpace => unreachable!(),
+                        // spaces_menu_rows never yields this variant — the
+                        // footer is rendered by the card, not the list.
+                        SpacesMenuRow::AddSpace => return None,
+                    })
                 })
                 .collect()
         };
@@ -1657,7 +1631,7 @@ impl Shell {
             .iter()
             .enumerate()
             .map(|(ix, detail)| match (&detail.row, &detail.turned_away) {
-                (SpacesMenuRow::Machine(id), Some(why)) => Some(self.turned_away_badge(
+                (SpacesMenuRow::Machine(id), Some(why)) => Some(Self::turned_away_badge(
                     format!("spaces-menu-turned-away-{ix}").into(),
                     id.clone(),
                     why.clone(),
@@ -1668,7 +1642,9 @@ impl Shell {
             .collect();
 
         let list = popover::menu_scroll_host("spaces-menu-list-host")
-            .on_hover(cx.listener(Self::on_spaces_menu_list_hover))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.on_spaces_menu_list_hover(*hovered, cx);
+            }))
             .child(popover::faded_menu_list(
                 &list_scroll,
                 popover::menu_scroll_list("spaces-menu-list", &list_scroll)
@@ -1727,7 +1703,7 @@ impl Shell {
         popover::popover_card(theme)
             // Match the trigger row as the sidebar is resized. Both live
             // inside the same SPACE_SM horizontal gutters.
-            .w(px(self.sidebar_content_width() - 2.0 * Theme::SPACE_SM))
+            .w(px(Theme::SPACE_SM.mul_add(-2.0, self.sidebar_content_width())))
             .track_focus(&focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                 this.spaces_menu_key(event, cx);
@@ -1875,9 +1851,10 @@ impl Shell {
             // same steps "Show more" takes.
             let shown = self.archived_shown.max(ARCHIVED_INITIAL_ROWS);
             if index >= shown {
-                self.archived_shown = ARCHIVED_INITIAL_ROWS
-                    + (index + 1 - ARCHIVED_INITIAL_ROWS).div_ceil(ARCHIVED_PAGE_ROWS)
-                        * ARCHIVED_PAGE_ROWS;
+                let past = index.saturating_add(1).saturating_sub(ARCHIVED_INITIAL_ROWS);
+                let pages = past.div_ceil(ARCHIVED_PAGE_ROWS);
+                self.archived_shown =
+                    ARCHIVED_INITIAL_ROWS.saturating_add(pages.saturating_mul(ARCHIVED_PAGE_ROWS));
             }
         }
         if self.settings.sidebar_collapsed {
@@ -1916,7 +1893,7 @@ impl Shell {
 
     /// Take the clock again when the soonest time the last sidebar showed next reads
     /// differently, and draw again then: until then every sidebar built says the same.
-    pub(super) fn tick_sidebar_clock(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn tick_sidebar_clock(&mut self, cx: &Context<Self>) {
         let Some(at) = self.sidebar_clock_next.take() else {
             return;
         };
@@ -1926,16 +1903,18 @@ impl Shell {
         if self.sidebar_clock_tick.as_ref().is_some_and(|(due, _)| *due <= at) {
             return;
         }
-        let wait =
-            (at - crate::clock::utc(cx)).to_std().unwrap_or_default() + Duration::from_millis(5);
+        let wait = at
+            .signed_duration_since(crate::clock::utc(cx))
+            .to_std()
+            .unwrap_or_default()
+            .saturating_add(Duration::from_millis(5));
         let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(wait).await;
-            this.update(cx, |this, cx| {
+            let _gone = this.update(cx, |this, cx| {
                 this.sidebar_clock_tick = None;
                 this.sidebar_clock = crate::clock::utc(cx);
                 cx.notify();
-            })
-            .ok();
+            });
         });
         self.sidebar_clock_tick = Some((at, task));
     }
@@ -1985,7 +1964,7 @@ impl Shell {
             // heard (a cached row's is the last word from a machine out of reach).
             let loudest =
                 marks::loudest(rows.iter().filter(|row| !row.cached).map(|row| &row.mark)).cloned();
-            let row_count = rows.len() + hidden;
+            let row_count = rows.len().saturating_add(hidden);
             let shown_rows = rows.len();
             let motion_key = format!("group:{key}");
             let collapsed = self.sidebar_collapsed_groups.contains(&key);
@@ -2040,11 +2019,10 @@ impl Shell {
                 rendered_rows.push((format!("c:{}", chat.id), height, element));
             }
             // Inactive's rows past its page wait behind "Show more".
-            let more = self.render_group_more(&key, hidden, theme, cx);
+            let more = Self::render_group_more(&key, hidden, theme, cx);
             let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-                + SIDEBAR_ROW_HEIGHT * shown_rows as f32
-                + more.as_ref().map_or(0.0, |(_, height, _)| *height)
-                + SIDEBAR_LIST_GAP * shown_rows.saturating_sub(1) as f32;
+                + rows_height(shown_rows)
+                + more.as_ref().map_or(0.0, |(_, height, _)| *height);
             rendered_rows.extend(more.filter(|_| draws));
             self.begin_queued_sidebar_reveal(&motion_key, !collapsed, body_height);
             let body = div()
@@ -2062,15 +2040,11 @@ impl Shell {
                 theme,
                 SharedString::from(format!("sidebar-group-{key}")),
                 &key,
-                None,
-                label.clone(),
                 // Open, its count fades in under the pointer; shut, it stands beside the
                 // loudest mark.
-                (!collapsed).then_some(row_count),
+                (label.clone(), (!collapsed).then_some(row_count)),
                 rollup,
-                chevron,
-                !collapsed,
-                None,
+                (chevron, !collapsed),
             )
             .debug_selector({
                 let selector = format!("sidebar-group-{key}"); // for the tests
@@ -2162,8 +2136,7 @@ impl Shell {
         // "Show more" matches the row slot.
         let more_height = SIDEBAR_ROW_HEIGHT;
         let body_height = SIDEBAR_DISCLOSURE_BODY_INSET
-            + visible_count as f32 * SIDEBAR_ROW_HEIGHT
-            + visible_count.saturating_sub(1) as f32 * SIDEBAR_LIST_GAP
+            + rows_height(visible_count)
             + if has_more { more_height + SIDEBAR_LIST_GAP } else { 0.0 };
         self.begin_queued_sidebar_reveal("archived", open, body_height);
         // Match Pinned: a muted label with a right-aligned disclosure chevron, its count shown
@@ -2173,13 +2146,9 @@ impl Shell {
             theme,
             "archived-toggle",
             "archived",
+            ("Archived".into(), Some(total)),
             None,
-            "Archived".into(),
-            Some(total),
-            None,
-            chevron,
-            open,
-            None,
+            (chevron, open),
         )
         .debug_selector(|| "archived-toggle".into())
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2229,7 +2198,7 @@ impl Shell {
             }
             let mut body = div().w_full().flex().flex_col().child(list);
             if has_more {
-                let remaining = (total - shown).min(PAGE);
+                let remaining = total.saturating_sub(shown).min(PAGE);
                 body = body.child(
                     div()
                         .id("archived-more")
@@ -2248,7 +2217,8 @@ impl Shell {
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.glass_hover()).text_color(theme.text))
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.archived_shown = this.archived_shown.max(INITIAL) + PAGE;
+                            this.archived_shown =
+                                this.archived_shown.max(INITIAL).saturating_add(PAGE);
                             cx.notify();
                         }))
                         .child(icon(icons::PLUS).size(px(14.0)).flex_none())
@@ -2349,7 +2319,7 @@ impl Shell {
 
     /// Look the query up under the device's home. The first call in Home
     /// also starts the host's index, so the first real query is fast.
-    fn search_home_folders(&mut self, cx: &mut Context<Self>) {
+    fn search_home_folders(&mut self, cx: &Context<Self>) {
         let in_home = self.add_space_in_home();
         let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
@@ -2359,7 +2329,7 @@ impl Shell {
         let query = flow.search.read(cx).text().trim().to_owned();
         let device_id = flow.device.as_ref().map(|d| d.id.clone());
         let search = &mut flow.home_search;
-        search.generation += 1;
+        search.generation = search.generation.wrapping_add(1);
         search.loading = false;
         search.indexing = false;
         search.task = None;
@@ -2391,7 +2361,7 @@ impl Shell {
 
     /// Tell the host the picker is done with its home index (it stays when a
     /// projectless chat warmed it).
-    fn release_home_folder_search(&mut self, cx: &mut Context<Self>) {
+    fn release_home_folder_search(&mut self, cx: &Context<Self>) {
         let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
         let Some(flow) = self.add_space.as_mut() else {
@@ -2521,7 +2491,7 @@ impl Shell {
         let names: Vec<_> = devices.iter().map(|d| d.name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
-            .map(|ix| devices[ix].clone())
+            .filter_map(|ix| devices.get(ix).cloned())
             .collect()
     }
 
@@ -2541,14 +2511,14 @@ impl Shell {
         let names: Vec<_> = locations.iter().map(|(name, _)| name.as_str()).collect();
         popover::filter_indices(flow.search.read(cx).text(), &names)
             .into_iter()
-            .map(|ix| locations[ix].clone())
+            .filter_map(|ix| locations.get(ix).cloned())
             .collect()
     }
 
     /// `ListDrives` on the flow's device (relay-forwarded when remote).
     /// Failures stay silent — the section just shows Home; the folder
     /// browser's own error row already covers "device didn't respond".
-    fn load_space_drives(&mut self, cx: &mut Context<Self>) {
+    fn load_space_drives(&mut self, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -2568,7 +2538,7 @@ impl Shell {
             }
             let result =
                 engine.client().call(methods::LIST_DRIVES, serde_json::Value::Object(params)).await;
-            this.update(cx, |shell, cx| {
+            let _gone = this.update(cx, |shell, cx| {
                 if let Some(flow) = shell.add_space.as_mut() {
                     flow.drives = match result {
                         Ok(value) => match serde_json::from_value::<DriveListing>(value) {
@@ -2579,8 +2549,7 @@ impl Shell {
                     };
                 }
                 cx.notify();
-            })
-            .ok();
+            });
         }));
     }
 
@@ -2599,7 +2568,10 @@ impl Shell {
         let dirs = browser_rows(listing);
         let query = flow.search.read(cx).text().to_owned();
         let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
-        popover::filter_indices(&query, &names).into_iter().map(|ix| dirs[ix].clone()).collect()
+        popover::filter_indices(&query, &names)
+            .into_iter()
+            .filter_map(|ix| dirs.get(ix).map(|entry| (*entry).clone()))
+            .collect()
     }
 
     /// The Folders step's rows: the open folder's matching subfolders, then
@@ -2770,9 +2742,9 @@ impl Shell {
             };
             let dirs = browser_rows(listing);
             let names: Vec<&str> = dirs.iter().map(|e| e.name.as_str()).collect();
-            crate::pickers::segment_target(&names, query).map(|ix| {
-                (crate::pickers::child_path(&listing.path, &dirs[ix].name), dirs[ix].is_repo)
-            })
+            crate::pickers::segment_target(&names, query)
+                .and_then(|ix| dirs.get(ix))
+                .map(|dir| (crate::pickers::child_path(&listing.path, &dir.name), dir.is_repo))
         };
         let Some((full, is_repo)) = target else {
             return false;
@@ -2800,12 +2772,12 @@ impl Shell {
         if len >= entry.name.len() {
             return None;
         }
-        Some((entry.name.clone(), entry.name[len..].to_string()))
+        Some((entry.name.clone(), entry.name.get(len..)?.to_owned()))
     }
 
     /// ⇥: accept the completion — the query becomes the full folder name
     /// (the ghost the input was previewing). Descending stays on `/`/⏎.
-    fn add_space_accept_completion(&mut self, cx: &mut Context<Self>) {
+    fn add_space_accept_completion(&self, cx: &mut Context<Self>) {
         let Some((name, _)) = self.add_space_completion(cx) else {
             return;
         };
@@ -2837,7 +2809,7 @@ impl Shell {
         flow.path_edit = None;
         let device_id = flow.device.as_ref().map(|d| d.id.clone());
         let went_home = path.is_none();
-        flow.browser_path = path.clone();
+        flow.browser_path.clone_from(&path);
         flow.browser = Loadable::Loading;
         flow.active = 0;
         flow.list_scroll.set_offset(Point::default());
@@ -2848,7 +2820,7 @@ impl Shell {
         };
         flow.load_task = Some(cx.spawn(async move |this, cx| {
             let result = list_folders_on(engine, path, device_id, local).await;
-            this.update(cx, |shell, cx| {
+            let _gone = this.update(cx, |shell, cx| {
                 if let Some(flow) = shell.add_space.as_mut() {
                     flow.browser = match result {
                         Ok(listing) => {
@@ -2866,8 +2838,7 @@ impl Shell {
                 // A path field opened while this loaded: ⇥ can use it now.
                 shell.add_space_refresh_path_completion(cx);
                 cx.notify();
-            })
-            .ok();
+            });
         }));
     }
 
@@ -2940,7 +2911,7 @@ impl Shell {
         let submit_id = space_id;
         let task = cx.spawn(async move |this, cx| {
             let result = engine.client().call(methods::MUTATE, params).await;
-            this.update(cx, |shell, cx| {
+            let _gone = this.update(cx, |shell, cx| {
                 match result {
                     Ok(_) => {
                         shell.close_add_space(cx);
@@ -2959,8 +2930,7 @@ impl Shell {
                     }
                 }
                 cx.notify();
-            })
-            .ok();
+            });
         });
         if let Some(flow) = self.add_space.as_mut() {
             flow.submit_task = Some(task);
@@ -3056,7 +3026,7 @@ impl Shell {
                 .client()
                 .call(methods::CLONE_REPO, serde_json::Value::Object(params))
                 .await;
-            this.update(cx, |shell, cx| {
+            let _gone = this.update(cx, |shell, cx| {
                 if let Some(notice) = notice {
                     crate::toast::withdraw(cx, notice);
                 }
@@ -3080,8 +3050,7 @@ impl Shell {
                         );
                     }
                 }
-            })
-            .ok();
+            });
         })
         .detach();
     }
@@ -3222,7 +3191,7 @@ impl Shell {
                 let device_id = flow.device.as_ref().map(|device| device.id.clone());
                 Some(cx.spawn(async move |this, cx| {
                     let listing = list_folders_on(engine, None, device_id, local).await;
-                    this.update(cx, |shell, cx| {
+                    let _gone = this.update(cx, |shell, cx| {
                         let (Ok(listing), Some(flow)) = (listing, shell.add_space.as_mut()) else {
                             return;
                         };
@@ -3240,8 +3209,7 @@ impl Shell {
                         // Whichever listing learned home first, `~` resolves now.
                         shell.add_space_refresh_path_completion(cx);
                         cx.notify();
-                    })
-                    .ok();
+                    });
                 }))
             }
             _ => None,
@@ -3292,7 +3260,7 @@ impl Shell {
 
     /// Keep ⇥'s source on the typed path's parent folder: the open listing
     /// answers for itself; any other folder is listed once per parent.
-    fn add_space_refresh_path_completion(&mut self, cx: &mut Context<Self>) {
+    fn add_space_refresh_path_completion(&mut self, cx: &Context<Self>) {
         let windows = self.add_space_windows_paths();
         let engine = self.state.read(cx).engine().cloned();
         let local = self.state.read(cx).local_device_id.clone();
@@ -3334,7 +3302,7 @@ impl Shell {
         edit.siblings = Some((key.clone(), Loadable::Loading));
         edit.siblings_task = Some(cx.spawn(async move |this, cx| {
             let listing = list_folders_on(engine, Some(parent), device_id, local).await;
-            this.update(cx, |shell, cx| {
+            let _gone = this.update(cx, |shell, cx| {
                 if let Some((known, folders)) = shell
                     .add_space
                     .as_mut()
@@ -3350,8 +3318,7 @@ impl Shell {
                     };
                     cx.notify();
                 }
-            })
-            .ok();
+            });
         }));
     }
 
@@ -3386,13 +3353,16 @@ impl Shell {
             _ if windows => '\\',
             _ => '/',
         };
-        let ghost =
-            (typed < entry.name.len()).then(|| SharedString::from(entry.name[typed..].to_string()));
+        let ghost = entry
+            .name
+            .get(typed..)
+            .filter(|rest| !rest.is_empty())
+            .map(|rest| SharedString::from(rest.to_owned()));
         let entry_name = escape_typed_path(&entry.name, windows);
         Some((format!("{folder}{entry_name}{separator}"), ghost))
     }
 
-    fn add_space_accept_path_completion(&mut self, cx: &mut Context<Self>) {
+    fn add_space_accept_path_completion(&self, cx: &mut Context<Self>) {
         let Some((text, _)) = self.add_space_path_completion(cx) else {
             return;
         };
@@ -3480,7 +3450,8 @@ impl Shell {
                     .map_err(|error| path_open_error(&tilde_path(&target, home.as_deref()), &error))
             }
             .await;
-            this.update(cx, |shell, cx| shell.add_space_finish_typed_path(home, result, cx)).ok();
+            let _gone =
+                this.update(cx, |shell, cx| shell.add_space_finish_typed_path(home, result, cx));
         }));
         cx.notify();
     }
@@ -3625,7 +3596,7 @@ impl Shell {
                     Some(ProjectStep::Locations) => self.add_space_locations(cx).len(),
                     // The clone row after the folders, or the one clone row.
                     _ if self.add_space.as_ref().is_some_and(|f| f.cloning) => 1,
-                    _ => self.add_space_folder_rows(cx).len() + 1,
+                    _ => self.add_space_folder_rows(cx).len().saturating_add(1),
                 };
                 let delta = if key == popover::MenuKey::Up { -1 } else { 1 };
                 if let Some(flow) = self.add_space.as_mut() {
@@ -3668,11 +3639,10 @@ impl Shell {
 
     /// The folders folded into the `…` crumb, in path order.
     fn render_project_crumb_menu(
-        &self,
         hidden: &[(String, String)],
         closing: Option<popover::Closing>,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let rows = hidden.iter().enumerate().map(|(ix, (name, full))| {
             let full = full.clone();
@@ -3973,7 +3943,7 @@ impl Shell {
                 .flex_none()
                 .px(px(8.0))
                 .when(ix == 0, |row| row.pt(px(8.0)))
-                .when(ix + 1 == count, |row| row.pb(px(8.0)))
+                .when(ix.saturating_add(1) == count, |row| row.pb(px(8.0)))
                 .child(content)
         });
         let mut results = div()
@@ -4078,7 +4048,7 @@ impl Shell {
             // While a descend loads, keep showing the REQUESTED path so the
             // trail doesn't collapse to the location and pop back.
             let open_path =
-                listing.as_ref().map(|l| l.path.clone()).or(browser_path).or(root.clone());
+                listing.as_ref().map(|l| l.path.clone()).or(browser_path).or_else(|| root.clone());
             let at_root = open_path.is_none()
                 || open_path
                     .as_deref()
@@ -4214,7 +4184,7 @@ impl Shell {
                 };
             }
             if more && menu_mounted {
-                el = el.child(self.render_project_crumb_menu(&hidden, menu_closing, &theme, cx));
+                el = el.child(Self::render_project_crumb_menu(&hidden, menu_closing, &theme, cx));
             }
             trail.push(el.into_any_element());
         }
@@ -4617,7 +4587,7 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn delete_space(&mut self, space_id: String, cx: &mut Context<Self>) {
+    pub(super) fn delete_space(&mut self, space_id: &str, cx: &mut Context<Self>) {
         self.delete_space_confirm = None;
         self.mutate(serde_json::json!({ "op": "deleteSpace", "spaceId": space_id }), cx);
         cx.notify();
@@ -4767,7 +4737,7 @@ impl Shell {
                     .child(
                         popover::btn_danger(&theme, "Remove").id("delete-space-confirm").on_click(
                             cx.listener(move |this, _, _, cx| {
-                                this.delete_space(space_id.clone(), cx);
+                                this.delete_space(&space_id, cx);
                             }),
                         ),
                     ),
@@ -4846,7 +4816,7 @@ mod project_flow_tests {
     #[test]
     fn deep_crumb_trails_fold_all_but_the_deepest_folders() {
         let mut short = vec!["a", "b", "c"];
-        assert!(fold_crumb_folders(&mut short).is_empty());
+        assert_eq!(fold_crumb_folders(&mut short), Vec::<&str>::new());
         assert_eq!(short, ["a", "b", "c"]);
         let mut deep = vec!["a", "b", "c", "d", "e"];
         assert_eq!(fold_crumb_folders(&mut deep), ["a", "b", "c"]);
@@ -4957,7 +4927,7 @@ mod home_folder_search_tests {
     }
 
     impl FakeEngine {
-        fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+        fn take(&mut self, method: &str, cx: &TestAppContext) -> Vec<serde_json::Value> {
             let mut found = Vec::new();
             loop {
                 cx.run_until_parked();
@@ -4981,14 +4951,17 @@ mod home_folder_search_tests {
         }
 
         fn reply(&self, request: &serde_json::Value, ok: serde_json::Value) {
-            self.send(serde_json::json!({ "id": request["id"], "ok": ok }));
+            let mut reply = serde_json::Map::new();
+            reply.insert("id".into(), request["id"].clone());
+            reply.insert("ok".into(), ok);
+            self.send(&serde_json::Value::Object(reply));
         }
 
         fn fail(&self, request: &serde_json::Value, err: &str) {
-            self.send(serde_json::json!({ "id": request["id"], "err": err }));
+            self.send(&serde_json::json!({ "id": request["id"], "err": err }));
         }
 
-        fn send(&self, reply: serde_json::Value) {
+        fn send(&self, reply: &serde_json::Value) {
             // The client's reader task runs on this runtime: let it drain.
             self.runtime.block_on(async {
                 self.replies.send(reply.to_string()).await.unwrap();
@@ -5074,7 +5047,7 @@ mod home_folder_search_tests {
             .unwrap();
     }
 
-    fn rows(window: gpui::WindowHandle<Shell>, cx: &mut TestAppContext) -> Vec<FolderRow> {
+    fn rows(window: gpui::WindowHandle<Shell>, cx: &TestAppContext) -> Vec<FolderRow> {
         window.read_with(cx, Shell::add_space_folder_rows).unwrap()
     }
 
@@ -5093,7 +5066,7 @@ mod home_folder_search_tests {
         cx.run_until_parked();
         // Merely warming Home must not start polling an empty query.
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
         type_query(window, "comet", cx);
         let request = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(request.len(), 1);
@@ -5107,11 +5080,14 @@ mod home_folder_search_tests {
         let (window, _dir, mut engine, first) = begin_home_search(cx);
         engine.reply(&first, serde_json::json!({ "matches": [], "indexing": true }));
         cx.run_until_parked();
-        assert!(rows(window, cx).is_empty());
+        assert_eq!(rows(window, cx), Vec::new());
         let comet = found("/home/me/dev/comet", "dev/comet", true);
-        for (round, millis) in [500, 1000, 2000, 2000].into_iter().enumerate() {
-            cx.executor().advance_clock(Duration::from_millis(millis - 1));
-            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        for (round, millis) in [500_u64, 1000, 2000, 2000].into_iter().enumerate() {
+            cx.executor().advance_clock(Duration::from_millis(millis.saturating_sub(1)));
+            assert_eq!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx),
+                Vec::<serde_json::Value>::new()
+            );
             cx.executor().advance_clock(Duration::from_millis(1));
             let requests = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
             assert_eq!(requests.len(), 1);
@@ -5120,7 +5096,10 @@ mod home_folder_search_tests {
             // A slow response does not queue more requests or erase rows.
             let partial = rows(window, cx);
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+            assert_eq!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx),
+                Vec::<serde_json::Value>::new()
+            );
             assert_eq!(rows(window, cx), partial);
             let matches = if round == 0 {
                 vec![comet.clone()]
@@ -5149,7 +5128,7 @@ mod home_folder_search_tests {
         }
         assert_eq!(rows(window, cx).len(), 2);
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
     }
 
     #[gpui::test]
@@ -5174,12 +5153,16 @@ mod home_folder_search_tests {
                             shell.add_space_pick_device(device("local"), cx);
                         }
                         "close" => shell.close_add_space(cx),
-                        _ => unreachable!(),
+                        _ => panic!("no such action as {action}"),
                     })
                     .unwrap(),
             }
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "{action}");
+            assert_eq!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx),
+                Vec::<serde_json::Value>::new(),
+                "{action}"
+            );
             window
                 .read_with(cx, |shell, _| {
                     assert!(
@@ -5210,10 +5193,10 @@ mod home_folder_search_tests {
             }),
         );
         cx.run_until_parked();
-        assert!(rows(window, cx).is_empty());
+        assert_eq!(rows(window, cx), Vec::new());
         cx.executor()
             .advance_clock(HOME_FOLDER_INDEX_RETRY.checked_sub(Duration::from_millis(1)).unwrap());
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
         cx.executor().advance_clock(Duration::from_millis(1));
         let retry = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(retry.len(), 1);
@@ -5221,7 +5204,7 @@ mod home_folder_search_tests {
         engine.reply(&retry[0], serde_json::json!({ "matches": [], "indexing": false }));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
     }
 
     #[gpui::test]
@@ -5237,7 +5220,7 @@ mod home_folder_search_tests {
                 "failed" => engine.fail(&retry[0], "search failed"),
                 "unsupported" => engine.fail(&retry[0], "unknown method: SearchHomeFolders"),
                 "decode" => engine.reply(&retry[0], serde_json::json!({})),
-                _ => unreachable!(),
+                _ => panic!("no such error as {error}"),
             }
             cx.run_until_parked();
             window
@@ -5248,7 +5231,11 @@ mod home_folder_search_tests {
                 })
                 .unwrap();
             cx.executor().advance_clock(Duration::from_secs(10));
-            assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "{error}");
+            assert_eq!(
+                engine.take(methods::SEARCH_HOME_FOLDERS, cx),
+                Vec::<serde_json::Value>::new(),
+                "{error}"
+            );
         }
     }
 
@@ -5263,7 +5250,7 @@ mod home_folder_search_tests {
         engine.reply(&warm[0], serde_json::json!({ "matches": [], "indexing": true }));
 
         type_query(window, "c", cx);
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
         type_query(window, "co", cx);
         let search = engine.take(methods::SEARCH_HOME_FOLDERS, cx);
         assert_eq!(search[0]["params"]["query"], "co");
@@ -5307,7 +5294,11 @@ mod home_folder_search_tests {
         assert!(matches!(&listed[0], FolderRow::Home(m) if m.relative == "code"));
         assert!(matches!(&listed[1], FolderRow::Home(m) if m.is_repo));
         cx.executor().advance_clock(Duration::from_secs(10));
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty(), "no polling");
+        assert_eq!(
+            engine.take(methods::SEARCH_HOME_FOLDERS, cx),
+            Vec::<serde_json::Value>::new(),
+            "no polling"
+        );
         type_query(window, "zz", cx);
         cx.run_until_parked();
         assert!(rows(window, cx).iter().all(|row| !matches!(row, FolderRow::Home(_))));
@@ -5386,7 +5377,7 @@ mod home_folder_search_tests {
                 assert_eq!(shell.state.read(cx).selected_space.as_deref(), Some("existing"));
                 assert_eq!(shell.state.read(cx).spaces.len(), 1);
             }).unwrap();
-            assert!(engine.take(methods::MUTATE, cx).is_empty());
+            assert_eq!(engine.take(methods::MUTATE, cx), Vec::<serde_json::Value>::new());
         }
     }
 
@@ -5520,7 +5511,11 @@ mod home_folder_search_tests {
             &asked[0],
             serde_json::json!({ "spaceId": "cloned", "deviceId": "remote", "path": "/home/me/zeron" }),
         );
-        assert!(engine.take(methods::MUTATE, cx).is_empty(), "no second project");
+        assert_eq!(
+            engine.take(methods::MUTATE, cx),
+            Vec::<serde_json::Value>::new(),
+            "no second project"
+        );
         window
             .read_with(cx, |shell, cx| {
                 let state = shell.state.read(cx);
@@ -5544,10 +5539,10 @@ mod home_folder_search_tests {
         assert!(asked[0]["params"].get("targetDeviceId").is_none(), "this machine's own");
         engine.fail(&asked[0], "fatal: repository not found");
         cx.run_until_parked();
-        assert!(engine.take(methods::MUTATE, cx).is_empty());
+        assert_eq!(engine.take(methods::MUTATE, cx), Vec::<serde_json::Value>::new());
         window
             .read_with(cx, |shell, cx| {
-                assert!(shell.state.read(cx).spaces.is_empty());
+                assert_eq!(shell.state.read(cx).spaces, Vec::new());
                 let said = crate::toast::messages(cx);
                 assert_eq!(said.len(), 1);
                 assert!(said[0].starts_with("Couldn\u{2019}t clone origin."), "{said:?}");
@@ -5574,10 +5569,10 @@ mod home_folder_search_tests {
                 let flow = shell.add_space.as_ref().unwrap();
                 assert!(!flow.cloning);
                 assert_eq!(flow.step, ProjectStep::Folders);
-                assert!(flow.search.read(cx).text().is_empty());
+                assert_eq!(flow.search.read(cx).text(), "");
             })
             .unwrap();
-        assert!(engine.take(methods::CLONE_REPO, cx).is_empty());
+        assert_eq!(engine.take(methods::CLONE_REPO, cx), Vec::<serde_json::Value>::new());
     }
 
     #[gpui::test]
@@ -5596,7 +5591,7 @@ mod home_folder_search_tests {
         assert_eq!(released.len(), 1);
         assert_eq!(released[0]["params"]["targetDeviceId"], "remote");
         type_query(window, "comet", cx);
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
 
         go_home(window, cx);
         engine.take(methods::SEARCH_HOME_FOLDERS, cx);
@@ -5604,7 +5599,10 @@ mod home_folder_search_tests {
         assert_eq!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).len(), 1);
         // Nothing left to release.
         window.update(cx, |shell, _, cx| shell.close_add_space(cx)).unwrap();
-        assert!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     #[gpui::test]
@@ -5615,13 +5613,16 @@ mod home_folder_search_tests {
         engine.fail(&warm[0], "unknown method: SearchHomeFolders");
         cx.run_until_parked();
         type_query(window, "comet", cx);
-        assert!(engine.take(methods::SEARCH_HOME_FOLDERS, cx).is_empty());
+        assert_eq!(engine.take(methods::SEARCH_HOME_FOLDERS, cx), Vec::<serde_json::Value>::new());
         window.update(cx, |shell, _, cx| shell.close_add_space(cx)).unwrap();
-        assert!(engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx).is_empty());
+        assert_eq!(
+            engine.take(methods::RELEASE_HOME_FOLDER_SEARCH, cx),
+            Vec::<serde_json::Value>::new()
+        );
     }
 
     /// The platform's ⌘ (Ctrl elsewhere), as the key handlers read it.
-    fn secondary(cx: &mut TestAppContext) -> gpui::Modifiers {
+    fn secondary(cx: &TestAppContext) -> gpui::Modifiers {
         cx.update(|cx| gpui::Modifiers::secondary_key(cx))
     }
 
@@ -5646,10 +5647,7 @@ mod home_folder_search_tests {
         cx.run_until_parked();
     }
 
-    fn path_input(
-        window: gpui::WindowHandle<Shell>,
-        cx: &mut TestAppContext,
-    ) -> Entity<ComposerInput> {
+    fn path_input(window: gpui::WindowHandle<Shell>, cx: &TestAppContext) -> Entity<ComposerInput> {
         window
             .read_with(cx, |shell, _| {
                 let flow = shell.add_space.as_ref().unwrap();
@@ -5676,7 +5674,7 @@ mod home_folder_search_tests {
     fn listing_request(
         engine: &mut FakeEngine,
         path: &str,
-        cx: &mut TestAppContext,
+        cx: &TestAppContext,
     ) -> serde_json::Value {
         let mut found = None;
         for request in engine.take(methods::LIST_FOLDERS, cx) {
@@ -5747,7 +5745,11 @@ mod home_folder_search_tests {
                 ));
             })
             .unwrap();
-        assert!(engine.take(methods::MUTATE, cx).is_empty(), "↵ only opens");
+        assert_eq!(
+            engine.take(methods::MUTATE, cx),
+            Vec::<serde_json::Value>::new(),
+            "↵ only opens"
+        );
     }
 
     #[gpui::test]
@@ -5829,7 +5831,7 @@ mod home_folder_search_tests {
     }
 
     /// What drawing the whole Shell needs beyond `picker`'s globals.
-    fn renderable(cx: &mut TestAppContext) -> tempfile::TempDir {
+    fn renderable(cx: &TestAppContext) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             settings::init(UiSettings::default(), dir.path(), cx);

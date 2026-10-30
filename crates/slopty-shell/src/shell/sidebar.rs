@@ -1,18 +1,5 @@
 //! The session sidebar as `impl Shell`: its column, the list body and its rows, the
 //! connection pill, and the server foot with its menu (`docs/decisions/layout.md`).
-#![allow(
-    clippy::allow_attributes_without_reason,
-    clippy::arithmetic_side_effects,
-    clippy::float_cmp_const,
-    clippy::needless_pass_by_ref_mut,
-    clippy::needless_pass_by_value,
-    clippy::or_fun_call,
-    clippy::suboptimal_flops,
-    clippy::type_complexity,
-    clippy::unused_result_ok,
-    clippy::unused_self,
-    reason = "shell lint migration: slice A"
-)]
 
 use super::*;
 
@@ -167,6 +154,9 @@ fn sidebar_server_identity(
     }
 }
 
+/// What a tooltip shows, built when it opens.
+type TooltipFn = dyn Fn(&mut Window, &mut App) -> gpui::AnyView;
+
 // A row's archive pill names ⇧⌘A only on the open chat's row, the one the key archives.
 /// The tooltip of a sidebar row's archive pill, above it (below, it would cover the next row).
 fn archive_tooltip(
@@ -174,7 +164,7 @@ fn archive_tooltip(
     open: bool,
 ) -> impl Fn(&mut Window, &mut App) -> gpui::AnyView + 'static {
     use crate::settings::widgets::{action_tooltip, text_tooltip};
-    let tooltip: Box<dyn Fn(&mut Window, &mut App) -> gpui::AnyView> = match (archived, open) {
+    let tooltip: Box<TooltipFn> = match (archived, open) {
         (true, _) => Box::new(text_tooltip("Unarchive chat")),
         (false, true) => Box::new(action_tooltip(
             ShortcutId::ArchiveSession.label(),
@@ -190,11 +180,10 @@ impl Shell {
     /// tooltip says why, and whose press dials the machine again now. It never asks for a
     /// credential (`docs/decisions/layout.md`, "The session list is stable").
     pub(super) fn turned_away_badge(
-        &self,
         id: SharedString,
         device: String,
         why: SharedString,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx);
         div()
@@ -220,7 +209,7 @@ impl Shell {
     /// Dial `device` again now, as its login badge asks: the app's `redial` action
     /// (`DeviceAction::REDIAL`), which skips the link's wait. A call that does not reach the app
     /// is said in the sidebar's notice.
-    pub(super) fn redial_device(&mut self, device: String, cx: &mut Context<Self>) {
+    pub(super) fn redial_device(&self, device: String, cx: &Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else { return };
         cx.spawn(async move |this, cx| {
             let params = serde_json::json!({
@@ -240,7 +229,7 @@ impl Shell {
 
     /// Scroll the sidebar so the renamed row (painted at `row`) clears the
     /// list's edge fades, while the rename is still revealing it.
-    fn keep_rename_row_in_view(&mut self, row: gpui::Bounds<Pixels>, cx: &mut Context<Self>) {
+    fn keep_rename_row_in_view(&self, row: gpui::Bounds<Pixels>, cx: &mut Context<Self>) {
         if !self.chat_rename_revealing() {
             return;
         }
@@ -274,13 +263,13 @@ impl Shell {
     /// pointer that has not moved since the last archive-pill click. Releasing
     /// matters as much as adopting: an archived row keeps its hover key when it
     /// lands in the Archived section, and would otherwise stay lit there.
-    fn sync_chat_row_hover(&mut self, row_id: String, hovered: bool, cx: &mut Context<Self>) {
-        let current = self.chat_status_hover.as_deref() == Some(row_id.as_str());
+    fn sync_chat_row_hover(&mut self, row_id: &str, hovered: bool, cx: &mut Context<Self>) {
+        let current = self.chat_status_hover.as_deref() == Some(row_id);
         if !self.chat_hover_resync || current == hovered {
             return;
         }
         if hovered {
-            if let Some(previous) = self.chat_status_hover.replace(row_id.clone()) {
+            if let Some(previous) = self.chat_status_hover.replace(row_id.to_owned()) {
                 motion::set_hover(&format!("{previous}-hover"), false, self.reduced_motion.get());
             }
         } else {
@@ -348,7 +337,7 @@ impl Shell {
                 .chat
                 .id
                 .clone();
-            let count = group.rows.len() + group.hidden;
+            let count = group.rows.len().saturating_add(group.hidden);
             let said = match loudest.as_ref().and_then(marks::Mark::word) {
                 Some(word) => format!("{}, {count}, {word}", group.label),
                 None => format!("{}, {count}", group.label),
@@ -419,7 +408,11 @@ impl Shell {
     /// machine is out of reach dims and wears the cached glyph in its mark's place. The palette's
     /// copy spells out where the chat runs, its status or time, and its branch.
     /// Click selects; right-click opens the context menu.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::needless_pass_by_value,
+        reason = "shell lint migration: seam, callers in slice A"
+    )]
     pub(super) fn render_chat_row(
         &self,
         id: String,
@@ -548,7 +541,7 @@ impl Shell {
         // every title ends at one edge; a cached row's slot says so instead.
         let mark_slot = compact.then(|| {
             let glyph = if let Some((device, why)) = turned_away.clone() {
-                Some(self.turned_away_badge(
+                Some(Self::turned_away_badge(
                     format!("chat-turned-away-{id}").into(),
                     device,
                     why,
@@ -821,9 +814,9 @@ impl Shell {
                         |_, _, _| {},
                         move |bounds, (), window, cx| {
                             window.defer(cx, move |_, cx| {
-                                shell
-                                    .update(cx, |this, cx| this.keep_rename_row_in_view(bounds, cx))
-                                    .ok();
+                                let _gone = shell.update(cx, |this, cx| {
+                                    this.keep_rename_row_in_view(bounds, cx);
+                                });
                             });
                         },
                     )
@@ -847,11 +840,9 @@ impl Shell {
                                 return;
                             }
                             window.defer(cx, move |_, cx| {
-                                shell
-                                    .update(cx, |this, cx| {
-                                        this.sync_chat_row_hover(row_id, hovered, cx);
-                                    })
-                                    .ok();
+                                let _gone = shell.update(cx, |this, cx| {
+                                    this.sync_chat_row_hover(&row_id, hovered, cx);
+                                });
                             });
                         },
                     )
@@ -879,11 +870,9 @@ impl Shell {
                                     return;
                                 }
                                 window.defer(cx, move |_, cx| {
-                                    shell
-                                        .update(cx, |this, cx| {
-                                            this.hover_session_card(&chat_id, false, cx);
-                                        })
-                                        .ok();
+                                    let _gone = shell.update(cx, |this, cx| {
+                                        this.hover_session_card(&chat_id, false, cx);
+                                    });
                                 });
                             },
                         )
@@ -1086,7 +1075,7 @@ impl Shell {
     /// The connection pill: the link's health, shown only while it is down. No surface and no
     /// border: a bare spinner and a faint caption while reconnecting, an amber dot only when the
     /// OS says offline. The transport's error belongs in the logs, not the sidebar.
-    fn render_connection_pill(&self, theme: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_connection_pill(&self, theme: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
         use slopty_view_proto::ConnectivityState as S;
         let state = self.state.read(cx).connectivity.state;
         let (label, glyph): (SharedString, AnyElement) = match state {
@@ -1180,7 +1169,7 @@ impl Shell {
                     .map(|(k, _)| k.clone())
                     .collect();
                 if key_order_changed && (!offsets.is_empty() || !new_keys.is_empty()) {
-                    self.resort_epoch += 1;
+                    self.resort_epoch = self.resort_epoch.wrapping_add(1);
                     self.sidebar_resort = offsets;
                     self.sidebar_new_keys = new_keys;
                 }
@@ -1330,9 +1319,9 @@ impl Shell {
     /// and the settings page both render this exact row, so the footer holds still across the
     /// swap.
     pub(super) fn render_sidebar_footer_row(
-        &mut self,
+        &self,
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         div()
             .id("sidebar-footer-row")
@@ -1345,21 +1334,17 @@ impl Shell {
             .into_any_element()
     }
 
-    pub(super) fn render_sidebar_footer(
-        &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    pub(super) fn render_sidebar_footer(&self, theme: &Theme, cx: &Context<Self>) -> AnyElement {
         let (user_line, menu_identity, online) = {
             let state = self.state.read(cx);
             sidebar_server_identity(state.connectivity.server.as_ref())
         };
-        self.render_user_menu(user_line, menu_identity, online, theme, cx)
+        self.render_user_menu(user_line, &menu_identity, online, theme, cx)
     }
 
     // The server menu's rows: Devices, Connect a phone (while the server offers its
     // code), and Change server (Add device on "A server").
-    fn server_menu_rows(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn server_menu_rows(&self, theme: &Theme, cx: &Context<Self>) -> Vec<AnyElement> {
         let invite = self
             .state
             .read(cx)
@@ -1415,12 +1400,12 @@ impl Shell {
     }
 
     fn render_user_menu(
-        &mut self,
+        &self,
         user_line: SharedString,
-        menu_identity: SharedString,
+        menu_identity: &SharedString,
         online: Option<bool>, // the server's link, as the avatar's dot.
         theme: &Theme,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &theme.for_popup();
         let open = self.user_menu.is_open();
@@ -1525,8 +1510,7 @@ impl Shell {
             let closing = self.user_menu.closing_at(crate::clock::now(cx));
 
             let menu = popover::popover_card(theme)
-                .w(px(self.sidebar_content_width()
-                    - 2.0 * Theme::SPACE_SM
+                .w(px(Theme::SPACE_SM.mul_add(-2.0, self.sidebar_content_width())
                     - SIDEBAR_FOOTER_ACTION_SIZE
                     - SIDEBAR_FOOTER_ACTION_GAP))
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -1537,7 +1521,7 @@ impl Shell {
                 .gap(px(2.0))
                 // The server's link as the heading, then what the person does about servers and
                 // machines.
-                .child(popover::menu_heading(theme, &menu_identity))
+                .child(popover::menu_heading(theme, menu_identity))
                 .children(self.server_menu_rows(theme, cx))
                 .into_any_element();
             // Opens upward, left-aligned with the pill: the card is as wide as
@@ -1592,7 +1576,7 @@ impl Shell {
                         gpui::Toggled::False
                     })
                     .tab_index(0)
-                    .size(px(SIDEBAR_FOOTER_BUTTON_SIZE + 2.0 * reach))
+                    .size(px(reach.mul_add(2.0, SIDEBAR_FOOTER_BUTTON_SIZE)))
                     .m(px(-reach))
                     .flex_none()
                     .rounded(px(8.0 + reach))
@@ -1618,6 +1602,16 @@ mod tests {
         DESKTOP, draw, find, find_starting, launch, session_row, space, tree,
     };
     use super::*;
+
+    /// `by` before `at`.
+    fn ago(at: DateTime<Utc>, by: chrono::TimeDelta) -> DateTime<Utc> {
+        at.checked_sub_signed(by).expect("a date in range")
+    }
+
+    /// `by` after `at`.
+    fn later(at: DateTime<Utc>, by: chrono::TimeDelta) -> DateTime<Utc> {
+        at.checked_add_signed(by).expect("a date in range")
+    }
 
     #[test]
     fn sidebar_footer_names_the_server_and_its_link() {
@@ -1654,7 +1648,7 @@ mod tests {
 
     #[test]
     fn sidebar_harness_geometry_reflects_row_hierarchy() {
-        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
+        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP.to_bits(), Theme::SPACE_SM.to_bits());
     }
 
     #[test]
@@ -1787,8 +1781,8 @@ mod tests {
             let now = Utc::now();
             shell.state.update(cx, |state, _| {
                 let chat = state.chats.iter_mut().find(|chat| chat.id == "b").unwrap();
-                chat.created_at = now - chrono::TimeDelta::hours(80);
-                chat.last_message_at = Some(now - chrono::TimeDelta::hours(73));
+                chat.created_at = ago(now, chrono::TimeDelta::hours(80));
+                chat.last_message_at = Some(ago(now, chrono::TimeDelta::hours(73)));
             });
             shell.sidebar_clock = now;
             cx.notify();
@@ -1992,7 +1986,7 @@ mod tests {
         });
         draw(cx);
         let rail = cx.debug_bounds("sidebar-rail").expect("the rail");
-        assert_eq!(f32::from(rail.size.width), SIDEBAR_RAIL_WIDTH, "its width");
+        assert_eq!(f32::from(rail.size.width).to_bits(), SIDEBAR_RAIL_WIDTH.to_bits(), "its width");
         assert!(cx.debug_bounds("chat-a").is_none(), "no rows on the rail");
         let nodes = tree(cx);
         let entry = find(&nodes, Role::Button, "app, 2, Working")
@@ -2009,7 +2003,7 @@ mod tests {
         );
     }
 
-    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &mut TestAppContext) {
+    fn init_settings_test(saved: UiSettings, dir: &std::path::Path, cx: &TestAppContext) {
         cx.update(|cx| {
             settings::init(saved, dir, cx);
             gpui_base::init(cx);
@@ -2046,7 +2040,8 @@ mod tests {
                     let mut bare: Vec<String> = lines
                         .iter()
                         .map(|line| {
-                            line.split_once(' ').map_or(line.clone(), |(_, rest)| rest.to_owned())
+                            line.split_once(' ')
+                                .map_or_else(|| line.clone(), |(_, rest)| rest.to_owned())
                         })
                         .collect();
                     bare.sort_unstable();
@@ -2086,9 +2081,9 @@ mod tests {
         cx.simulate_resize(gpui::size(px(1320.0), px(880.0)));
         // A clock taken five minutes ago, a chat that folds two minutes after it: folded by the
         // wall's clock, not yet by the sidebar's.
-        let clock = Utc::now() - chrono::Duration::minutes(5);
-        let folds = clock + chrono::Duration::minutes(2);
-        let moved = folds - chrono::Duration::hours(sidebar_status::INACTIVE_AFTER_HOURS);
+        let clock = ago(Utc::now(), chrono::Duration::minutes(5));
+        let folds = later(clock, chrono::Duration::minutes(2));
+        let moved = ago(folds, chrono::Duration::hours(sidebar_status::INACTIVE_AFTER_HOURS));
         shell.update(cx, |shell, cx| {
             shell.debug_gate = Some(GatePhase::Ready);
             shell.splash = SplashPhase::Gone;
@@ -2138,7 +2133,10 @@ mod tests {
                         serde_json::from_value(serde_json::json!({
                             "id": format!("c{n}"), "title": format!("Say hello {n}"),
                             "deviceId": "local", "archived": false,
-                            "createdAt": Utc::now() - chrono::Duration::hours(80) - chrono::Duration::minutes(n),
+                            "createdAt": ago(
+                                ago(Utc::now(), chrono::Duration::hours(80)),
+                                chrono::Duration::minutes(n)
+                            ),
                         }))
                         .unwrap()
                     })
@@ -2164,14 +2162,14 @@ mod tests {
         cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
         settle(cx, Duration::from_millis(50));
         stale.extend(stale_sidebar(cx).map(|s| format!("on the row: {s}")));
-        settle(cx, settings::widgets::TOOLTIP_DELAY * 3);
+        settle(cx, settings::widgets::TOOLTIP_DELAY.saturating_mul(3));
         stale.extend(stale_sidebar(cx).map(|s| format!("its card up: {s}")));
         let more = cx.debug_bounds("sidebar-group-more-inactive");
         if let Some(more) = more {
             cx.simulate_click(more.center(), gpui::Modifiers::default());
             settle(cx, Duration::from_millis(50));
             stale.extend(stale_sidebar(cx).map(|s| format!("after Show more: {s}")));
-            settle(cx, settings::widgets::TOOLTIP_DELAY * 3);
+            settle(cx, settings::widgets::TOOLTIP_DELAY.saturating_mul(3));
             stale.extend(stale_sidebar(cx).map(|s| format!("a row under it: {s}")));
         } else {
             stale.push("no Show more drawn".to_owned());
