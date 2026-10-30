@@ -2758,10 +2758,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     text above: this call was stopped while running, not refused before it ran. …" (the
     `interrupt` recording). They still open as a refusal's do, so the decoder still reads the
     call as stopped, and the inspector words it as before.
-  - **Glob and Grep found nothing.** In the person's managed 2.1.314 build both answered "No
-    files found" for a folder holding `main.rs`, with a path or without, with settings or
-    without (three probes), where 2.1.312 found it; so the `tools` recording pins their empty
-    results, in the same records. Record it again once they find files.
+  - **Glob and Grep found nothing, and why.** In the person's managed 2.1.314 build both
+    answered "No files found" for a folder holding `main.rs`. Claude Code runs its built-in
+    ripgrep as its own binary under the name `rg` (`process.execPath`, argv0 `rg`,
+    `--no-config`). The managed launcher's adapter rewrites every spawn of that binary into a
+    launcher call, which then rejects `--no-config` as a Claude flag. The official build, run
+    the same way, lists the file. `USE_BUILTIN_RIPGREP=0` makes Claude Code use the system
+    `rg`, and the `tools` recording was made again that way (2026-10-30): Glob finds `main.rs`
+    and Grep its `println`. Record with it until the launcher passes such a spawn through.
   - **Fixes only, otherwise**, among them a `PreCompact` hook's output cut at 10 000
     characters (the relay prints none), `--setting-sources` now excluding all a file holds
     (auto mode rules and saved consents too, so a recording depends less on the machine), and a
