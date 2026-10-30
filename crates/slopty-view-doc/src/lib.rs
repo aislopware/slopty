@@ -3,9 +3,8 @@
 //! (`slopty_view_proto`): a transcript's entries and parts ([`schema`], [`parts`],
 //! [`part_kinds`]) and the frames its watch sends ([`transcript_delta`]); what a session says
 //! beside its terminal ([`dock`], [`work`]) and the pages it shows ([`page_card`]); the calls
-//! that serve them ([`calls`]); and a session's command ledger ([`commands`]).
+//! that serve them ([`calls`]); and the size past which an entry splits ([`constants`]).
 pub mod calls;
-pub mod commands;
 pub mod constants;
 pub mod dock;
 pub mod page_card;
@@ -15,7 +14,6 @@ pub mod schema;
 pub mod transcript_delta;
 pub mod work;
 
-pub use commands::*;
 pub use constants::*;
 pub use dock::*;
 pub use page_card::*;
