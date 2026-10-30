@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
 //! UI settings persisted to a small JSON file in the data dir — pane widths and
 //! collapse flags (slopty persisted the same set in localStorage).
 //!
@@ -8,6 +8,8 @@
 //! defaults, and loaded values are clamped so a hand-edited file can't wedge the
 //! layout.
 
+use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -223,6 +225,19 @@ pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSetti
 
 pub fn replace(settings: UiSettings, policy: SavePolicy, cx: &mut App) -> bool {
     update(policy, cx, |current| *current = settings)
+}
+
+/// Read on every wheel notch, so without cloning the settings. Without a
+/// store (not the app) wheel input is left alone.
+pub fn smooth_scrolling(cx: &App) -> bool {
+    cx.try_global::<SettingsStore>()
+        .is_some_and(|store| store.current.smooth_scrolling)
+}
+
+pub fn set_smooth_scrolling(enabled: bool, cx: &mut App) {
+    update(SavePolicy::Immediate, cx, |settings| {
+        settings.smooth_scrolling = enabled;
+    });
 }
 
 fn schedule(policy: SavePolicy, cx: &mut App) {
@@ -508,6 +523,9 @@ pub struct UiSettings {
     // slopty: reduced motion follows the OS alone (Amp's prune P12).
     /// Also snap animations while the main window is not focused.
     pub pause_animations_in_background: bool,
+    /// Mouse-wheel notches glide instead of jumping (`smooth_scroll`).
+    /// Trackpads already scroll smoothly; reduced motion overrides.
+    pub smooth_scrolling: bool,
     // slopty: voice removed.
 }
 
@@ -561,6 +579,7 @@ impl Default for UiSettings {
             accent: slopty_shell_theme::AccentSelection::default(),
             surface: slopty_shell_theme::SurfacePreference::default(),
             pause_animations_in_background: false,
+            smooth_scrolling: true,
             // slopty: voice removed.
         }
     }
@@ -989,6 +1008,11 @@ pub fn platform_combo(combo: &str) -> String {
     platform_combo_on(crate::keys::MOD_IS_COMMAND, combo) // slopty: an iPad's ⌘ too
 }
 
+/// slopty: a stored combo as the keystroke [`platform_combo`] binds, parsed for this platform.
+pub fn parse_combo(combo: &str) -> Result<gpui::Keystroke, gpui::InvalidKeystrokeError> {
+    gpui::Keystroke::parse_with_os(&platform_combo(combo), crate::keys::OS)
+}
+
 /// [`platform_combo`] for an explicit platform (see [`combo_from_keystroke_on`]).
 pub fn platform_combo_on(mac: bool, combo: &str) -> String {
     let primary = if mac { "cmd" } else { "ctrl" };
@@ -999,6 +1023,142 @@ pub fn platform_combo_on(mac: bool, combo: &str) -> String {
         .join("-")
 }
 
+/// Where the active keyboard layout puts shortcut keys: the US key a combo
+/// is written with → the key that layout types in its place. This is
+/// Apple's own relocation — an AZERTY Mac reaches ⌘1 as ⌘&, ⌘/ as ⌘: and
+/// ⌘[ as ⌘^ — which gpui ships as `get_key_equivalents` but applies only to
+/// bindings loaded with it. Empty on US layouts and off macOS.
+pub type KeyEquivalents = HashMap<char, char>;
+
+/// The active layout's [`KeyEquivalents`].
+pub fn key_equivalents(cx: &App) -> KeyEquivalents {
+    gpui::PlatformKeyboardMapper::get_key_equivalents(cx.keyboard_mapper().as_ref())
+        .map(|table| table.iter().map(|(&us, &here)| (us, here)).collect())
+        .unwrap_or_default()
+}
+
+thread_local! {
+    /// The table the keymap was last bound against. slopty: a chord read outside gpui's keymap
+    /// matches by its US spelling through it ([`bound_canonical_combo`]); hints read the bound
+    /// keymap itself.
+    static BOUND_KEY_EQUIVALENTS: RefCell<KeyEquivalents> = RefCell::default();
+}
+
+/// Called by `shell::apply_keymap` with the table it just bound against.
+pub(crate) fn set_bound_key_equivalents(equivalents: KeyEquivalents) {
+    BOUND_KEY_EQUIVALENTS.set(equivalents);
+}
+
+/// The key `equivalents` puts in place of the US `key` — gpui's
+/// `MacKeyboardMapper::map_key_equivalent`, for Slopty's own strings. Named
+/// keys ("tab", "f5") and characters the layout keeps pass through.
+pub fn localize_key<'a>(key: &'a str, equivalents: &KeyEquivalents) -> Cow<'a, str> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(us), None) => equivalents
+            .get(&us)
+            .map_or(Cow::Borrowed(key), |here| Cow::Owned(here.to_string())),
+        _ => Cow::Borrowed(key),
+    }
+}
+
+/// The US key a combo stores for a key this layout reported: the inverse of
+/// [`localize_key`], so a recorded chord keeps the spelling its default uses
+/// (AZERTY ⌘& records as "mod-1") and conflict checks on stored combos still
+/// see one chord per key. `None` when the layout relocates `key` itself and
+/// nothing lands on it — AZERTY's @ key — since no stored combo reaches it.
+/// Two US keys sharing one target (Icelandic ] and }) resolve to the lower.
+pub fn canonical_key(key: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let mut chars = key.chars();
+    let (Some(here), None) = (chars.next(), chars.next()) else {
+        return Some(key.to_string());
+    };
+    if let Some(us) = equivalents
+        .iter()
+        .filter(|&(_, &target)| target == here)
+        .map(|(&us, _)| us)
+        .min()
+    {
+        return Some(us.to_string());
+    }
+    (!equivalents.contains_key(&here)).then(|| key.to_string())
+}
+
+/// Split a combo into its modifier prefix and key: ("mod-shift-", "/").
+fn split_combo(combo: &str) -> (&str, &str) {
+    // "-" is a key too: "mod--" is Mod+Minus.
+    let key_start = if combo.ends_with('-') {
+        combo.len() - 1
+    } else {
+        combo.rfind('-').map_or(0, |ix| ix + 1)
+    };
+    combo.split_at(key_start)
+}
+
+/// `combo` with its key localized ("mod-/" → "mod-:" on AZERTY), in either
+/// the stored ("mod-…") or the bindable ("cmd-…") spelling.
+pub fn localize_combo(combo: &str, equivalents: &KeyEquivalents) -> String {
+    let (modifiers, key) = split_combo(combo);
+    format!("{modifiers}{}", localize_key(key, equivalents))
+}
+
+/// The inverse of [`localize_combo`] (see [`canonical_key`]).
+pub fn canonical_combo(combo: &str, equivalents: &KeyEquivalents) -> Option<String> {
+    let (modifiers, key) = split_combo(combo);
+    canonical_key(key, equivalents).map(|key| format!("{modifiers}{key}"))
+}
+
+/// macOS French (AZERTY), as gpui_macos `keyboard.rs` lists it for
+/// `com.apple.keylayout.French` — the test platform has no layout table.
+#[cfg(test)]
+pub(crate) fn azerty_key_equivalents() -> KeyEquivalents {
+    [
+        ('!', '1'),
+        ('"', '%'),
+        ('#', '3'),
+        ('$', '4'),
+        ('%', '5'),
+        ('&', '7'),
+        ('(', '9'),
+        (')', '0'),
+        ('*', '8'),
+        ('.', ';'),
+        ('/', ':'),
+        ('0', 'à'),
+        ('1', '&'),
+        ('2', 'é'),
+        ('3', '"'),
+        ('4', '\''),
+        ('5', '('),
+        ('6', '§'),
+        ('7', 'è'),
+        ('8', '!'),
+        ('9', 'ç'),
+        (':', '°'),
+        (';', ')'),
+        ('<', '.'),
+        ('>', '/'),
+        ('@', '2'),
+        ('[', '^'),
+        ('\'', 'ù'),
+        ('\\', '`'),
+        (']', '$'),
+        ('^', '6'),
+        ('`', '<'),
+        ('{', '¨'),
+        ('|', '£'),
+        ('}', '*'),
+        ('~', '>'),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The stored (US-key) spelling of a chord read outside gpui's keymap, by
+/// the table the keymap is bound to (see [`canonical_combo`]).
+pub fn bound_canonical_combo(combo: &str) -> Option<String> {
+    BOUND_KEY_EQUIVALENTS.with_borrow(|equivalents| canonical_combo(combo, equivalents))
+}
 impl UiSettings {
     pub fn sidebar_pins(&self, profile_key: &str) -> &[String] {
         self.sidebar_pinned_session_ids_by_profile
@@ -1085,6 +1245,7 @@ impl UiSettings {
             accent,
             surface,
             pause_animations_in_background,
+            smooth_scrolling,
             // slopty: voice removed.
             // slopty: no pull-request pages.
         );
@@ -1355,6 +1516,7 @@ mod tests {
         let loaded = UiSettings::load(dir.path());
         assert!(loaded.open_web_links_in_slopty);
         assert!(!loaded.pause_animations_in_background);
+        assert!(loaded.smooth_scrolling);
         assert_eq!(loaded.sidebar_width, 300.0);
         assert!(!loaded.sound_enabled);
         for sound in [
@@ -1724,6 +1886,7 @@ mod tests {
             accent: slopty_shell_theme::AccentSelection::Preset(slopty_shell_theme::AccentPreset::Cyan),
             surface: slopty_shell_theme::SurfacePreference::Frosted,
             pause_animations_in_background: true,
+            smooth_scrolling: false,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();
@@ -1732,6 +1895,7 @@ mod tests {
         assert!(json.contains(r#""openWebLinksInSlopty": false"#));
         assert!(json.contains(r#""conversationWidth": "wide""#));
         assert!(json.contains(r#""pauseAnimationsInBackground": true"#));
+        assert!(json.contains(r#""smoothScrolling": false"#));
         assert!(json.contains(r#""terminalFontFamily": "installed:Menlo""#));
         assert!(json.contains(r#""terminalFontSize": 15.0"#));
         assert!(json.contains(r#""codeFontFamily": "geist""#));
@@ -2359,7 +2523,7 @@ mod tests {
         assert!(conflicted_shortcuts(&KeymapConfig::default()).is_empty());
         for id in ShortcutId::ALL {
             assert!(
-                gpui::Keystroke::parse(&platform_combo(id.default_combo())).is_ok(),
+                parse_combo(id.default_combo()).is_ok(),
                 "{:?} default combo does not parse",
                 id
             );
@@ -2579,6 +2743,57 @@ mod tests {
         let mut bare = KeymapConfig::default();
         bare.set(ShortcutId::JumpSession(0), "f5".into());
         assert!(!jump_hints_visible(&bare, false, false, false));
+    }
+
+    #[test]
+    fn azerty_localizes_shortcuts_where_appkit_puts_them() {
+        let azerty = azerty_key_equivalents();
+        // The relocations an AZERTY Mac's own menus apply to these shortcuts.
+        for (us, here) in [
+            ("mod-1", "mod-&"),
+            ("mod-2", "mod-é"),
+            ("mod-/", "mod-:"),
+            ("mod-[", "mod-^"),
+            ("mod-]", "mod-$"),
+        ] {
+            assert_eq!(localize_combo(us, &azerty), here);
+        }
+        // Letters, named keys and keys AZERTY keeps in place stay put.
+        for combo in [
+            "mod-b",
+            "mod-shift-a",
+            "ctrl-tab",
+            "mod-enter",
+            "f5",
+            "mod-,",
+            "mod--",
+        ] {
+            assert_eq!(localize_combo(combo, &azerty), combo);
+        }
+        // So does every key on a US layout, and the bindable spelling
+        // localizes like the stored one.
+        assert_eq!(localize_combo("mod-1", &KeyEquivalents::default()), "mod-1");
+        assert_eq!(localize_combo("cmd-shift-/", &azerty), "cmd-shift-:");
+    }
+
+    #[test]
+    fn canonical_keys_invert_localization_on_every_reachable_key() {
+        let azerty = azerty_key_equivalents();
+        for here in azerty.values().copied().chain("abz,-=+?".chars()) {
+            let here = here.to_string();
+            let us = canonical_key(&here, &azerty).unwrap_or_else(|| panic!("{here} unreachable"));
+            assert_eq!(localize_key(&us, &azerty), here.as_str(), "{here} via {us}");
+        }
+        assert_eq!(canonical_key("tab", &azerty).as_deref(), Some("tab"));
+        assert_eq!(
+            canonical_combo("mod-alt-&", &azerty).as_deref(),
+            Some("mod-alt-1")
+        );
+        // AZERTY relocates @ and nothing lands on that key.
+        assert_eq!(canonical_key("@", &azerty), None);
+        // Two US keys sharing one target (Icelandic ] and }) take the lower.
+        let icelandic: KeyEquivalents = [(']', '´'), ('}', '´')].into_iter().collect();
+        assert_eq!(canonical_key("´", &icelandic).as_deref(), Some("]"));
     }
 
     #[test]

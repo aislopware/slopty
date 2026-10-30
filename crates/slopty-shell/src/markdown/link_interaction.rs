@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 1bb6259), see THIRD_PARTY_NOTICES.md
 //! Per-range hit targets share the text's shaped geometry, including wrapped links.
 use super::{
     links::*,
@@ -257,9 +257,10 @@ impl Element for LinkRanges {
                             cx,
                         );
                         let dismissed = state.dismissed.clone();
-                        let epoch = state.epoch.clone();
                         // This disclosure is not a menu: menu_at consumes every
                         // outside press, preventing other controls from receiving it.
+                        // An outside press only hides it; the links keep their
+                        // ids, so a press on one of them still clicks it.
                         let mut popup = gpui::deferred(
                             gpui::anchored()
                                 .position(rect.bottom_left())
@@ -271,7 +272,6 @@ impl Element for LinkRanges {
                                         .occlude()
                                         .on_mouse_down_out(move |_, window, _| {
                                             dismissed.set(true);
-                                            epoch.set(epoch.get().wrapping_add(1));
                                             window.refresh();
                                         })
                                         .child(card),
@@ -680,7 +680,7 @@ mod rendered_tests {
         let _ = window.draw(cx);
         TOOLTIP_BOUNDS.with(|bounds| bounds.borrow().as_ref().is_some_and(|b| b.get().is_some()))
     }
-    fn key(window: &mut Window, key: &str, cx: &mut App) {
+    fn key(window: &mut Window, key: &'static str, cx: &mut App) {
         window.dispatch_event(
             gpui::PlatformInput::KeyDown(gpui::KeyDownEvent {
                 keystroke: gpui::Keystroke::parse(key).unwrap(),

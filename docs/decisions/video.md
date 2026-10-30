@@ -337,7 +337,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `gpui_macos/src/display_link.rs` drives frames from one `CVDisplayLink` per display,
   `gpui_apple/src/metal_renderer.rs` `configure_layer` sets `maximumDrawableCount(3)` and never
   touches display sync, and `present_drawable` goes on the command buffer, synchronously through
-  `presentsWithTransaction` only while a window re-activates.
+  `presentsWithTransaction` only while a window re-activates. Since 2026-10-30 gpui-fast has zed's
+  `CAMetalDisplayLink` too, but a window moves to it only once `nextDrawable` stalls, since the
+  link shows each frame about a refresh and a half later here (`docs/decisions/tooling.md`,
+  "Upstream sync of 2026-10-30").
 
 - ✅ **Present on arrival, and the presentation path is measured rather than assumed**
   (2026-09-05). A decoded frame goes up on the first paint after the decoder returns it and is

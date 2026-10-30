@@ -214,7 +214,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(4096);
         cx.update(|cx| {
             cx.set_global(slopty_shell::theme::Theme::default());
-            cx.bind_keys(super::super::key_bindings());
+            cx.bind_keys(super::super::key_bindings(cx));
         });
         let (view, cx) = cx.add_window_view(|window, cx| {
             let view = TerminalView::new(SessionId::new(), size, tx, Theme::default(), cx);
@@ -430,9 +430,9 @@ mod tests {
         let screen = (HELD..HELD + 60).map(ls).collect();
         let (view, _rx, cx) = open(cx, size, history, screen, (59, 0));
         cx.dispatch_action(CopyMode);
-        let time = |cx: &mut VisualTestContext, keys: &[&str]| {
+        let time = |cx: &mut VisualTestContext, keys: &[&'static str]| {
             let strokes: Vec<Keystroke> =
-                keys.iter().map(|k| Keystroke::parse(k).unwrap().with_simulated_ime()).collect();
+                keys.iter().map(|&k| Keystroke::parse(k).unwrap().with_simulated_ime()).collect();
             let mut took: Vec<Duration> = strokes
                 .iter()
                 .cycle()

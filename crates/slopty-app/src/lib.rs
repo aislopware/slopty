@@ -491,7 +491,7 @@ impl Workspace {
         let sharing = loaded.settings.clipboard.clone();
         let keys = loaded.settings.keys.clone();
         let (_bound, wrong) =
-            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()));
+            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()), cx);
         if let Some(first) = wrong.first() {
             Self::show_notice(format!("Settings: {first}"), cx);
         }
@@ -1525,7 +1525,7 @@ fn bind_terminal_keys(workspace: &Entity<Workspace>, cx: &mut App) {
         let keys = workspace.upgrade().map(|ws| ws.read(cx).settings.keys.clone());
         let keys = keys.unwrap_or_default();
         let (bindings, _warned) =
-            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()));
+            slopty_terminal::bindings(|name| keys.get("terminal", name).map(|c| c.0.clone()), cx);
         cx.bind_keys(bindings);
     });
 }

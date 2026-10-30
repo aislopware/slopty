@@ -14,6 +14,31 @@ use gpui::{Action, App, FocusHandle, KeyBinding, Modifiers, SharedString, Window
 /// alike, and Ctrl elsewhere. What the keymap binds and what a hint names both follow it.
 pub const MOD_IS_COMMAND: bool = cfg!(target_vendor = "apple");
 
+/// The system whose keyboard GPUI parses and spells Slopty's keys for: "cmd-" on the Mac and on
+/// an iPad's or iPhone's hardware keyboard alike.
+pub const OS: gpui::OperatingSystem = std::cfg_select! {
+    target_os = "macos" => { gpui::OperatingSystem::Mac }
+    target_os = "ios" => { gpui::OperatingSystem::Ios }
+    target_os = "windows" => { gpui::OperatingSystem::Windows }
+    target_os = "linux" => { gpui::OperatingSystem::Linux }
+    target_os = "freebsd" => { gpui::OperatingSystem::FreeBsd }
+    _ => { gpui::OperatingSystem::Unknown }
+};
+
+/// A binding at a chord made at run time ([`crate::settings::platform_combo`], a setting): GPUI's
+/// `KeyBinding::new` takes a literal, and this parses the chord as GPUI's own keymap loading does.
+/// A chord that is no chord panics, as `KeyBinding::new`'s does.
+pub fn binding<A: Action>(chord: &str, action: A, context: Option<&str>, cx: &App) -> KeyBinding {
+    let predicate = context.map(|context| match gpui::KeyBindingContextPredicate::parse(context) {
+        Ok(predicate) => std::rc::Rc::new(predicate),
+        Err(error) => panic!("key context {context:?}: {error}"),
+    });
+    match KeyBinding::load(chord, Box::new(action), predicate, false, None, cx) {
+        Ok(binding) => binding,
+        Err(error) => panic!("chord {chord:?}: {error}"),
+    }
+}
+
 /// Between the chords of a multi-stroke binding ("⌘K ⌘S"): a thin space.
 const CHORD_GAP: char = '\u{2009}';
 

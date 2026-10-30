@@ -65,8 +65,9 @@ pub struct Frame {
 impl Frame {
     /// What the frame says ([`crate::frame_text`]), leaving out the nodes centred inside
     /// `masks`: what a masked region says moves as its picture does. A path in the run's scratch
-    /// directory starts `$SCRATCH`, a port on loopback is `$PORT`, and a new note's moment is
-    /// `$MOMENT`, because each machine and each run has its own.
+    /// directory starts `$SCRATCH`, a port on loopback is `$PORT`, a new note's moment is
+    /// `$MOMENT` and a machine's system release is `$OS`, because each machine and each run has
+    /// its own.
     #[must_use]
     pub fn text(&self, masks: &[PixelRect]) -> String {
         let kept: Vec<crate::A11yNode> = self
@@ -88,8 +89,27 @@ impl Frame {
             })
             .cloned()
             .collect();
-        scrub_clocks(&scrub_moments(&scrub_ports(&scrub_scratch(&crate::frame_text(&kept)))))
+        let text = scrub_ports(&scrub_scratch(&crate::frame_text(&kept)));
+        scrub_releases(&scrub_clocks(&scrub_moments(&text)))
     }
+}
+
+/// `text` with the system release a machine's record names (`"os_version":"27.0.1"`, in a
+/// tool's answer the inspector shows) spelled `$OS`, and the rest of its line cut to `…`: the
+/// release is the machine's, and a label cut at a fixed length ends elsewhere when the release
+/// is longer or shorter.
+fn scrub_releases(text: &str) -> String {
+    const RELEASE: &str = "\"os_version\":\"";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(RELEASE) {
+        let (before, found) = rest.split_at(at.saturating_add(RELEASE.len()));
+        out.push_str(before);
+        out.push_str("$OS\u{2026}");
+        rest = found.find('\n').map_or("", |end| found.get(end..).unwrap_or_default());
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `text` with the moment in each new note's name (`note-2026-10-05-143210`) spelled
@@ -858,6 +878,31 @@ mod tests {
             "Button \u{2502} http://127.0.0.1:$PORT/\n\
              Label \u{2502} localhost:$PORT and [::1]:$PORT and studio:22\n"
         );
+    }
+
+    /// A machine's release reads the same on every machine, however long it is, and the
+    /// label it ends is cut after it; the next line stays.
+    #[test]
+    fn a_machine_s_release_reads_the_same_on_every_machine() {
+        let record = |release: &str| Frame {
+            image: solid(1, 1, [0, 0, 0]),
+            a11y: vec![
+                node(
+                    "Code",
+                    &format!(r#"[{{"os":"macos","os_version":"{release}","arch":"aarch64"}}]"#),
+                    [0.0, 0.0, 1.0, 1.0],
+                ),
+                node("Button", "os_version stays in prose", [0.0, 0.0, 1.0, 1.0]),
+            ],
+            scale: 1.0,
+        };
+        let said = record("27.0.1").text(&[]);
+        assert_eq!(
+            said,
+            "Code \u{2502} [{\"os\":\"macos\",\"os_version\":\"$OS\u{2026}\n\
+             Button \u{2502} os_version stays in prose\n"
+        );
+        assert_eq!(record("27.0").text(&[]), said);
     }
 
     #[test]

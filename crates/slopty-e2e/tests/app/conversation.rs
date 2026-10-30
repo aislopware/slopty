@@ -50,19 +50,19 @@ async fn code_copies_in_place_and_ansi_draws_in_colour() {
     open_read(drv).await;
     tokio::time::sleep(SETTLE).await;
     let shown =
-        seen(drv, "the code's Copy", STEP, |d| node(d, "Button", "Copy code").is_some()).await;
+        seen(drv, "the code's Copy", STEP, |d| reply_button(d, "Copy code").is_some()).await;
     // The person's own words keep what they typed; the reply's block shows no escape.
     let words = slopty_e2e::frame_text(crate::served::replies(&shown));
     assert!(!words.contains("\\x1b") && !words.contains("[1;32m"), "no escape shows:\n{words}");
     goldens(drv, &renders, "code-ansi", &[]).await;
 
     let dump = drv.dump().await.unwrap();
-    let copy = node(&dump, "Button", "Copy code").cloned().unwrap();
+    let copy = reply_button(&dump, "Copy code").cloned().unwrap();
     hover(drv, &copy).await;
     let (x, y) = middle(&copy);
     drv.click(x, y).await.unwrap();
-    let copied = seen(drv, "Copied", STEP, |d| node(d, "Button", "Copied").is_some()).await;
-    let after = node(&copied, "Button", "Copied").cloned().unwrap();
+    let copied = seen(drv, "Copied", STEP, |d| reply_button(d, "Copied").is_some()).await;
+    let after = reply_button(&copied, "Copied").cloned().unwrap();
     println!("MEASURE code-copy-no-shift: Copy at {:?}, Copied at {:?}", copy.bounds, after.bounds);
     let moved =
         copy.bounds.iter().zip(after.bounds).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
@@ -73,8 +73,8 @@ async fn code_copies_in_place_and_ansi_draws_in_colour() {
         after.bounds
     );
     // Back to Copy once it has said so, still in place.
-    let back = seen(drv, "Copy again", STEP, |d| node(d, "Button", "Copy code").is_some()).await;
-    let again = node(&back, "Button", "Copy code").cloned().unwrap();
+    let back = seen(drv, "Copy again", STEP, |d| reply_button(d, "Copy code").is_some()).await;
+    let again = reply_button(&back, "Copy code").cloned().unwrap();
     assert!(
         copy.bounds.iter().zip(again.bounds).all(|(a, b)| (a - b).abs() <= 1.0),
         "Copy came back elsewhere: {:?} → {:?}",
@@ -114,6 +114,14 @@ async fn a_link_shows_where_it_goes_on_hover() {
     tokio::time::sleep(SETTLE).await;
     crate::served::goldens_with(drv, &renders, "link-preview", &[], &["Copy message"]).await;
     stack.shutdown().await;
+}
+
+/// The reply's button `label`: the person's own message renders its Markdown too, and its code
+/// block has a Copy of its own.
+fn reply_button<'a>(dump: &'a Dump, label: &str) -> Option<&'a A11yNode> {
+    crate::served::replies(dump)
+        .iter()
+        .find(|n| n.role == "Button" && n.label.as_deref() == Some(label))
 }
 
 /// The reply's link "the guide", the last one drawn (the person's own message holds it too).

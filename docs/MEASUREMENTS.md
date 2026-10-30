@@ -17959,6 +17959,57 @@ cargo test -p slopty-net --test sim                                  # the gate
 cargo test -p slopty-net --test sim -- --ignored --nocapture         # the 200-seed sweep
 ```
 
+## 2026-10-30 — a Mac window's frames from CAMetalDisplayLink
+
+gpui-fast `576e7c96` imports zed #65472, which paces a macOS 14+ window with a
+`CAMetalDisplayLink` in place of `CVDisplayLink` ticks and `nextDrawable`. The numbers come from
+the fork's `frame_latency` example (release-fast) on mac-studio: M1 Max, macOS 27.0, and Parsec's
+60 Hz virtual display. That display reports no scan-out, so the drawable's presented handler
+stands for the glass (`GPUI_PRESENTED_AT_CALLBACK=1`). Other lanes were building beside it (load
+7–21). Each cell is a range over three runs of each build, run alternately; `idle` and `echo` add
+the p99 in brackets.
+
+| measure | `CVDisplayLink` (988229b0) | `CAMetalDisplayLink` |
+| --- | --- | --- |
+| `continuous`: submit → glass, p50 | 11.6–12.1 ms | 38.1–39.5 ms |
+| `flood`: key → glass, p50 | 20.1–21.2 ms | 46.8–47.2 ms |
+| `idle`: key → glass, p50 (p99) | 14.9–17.5 ms (26.0–26.8) | 9.7–11.4 ms (17.0–18.6) |
+| `echo`: key → echo on the glass, p50 (p99) | 31.7–32.1 ms (41.2–41.7) | 13.3–14.4 ms (59.5–61.7) |
+| `animate`: gap between renders, p99 | 18.7 ms | 16.7–16.9 ms |
+| `wake`: wake → render, p50 | 62–88 µs | 94–129 µs |
+
+- **The link costs each frame of a drawing window about a refresh and a half.** It schedules
+  each update's drawable for the third refresh after the update: `targetTimestamp` lay 16.5 ms
+  ahead and `targetPresentationTimestamp` 49.9 ms. `preferredFrameLatency` moved neither. It is 2
+  by default, takes 1, and caps 3 at 2. A link drawable presented at another time
+  (`presentDrawable:atTime:`, `afterMinimumDuration:`) got no presentation report.
+- **The link wins only a quiet window's first frame and the echo just after it.** gpui-fast's
+  immediate frame draws those with the link set aside, and the echo tail is 20 ms worse.
+- **So a window stays on the `CVDisplayLink` until `nextDrawable` stalls**
+  (`docs/decisions/tooling.md`, "Upstream sync of 2026-10-30"). With that rule the fork draws as
+  988229b0 did; two runs of each build:
+
+| measure | 988229b0 | `576e7c96` |
+| --- | --- | --- |
+| `continuous`: submit → glass, p50 | 11.4–11.6 ms | 11.3–12.8 ms |
+| `flood`: key → glass, p50 | 19.6–19.8 ms | 19.6–20.4 ms |
+| `idle`: key → glass, p50 | 18.3–18.6 ms | 15.1–17.8 ms |
+| `echo`: key → echo on the glass, p50 | 31.4–32.8 ms | 32.1–33.2 ms |
+| `animate`: gap between renders, p99 | 18.7 ms | 18.6–18.7 ms |
+| `wake`: wake → render, p50 | 76–82 µs | 74–88 µs |
+
+- **The move works mid-run.** A build that counted every wait as a stall moved to the link after
+  six `CVDisplayLink` ticks and kept 60 renders a second. No Mac here stalls for real.
+
+```sh
+cd .research/gpui-fast   # at 988229b0, then at 576e7c96
+MACOSX_DEPLOYMENT_TARGET=27.0 IPHONEOS_DEPLOYMENT_TARGET= \
+  cargo build -p gpui --example frame_latency --profile release-fast
+export GPUI_PRESENTED_AT_CALLBACK=1 FRAME_LATENCY_REST_SECS=6
+target/release-fast/examples/frame_latency idle      # also echo, flood, continuous, animate, wake
+GPUI_METAL_DISPLAY_LINK=1 target/release-fast/examples/frame_latency idle   # every window on the link
+```
+
 ## 2026-10-30 — committed fuzz corpora, their replay, and the agent targets' first runs
 
 Mac Studio M1 Max, macOS 27.0, beside four other lanes' builds and gates (load 8–28), so the wall

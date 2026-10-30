@@ -643,7 +643,7 @@ mod tests {
     /// keys copy mode has no use for mean nothing, so they are swallowed rather than typed.
     #[test]
     fn keys_mean_vi_s_motions_and_acts() {
-        let key = |s: &str| command(&Keystroke::parse(s).unwrap().with_simulated_ime());
+        let key = |s: &'static str| command(&Keystroke::parse(s).unwrap().with_simulated_ime());
         assert_eq!(key("j"), Command::Move(Motion::Down));
         assert_eq!(key("down"), Command::Move(Motion::Down));
         assert_eq!(key("shift-down"), Command::Move(Motion::Down), "⇧ adds nothing to an arrow");

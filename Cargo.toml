@@ -10,7 +10,6 @@ members = [
 ]
 # default-members: every member builds on the worker; iOS-only crates are cfg-gated internally
 exclude = [
-    "vendor/block",
     "vendor/ghostty",
     "vendor/noq-proto",
     "vendor/noq-udp",
@@ -74,8 +73,6 @@ regex = "1.13.1"
 bitflags = { version = "2.13.2", features = [ "serde" ] }
 bytes = { version = "1.12.1", features = [ "serde" ] }
 core-foundation = "0.10.1"
-# core-video follows the GPUI fork: `SurfaceSource: From<CVPixelBuffer>` needs the same crate version.
-core-video = "0.6.1"
 memchr = "2.8.3"
 # Clipboard and file-transfer digests: equal digests are the same contents (echo backstop,
 # end-to-end file check).
@@ -456,9 +453,6 @@ noq-proto = { path = "vendor/noq-proto" }
 # reported, not dropped (quinn#2748), and `SO_SNDBUF` keeps clear of macOS's `EWOULDBLOCK`
 # (quinn#2727). `vendor/noq-udp/SLOPTY.md` lists them.
 noq-udp = { path = "vendor/noq-udp" }
-# block 0.1.6 with its extern statics of an uninhabited type made inhabited (rust#74840, a future
-# hard error); `vendor/block/SLOPTY.md`.
-block = { path = "vendor/block" }
 # gpui-kit keeps upstream's gpui-pre requirements; the gpui-fast fork's `compat/` crates stand in
 # for them under their names (longbridge/gpui-fast#23), so the graph holds one GPUI. `xtask
 # upstream check` fails on any crates.io `gpui-pre*` left in Cargo.lock.

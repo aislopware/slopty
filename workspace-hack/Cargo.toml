@@ -50,7 +50,7 @@ futures-io = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["async-await-macro", "channel", "io", "sink"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
 granit-parser = { version = "1" }
@@ -175,7 +175,6 @@ dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["runtime_shaders", "wayland", "x11"] }
@@ -186,7 +185,7 @@ noq = { version = "1", default-features = false, features = ["fast-apple-datapat
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
 notify = { version = "8" }
 objc2 = { version = "0.6", features = ["disable-encoding-assertions", "exception"] }
-objc2-app-kit = { version = "0.3" }
+objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFByteOrder", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFNotificationCenter", "CFPlugInCOM", "CFSet", "CFStream", "CFUUID", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGDisplayConfiguration", "CGDisplayStream", "CGFont", "CGPath", "CGSession", "objc2"] }
@@ -195,10 +194,9 @@ objc2-core-text = { version = "0.3", default-features = false, features = ["CTFo
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVHostTime", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
 objc2-foundation = { version = "0.3" }
-objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAMetalLayer", "CAOpenGLLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "dispatch2", "objc2-core-foundation", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CABase", "CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAMetalDisplayLink", "CAMetalLayer", "CAOpenGLLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-security = { version = "0.3", default-features = false, features = ["CSCommon", "SecBase", "SecCode", "SecItem", "SecTrust", "objc2", "std"] }
-objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["UTCoreTypes", "UTType", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 objc2-video-toolbox = { version = "0.3", default-features = false, features = ["VTBase", "VTCompressionProperties", "VTCompressionSession", "VTDecompressionProperties", "VTDecompressionSession", "VTErrors", "VTSession", "VTVideoEncoderList", "objc2-core-media", "objc2-core-video", "std"] }
 objc2-web-kit = { version = "0.3" }
@@ -211,7 +209,7 @@ time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 block2 = { version = "0.6" }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 objc2 = { version = "0.6", features = ["disable-encoding-assertions", "exception"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFAttributedString", "CFBase", "CFByteOrder", "CFCGTypes", "CFCalendar", "CFCharacterSet", "CFData", "CFDate", "CFDictionary", "CFError", "CFFileSecurity", "CFLocale", "CFMachPort", "CFMessagePort", "CFNotificationCenter", "CFNumber", "CFPlugInCOM", "CFRunLoop", "CFSet", "CFStream", "CFString", "CFTimeZone", "CFURL", "CFUUID", "objc2", "std"] }
@@ -227,7 +225,6 @@ dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -241,8 +238,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSKeyValueObserving", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "dispatch2", "objc2-core-foundation", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CABase", "CALayer", "CAMetalDisplayLink", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
@@ -252,7 +249,7 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 [target.aarch64-apple-ios.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }
@@ -264,7 +261,6 @@ dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 event-listener = { version = "5" }
 futures-lite = { version = "2" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
@@ -278,8 +274,8 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGPath", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSKeyValueObserving", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLResponse", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
-objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "std"] }
-objc2-quartz-core = { version = "0.3", default-features = false, features = ["CALayer", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
+objc2-metal = { version = "0.3", default-features = false, features = ["MTLAccelerationStructureCommandEncoder", "MTLAccelerationStructureTypes", "MTLBlitCommandEncoder", "MTLBlitPass", "MTLBuffer", "MTLCaptureManager", "MTLCaptureScope", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLComputeCommandEncoder", "MTLComputePass", "MTLComputePipeline", "MTLCounters", "MTLDepthStencil", "MTLDevice", "MTLDrawable", "MTLEvent", "MTLPipeline", "MTLPixelFormat", "MTLRenderCommandEncoder", "MTLRenderPass", "MTLRenderPipeline", "MTLResidencySet", "MTLSampler", "MTLStageInputOutputDescriptor", "MTLTexture", "MTLTypes", "MTLVertexDescriptor", "block2", "dispatch2", "objc2-core-foundation", "std"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = ["CABase", "CALayer", "CAMetalDisplayLink", "CAMetalLayer", "CATransaction", "objc2-core-foundation", "objc2-core-graphics", "objc2-metal", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationServiceExtension", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter", "block2", "std"] }
 rust-embed = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
@@ -289,7 +285,7 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 [target.aarch64-apple-ios-sim.build-dependencies]
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 errno = { version = "0.3" }
-getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 libc = { version = "0.2" }
 rust-embed-impl = { version = "8", default-features = false, features = ["debug-embed", "include-exclude", "interpolate-folder-path"] }
 rustix = { version = "1", features = ["event", "net", "pipe", "process", "pty", "stdio", "system", "termios", "time"] }

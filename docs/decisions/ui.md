@@ -159,7 +159,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Zero-copy video in GPUI.** `gpui::surface(CVPixelBuffer)` → `paint_surface` →
   `CVMetalTextureCache` in `gpui_apple/metal_renderer.rs` (verified by reading source). Upstream
   gates it to macOS and stubs `draw_surfaces` on iOS; fork commit `a7cc3f4` lifts every gate to
-  `any(macos, ios)` (`core-video` 0.5 builds for both), so the phone paints the decoder's
+  `any(macos, ios)` (`objc2-core-video` builds for both), so the phone paints the decoder's
   `CVPixelBuffer` the same zero-copy way. Checked on macOS, `aarch64-apple-ios-sim` and
   `aarch64-apple-ios`.
 
@@ -423,8 +423,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   rows are cached per (content, focus, font size).
 
 - ✅ **Remote windows are `surface` elements, verified 2026-09-04.** `slopty-ui::screen::ScreenView`
-  wraps the decoder's `CVPixelBuffer` with `core_video::CVPixelBuffer::wrap_under_get_rule` (own
-  retain, so the frame `Arc` may drop first) and paints `gpui::surface(buffer).object_fit(Fill)`.
+  holds the decoder's `CVPixelBuffer` as objc2-core-video's `CFRetained` (own retain, so the frame
+  `Arc` may drop first) and paints `gpui::surface(buffer).object_fit(Fill)`.
   A Ghostty window streamed from the host rendered pixel-exact through the Metal path with no
   copy. The view keeps only the newest frame; a pump task awaits the client `watch` channels for
   frames and cursor and calls `cx.notify()`.
@@ -14547,3 +14547,45 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `view_model::tests::a_tapped_note_names_its_chat` (slopty-ui),
     `notify::tests::a_tap_before_the_app_listens_arrives_once_it_does_exactly_once` and
     `notify::pushed::tests::a_pushed_note_carries_what_a_tap_routes_by` (slopty-platform).
+
+- ✅ **zeron adopted to `369d428` (2026-10-30).** Taken: wheel notches that glide (#1005),
+  shortcuts bound where a non-US Mac layout puts them (#1013), Markdown in the person's prompts
+  (#1067) with a folded prompt laid out to its fold (#1089's half that is not the rail), New
+  project's typed path with Tab completion (#998), Luau highlighting (#1031), stale highlights
+  dropped after an external reload (#894), the fork marker's title kept under popovers (#907),
+  tooltips on the icon-only buttons that had none (#1048), the Browser saying where a local
+  file opens (#1012's half that is not Codex's `view_image`), the macOS page handing the
+  keyboard back only when it holds it (#997's `focus_chrome`), and a link that still clicks
+  while its disclosure shows (#1026's fix).
+  - **Smooth scrolling.** A mouse wheel's notch, a coarse step, glides over a few frames
+    as in Chrome, in the shell and in a browser page; a trackpad's or Magic Mouse's precise
+    deltas pass through as they come. Appearance has the switch, on by default. The glide reads
+    the shell's clock (`crate::clock`), so a test steps it by the test dispatcher's.
+  - **Non-US layouts.** The keymap is bound where the layout puts each chord (AZERTY's ⌘1 is
+    ⌘&) through gpui-fast's key equivalents, and bound again when the layout changes. A chord
+    read outside GPUI's keymap, by the browser's key monitor or the shortcut recorder, matches
+    by its US spelling through the bound table. zeron's migration of stored keymaps to
+    `layoutNeutral` is not taken: pre-release, there is nothing to migrate. Nor is its change
+    to how hints spell a chord, since Slopty's hints read the bound keymap.
+  - **The typed path.** ⌘L, the pen at the trail's end or a click on its empty end turns the
+    crumbs into the open folder's path. Tab completes a folder from the device's listing, ⏎
+    opens the path, ⌘⏎ adds it as a project, Esc gives the crumbs back. A relative path starts
+    from the open folder and `~` is the device's home; a Windows worker's paths are Windows'.
+    Slopty's edits: no Cloud device; its input pastes text only, so a folder copied in Finder
+    pastes as its name; the Open button is 24 pt like its neighbours; and the footer keeps
+    Slopty's hints, where ⏎ clones a repository's address, with no Add button beside it.
+  - **Prompts in Markdown.** A TUI's prompt holds no chips, so every prompt renders its
+    Markdown, a newline kept as a line break (`slopty_markdown::parse_message`). A long one
+    folds to its first lines, and only those are laid out until it opens.
+  - **Not taken:** the transcript rail and its hover card (#958, #1034, #1049, and the rail
+    halves of #1067 and #1089: Slopty has no rail); the session card's snap (#1028), its row
+    click (#1065, a fix for zui's scene overlay, which gpui-fast lacks) and its branch row
+    (#950); compact mode's subagent cards (#1025: Slopty's turn divider draws no calls and its
+    spawn groups never fold); #997's window-wide mouse-down capture, since gpui-fast's
+    composition gives GPUI the presses over a page and keeps the keyboard in step; Zeron
+    Cloud, providers, plans, billing, onboarding and the native-subagent switch (#966, #1046);
+    agents' images in replies (#1036) and Codex's `view_image` (#1012); the terminal over
+    direct links with predictive echo (#975, #1007, #1106); discovered preview ports (#1023);
+    access and plan modes (#1088), fx (#1099), browser annotations (#814), agent CLI updates
+    (#978); settings search (#1018); and the mobile apps (#1062). Each path is in
+    `xtask/zeron.toml`'s `[skip]`.

@@ -10,7 +10,10 @@
 //! every step: nothing panicked (GPUI's own retained check panics on a stale frame as it draws
 //! it), the frame shown paints what a frame from scratch at its moment paints
 //! ([`super::retention_tests::stale`]), the shell selected the chat the model says it did, the
-//! focus is on something the frame holds, and the accessibility tree is whole.
+//! focus is on something the frame holds, the accessibility tree is whole, and what it says of
+//! the layout holds ([`layout_fault`]): every node inside the window, every control named,
+//! no two controls side by side over each other, every shortcut spelled as a screen reader
+//! reads it.
 //!
 //! A failure is shrunk (delta debugging: chunks of the sequence dropped, then single steps)
 //! while it still fails the same way, and printed as its seed and the steps kept, which rerun
@@ -342,6 +345,131 @@ fn a11y_fault(window: &Window) -> Option<String> {
     (!ids.contains_key(&tree.focus)).then(|| format!("the focus {:?} is on no node", tree.focus))
 }
 
+/// The roles of the controls a person acts on: a screen reader names each.
+const CONTROLS: &[gpui::Role] = &[
+    gpui::Role::Button,
+    gpui::Role::Link,
+    gpui::Role::CheckBox,
+    gpui::Role::Switch,
+    gpui::Role::RadioButton,
+    gpui::Role::Tab,
+    gpui::Role::MenuItem,
+    gpui::Role::MenuItemCheckBox,
+    gpui::Role::MenuItemRadio,
+    gpui::Role::ComboBox,
+    gpui::Role::TextInput,
+    gpui::Role::MultilineTextInput,
+    gpui::Role::SearchInput,
+    gpui::Role::Slider,
+    gpui::Role::DisclosureTriangle,
+];
+
+/// The rounding a node's bounds may take past the window's edge or into a neighbour's, in
+/// device pixels.
+const SLACK: f64 = 1.0;
+
+/// What a frame's accessibility tree says the layout gets wrong: a node that shows outside
+/// the window (its bounds are what its clip leaves of it) or is turned inside out, a control with nothing to name it by, two controls side by side
+/// laid over each other (a click finds only one), a shortcut not in `aria-keyshortcuts`
+/// spelling. Controls side by side are those of one container: the window's own children are
+/// its layers (the page, and the menus, popovers and tooltips over it). On a touch screen a
+/// control takes presses over a finger's 44 pt around what it draws, into its neighbours' gaps
+/// and past them by design (#23), so there controls may lie over each other.
+fn layout_fault(window: &Window, touch: bool) -> Option<String> {
+    let tree = window.a11y_tree()?;
+    let scale = f64::from(window.scale_factor());
+    let size = window.viewport_size();
+    let (width, height) = (f64::from(f32::from(size.width)) * scale, f64::from(f32::from(size.height)) * scale);
+    let nodes: std::collections::HashMap<_, _> = tree.nodes.iter().map(|(id, node)| (*id, node)).collect();
+    let says = |text: Option<&str>| text.is_some_and(|t| !t.trim().is_empty());
+    let root = tree.tree.as_ref().map(|tree| tree.root);
+    for (id, node) in &tree.nodes {
+        let what = || format!("{id:?} ({:?} {:?})", node.role(), node.label());
+        if let Some(r) = node.bounds() {
+            if ![r.x0, r.y0, r.x1, r.y1].iter().all(|v| v.is_finite()) || r.x0 > r.x1 || r.y0 > r.y1 {
+                return Some(format!("{} has bounds {r:?}", what()));
+            }
+            // A node clipped out whole keeps a rect of no size where it would be.
+            let shows = r.x1 - r.x0 > SLACK && r.y1 - r.y0 > SLACK;
+            if shows && (r.x0 < -SLACK || r.y0 < -SLACK || r.x1 > width + SLACK || r.y1 > height + SLACK) {
+                return Some(format!("{} at {r:?} is outside the {width} × {height} window", what()));
+            }
+        }
+        if CONTROLS.contains(&node.role()) && !node.is_hidden() {
+            // Named by itself or by what it holds, as a screen reader names a button by its
+            // text.
+            let mut held = vec![(*id, 0_u8)];
+            let mut named = false;
+            while let Some((at, depth)) = held.pop() {
+                let Some(n) = nodes.get(&at) else { continue };
+                if says(n.label()) || says(n.value()) || !n.labelled_by().is_empty() {
+                    named = true;
+                    break;
+                }
+                if depth < 4 {
+                    held.extend(n.children().iter().map(|child| (*child, depth + 1)));
+                }
+            }
+            if !named {
+                return Some(format!("{} has nothing to name it by", what()));
+            }
+        }
+        if let Some(keys) = node.keyboard_shortcut()
+            && !aria_spelling(keys)
+        {
+            return Some(format!("{} has the shortcut {keys:?}, not in aria-keyshortcuts spelling", what()));
+        }
+        // The window's own children are its layers: menus, popovers and tooltips lie over the
+        // page by design.
+        if touch || Some(*id) == root {
+            continue;
+        }
+        let sides: Vec<_> = node
+            .children()
+            .iter()
+            .filter_map(|child| nodes.get(child).map(|n| (child, n)))
+            .filter(|(_, n)| CONTROLS.contains(&n.role()) && !n.is_hidden())
+            .filter_map(|(child, n)| n.bounds().map(|r| (child, n, r)))
+            .filter(|(_, _, r)| r.x1 - r.x0 > SLACK && r.y1 - r.y0 > SLACK)
+            .collect();
+        for (i, (a, an, ar)) in sides.iter().enumerate() {
+            for (b, bn, br) in &sides[i + 1..] {
+                let across = ar.x1.min(br.x1) - ar.x0.max(br.x0);
+                let down = ar.y1.min(br.y1) - ar.y0.max(br.y0);
+                if across > SLACK && down > SLACK {
+                    return Some(format!(
+                        "{a:?} ({:?} {:?}) at {ar:?} and {b:?} ({:?} {:?}) at {br:?}, side by side in {}, lie over each other",
+                        an.role(),
+                        an.label(),
+                        bn.role(),
+                        bn.label(),
+                        what()
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `keys` in `aria-keyshortcuts` spelling, as [`crate::keys::aria`] writes it: shortcuts apart
+/// by spaces, each its modifiers in the order Control, Alt, Shift, Meta and then one key.
+fn aria_spelling(keys: &str) -> bool {
+    const MODIFIERS: [&str; 4] = ["Control", "Alt", "Shift", "Meta"];
+    !keys.is_empty()
+        && keys.split(' ').all(|stroke| {
+            // The plus key itself is the one key a `+` may end on.
+            let (modifiers, key) = match stroke.strip_suffix("++") {
+                Some(modifiers) => (modifiers, "+"),
+                None => stroke.rsplit_once('+').unwrap_or(("", stroke)),
+            };
+            let mut order = MODIFIERS.iter();
+            !key.is_empty()
+                && !MODIFIERS.contains(&key)
+                && (modifiers.is_empty() || modifiers.split('+').all(|m| order.any(|known| *known == m)))
+        })
+}
+
 /// Run `steps` on the seed's screen, checking after each; the first failure.
 fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
     let screen = screen_of(seed);
@@ -420,9 +548,11 @@ fn run(seed: u64, steps: &[Step]) -> Result<(), Failure> {
                         window.refresh();
                         window.draw(cx).clear(cx);
                         a11y_fault(window)
+                            .map(|fault| ("a11y", fault))
+                            .or_else(|| layout_fault(window, SCREENS[screen].1.touch).map(|fault| ("layout", fault)))
                     });
-                    if let Some(fault) = fault {
-                        return Err(Failure { step: ix, kind: "a11y", detail: fault });
+                    if let Some((kind, fault)) = fault {
+                        return Err(Failure { step: ix, kind, detail: fault });
                     }
                 }
                 Ok(())
@@ -633,4 +763,17 @@ fn a_seed_takes_the_same_steps_every_time() {
     assert_eq!(steps_of(7, 40), steps_of(7, 40));
     assert_ne!(steps_of(7, 40), steps_of(8, 40));
     assert_eq!(screen_of(2), 2, "seed 2 is a phone's");
+}
+
+/// The spelling the layout check holds a shortcut to is the one the shell writes.
+#[test]
+fn a_shortcut_is_held_to_the_spelling_the_shell_writes() {
+    for (combo, mac) in [("cmd-shift-t", true), ("ctrl-alt-shift-cmd-k", true), ("ctrl-tab", false), ("cmd-k cmd-s", true)] {
+        let aria = crate::keys::aria_combo_on(mac, combo);
+        assert!(aria_spelling(&aria), "{combo} as {aria}");
+    }
+    for wrong in ["", "Meta+", "Shift+Control+A", "Meta+Meta+A", "Command+A", "Meta+Shift"] {
+        assert!(!aria_spelling(wrong), "{wrong:?}");
+    }
+    assert!(aria_spelling("Meta++"), "the plus key");
 }

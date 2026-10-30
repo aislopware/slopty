@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 77a3c0f), see THIRD_PARTY_NOTICES.md
 //! The app shell (slopty `__root.tsx`): sidebar column + main panel + optional
 //! right "Changes" pane, plus the boot splash and the connection gate.
 //!
@@ -18,7 +18,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use gpui::{
     Action, AnyElement, App, ClipboardItem, Context, Empty, Entity, FocusHandle, Focusable as _,
-    IntoElement, KeyBinding, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    IntoElement, Keystroke, ModifiersChangedEvent, MouseButton, MouseDownEvent,
     MouseUpEvent, NavigationDirection, Pixels, Point, Render, SharedString, Subscription, Task,
     Window, WindowControlArea, actions, div, prelude::*, px,
 };
@@ -439,10 +439,12 @@ pub fn cluster_clearance(
 /// (Re-)apply the whole app keymap: clears every binding, restores the text fields'
 /// map, then binds the customizable shortcuts from `keymap` (feature-inventory
 /// §1.4). Invalid persisted combos fall back to that shortcut's default.
+/// Everything is written in US keys and bound where the active keyboard layout
+/// types them (see [`localize_key_bindings`]); re-run on a layout switch.
 pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     fn valid_or_default(combo: &str, fallback: &str) -> String {
         let candidate = platform_combo(combo);
-        if Keystroke::parse(&candidate).is_ok() {
+        if Keystroke::parse_with_os(&candidate, crate::keys::OS).is_ok() {
             candidate
         } else {
             tracing::warn!(%combo, "unparseable shortcut combo; using default");
@@ -450,6 +452,7 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
         }
     }
     // slopty: appshots removed.
+    let equivalents = crate::settings::key_equivalents(cx);
     cx.clear_key_bindings();
     // `clear_key_bindings` also removes the contextual editing actions that
     // gpui-base installed at startup. Reinitialize the component layer before
@@ -462,65 +465,75 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // key equivalents and must survive keymap re-application.
     crate::app_menus::bind_keys(cx);
     cx.bind_keys([
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.save_file, "mod-s"),
             SaveFile,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.toggle_sidebar, "mod-b"),
             ToggleSidebar,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.toggle_changes, "mod-r"),
             ToggleChanges,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.toggle_files, "mod-e"),
             ToggleFiles,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.toggle_terminal, "mod-j"),
             ToggleTerminal,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.new_session, "mod-n"),
             NewSession,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(
                 &keymap.next_session,
                 crate::settings::ShortcutId::NextSession.default_combo(),
             ),
             NextSession,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(
                 &keymap.prev_session,
                 crate::settings::ShortcutId::PrevSession.default_combo(),
             ),
             PrevSession,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.archive_session, "mod-shift-a"),
             ArchiveSession,
             None,
+            cx,
         ),
-        KeyBinding::new(
+        crate::keys::binding(
             &valid_or_default(&keymap.new_project, ShortcutId::NewProject.default_combo()),
             AddSpacePalette,
             None,
+            cx,
         ),
         // Fixed: ⌘K summons the command palette.
         // Pressing it again dismisses.
-        KeyBinding::new(&platform_combo("mod-k"), ToggleCommandPalette, None),
+        crate::keys::binding(&platform_combo("mod-k"), ToggleCommandPalette, None, cx),
     ]);
     crate::browser::bind_keys(cx, keymap);
     // slopty: the files surface's and the diff's fixed keys, in their own contexts.
@@ -531,44 +544,117 @@ pub fn apply_keymap(cx: &mut App, keymap: &KeymapConfig) {
     // ⌘1..⌘9 open the sidebar's first nine rows. A slot left unbound (an empty
     // combo in a hand-edited file) binds nothing rather than falling back —
     // the user cleared it on purpose.
-    cx.bind_keys((0..JUMP_SLOTS).filter_map(|slot| {
+    let jumps: Vec<_> = (0..JUMP_SLOTS).filter_map(|slot| { // slopty: built before binding
         let id = ShortcutId::JumpSession(slot);
         let combo = keymap.get(id);
         if combo.is_empty() {
             return None;
         }
-        Some(KeyBinding::new(
+        Some(crate::keys::binding(
             &valid_or_default(combo, id.default_combo()),
             JumpSession(slot),
             None,
+            cx,
         ))
-    }));
+    }).collect();
+    cx.bind_keys(jumps);
     // Context-free bindings (the jumps above) match at the full focus depth,
     // so a palette binding must too: one for the palette's focused search
     // input, one for the card itself. Bound after the jumps, they win the tie.
     let palette_input = format!("{} > PaletteSearch", command_palette::KEY_CONTEXT);
-    cx.bind_keys((0..command_palette::Tab::ALL.len()).flat_map(|ix| {
+    let tabs: Vec<_> = (0..command_palette::Tab::ALL.len()).flat_map(|ix| { // slopty: as jumps
         let combo = platform_combo(&format!("mod-{}", ix + 1));
         [
-            KeyBinding::new(&combo, SelectPaletteTab(ix), Some(&palette_input)),
-            KeyBinding::new(
+            crate::keys::binding(&combo, SelectPaletteTab(ix), Some(&palette_input), cx),
+            crate::keys::binding(
                 &combo,
                 SelectPaletteTab(ix),
                 Some(command_palette::KEY_CONTEXT),
+                cx,
             ),
         ]
-    }));
+    }).collect();
+    cx.bind_keys(tabs);
     // slopty: Slopty's views' own keys, last, so they hold in their contexts.
     crate::live::bind_keys(cx);
     // slopty: in an agent's session ⌘K opens the palette over its terminal's own Clear: the
     // keyboard lives in that terminal, and an agent's TUI has no use for a cleared screen
     // (`docs/decisions/ui.md`, "⌘K in an agent's session"). After the terminal's keys, so it
     // holds over them there alone.
-    cx.bind_keys([KeyBinding::new(
+    cx.bind_keys([crate::keys::binding(
         &platform_combo("mod-k"),
         ToggleCommandPalette,
         Some("AgentSession > Terminal"),
+        cx,
     )]);
+    localize_key_bindings(cx, &equivalents);
+    crate::settings::set_bound_key_equivalents(equivalents);
+}
+
+/// Move every binding to the key the active layout types for it. Combos are
+/// written in US keys, like the macOS menus they mirror; Apple relocates
+/// those per layout (AZERTY ⌘1 is ⌘&, ⌘/ is ⌘:, ⌘[ is ⌘^) and gpui ships
+/// the same table, but `KeyBinding::new` never applies it — to Slopty's
+/// bindings or gpui-base's editor map. Order is kept: gpui breaks ties
+/// between equally deep matches by binding order.
+fn localize_key_bindings(cx: &mut App, equivalents: &crate::settings::KeyEquivalents) {
+    if equivalents.is_empty() {
+        return;
+    }
+    let keymap = cx.key_bindings();
+    let bindings: Vec<gpui::KeyBinding> = keymap
+        .borrow()
+        .bindings()
+        .map(|binding| localize_binding(binding, equivalents, cx))
+        .collect();
+    cx.clear_key_bindings();
+    cx.bind_keys(bindings);
+}
+
+// slopty: gpui-fast parses and spells a keystroke for the OS the app runs on.
+fn localize_binding(
+    binding: &gpui::KeyBinding,
+    equivalents: &crate::settings::KeyEquivalents,
+    cx: &App,
+) -> gpui::KeyBinding {
+    let mut moved = false;
+    let source = binding
+        .keystrokes()
+        .iter()
+        .map(|keystroke| {
+            let keystroke = keystroke.inner();
+            let key = crate::settings::localize_key(&keystroke.key, equivalents);
+            moved |= key != keystroke.key.as_str();
+            gpui::Keystroke {
+                key: key.into_owned(),
+                ..keystroke.clone()
+            }
+            .unparse(cx.platform_info().os)
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !moved {
+        return binding.clone();
+    }
+    match gpui::KeyBinding::load(
+        &source,
+        binding.action().boxed_clone(),
+        binding.predicate(),
+        false,
+        binding.action_input(),
+        cx,
+    ) {
+        Ok(mut localized) => {
+            if let Some(meta) = binding.meta() {
+                localized.set_meta(meta);
+            }
+            localized
+        }
+        Err(error) => {
+            tracing::warn!(%error, %source, "unbindable localized shortcut; keeping US key");
+            binding.clone()
+        }
+    }
 }
 
 /// The settings sections (feature-inventory §1.5 routes).
@@ -5794,6 +5880,7 @@ impl Shell {
                     match button {
                         gpui::WindowButton::Minimize => linux_caption_button(
                             "window-minimize",
+                            "Minimize",
                             icons::WINDOW_MINIMIZE,
                             false,
                             theme,
@@ -5801,18 +5888,24 @@ impl Shell {
                         )
                         .into_any_element(),
                         gpui::WindowButton::Maximize => {
-                            let (id, icon_path) = if is_maximized {
-                                ("window-restore", icons::WINDOW_RESTORE)
+                            let (id, label, icon_path) = if is_maximized {
+                                ("window-restore", "Restore", icons::WINDOW_RESTORE)
                             } else {
-                                ("window-maximize", icons::WINDOW_MAXIMIZE)
+                                ("window-maximize", "Maximize", icons::WINDOW_MAXIMIZE)
                             };
-                            linux_caption_button(id, icon_path, false, theme, |_, window, _| {
-                                window.zoom_window()
-                            })
+                            linux_caption_button(
+                                id,
+                                label,
+                                icon_path,
+                                false,
+                                theme,
+                                |_, window, _| window.zoom_window(),
+                            )
                             .into_any_element()
                         }
                         gpui::WindowButton::Close => linux_caption_button(
                             "window-close",
+                            "Close",
                             icons::CLOSE,
                             true,
                             theme,
@@ -8073,6 +8166,10 @@ impl Shell {
             self.close_project_crumb_menu(cx);
             return true;
         }
+        // A typed path gives the crumbs back before the palette closes.
+        if self.add_space_cancel_path_edit(cx) {
+            return true;
+        }
         if self.add_space.is_some() {
             self.close_add_space(cx);
             return true;
@@ -9827,6 +9924,7 @@ fn windows_caption_button(
 /// of the drag strip's event surface (see [`window_control_button`]).
 fn linux_caption_button(
     id: &'static str,
+    label: &'static str,
     icon_path: &'static str,
     close: bool,
     theme: &Theme,
@@ -9851,6 +9949,9 @@ fn linux_caption_button(
         .rounded(px(6.0))
         .cursor_pointer()
         .hover(move |style| style.bg(hover_bg))
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .tooltip(crate::settings::widgets::text_tooltip(label))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
         .on_click(move |event, window, cx| {
@@ -10704,7 +10805,8 @@ impl Render for Shell {
             // element at the window edges.
             .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
-        root
+        // Wheel notches anywhere in the window glide (Appearance → Motion).
+        crate::smooth_scroll::smooth_scroll(root)
     }
 }
 
@@ -10952,7 +11054,7 @@ mod tests {
         for id in crate::settings::ShortcutId::ALL {
             let combo = platform_combo(id.default_combo());
             assert!(
-                Keystroke::parse(&combo).is_ok(),
+                Keystroke::parse_with_os(&combo, crate::keys::OS).is_ok(),
                 "{} default {combo:?} does not parse",
                 id.label()
             );
@@ -12031,11 +12133,13 @@ mod exit_regressions {
                 settings::update(SavePolicy::Immediate, cx, |settings| {
                     settings.pause_animations_in_background = true;
                 });
+                settings::set_smooth_scrolling(false, cx);
                 // Any shell-owned change (sidebar width, panels) republishes
                 // the working copy; it must not revert the motion choices.
                 shell.schedule_save(cx);
                 let saved = settings::current(cx);
                 assert!(saved.pause_animations_in_background);
+                assert!(!saved.smooth_scrolling);
             })
             .unwrap();
     }
@@ -13639,10 +13743,11 @@ mod shortcut_focus_regressions {
     #[gpui::test]
     fn shortcuts_recover_from_retained_editor_focus(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.bind_keys([KeyBinding::new(
+            cx.bind_keys([crate::keys::binding(
                 &platform_combo("mod-2"),
                 JumpSession(1),
                 None,
+                cx,
             )]);
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
@@ -13683,10 +13788,11 @@ mod shortcut_focus_regressions {
     #[gpui::test]
     fn shortcuts_work_after_mouse_focus_changes(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            cx.bind_keys([KeyBinding::new(
+            cx.bind_keys([crate::keys::binding(
                 &platform_combo("mod-2"),
                 JumpSession(1),
                 None,
+                cx,
             )]);
         });
         let host = cx.add_window(|_, cx| ShortcutHost {
@@ -13963,6 +14069,105 @@ mod settings_modal_regressions {
         // slopty: ⌘N opens the New session picker over the session on screen.
         assert_eq!(press(&keymap.new_session), (Route::Chat, Some("newer".into())));
         assert!(window.read_with(cx, |shell, _| shell.new_session.is_some()).unwrap());
+    }
+
+    /// An AZERTY Mac types ⌘& on the key AppKit reads as ⌘1, and ⌘⇧& — which
+    /// gpui reports as a literal ⌘1 — is no shortcut there. Bound in US keys
+    /// only, Jump to session 1 answered the second and not the first.
+    #[gpui::test]
+    fn azerty_jumps_from_the_key_appkit_reads_as_cmd_1(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        // slopty: the keymap bound as the app binds it at start.
+        cx.update(|cx| apply_keymap(cx, &KeymapConfig::default()));
+        let window = cx.add_window(|_, cx| {
+            let shell = test_shell(dir.path(), cx);
+            shell.state.update(cx, |state, _| {
+                state.workspace_scope = Some(WorkspaceScope::Local);
+                state.local_device_id = Some("local".into());
+                state.chats = ["older", "newer"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ix, id)| {
+                        serde_json::from_value(serde_json::json!({
+                            "id": id, "title": id, "deviceId": "local", "archived": false,
+                            "createdAt": Utc::now() - chrono::Duration::minutes(10 - ix as i64),
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                state.selected_chat = Some("older".into());
+            });
+            shell
+        });
+        // The keymap was bound against the test platform, which has no layout
+        // table; localize it as an AZERTY Mac's `apply_keymap` does.
+        cx.run_until_parked();
+        cx.update(|cx| localize_key_bindings(cx, &settings::azerty_key_equivalents()));
+        let mut press = |combo: &str| {
+            cx.simulate_keystrokes(window.into(), &platform_combo(combo));
+            window
+                .read_with(cx, |shell, cx| shell.state.read(cx).selected_chat.clone())
+                .unwrap()
+        };
+        assert_eq!(press("mod-1"), Some("older".into()));
+        assert_eq!(press("mod-&"), Some("newer".into()));
+    }
+
+    /// Localizing moves exactly the bindings whose key the layout relocates —
+    /// Slopty's and gpui-base's alike — and keeps the rest, in order.
+    #[gpui::test]
+    fn azerty_keymap_moves_only_relocated_keys(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let keymap = KeymapConfig::default();
+        cx.update(|cx| apply_keymap(cx, &keymap));
+        let azerty = settings::azerty_key_equivalents();
+        let sources = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings()
+                    .map(|binding| {
+                        let keys = binding
+                            .keystrokes()
+                            .iter()
+                            .map(|keystroke| keystroke.inner().unparse(cx.platform_info().os))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        (binding.action().name(), keys)
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = sources(cx);
+        cx.update(|cx| localize_key_bindings(cx, &azerty));
+        let after = sources(cx);
+        assert_eq!(before.len(), after.len());
+        for ((action, us), (localized_action, localized)) in before.iter().zip(&after) {
+            assert_eq!(action, localized_action, "binding order must hold");
+            let expected = us
+                .split(' ')
+                .map(|keystroke| settings::localize_combo(keystroke, &azerty))
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert_eq!(localized, &expected, "{action}");
+        }
+        let bound = |action: &str| {
+            after
+                .iter()
+                .filter(|(name, _)| *name == action)
+                .map(|(_, keys)| keys.as_str())
+                .collect::<Vec<_>>()
+        };
+        let primary = platform_combo("mod");
+        // Every jump slot shares the action name: slot 1 now sits on &, and
+        // none stays on the literal 1 that AZERTY types only with Shift.
+        let jumps = bound(JumpSession(0).name());
+        assert!(jumps.contains(&format!("{primary}-&").as_str()));
+        assert!(!jumps.contains(&format!("{primary}-1").as_str()));
+        assert!(bound(crate::browser::Back.name()).contains(&format!("{primary}-^").as_str()));
+        assert!(bound(ToggleSidebar.name()).contains(&format!("{primary}-b").as_str()));
     }
 
     #[gpui::test]

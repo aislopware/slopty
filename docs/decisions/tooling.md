@@ -2994,3 +2994,56 @@ more full-window layer.
     external disk (launchd's jobs cannot open them); a separate APFS volume (needs the disk's
     container and an administrator, where an image needs neither); and the person's own account
     for the daemon (its jobs would run with every credential the person holds).
+
+- ✅ **Upstream sync of 2026-10-30: gpui-fast `576e7c96`, gpui-kit `89e64d35`, zed `e20d19d3`.**
+  gpui-fast takes longbridge `07b42ebf`: #84's on-demand Windows frames, #83's prepaint safety
+  net for unmeasured text, and #89's alignment with the gpui-pre 0.3.10 snapshots. It also
+  takes zed `025d2a06`, `0373366f` and `e20d19d3` (aislopware/gpui-fast #63, #64 and #65; #65
+  touches `gpui_wgpu` only). Slopty's gpui-pre crates move from 0.3.9 to 0.3.10 with it.
+  gpui-kit is rebased onto `94480398` (76 upstream commits).
+  - **The fork validates releases in longbridge's repository only** (`988229b0`). The release
+    check builds a workspace of crates.io's gpui-pre snapshots, which lag the fork's zed
+    imports: gpui here uses `scheduler::SendLocalExecutor`, which gpui-pre-scheduler 0.3.10
+    lacks. The fork publishes nothing, so in its repository that check could only fail.
+    `gpui_platform` no longer forwards `test-support` to `gpui_ios` (`4376d463`), since
+    crates.io's gpui-pre-ios has no such feature; Slopty turns `gpui_ios/test-support` on itself.
+  - **gpui-kit was merged without CI.** Actions are off on aislopware/gpui-kit, so #13 was
+    merged on the runner checks of the sync (run 40941668883), which built and tested the kit's
+    whole workspace against gpui-fast `988229b0`. Its own lock stays on `988229b0`, which still
+    builds: Slopty's lock resolves the kit against the newer fork, and its checks run the kit
+    there.
+  - **A Mac window stays on `CVDisplayLink` until `nextDrawable` stalls.** zed #65472 paces a
+    macOS 14+ window with a `CAMetalDisplayLink`, for Macs whose `nextDrawable` blocks two
+    refreshes a frame (base M4 and M5 under macOS 26 and later), which held zed to 30 fps.
+    - Measured on this Mac, the link costs every frame of a drawing window about a refresh and
+      a half (docs/MEASUREMENTS.md, "a Mac window's frames from CAMetalDisplayLink"). It
+      schedules each update's drawable for the third refresh after it, whatever
+      `preferredFrameLatency` asks. A keystroke during streamed output took 47 ms to the glass
+      where the `CVDisplayLink` takes 20.
+    - gpui-fast's `fast::frame_source` counts how long each `nextDrawable` waits. Once six of
+      the last eight frames waited over a refresh, every window of the process moves to its
+      link: at its next tick, at its next link start, or as it opens. `GPUI_METAL_DISPLAY_LINK=1`
+      starts every window on the link, and `=0` never moves one.
+    - On the link, gpui-fast keeps its immediate frame by setting the link aside for it.
+    - **Rejected:** the link on every window, as zed has it (the latency above), and none
+      (a Mac that stalls would draw at half rate).
+  - **A keystroke is parsed and spelled for an OS.** gpui parses and spells a keystroke for a
+    named OS (`Keystroke::parse_with_os`, `unparse(os)`), and `Keystroke` no longer implements
+    `Display`. Slopty parses with its build's OS, named once as `slopty_shell::keys::OS`, in its
+    settings, its browser's key monitor and the e2e driver. It spells a chord for the running
+    platform (`cx.platform_info().os`). `Modifiers::secondary_key` takes the app. Also
+    adopted: a frame's clear takes the app (`window.draw(cx).clear(cx)`), a scroll event's
+    momentum fields, and gpui's text system shared as `Rc` (`Rc::clone(window.text_system())`).
+  - **A `div` takes one tooltip.** gpui-fast asserts it in debug builds. The accent swatch
+    lost the second tooltip zeron #1048 gave it; its caller's hint already names the accent.
+  - **core-video and `vendor/block` leave the tree.** The window glass and screen capture read
+    their pixel buffers through objc2-core-video (`CFRetained<CVPixelBuffer>`), as gpui-fast's
+    surfaces do since zed #65942. Nothing else needed the `block` stand-in, so its patch and
+    directory are gone.
+  - **An inactive window keeps gpui's frame limit.** zed #66237 caps a window that is not key
+    at about 30 fps (`inactive_frame_interval`). Slopty keeps the default: a stream's pictures
+    go through gpui-fast's `VideoLayer`, outside GPUI's frames, so an inactive window's video
+    keeps its rate, and the frames it gives up are the chrome's.
+  - **The zeron adopt shows the base in a conflict** (`git merge-file --zdiff3`), so whoever
+    settles it sees what each side changed. What the adopt took is in `docs/decisions/ui.md`,
+    "zeron adopted to `369d428`".

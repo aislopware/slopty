@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ eabad36), see THIRD_PARTY_NOTICES.md
 //! The shell's text field: a hand-rolled multiline text input (adapted from gpui's
 //! `examples/input.rs`) with IME, undo, word and line motion, drag selection and auto-grow.
 //!
@@ -227,7 +227,7 @@ enum EditKind {
 const GENERIC_COMPOSER_CONTEXT: &str = "Composer";
 const PALETTE_SEARCH_CONTEXT: &str = "PaletteSearch";
 
-fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
+fn input_bindings(context: &'static str, cx: &App) -> Vec<KeyBinding> {
     let ctx = Some(context);
     let mut bindings = vec![
         KeyBinding::new("tab", MentionTab, ctx),
@@ -262,8 +262,8 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
         KeyBinding::new("cmd-delete", DeleteToLineEnd, ctx),
     ];
     for prefix in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, ctx));
-        bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, ctx));
+        bindings.push(crate::keys::binding(&format!("{prefix}-z"), Undo, ctx, cx));
+        bindings.push(crate::keys::binding(&format!("shift-{prefix}-z"), Redo, ctx, cx));
     }
     // Word-level editing: Option on Apple keyboards, Ctrl on Windows/Linux.
     let word_edit_prefix = if crate::keys::MOD_IS_COMMAND { // slopty: an iPad's ⌥ too
@@ -271,48 +271,54 @@ fn input_bindings(context: &'static str) -> Vec<KeyBinding> {
     } else {
         "ctrl"
     };
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-backspace"),
         DeleteWordLeft,
         ctx,
+        cx,
     ));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-delete"),
         DeleteWordRight,
         ctx,
+        cx,
     ));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-left"),
         WordLeft,
         ctx,
+        cx,
     ));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-right"),
         WordRight,
         ctx,
+        cx,
     ));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("shift-{word_edit_prefix}-left"),
         SelectWordLeft,
         ctx,
+        cx,
     ));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(
         &format!("shift-{word_edit_prefix}-right"),
         SelectWordRight,
         ctx,
+        cx,
     ));
     for prefix in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(&format!("{prefix}-a"), SelectAll, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-c"), Copy, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-x"), Cut, ctx));
-        bindings.push(KeyBinding::new(&format!("{prefix}-v"), Paste, ctx));
+        bindings.push(crate::keys::binding(&format!("{prefix}-a"), SelectAll, ctx, cx));
+        bindings.push(crate::keys::binding(&format!("{prefix}-c"), Copy, ctx, cx));
+        bindings.push(crate::keys::binding(&format!("{prefix}-x"), Cut, ctx, cx));
+        bindings.push(crate::keys::binding(&format!("{prefix}-v"), Paste, ctx, cx));
     }
     bindings
 }
 
 /// Bind the text fields' keymap. Call once at app boot.
 pub fn init(cx: &mut App) {
-    let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT);
+    let mut generic_bindings = input_bindings(GENERIC_COMPOSER_CONTEXT, cx);
     generic_bindings.push(KeyBinding::new(
         "enter",
         Submit,
@@ -346,43 +352,49 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-cmd-right", SelectEnd, palette),
         KeyBinding::new("cmd-backspace", DeleteToLineStart, palette),
     ];
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-backspace"),
         DeleteWordLeft,
         palette,
+        cx,
     ));
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-delete"),
         DeleteWordRight,
         palette,
+        cx,
     ));
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-left"),
         WordLeft,
         palette,
+        cx,
     ));
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("{word_edit_prefix}-right"),
         WordRight,
         palette,
+        cx,
     ));
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("shift-{word_edit_prefix}-left"),
         SelectWordLeft,
         palette,
+        cx,
     ));
-    palette_bindings.push(KeyBinding::new(
+    palette_bindings.push(crate::keys::binding(
         &format!("shift-{word_edit_prefix}-right"),
         SelectWordRight,
         palette,
+        cx,
     ));
     for prefix in ["cmd", "ctrl"] {
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-a"), SelectAll, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-c"), Copy, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-x"), Cut, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-v"), Paste, palette));
-        palette_bindings.push(KeyBinding::new(&format!("{prefix}-z"), Undo, palette));
-        palette_bindings.push(KeyBinding::new(&format!("shift-{prefix}-z"), Redo, palette));
+        palette_bindings.push(crate::keys::binding(&format!("{prefix}-a"), SelectAll, palette, cx));
+        palette_bindings.push(crate::keys::binding(&format!("{prefix}-c"), Copy, palette, cx));
+        palette_bindings.push(crate::keys::binding(&format!("{prefix}-x"), Cut, palette, cx));
+        palette_bindings.push(crate::keys::binding(&format!("{prefix}-v"), Paste, palette, cx));
+        palette_bindings.push(crate::keys::binding(&format!("{prefix}-z"), Undo, palette, cx));
+        palette_bindings.push(crate::keys::binding(&format!("shift-{prefix}-z"), Redo, palette, cx));
     }
     cx.bind_keys(palette_bindings);
     cx.bind_keys(generic_bindings);

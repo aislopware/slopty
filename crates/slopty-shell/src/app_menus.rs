@@ -514,7 +514,7 @@ mod tests {
                         .collect::<Vec<_>>()
                 })
         };
-        let combo = |source: &str| vec![Keystroke::parse(source).unwrap()];
+        let combo = |source: &'static str| vec![Keystroke::parse(source).unwrap()];
         let macos = app_key_bindings(true, true);
         assert_eq!(
             find(&macos, shell::OpenSettings.name()),

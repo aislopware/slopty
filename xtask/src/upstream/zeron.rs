@@ -342,7 +342,8 @@ enum Merged {
     Conflicts(Vec<u8>, i32),
 }
 
-/// `git merge-file` of `theirs` into `ours` over `base`, all in memory.
+/// `git merge-file` of `theirs` into `ours` over `base`, all in memory. A conflict shows the
+/// base between the two sides (`--zdiff3`), so whoever settles it sees what each side changed.
 fn merge(sh: &Shell, ours: &[u8], base: &[u8], theirs: &[u8]) -> Result<Merged> {
     if ours == base {
         return Ok(Merged::Clean(theirs.to_vec()));
@@ -358,7 +359,7 @@ fn merge(sh: &Shell, ours: &[u8], base: &[u8], theirs: &[u8]) -> Result<Merged> 
     std::fs::write(&o, ours)?;
     std::fs::write(&b, base)?;
     std::fs::write(&t, theirs)?;
-    let out = cmd!(sh, "git merge-file -p -L ours -L base -L zeron {o} {b} {t}")
+    let out = cmd!(sh, "git merge-file -p --zdiff3 -L ours -L base -L zeron {o} {b} {t}")
         .quiet()
         .ignore_status()
         .output();

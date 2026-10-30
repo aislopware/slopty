@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 77a3c0f), see THIRD_PARTY_NOTICES.md
 //! App state: the engine connection, entity lists, and the selected chat's
 //! transcript — one gpui [`Entity`] the whole shell renders from.
 //!

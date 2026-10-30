@@ -41,12 +41,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use core_foundation::base::TCFType as _;
-use core_video::pixel_buffer::CVPixelBuffer;
 use gpui::PresentedFrame;
 use gpui::composition::NativeHost;
 use gpui_apple::fast::video_layer::{VideoLayer, VideoLayerOptions};
-use objc2_core_foundation::CFRetained;
+use objc2_core_foundation::{CFRetained, Type as _};
+use objc2_core_video::{
+    CVPixelBuffer, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
+};
 use parking_lot::Mutex;
 use slopty_client::Presentable;
 use slopty_client::pacing::{FrameStamp, GlassStats, Pace, Pacer, PacingStats, PaintRate};
@@ -108,7 +109,7 @@ impl Shape {
         });
         Self {
             size: (width, height),
-            chroma: chroma_of(picture.top.get_pixel_format()),
+            chroma: chroma_of(CVPixelBufferGetPixelFormatType(&picture.top)),
             seam,
             region: picture.region,
         }
@@ -118,14 +119,14 @@ impl Shape {
 /// A buffer's width and height.
 fn side(buffer: &CVPixelBuffer) -> (u32, u32) {
     let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    (side(buffer.get_width()), side(buffer.get_height()))
+    (side(CVPixelBufferGetWidth(buffer)), side(CVPixelBufferGetHeight(buffer)))
 }
 
 /// A decoded picture the decoder's thread, the layer's and the main thread all hold: one
 /// picture, or a striped one's top stripe and its lower one.
 #[derive(Clone)]
 pub(super) struct Picture {
-    top: CVPixelBuffer,
+    top: Surface,
     lower: Option<Lower>,
     /// The part of the target it shows; `None` for all of it.
     region: Option<Region>,
@@ -134,7 +135,7 @@ pub(super) struct Picture {
 /// A striped picture's lower stripe.
 #[derive(Clone)]
 struct Lower {
-    buffer: CVPixelBuffer,
+    buffer: Surface,
     /// Rows of the top stripe's picture shown.
     top_rows: u32,
     /// The first row of this one's shown.
@@ -151,13 +152,13 @@ unsafe impl Sync for Picture {}
 impl Picture {
     /// A picture a test made.
     #[cfg(test)]
-    pub(super) const fn new(buffer: CVPixelBuffer) -> Self {
+    pub(super) const fn new(buffer: Surface) -> Self {
         Self { top: buffer, lower: None, region: None }
     }
 
     /// A picture a test made of `region` of the target.
     #[cfg(test)]
-    pub(super) const fn of_region(buffer: CVPixelBuffer, region: Region) -> Self {
+    pub(super) const fn of_region(buffer: Surface, region: Region) -> Self {
         Self { top: buffer, lower: None, region: Some(region) }
     }
 
@@ -165,9 +166,9 @@ impl Picture {
     /// `lower_from`.
     #[cfg(test)]
     pub(super) const fn striped(
-        top: CVPixelBuffer,
+        top: Surface,
         top_rows: u32,
-        lower: CVPixelBuffer,
+        lower: Surface,
         lower_from: u32,
     ) -> Self {
         Self {
@@ -177,12 +178,12 @@ impl Picture {
         }
     }
 
-    /// The decoder's picture, in the wrapper GPUI and the layer take.
+    /// The decoder's picture, held once more: GPUI and the layer take the decoder's own buffer.
     pub(super) fn of(frame: &Presentable) -> Self {
         Self {
-            top: wrap(frame.frame.image.as_cv()),
+            top: frame.frame.image.as_cv().retain(),
             lower: frame.stripes.as_ref().map(|stitched| Lower {
-                buffer: wrap(stitched.lower.image.as_cv()),
+                buffer: stitched.lower.image.as_cv().retain(),
                 top_rows: stitched.top_rows,
                 shown_from: stitched.lower_from,
             }),
@@ -191,13 +192,13 @@ impl Picture {
     }
 
     /// The whole picture's buffer, or the top stripe's, as GPUI's surface takes it.
-    pub(super) fn buffer(&self) -> Option<Surface> {
-        surface(&self.top)
+    pub(super) fn buffer(&self) -> Surface {
+        self.top.clone()
     }
 
     /// The lower stripe's buffer, as GPUI's surface takes it; `None` for one picture.
     pub(super) fn lower(&self) -> Option<Surface> {
-        self.lower.as_ref().and_then(|lower| surface(&lower.buffer))
+        self.lower.as_ref().map(|lower| lower.buffer.clone())
     }
 
     /// The part of the target it shows; `None` for all of it (tests).
@@ -205,15 +206,6 @@ impl Picture {
     pub(super) const fn region(&self) -> Option<Region> {
         self.region
     }
-}
-
-/// The decoder's buffer at `image`, a `CVPixelBufferRef`, in the wrapper the layer takes
-/// (GPUI's surface takes it through [`surface`]).
-fn wrap<T>(image: &T) -> CVPixelBuffer {
-    let raw = std::ptr::from_ref(image).cast_mut().cast::<core_video::buffer::__CVBuffer>();
-    // SAFETY: `raw` is a live `CVPixelBufferRef` the frame owns; `wrap_under_get_rule` takes a
-    // retain of its own, so the wrapper outlives the frame.
-    unsafe { CVPixelBuffer::wrap_under_get_rule(raw) }
 }
 
 /// A layer the pictures go to.
@@ -571,21 +563,30 @@ fn reported(glass: &Weak<Glass>, generation: u64, sequence: u64, frame: Presente
     }
 }
 
-/// A pixel buffer as GPUI paints a surface from it (`Window::paint_surface`).
-pub(super) type Surface = CFRetained<objc2_core_video::CVPixelBuffer>;
+/// A pixel buffer as the layer and GPUI's surface (`Window::paint_surface`) take it: the
+/// decoder's buffer, held.
+pub(super) type Surface = CFRetained<CVPixelBuffer>;
 
-/// `buffer` as GPUI's surface takes it: the same `CVPixelBuffer`, held once more. The decoder
-/// hands out `core-video`'s wrapper, GPUI takes `objc2-core-video`'s; both are the one
-/// `CVPixelBufferRef`.
-fn surface(buffer: &CVPixelBuffer) -> Option<Surface> {
-    let raw = buffer.as_concrete_TypeRef().cast::<objc2_core_video::CVPixelBuffer>();
-    let raw = std::ptr::NonNull::new(raw)?;
-    // SAFETY: Core Foundation's Create Rule and Get Rule (CFMemoryMgmt): `raw` is the
-    // `CVPixelBufferRef` that `buffer` owns a reference to for as long as it lives, so it is
-    // valid here; `CFRetained::retain` takes a reference of its own (`CFRetain`), which it
-    // releases when dropped, so the surface outlives `buffer` safely. Both wrappers name the
-    // same Core Video type, `CVPixelBufferRef`.
-    Some(unsafe { CFRetained::retain(raw) })
+/// A blank picture in CoreVideo pixel format `format` for a test to put up.
+#[cfg(test)]
+pub(super) fn test_buffer(format: u32, width: usize, height: usize) -> Surface {
+    let mut raw: *mut CVPixelBuffer = std::ptr::null_mut();
+    // SAFETY: CoreVideo's rule for `CVPixelBufferCreate`: a valid out-pointer, and no allocator
+    // or attributes (the defaults).
+    let status = unsafe {
+        objc2_core_video::CVPixelBufferCreate(
+            None,
+            width,
+            height,
+            format,
+            None,
+            std::ptr::NonNull::from(&mut raw),
+        )
+    };
+    assert_eq!(status, 0, "CVPixelBufferCreate");
+    let raw = std::ptr::NonNull::new(raw).expect("CVPixelBufferCreate made a buffer");
+    // SAFETY: `CVPixelBufferCreate` returned a +1 reference, which this takes over.
+    unsafe { CFRetained::from_raw(raw) }
 }
 
 /// A stamp for a picture a test puts up: decoded and arrived now, after every one before.
@@ -603,14 +604,12 @@ pub(super) fn test_stamp(index: u64) -> FrameStamp {
 
 #[cfg(test)]
 mod tests {
-    use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 
     use super::*;
 
     fn picture(w: usize, h: usize) -> Picture {
-        let buffer = CVPixelBuffer::new(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, w, h, None)
-            .expect("pixel buffer");
-        Picture::new(buffer)
+        Picture::new(test_buffer(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, w, h))
     }
 
     fn frame(presented_at: Option<Instant>) -> PresentedFrame {
@@ -678,7 +677,7 @@ mod tests {
         glass.offer(picture(64, 48), test_stamp(0));
         assert_eq!(glass.put_up(), 0);
         let last = glass.last().expect("the newest waits");
-        assert_eq!((last.top.get_width(), last.top.get_height()), (32, 16));
+        assert_eq!((CVPixelBufferGetWidth(&last.top), CVPixelBufferGetHeight(&last.top)), (32, 16));
         assert_eq!(shapes.borrow().map(|shape| shape.size), Some((32, 16)), "not the late one's");
         let pacing = glass.pacing();
         assert_eq!((pacing.skipped, pacing.late), (1, 1));
@@ -752,7 +751,7 @@ mod tests {
         glass.offer(of(0), test_stamp(1));
         glass.offer(of(32), test_stamp(2));
         let base = glass.base().expect("the whole picture");
-        assert_eq!((base.top.get_width(), base.region()), (640, None));
+        assert_eq!((CVPixelBufferGetWidth(&base.top), base.region()), (640, None));
         assert_eq!(glass.last().and_then(|last| last.region()), Some(region(32)));
         assert_eq!(glass.shapes().borrow().and_then(|shape| shape.region), Some(region(32)));
     }

@@ -232,6 +232,7 @@ pub fn commands() -> Vec<KeyCommand> {
 /// warnings, as the file's other mistakes are.
 pub fn bindings(
     chosen: impl Fn(&str) -> Option<Vec<String>>,
+    cx: &App,
 ) -> (Vec<gpui::KeyBinding>, Vec<String>) {
     let (mut out, mut warnings) = (Vec::new(), Vec::new());
     for command in commands() {
@@ -248,7 +249,7 @@ pub fn bindings(
                     predicate,
                     false,
                     None,
-                    &gpui::DummyKeyboardMapper,
+                    cx,
                 ) {
                     Ok(binding) => out.push(binding),
                     Err(_) => warnings
@@ -262,8 +263,8 @@ pub fn bindings(
 
 /// The terminal's commands at their defaults, for its tests.
 #[cfg(test)]
-fn key_bindings() -> Vec<gpui::KeyBinding> {
-    bindings(|_| None).0
+fn key_bindings(cx: &App) -> Vec<gpui::KeyBinding> {
+    bindings(|_| None, cx).0
 }
 
 /// The Escape key, pressed alone.
@@ -4549,7 +4550,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         cx.update(|cx| {
             cx.set_global(slopty_shell::theme::Theme::default());
-            cx.bind_keys(key_bindings());
+            cx.bind_keys(key_bindings(cx));
         });
         let (view, cx) = cx.add_window_view(|window, cx| {
             let size = TermSize { cols: 10, rows: 3, ..TermSize::default() };
@@ -4567,15 +4568,15 @@ mod tests {
     /// The file's `[keys.terminal]` lays its chords over the defaults: a command it names binds
     /// at those chords only, one it names with none is unbound, the rest keep theirs, and a
     /// chord that is no chord is left out and said.
-    #[test]
-    fn the_file_s_chords_lay_over_the_defaults() {
+    #[gpui::test]
+    fn the_file_s_chords_lay_over_the_defaults(cx: &TestAppContext) {
         let chosen = |name: &str| match name {
             "find" => Some(vec!["cmd-shift-f".to_owned()]),
             "copy" => Some(Vec::new()),
             "clear_screen" => Some(vec!["cmd-k".to_owned(), "hyper-x".to_owned()]),
             _ => None,
         };
-        let (bound, wrong) = bindings(chosen);
+        let (bound, wrong) = cx.update(|cx| bindings(chosen, cx));
         let chords = |action: &dyn gpui::Action| {
             bound
                 .iter()
@@ -4583,7 +4584,7 @@ mod tests {
                 .map(|b| {
                     b.keystrokes()
                         .iter()
-                        .map(gpui::KeybindingKeystroke::unparse)
+                        .map(|stroke| stroke.unparse(gpui::OperatingSystem::Mac))
                         .collect::<Vec<_>>()
                         .join(" ")
                 })

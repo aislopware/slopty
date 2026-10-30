@@ -20,12 +20,13 @@ const KEY_TAKERS: [&str; 2] = [slopty_terminal::CTX, crate::screen::CTX];
 /// Give the chords without ⌘ that are bound around every view now back to the views that take
 /// every key. Run once the app's bindings are in (the shell's and the kit's).
 pub fn release(cx: &mut App) {
-    let released = released(&cx.key_bindings().borrow().bindings().cloned().collect::<Vec<_>>());
+    let bound = cx.key_bindings().borrow().bindings().cloned().collect::<Vec<_>>();
+    let released = released(&bound, cx);
     cx.bind_keys(released);
 }
 
 /// The unbindings that give `bound`'s chords around every view back to [`KEY_TAKERS`].
-fn released(bound: &[KeyBinding]) -> Vec<KeyBinding> {
+fn released(bound: &[KeyBinding], cx: &App) -> Vec<KeyBinding> {
     let Ok(root) = gpui::KeyContext::parse(KIT_ROOT) else { return Vec::new() };
     let around = [root];
     let mut out = Vec::new();
@@ -40,7 +41,7 @@ fn released(bound: &[KeyBinding]) -> Vec<KeyBinding> {
         {
             continue;
         }
-        let chord = stroke.unparse();
+        let chord = stroke.unparse(cx.platform_info().os);
         let unbind = gpui::Unbind(action.name().into());
         for context in KEY_TAKERS {
             let predicate = match KeyBindingContextPredicate::parse(context) {
@@ -56,7 +57,7 @@ fn released(bound: &[KeyBinding]) -> Vec<KeyBinding> {
                 Some(predicate),
                 false,
                 None,
-                &gpui::DummyKeyboardMapper,
+                cx,
             ) {
                 Ok(binding) => out.push(binding),
                 Err(e) => tracing::error!(chord, context, error = %e, "release"),

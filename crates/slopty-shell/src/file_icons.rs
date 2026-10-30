@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 187b402), see THIRD_PARTY_NOTICES.md
 //! Deterministic file and folder identity icons backed by Symbols.
 //!
 //! Resolution preserves the VS Code theme's semantics: exact basenames win,
@@ -327,6 +327,8 @@ fn language_asset(language: Option<LanguageId>) -> Option<&'static str> {
         LanguageId::Php => "php",
         LanguageId::Sql => "sql",
         LanguageId::Lua => "lua",
+        // Not a language id in the upstream manifest; `.luau` has its icon.
+        LanguageId::Luau => return definition_asset("luau"),
         LanguageId::Dockerfile => "dockerfile",
         LanguageId::Nix => "nix",
         LanguageId::Make => "makefile",

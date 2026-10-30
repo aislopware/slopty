@@ -63,10 +63,11 @@ pub fn init(cx: &mut App) {
 
 /// slopty: the panel's own keys (⌘T, a new tab), bound again with each keymap.
 pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
+    cx.bind_keys([crate::keys::binding(
         &crate::settings::platform_combo("mod-t"),
         NewTerminalTab,
         Some(KEY_CONTEXT),
+        cx,
     )]);
 }
 

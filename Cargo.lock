@@ -160,6 +160,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloca"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5a7d05ea6aea7e9e64d25b9156ba2fee3fdd659e34e41063cd2fc7cd020d7f4"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -173,6 +182,12 @@ checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "anes"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "annotate-snippets"
@@ -221,7 +236,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -232,7 +247,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -701,6 +716,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bench_metrics"
+version = "0.1.0"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
+dependencies = [
+ "anyhow",
+ "criterion",
+ "libc",
+ "perf-event2",
+]
+
+[[package]]
 name = "bit-set"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -785,10 +811,6 @@ dependencies = [
  "constant_time_eq",
  "cpufeatures 0.3.1",
 ]
-
-[[package]]
-name = "block"
-version = "0.1.6"
 
 [[package]]
 name = "block-buffer"
@@ -943,6 +965,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "c-enum"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd17eb909a8c6a894926bfcc3400a4bb0e732f5a57d37b1f14e8b29e329bace8"
+
+[[package]]
 name = "cairo-rs"
 version = "0.18.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -999,6 +1027,12 @@ checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
 dependencies = [
  "serde_core",
 ]
+
+[[package]]
+name = "cast"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
 [[package]]
 name = "cbc"
@@ -1106,6 +1140,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ciborium"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42e69ffd6f0917f5c029256a24d0161db17cea3997d185db0d35926308770f0e"
+dependencies = [
+ "ciborium-io",
+ "ciborium-ll",
+ "serde",
+]
+
+[[package]]
+name = "ciborium-io"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05afea1e0a06c9be33d539b876f1ce3692f4afea2cb41f740e7743225ed1c757"
+
+[[package]]
+name = "ciborium-ll"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57663b653d948a338bfb3eeba9bb2fd5fcfaecb9e199e87e1eda4d9e8b240fd9"
+dependencies = [
+ "ciborium-io",
+ "half",
+]
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1183,65 +1244,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cocoa"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6140449f97a6e97f9511815c5632d84c8aacf8ac271ad77c559218161a1373c"
-dependencies = [
- "bitflags 1.3.2",
- "block",
- "cocoa-foundation 0.1.2",
- "core-foundation 0.9.4",
- "core-graphics 0.23.2",
- "foreign-types",
- "libc",
- "objc",
-]
-
-[[package]]
-name = "cocoa"
-version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f79398230a6e2c08f5c9760610eb6924b52aa9e7950a619602baba59dcbbdbb2"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "cocoa-foundation 0.2.1",
- "core-foundation 0.10.1",
- "core-graphics 0.24.0",
- "foreign-types",
- "libc",
- "objc",
-]
-
-[[package]]
-name = "cocoa-foundation"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c6234cbb2e4c785b456c0644748b1ac416dd045799740356f8363dfe00c93f7"
-dependencies = [
- "bitflags 1.3.2",
- "block",
- "core-foundation 0.9.4",
- "core-graphics-types 0.1.3",
- "libc",
- "objc",
-]
-
-[[package]]
-name = "cocoa-foundation"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81411967c50ee9a1fc11365f8c585f863a22a9697c89239c452292c40ba79b0d"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "core-foundation 0.10.1",
- "core-graphics-types 0.2.0",
- "objc",
-]
-
-[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,7 +1257,7 @@ dependencies = [
 [[package]]
 name = "collections"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "gpui_util",
  "indexmap",
@@ -1402,51 +1404,14 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "core-graphics"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c07782be35f9e1140080c6b96f0d44b739e2278479f64e02fdab4e32dfd8b081"
-dependencies = [
- "bitflags 1.3.2",
- "core-foundation 0.9.4",
- "core-graphics-types 0.1.3",
- "foreign-types",
- "libc",
-]
-
-[[package]]
-name = "core-graphics"
 version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa95a34622365fa5bbf40b20b75dba8dfa8c94c734aea8ac9a5ca38af14316f1"
 dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.10.1",
- "core-graphics-types 0.2.0",
+ "core-graphics-types",
  "foreign-types",
- "libc",
-]
-
-[[package]]
-name = "core-graphics-helmer-fork"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32eb7c354ae9f6d437a6039099ce7ecd049337a8109b23d73e48e8ffba8e9cd5"
-dependencies = [
- "bitflags 2.13.2",
- "core-foundation 0.9.4",
- "core-graphics-types 0.1.3",
- "foreign-types",
- "libc",
-]
-
-[[package]]
-name = "core-graphics-types"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45390e6114f68f718cc7a830514a96f903cccd70d02a8f6d9f643ac4ba45afaf"
-dependencies = [
- "bitflags 1.3.2",
- "core-foundation 0.9.4",
  "libc",
 ]
 
@@ -1462,43 +1427,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-graphics2"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b65858d95344d2711161cd92196732f67d6c5fea238cf12f994584828731a5c"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "cfg-if",
- "core-foundation 0.10.1",
- "libc",
-]
-
-[[package]]
 name = "core-text"
 version = "21.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a593227b66cbd4007b2a050dfdd9e1d1318311409c8d600dc82ba1b15ca9c130"
 dependencies = [
  "core-foundation 0.10.1",
- "core-graphics 0.24.0",
+ "core-graphics",
  "foreign-types",
  "libc",
-]
-
-[[package]]
-name = "core-video"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0f83d7bc2e8fbc517a71dcf3227003db7646e6c7aa5b0b5ab3acc89bc692641"
-dependencies = [
- "block",
- "core-foundation 0.10.1",
- "core-graphics2",
- "libc",
- "metal",
- "objc2-core-foundation",
- "objc2-io-surface",
 ]
 
 [[package]]
@@ -1571,6 +1508,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "criterion"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "950046b2aa2492f9a536f5f4f9a3de7b9e2476e575e05bd6c333371add4d98f3"
+dependencies = [
+ "alloca",
+ "anes",
+ "cast",
+ "ciborium",
+ "clap",
+ "criterion-plot",
+ "itertools 0.13.0",
+ "num-traits",
+ "oorandom",
+ "page_size",
+ "plotters",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "tinytemplate",
+ "walkdir",
+]
+
+[[package]]
+name = "criterion-plot"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8d80a2f4f5b554395e47b5d8305bc3d27813bacb73493eb1001e8f76dae29ea"
+dependencies = [
+ "cast",
+ "itertools 0.13.0",
 ]
 
 [[package]]
@@ -1865,7 +1837,7 @@ dependencies = [
 [[package]]
 name = "derive_refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1928,14 +1900,8 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
-
-[[package]]
-name = "dispatch"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd0c93bb4b0c6d9b77f4435b0ae98c24d17f1c45b2ff844c6151a07256ca923b"
 
 [[package]]
 name = "dispatch2"
@@ -2272,7 +2238,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3063,23 +3029,23 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.62.2",
+ "windows 0.58.0",
 ]
 
 [[package]]
 name = "gpui"
 version = "0.2.2"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "accesskit",
  "anyhow",
  "async-channel",
  "async-task",
  "backtrace",
+ "bench_metrics",
  "bitflags 2.13.2",
  "chrono",
  "collections",
- "ctor",
  "derive_more",
  "embed-resource",
  "etagere",
@@ -3127,6 +3093,7 @@ dependencies = [
  "sum_tree",
  "taffy",
  "thiserror 2.0.21",
+ "unicode-segmentation",
  "url",
  "usvg",
  "uuid",
@@ -3138,8 +3105,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-base"
-version = "0.8.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#6356eda5901be96d4903bc50eeeed13c327e00d0"
+version = "0.8.1"
+source = "git+https://github.com/aislopware/gpui-kit.git#89e64d3564d2ec0742402dffc5ea7701c97c6913"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3179,8 +3146,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component"
-version = "0.8.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#6356eda5901be96d4903bc50eeeed13c327e00d0"
+version = "0.8.1"
+source = "git+https://github.com/aislopware/gpui-kit.git#89e64d3564d2ec0742402dffc5ea7701c97c6913"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3225,8 +3192,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-component-macros"
-version = "0.8.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#6356eda5901be96d4903bc50eeeed13c327e00d0"
+version = "0.8.1"
+source = "git+https://github.com/aislopware/gpui-kit.git#89e64d3564d2ec0742402dffc5ea7701c97c6913"
 dependencies = [
  "proc-macro-crate 3.5.0",
  "proc-macro2",
@@ -3236,8 +3203,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit"
-version = "0.8.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#6356eda5901be96d4903bc50eeeed13c327e00d0"
+version = "0.8.1"
+source = "git+https://github.com/aislopware/gpui-kit.git#89e64d3564d2ec0742402dffc5ea7701c97c6913"
 dependencies = [
  "gpui-base",
  "gpui-component",
@@ -3250,8 +3217,8 @@ dependencies = [
 
 [[package]]
 name = "gpui-kit-assets"
-version = "0.8.0"
-source = "git+https://github.com/aislopware/gpui-kit.git#6356eda5901be96d4903bc50eeeed13c327e00d0"
+version = "0.8.1"
+source = "git+https://github.com/aislopware/gpui-kit.git#89e64d3564d2ec0742402dffc5ea7701c97c6913"
 dependencies = [
  "anyhow",
  "gpui-pre",
@@ -3264,24 +3231,24 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre"
-version = "0.3.9"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+version = "0.3.10"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "gpui-pre-macros"
-version = "0.3.9"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+version = "0.3.10"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "gpui_macros",
 ]
 
 [[package]]
 name = "gpui-pre-platform"
-version = "0.3.9"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+version = "0.3.10"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "gpui",
  "gpui_platform",
@@ -3339,16 +3306,16 @@ dependencies = [
 
 [[package]]
 name = "gpui-pre-sum-tree"
-version = "0.3.9"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+version = "0.3.10"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "sum_tree",
 ]
 
 [[package]]
 name = "gpui-pre-web"
-version = "0.3.9"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+version = "0.3.10"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "gpui_web",
 ]
@@ -3356,7 +3323,7 @@ dependencies = [
 [[package]]
 name = "gpui_apple"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "async-task",
@@ -3365,13 +3332,10 @@ dependencies = [
  "collections",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "core-graphics 0.24.0",
+ "core-graphics",
  "core-text",
- "core-video",
- "derive_more",
  "dispatch2",
  "etagere",
- "foreign-types",
  "futures",
  "gpui",
  "gpui_util",
@@ -3379,9 +3343,9 @@ dependencies = [
  "libc",
  "log",
  "mach2",
- "metal",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-core-text",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
@@ -3398,23 +3362,21 @@ dependencies = [
 [[package]]
 name = "gpui_ios"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "accesskit",
  "anyhow",
  "block2 0.6.2",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "core-graphics 0.24.0",
+ "core-graphics",
  "core-text",
  "dispatch2",
- "foreign-types",
  "futures",
  "gpui",
  "gpui_apple",
  "image",
  "log",
- "metal",
  "objc2 0.6.5",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -3431,7 +3393,7 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3475,17 +3437,16 @@ dependencies = [
 [[package]]
 name = "gpui_macos"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "accesskit",
  "accesskit_macos",
  "anyhow",
  "block2 0.6.2",
- "cocoa 0.26.0",
  "collections",
  "core-foundation 0.10.1",
  "core-foundation-sys",
- "core-graphics 0.24.0",
+ "core-graphics",
  "ctor",
  "dispatch2",
  "foreign-types",
@@ -3496,13 +3457,14 @@ dependencies = [
  "image",
  "itertools 0.14.0",
  "log",
- "objc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
  "parking_lot",
  "raw-window-handle",
@@ -3516,7 +3478,7 @@ dependencies = [
 [[package]]
 name = "gpui_macros"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -3527,7 +3489,7 @@ dependencies = [
 [[package]]
 name = "gpui_platform"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3543,7 +3505,7 @@ dependencies = [
 [[package]]
 name = "gpui_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "schemars",
  "serde",
@@ -3563,7 +3525,7 @@ dependencies = [
 [[package]]
 name = "gpui_util"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "log",
@@ -3573,7 +3535,7 @@ dependencies = [
 [[package]]
 name = "gpui_web"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -3602,7 +3564,7 @@ dependencies = [
 [[package]]
 name = "gpui_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3622,14 +3584,14 @@ dependencies = [
  "unicode-bidi",
  "unicode-segmentation",
  "web-sys",
- "wgpu",
+ "wgpu 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
  "zed-font-kit",
 ]
 
 [[package]]
 name = "gpui_windows"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -4038,7 +4000,7 @@ dependencies = [
 [[package]]
 name = "http_client"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4147,7 +4109,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -5042,15 +5004,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
-name = "malloc_buf"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62bb907fe88d54d8d9ce32a3cceab4218ed2f6b7d35617cafe9adf84e43919cb"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "manatee"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5279,21 +5232,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58f09cddc63acd63a7fd20b34d228104aea3300eca41aa6513d7f93b8a3e2ca6"
 
 [[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "core-graphics-types 0.2.0",
- "foreign-types",
- "log",
- "objc",
- "paste",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5407,7 +5345,7 @@ dependencies = [
  "indexmap",
  "libm",
  "log",
- "naga-types",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "num-traits",
  "once_cell",
  "pp-rs",
@@ -5418,9 +5356,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "naga"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.11.1",
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "codespan-reporting",
+ "half",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "libm",
+ "log",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "num-traits",
+ "once_cell",
+ "rustc-hash 1.1.0",
+ "spirv",
+ "thiserror 2.0.21",
+ "unicode-ident",
+]
+
+[[package]]
 name = "naga-types"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
+dependencies = [
+ "hashbrown 0.17.1",
+ "indexmap",
+ "rustc-hash 1.1.0",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "naga-types"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
 dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
@@ -5617,7 +5591,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5771,27 +5745,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1"
-dependencies = [
- "malloc_buf",
- "objc_exception",
-]
-
-[[package]]
-name = "objc-foundation"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1add1b659e36c9607c7aab864a76c7a4c2760cd0cd2e120f3fb8b952c7e22bf9"
-dependencies = [
- "block",
- "objc",
- "objc_id",
-]
-
-[[package]]
 name = "objc-sys"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5852,6 +5805,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
+ "objc2-uniform-type-identifiers",
 ]
 
 [[package]]
@@ -6167,7 +6121,9 @@ checksum = "a0125f776a10d00af4152d74616409f0d4a2053a6f57fa5b7d6aa2854ac04794"
 dependencies = [
  "bitflags 2.13.2",
  "block2 0.6.2",
+ "dispatch2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
  "objc2-foundation 0.3.2",
 ]
 
@@ -6312,24 +6268,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc_exception"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad970fb455818ad6cba4c122ad012fae53ae8b4795f86378bce65e4f6bab2ca4"
-dependencies = [
- "cc",
-]
-
-[[package]]
-name = "objc_id"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c92d4ddb4bd7b50d730c215ff871754d0da6b2178849f8a2a2ab69712d0c073b"
-dependencies = [
- "objc",
-]
-
-[[package]]
 name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6362,8 +6300,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "oo7"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78f2bfed90f1618b4b48dcad9307f25e14ae894e2949642c87c351601d62cebd"
+source = "git+https://github.com/zed-industries/oo7?rev=731c1215edb6905876c6137ab300428c7b8d7c13#731c1215edb6905876c6137ab300428c7b8d7c13"
 dependencies = [
  "aes",
  "ashpd",
@@ -6393,6 +6330,12 @@ dependencies = [
  "zeroize",
  "zvariant",
 ]
+
+[[package]]
+name = "oorandom"
+version = "11.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "open"
@@ -6446,6 +6389,16 @@ dependencies = [
  "primefield",
  "primeorder",
  "sha2 0.11.1",
+]
+
+[[package]]
+name = "page_size"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30d5b2194ed13191c1999ae0704b7839fb18384fa22e49b57eeaa97d79ce40da"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -6602,6 +6555,41 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "perf-event-data"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "575828d9d7d205188048eb1508560607a03d21eafdbba47b8cade1736c1c28e1"
+dependencies = [
+ "bitflags 2.13.2",
+ "c-enum",
+ "perf-event-open-sys2",
+]
+
+[[package]]
+name = "perf-event-open-sys2"
+version = "5.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
+dependencies = [
+ "libc",
+ "memoffset",
+]
+
+[[package]]
+name = "perf-event2"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0939b8fad77dfaeb29ebbd35faaeaadbf833167f30975f1b8993bbba09ea0a0f"
+dependencies = [
+ "bitflags 2.13.2",
+ "c-enum",
+ "libc",
+ "memmap2",
+ "perf-event-data",
+ "perf-event-open-sys2",
+]
 
 [[package]]
 name = "pest"
@@ -6851,6 +6839,34 @@ dependencies = [
  "quick-xml 0.42.0",
  "serde",
  "time",
+]
+
+[[package]]
+name = "plotters"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aeb6f403d7a4911efb1e33402027fc44f29b5bf6def3effcc22d7bb75f2b747"
+dependencies = [
+ "num-traits",
+ "plotters-backend",
+ "plotters-svg",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "plotters-backend"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df42e13c12958a16b3f7f4386b9ab1f3e7933914ecea48da7139435263a4172a"
+
+[[package]]
+name = "plotters-svg"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
+dependencies = [
+ "plotters-backend",
 ]
 
 [[package]]
@@ -7321,7 +7337,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7650,7 +7666,7 @@ dependencies = [
 [[package]]
 name = "refineable"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "derive_refineable",
 ]
@@ -7943,7 +7959,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8009,7 +8025,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8080,7 +8096,7 @@ dependencies = [
 [[package]]
 name = "scheduler"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "async-task",
  "backtrace",
@@ -8132,29 +8148,6 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
-
-[[package]]
-name = "screencapturekit"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a5eeeb57ac94960cfe5ff4c402be6585ae4c8d29a2cf41b276048c2e849d64e"
-dependencies = [
- "screencapturekit-sys",
-]
-
-[[package]]
-name = "screencapturekit-sys"
-version = "0.2.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22411b57f7d49e7fe08025198813ee6fd65e1ee5eff4ebc7880c12c82bde4c60"
-dependencies = [
- "block",
- "dispatch",
- "objc",
- "objc-foundation",
- "objc_id",
- "once_cell",
-]
 
 [[package]]
 name = "seahash"
@@ -8279,7 +8272,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -9237,6 +9230,7 @@ dependencies = [
  "merman",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "objc2-core-graphics",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
  "qrcode",
@@ -9299,6 +9293,7 @@ dependencies = [
  "tree-sitter-json",
  "tree-sitter-kotlin-ng",
  "tree-sitter-lua",
+ "tree-sitter-luau",
  "tree-sitter-make",
  "tree-sitter-md",
  "tree-sitter-nix",
@@ -9414,7 +9409,6 @@ dependencies = [
  "bytes",
  "chrono",
  "core-foundation 0.10.1",
- "core-video",
  "futures",
  "gpui",
  "gpui-base",
@@ -9505,7 +9499,7 @@ dependencies = [
  "gltf",
  "image",
  "mlua",
- "naga",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "thiserror 2.0.21",
 ]
 
@@ -9517,7 +9511,7 @@ dependencies = [
  "pollster 1.0.1",
  "slopty-visual",
  "tracing",
- "wgpu",
+ "wgpu 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
 ]
 
 [[package]]
@@ -9659,7 +9653,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9747,7 +9741,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -9862,7 +9856,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 [[package]]
 name = "sum_tree"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "heapless",
  "rayon",
@@ -10019,26 +10013,13 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "639627c87f43b9181c811f40a6296409e093a17bc761214cba3c15df74f86b99"
+checksum = "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa"
 dependencies = [
- "arrayvec",
  "serde",
  "slotmap",
  "smallvec",
-]
-
-[[package]]
-name = "tao-core-video-sys"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "271450eb289cb4d8d0720c6ce70c72c8c858c93dd61fc625881616752e6b98f6"
-dependencies = [
- "cfg-if",
- "core-foundation-sys",
- "libc",
- "objc",
 ]
 
 [[package]]
@@ -10076,10 +10057,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -10248,6 +10229,16 @@ dependencies = [
  "displaydoc",
  "serde_core",
  "zerovec",
+]
+
+[[package]]
+name = "tinytemplate"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4d6b5f19ff7664e8c98d03e2139cb510db9b0a60b55f8e8709b689d939b6bc"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -10710,6 +10701,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-luau"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "871abeb427d719788bb38094facd7ff082908ef2b93c1d3d6a5f6025330120f4"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-make"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10875,7 +10876,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -11466,7 +11467,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "js-sys",
  "log",
- "naga",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "profiling",
  "raw-window-handle",
  "smallvec",
@@ -11474,10 +11475,38 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "wgpu-core",
- "wgpu-hal",
- "wgpu-sync",
- "wgpu-types",
+ "wgpu-core 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "arrayvec",
+ "bitflags 2.13.2",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases",
+ "document-features",
+ "hashbrown 0.17.1",
+ "js-sys",
+ "log",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "profiling",
+ "raw-window-handle",
+ "smallvec",
+ "static_assertions",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu-core 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11495,8 +11524,8 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "log",
- "naga",
- "naga-types",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "num-traits",
  "profiling",
  "raw-window-handle",
@@ -11504,15 +11533,49 @@ dependencies = [
  "scopeguard",
  "smallvec",
  "thiserror 2.0.21",
- "wgpu-core-deps-apple",
- "wgpu-core-deps-emscripten",
- "wgpu-core-deps-linux-android-bsd",
+ "wgpu-core-deps-apple 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-core-deps-emscripten 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-core-deps-linux-android-bsd 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-core-deps-windows 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-naga-bridge 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-core"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "arrayvec",
+ "bit-set 0.11.1",
+ "bit-vec 0.10.1",
+ "bitflags 2.13.2",
+ "bytemuck",
+ "cfg_aliases",
+ "document-features",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "log",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "num-traits",
+ "profiling",
+ "raw-window-handle",
+ "rustc-hash 1.1.0",
+ "scopeguard",
+ "smallvec",
+ "thiserror 2.0.21",
+ "wgpu-core-deps-apple 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-core-deps-emscripten 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-core-deps-linux-android-bsd 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
  "wgpu-core-deps-wasm",
- "wgpu-core-deps-windows",
- "wgpu-hal",
- "wgpu-naga-bridge",
- "wgpu-sync",
- "wgpu-types",
+ "wgpu-core-deps-windows 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-naga-bridge 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11520,7 +11583,15 @@ name = "wgpu-core-deps-apple"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
 dependencies = [
- "wgpu-hal",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-core-deps-apple"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11528,7 +11599,15 @@ name = "wgpu-core-deps-emscripten"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
 dependencies = [
- "wgpu-hal",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-core-deps-emscripten"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11536,15 +11615,23 @@ name = "wgpu-core-deps-linux-android-bsd"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
 dependencies = [
- "wgpu-hal",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-core-deps-linux-android-bsd"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
 name = "wgpu-core-deps-wasm"
 version = "30.0.0"
-source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
 dependencies = [
- "wgpu-hal",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11552,7 +11639,15 @@ name = "wgpu-core-deps-windows"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
 dependencies = [
- "wgpu-hal",
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-core-deps-windows"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "wgpu-hal 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
@@ -11578,8 +11673,8 @@ dependencies = [
  "libc",
  "libloading",
  "log",
- "naga",
- "naga-types",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "ndk-sys",
  "objc2 0.6.5",
  "objc2-core-foundation",
@@ -11599,9 +11694,61 @@ dependencies = [
  "wasm-bindgen",
  "wayland-sys",
  "web-sys",
- "wgpu-naga-bridge",
- "wgpu-sync",
- "wgpu-types",
+ "wgpu-naga-bridge 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-result 0.4.1",
+]
+
+[[package]]
+name = "wgpu-hal"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "android_system_properties",
+ "arrayvec",
+ "ash",
+ "bit-set 0.11.1",
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "bytemuck",
+ "cfg-if",
+ "cfg_aliases",
+ "glow",
+ "glutin_wgl_sys",
+ "gpu-allocator",
+ "hashbrown 0.17.1",
+ "js-sys",
+ "khronos-egl",
+ "libc",
+ "libloading",
+ "log",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "ndk-sys",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "ordered-float",
+ "profiling",
+ "range-alloc",
+ "raw-window-handle",
+ "raw-window-metal",
+ "renderdoc-sys",
+ "smallvec",
+ "static_assertions",
+ "thiserror 2.0.21",
+ "wasm-bindgen",
+ "wayland-sys",
+ "web-sys",
+ "wgpu-naga-bridge 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-sync 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-result 0.4.1",
@@ -11612,14 +11759,36 @@ name = "wgpu-naga-bridge"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
 dependencies = [
- "naga",
- "wgpu-types",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+]
+
+[[package]]
+name = "wgpu-naga-bridge"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
+ "wgpu-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
 ]
 
 [[package]]
 name = "wgpu-sync"
 version = "30.0.0"
 source = "git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c#3b3506ea31154edc04de64debda0e780cba2639c"
+dependencies = [
+ "cfg-if",
+ "lock_api",
+ "once_cell",
+ "parking_lot",
+ "portable-atomic",
+ "portable-atomic-util",
+]
+
+[[package]]
+name = "wgpu-sync"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
 dependencies = [
  "cfg-if",
  "lock_api",
@@ -11639,7 +11808,23 @@ dependencies = [
  "js-sys",
  "log",
  "macro_rules_attribute",
- "naga-types",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "raw-window-handle",
+ "static_assertions",
+ "web-sys",
+]
+
+[[package]]
+name = "wgpu-types"
+version = "30.0.0"
+source = "git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007#cddb2f5d80dc0009b2ef6767635140cacf90a007"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytemuck",
+ "js-sys",
+ "log",
+ "macro_rules_attribute",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=cddb2f5d80dc0009b2ef6767635140cacf90a007)",
  "raw-window-handle",
  "static_assertions",
  "web-sys",
@@ -11676,7 +11861,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12310,7 +12495,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12384,7 +12569,6 @@ dependencies = [
  "futures-sink",
  "futures-task",
  "futures-util",
- "getrandom 0.3.4",
  "getrandom 0.4.3",
  "gpui",
  "gpui_apple",
@@ -12410,8 +12594,8 @@ dependencies = [
  "memchr",
  "miniz_oxide 0.8.9",
  "mio",
- "naga",
- "naga-types",
+ "naga 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
+ "naga-types 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
  "noq",
  "noq-udp",
  "notify",
@@ -12430,7 +12614,6 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "objc2-security",
  "objc2-ui-kit",
- "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
  "objc2-video-toolbox",
  "objc2-web-kit",
@@ -12887,7 +13070,7 @@ dependencies = [
  "bitflags 2.13.2",
  "byteorder",
  "core-foundation 0.10.1",
- "core-graphics 0.24.0",
+ "core-graphics",
  "core-text",
  "dirs 6.0.0",
  "dwrote",
@@ -12906,18 +13089,12 @@ dependencies = [
 [[package]]
 name = "zed-scap"
 version = "0.0.8-zed"
-source = "git+https://github.com/zed-industries/scap?rev=4afea48c3b002197176fb19cd0f9b180dd36eaac#4afea48c3b002197176fb19cd0f9b180dd36eaac"
+source = "git+https://github.com/zed-industries/scap?rev=b5c86ec58dd4b6b7732bf6ac8be03d6b1f190a82#b5c86ec58dd4b6b7732bf6ac8be03d6b1f190a82"
 dependencies = [
  "anyhow",
- "cocoa 0.25.0",
- "core-graphics-helmer-fork",
  "log",
- "objc",
  "rand 0.8.8",
- "screencapturekit",
- "screencapturekit-sys",
  "sysinfo",
- "tao-core-video-sys",
  "windows 0.61.3",
  "windows-capture",
  "x11",
@@ -13054,7 +13231,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 [[package]]
 name = "ztracing"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 dependencies = [
  "tracing",
  "ztracing_macro",
@@ -13063,7 +13240,7 @@ dependencies = [
 [[package]]
 name = "ztracing_macro"
 version = "0.1.0"
-source = "git+https://github.com/aislopware/gpui-fast.git#a309f58554b9786dc6676321c1f6dc70076e1be6"
+source = "git+https://github.com/aislopware/gpui-fast.git#576e7c9665dfbfc3ffeb179abf4aa6ffdfa5ac0d"
 
 [[package]]
 name = "zune-core"

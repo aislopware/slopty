@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
 //! slopty-shell — the gpui viewport. Shell, sidebar, conversation, composer, terminal,
 //! diff pane.
 //!
@@ -59,6 +59,7 @@ mod roll_text;
 pub mod running_pill;
 pub mod settings;
 pub mod shell;
+pub mod smooth_scroll;
 pub mod sound;
 pub mod state;
 pub(crate) mod surface_chrome;
@@ -287,6 +288,17 @@ pub fn start(
         // synchronously, so `set_menus` reads the final bindings for the ⌘-key
         // equivalents (gpui snapshots the keymap at set time).
         cx.set_menus(app_menus::app_menus());
+        // Switching keyboard layout moves the keys behind ⌘-shortcuts (AZERTY
+        // reaches ⌘1 as ⌘&): rebind against the new layout, then refresh the
+        // menu bar's snapshot of the keymap and redraw the hints that name
+        // those keys.
+        cx.on_keyboard_layout_change(|cx| {
+            let settings = settings::current(cx);
+            shell::apply_keymap(cx, &settings.keymap);
+            cx.set_menus(app_menus::app_menus());
+            cx.refresh_windows();
+        })
+        .detach();
         if config.activate {
             cx.activate(true); // slopty: as the host asks
         }

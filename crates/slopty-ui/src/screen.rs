@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
-use core_video::pixel_buffer::CVPixelBuffer;
+use glass::Surface;
 use gpui::composition::{NativeHost, NativeHostOptions};
 use gpui::{
     AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorImage,
@@ -708,7 +708,7 @@ pub fn hud_lines(input: &HudInput<'_>) -> String {
 /// hands back bi-planar 4:4:4 (`xf44` at 10 bits, `444f` at 8) only for a stream encoded so.
 #[must_use]
 pub const fn chroma_of(format: u32) -> Chroma {
-    use core_video::pixel_buffer::{
+    use objc2_core_video::{
         kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
         kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
     };
@@ -1775,7 +1775,7 @@ impl ScreenView {
     /// Put `buffer` up as a picture off the stream would be (tests and the workspace's frame
     /// measurements): on the layer, with the view told of its shape at once.
     #[cfg(test)]
-    pub(crate) fn show_picture(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
+    pub(crate) fn show_picture(&mut self, buffer: Surface, cx: &mut Context<Self>) {
         let picture = glass::Picture::new(buffer);
         let shape = glass::Shape::of(&picture);
         self.glass.offer(picture, glass::test_stamp(self.test_pictures));
@@ -1785,7 +1785,7 @@ impl ScreenView {
 
     /// Put a picture of `region` of the target up (tests).
     #[cfg(test)]
-    fn show_region(&mut self, buffer: CVPixelBuffer, region: Region, cx: &mut Context<Self>) {
+    fn show_region(&mut self, buffer: Surface, region: Region, cx: &mut Context<Self>) {
         let picture = glass::Picture::of_region(buffer, region);
         let shape = glass::Shape::of(&picture);
         self.glass.offer(picture, glass::test_stamp(self.test_pictures));
@@ -1798,8 +1798,8 @@ impl ScreenView {
     #[cfg(test)]
     fn show_striped(
         &mut self,
-        (top, top_rows): (CVPixelBuffer, u32),
-        (lower, lower_from): (CVPixelBuffer, u32),
+        (top, top_rows): (Surface, u32),
+        (lower, lower_from): (Surface, u32),
         cx: &mut Context<Self>,
     ) {
         let picture = glass::Picture::striped(top, top_rows, lower, lower_from);
@@ -3016,15 +3016,11 @@ fn region_bounds(whole: Bounds<Pixels>, region: Region, native: (f32, f32)) -> B
 /// its rows.
 fn paint_picture(window: &mut Window, at: Bounds<Pixels>, picture: &glass::Picture) {
     let Some([top, lower]) = stripe_places(at, glass::Shape::of(picture)) else {
-        if let Some(buffer) = picture.buffer() {
-            window.paint_surface(at, buffer);
-        }
+        window.paint_surface(at, picture.buffer());
         return;
     };
     window.with_content_mask(Some(ContentMask { bounds: top.shown }), |window| {
-        if let Some(buffer) = picture.buffer() {
-            window.paint_surface(top.layer, buffer);
-        }
+        window.paint_surface(top.layer, picture.buffer());
     });
     if let Some(buffer) = picture.lower() {
         window.with_content_mask(Some(ContentMask { bounds: lower.shown }), |window| {
@@ -3325,7 +3321,7 @@ impl Render for ScreenView {
                             window.paint_native(&native, at, gpui::Corners::default(), None);
                             #[cfg(test)]
                             layer_at.set(Some((at, window.content_mask().bounds)));
-                            if let Some(buffer) = captured.and_then(|p| p.buffer()) {
+                            if let Some(buffer) = captured.as_ref().map(glass::Picture::buffer) {
                                 window.paint_surface(at, buffer);
                             }
                             return;
@@ -3341,8 +3337,7 @@ impl Render for ScreenView {
                                 );
                                 #[cfg(test)]
                                 layer_at.set(Some((top.layer, window.content_mask().bounds)));
-                                if let Some(buffer) =
-                                    captured.as_ref().and_then(glass::Picture::buffer)
+                                if let Some(buffer) = captured.as_ref().map(glass::Picture::buffer)
                                 {
                                     window.paint_surface(top.layer, buffer);
                                 }
@@ -3436,7 +3431,7 @@ impl Render for ScreenView {
         let console = self.console_overlay(cx);
         // While the view has the keys, the workspace's own chords stand back (`!Screen`); with
         // system shortcuts sent, so do the app's ⌘Q and ⌘H (`!SystemKeys`).
-        let mut key_context = gpui::KeyContext::new_with_defaults();
+        let mut key_context = gpui::KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add(CTX);
         if self.system_keys {
             key_context.add(SYSTEM_KEYS_CTX);
@@ -3972,7 +3967,7 @@ mod tests {
 
     use super::*;
 
-    fn chord(s: &str) -> Keystroke {
+    fn chord(s: &'static str) -> Keystroke {
         Keystroke::parse(s).expect("keystroke")
     }
 
@@ -6042,13 +6037,11 @@ mod tests {
         const WARM: usize = 50;
         let (view, _rx, cx) = windowed(cx);
         cx.simulate_resize(size(px(1170.0), px(2532.0)));
-        let buffer = CVPixelBuffer::new(
-            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+        let buffer = glass::test_buffer(
+            objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             5120,
             2880,
-            None,
-        )
-        .expect("pixel buffer");
+        );
         view.update(cx, |v, cx| {
             v.show_picture(buffer, cx);
             v.native = (5120.0, 2880.0);
@@ -6101,7 +6094,7 @@ mod tests {
     /// `444f` at 8 bits), 4:2:0 for NV12, and nothing before the first picture.
     #[gpui::test]
     fn the_overlay_says_4_4_4_from_the_decoded_picture(cx: &mut gpui::TestAppContext) {
-        use core_video::pixel_buffer::{
+        use objc2_core_video::{
             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             kCVPixelFormatType_444YpCbCr8BiPlanarFullRange,
             kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
@@ -6111,13 +6104,10 @@ mod tests {
         let chroma =
             |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.shape.map(|s| s.chroma));
         assert_eq!(chroma(cx), None, "no picture yet");
-        let full =
-            CVPixelBuffer::new(kCVPixelFormatType_444YpCbCr10BiPlanarFullRange, 64, 48, None)
-                .expect("pixel buffer");
+        let full = glass::test_buffer(kCVPixelFormatType_444YpCbCr10BiPlanarFullRange, 64, 48);
         view.update(cx, |v, cx| v.show_picture(full, cx));
         assert_eq!(chroma(cx).map(chroma_label), Some("4:4:4"));
-        let nv12 = CVPixelBuffer::new(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, 64, 48, None)
-            .expect("pixel buffer");
+        let nv12 = glass::test_buffer(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, 64, 48);
         view.update(cx, |v, cx| v.show_picture(nv12, cx));
         assert_eq!(chroma(cx).map(chroma_label), Some("4:2:0"));
     }
@@ -6391,14 +6381,8 @@ mod tests {
     }
 
     /// A picture of `w` × `h` for a test to put up.
-    fn picture(w: usize, h: usize) -> CVPixelBuffer {
-        CVPixelBuffer::new(
-            core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            w,
-            h,
-            None,
-        )
-        .expect("pixel buffer")
+    fn picture(w: usize, h: usize) -> Surface {
+        glass::test_buffer(objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, w, h)
     }
 
     /// A sender for the cursor samples the view's pump reads, as the stream's own.

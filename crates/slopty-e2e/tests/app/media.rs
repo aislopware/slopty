@@ -471,13 +471,19 @@ async fn formulas_sit_on_their_line_and_diagrams_draw() {
     let renders = stack.path("");
     let drv = &mut stack.driver;
     open_thread(drv, 1).await;
+    // The reply's formulas: the person's message renders the same Markdown, so it holds its own.
+    let math = |d: &Dump, tex: &str| {
+        crate::served::replies(d)
+            .iter()
+            .find(|n| n.role == "Math" && n.label.as_deref() == Some(tex))
+            .cloned()
+    };
     let shown = seen(drv, "the formulas", STEP, |d| {
-        node(d, "Math", "\\pi r^2").is_some()
-            && node(d, "Math", "\\int_0^1 x^2\\,dx = \\frac{1}{3}").is_some()
+        math(d, "\\pi r^2").is_some() && math(d, "\\int_0^1 x^2\\,dx = \\frac{1}{3}").is_some()
     })
     .await;
-    let inline = node(&shown, "Math", "\\pi r^2").cloned().unwrap();
-    let display = node(&shown, "Math", "\\int_0^1 x^2\\,dx = \\frac{1}{3}").cloned().unwrap();
+    let inline = math(&shown, "\\pi r^2").unwrap();
+    let display = math(&shown, "\\int_0^1 x^2\\,dx = \\frac{1}{3}").unwrap();
     let [inline_x, inline_y, inline_w, inline_h] = inline.bounds;
     let [_, dy, _, dh] = display.bounds;
     println!(

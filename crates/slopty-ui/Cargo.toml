@@ -19,7 +19,6 @@ base64.workspace = true
 # A file tile's picture or PDF, shared with its link without a copy (`file::decode`).
 bytes.workspace = true
 core-foundation.workspace = true
-core-video.workspace = true
 # Times on the interface's rows (`view_model`).
 chrono.workspace = true
 # The interface's watches, as streams (`view_model`).
@@ -32,8 +31,8 @@ gpui_apple.workspace = true
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 # A file tile's picture or PDF, decoded or drawn at the size the tile shows it (`file::decode`).
 objc2-core-foundation = { workspace = true, features = [ "CFData", "CFDate", "CFTimeZone" ] }
-# GPUI's surface takes `objc2-core-video`'s pixel buffer; a remote picture is handed to it as one
-# (`screen::glass::surface`).
+# A remote picture: the decoder's pixel buffer, which the stream's layer and GPUI's surface take
+# (`screen::glass`).
 objc2-core-video.workspace = true
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true

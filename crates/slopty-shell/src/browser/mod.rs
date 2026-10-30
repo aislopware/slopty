@@ -27,24 +27,24 @@ gpui::actions!(
 );
 
 pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
-    use crate::settings::{ShortcutId, platform_combo};
+    use crate::settings::{ShortcutId, parse_combo, platform_combo};
     // Existing customized app chords win. In particular old settings may
     // already assign mod-shift-r to the right pane.
     let available = |combo: &str, own: Option<ShortcutId>| {
         !combo.is_empty()
             && !ShortcutId::ALL.iter().any(|id| {
                 Some(*id) != own
-                    && gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
-                        == gpui::Keystroke::parse(&platform_combo(combo)).ok()
+                    && parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok()
             })
     };
     macro_rules! bind {
         ($combo:literal, $action:ident) => {
             if available($combo, None) {
-                cx.bind_keys([gpui::KeyBinding::new(
+                cx.bind_keys([crate::keys::binding(
                     &platform_combo($combo),
                     $action,
                     Some("Browser"),
+                    cx,
                 )]);
             }
         };
@@ -56,12 +56,13 @@ pub(crate) fn bind_keys(cx: &mut App, keymap: &crate::settings::KeymapConfig) {
     bind!("mod-]", Forward);
     let reload = keymap.get(ShortcutId::BrowserReload);
     if available(reload, Some(ShortcutId::BrowserReload))
-        && gpui::Keystroke::parse(&platform_combo(reload)).is_ok()
+        && parse_combo(reload).is_ok()
     {
-        cx.bind_keys([gpui::KeyBinding::new(
+        cx.bind_keys([crate::keys::binding(
             &platform_combo(reload),
             Reload,
             Some("Browser"),
+            cx,
         )]);
     }
 }

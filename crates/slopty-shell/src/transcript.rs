@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 46d4e42), see THIRD_PARTY_NOTICES.md
 //! The conversation view: virtualized transcript with block-granularity rows,
 //! stick-to-bottom, tool-group folding, and streaming markdown.
 //!
@@ -36,8 +36,8 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, Bounds, ClipboardItem, Context, Entity, ListAlignment, ListOffset,
     ListScrollEvent, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, ObjectFit, PathBuilder,
-    Pixels, Point, SharedString, StyledImage as _, StyledText, Subscription, Task,
-    TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
+    Pixels, Point, ScrollDelta, ScrollEvent, SharedString, StyledImage as _, StyledText,
+    Subscription, Task, TextRun, Window, canvas, div, img, list, point, prelude::*, px, size,
 };
 
 use slopty_view_doc::{MessagePart, MessageRole, MessageStatus, SessionMessageEntry, SubagentStatus};
@@ -219,6 +219,8 @@ const FOLD_TWEEN_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 pub const USER_COLLAPSED_LINES: usize = 5;
 /// The user bubble's line box.
 pub const USER_LINE_HEIGHT: f32 = 22.0;
+/// Lines a folded prompt's Markdown lays out past the fold, under its fade.
+const USER_FOLD_OVERDRAW_LINES: usize = 2;
 /// slopty: the height of the "parent › subagent" breadcrumb a drilled subagent's run starts under
 /// (`shell/subagent_drill.rs`).
 pub(crate) const DRILL_CRUMB_HEIGHT: f32 = 26.0;
@@ -1287,6 +1289,9 @@ pub enum RowKind {
     User {
         /// Visible prompt (attachment-ref trailer already stripped).
         text: SharedString,
+        /// `text` parsed as Markdown, when it uses any. `None` shows `text`
+        /// as typed.
+        markdown: Option<UserMarkdown>,
         /// Image refs parsed out of the message text (message-attachments.ts):
         /// thumbnails load from the owning device via ReadAttachmentChunk.
         attachments: Arc<Vec<crate::attachments::UserImageAttachment>>,
@@ -1701,6 +1706,14 @@ fn entry_rows(
         let parsed = crate::attachments::parse_user_message_images(&raw);
         // slopty: the words as the agent's record has them: a TUI's prompt holds no chips.
         let text = agent_message_display(&parsed.text);
+        // slopty: a TUI's prompt holds no chips, so any prompt may render its Markdown.
+        let markdown = Some(crate::markdown::parse_message(&text))
+            .filter(|tree| !plain_markdown(tree))
+            .map(|tree| UserMarkdown {
+                folded: folded_markdown(&tree, USER_COLLAPSED_LINES + USER_FOLD_OVERDRAW_LINES)
+                    .map(Arc::new),
+                full: Arc::new(tree),
+            });
         let attachments = parsed.attachments;
         let copy_text = (!text.trim().is_empty()).then(|| SharedString::from(text.clone()));
         return vec![Row {
@@ -1709,6 +1722,7 @@ fn entry_rows(
             turn_start: true,
             kind: RowKind::User {
                 text: text.into(),
+                markdown,
                 attachments: Arc::new(attachments),
                 pending,
             },
@@ -3290,6 +3304,7 @@ impl HighlightStore {
                             Lang::Php => "php",
                             Lang::Sql => "sql",
                             Lang::Lua => "lua",
+                            Lang::Luau => "luau",
                             Lang::Dockerfile => "dockerfile",
                             Lang::Nix => "nix",
                             Lang::Make => "make",
@@ -4118,6 +4133,15 @@ pub struct Transcript {
     /// re-engaged inside the 70px band, after an own-send first overflows, and
     /// on the jump button.
     pinned: bool,
+    /// The latest wheel/touch input headed for the top of a scrollable list
+    /// and broke the pin as it arrived ([`Transcript::on_scroll_wheel`]); the
+    /// deferred decision in [`Transcript::handle_scroll`] must not re-engage
+    /// it.
+    input_escaped: bool,
+    /// The list took the wheel event in flight ([`Transcript::handle_scroll`]
+    /// runs first): a wheel the list never saw (one an overlay above it let
+    /// bubble) must not break the pin.
+    list_took_input: bool,
     /// A locally-sent prompt currently held near the viewport top while its
     /// reply grows into the empty space below it.
     own_turn: Option<OwnTurnAnchor>,
@@ -4528,6 +4552,8 @@ impl Transcript {
             last_scroll_distance: 0.0,
             wheel_travel: 0.0,
             pinned,
+            input_escaped: false,
+            list_took_input: false,
             own_turn: None,
             own_turn_kick: false,
             own_turn_scheduled: FrameAsk::default(),
@@ -4886,6 +4912,7 @@ impl Transcript {
                 card.update(cx, |_, cx| cx.notify());
             }
         }
+        self.list_took_input = true;
         let released_own_turn = self.own_turn.as_ref().is_some_and(|anchor| anchor.held);
         self.release_own_turn_hold();
         if self.own_turn.is_some() {
@@ -4904,6 +4931,8 @@ impl Transcript {
         cx.defer(move |cx| {
             this.update(cx, |this: &mut Transcript, cx| {
                 this.discard_pending_viewport();
+                this.list_took_input = false;
+                let escaped = std::mem::take(&mut this.input_escaped);
                 // Input owns the viewport immediately, including wheel-down
                 // after background streaming. A held turn can be stale while
                 // frame callbacks are paused; reasserting its old prompt here
@@ -4915,8 +4944,8 @@ impl Transcript {
                     this.last_scroll_distance = distance;
                     // Reaching the end preserves normal tail-follow intent
                     // without reasserting a possibly stale prompt hold.
-                    this.pinned =
-                        distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous);
+                    this.pinned = !escaped
+                        && (distance <= AT_BOTTOM_PX || Self::should_restick(distance, previous));
                     this.spring.reset();
                     this.spring_last_tick = None;
                     // Re-stick only when returning to a short turn's actual
@@ -4928,7 +4957,11 @@ impl Transcript {
                                 >= Self::own_send_inset(ix) - OWN_SEND_SCROLL_SLACK_PX - 2.0
                         })
                     });
-                    if !released_own_turn && at_hold && Self::should_restick(distance, previous) {
+                    if !released_own_turn
+                        && !escaped
+                        && at_hold
+                        && Self::should_restick(distance, previous)
+                    {
                         if let Some(anchor) = this.own_turn.as_mut() {
                             anchor.held = true;
                             anchor.positioned = false;
@@ -4947,7 +4980,7 @@ impl Transcript {
                 let distance = this.distance_from_bottom();
                 let previous = this.wheel_previous_distance(distance); // slopty
                 this.last_scroll_distance = distance;
-                if distance > previous + 1.0 && distance > AT_BOTTOM_PX {
+                if escaped || (distance > previous + 1.0 && distance > AT_BOTTOM_PX) {
                     // User input moving away from the bottom breaks the pin.
                     // Content growth never lands here — it doesn't fire the
                     // scroll handler (mugen §1e: interrupt from input, not
@@ -4971,6 +5004,32 @@ impl Transcript {
             })
             .ok();
         });
+    }
+
+    /// A wheel notch headed for the top breaks the pin as it arrives, however
+    /// little it moved, as use-stick-to-bottom's wheel handler does. The
+    /// distance test in [`Self::handle_scroll`] can't see that on its own: a
+    /// smoothed notch starts and ends with sub-pixel slices, and its slices
+    /// arrive on frames, where the spring's step runs before that deferred
+    /// decision, pulling the view back and recording the distance it then
+    /// compares against. Precise (trackpad) input keeps the distance test.
+    /// Children bubble first, so the list has applied the input by now, or
+    /// never saw it.
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollEvent,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        let toward_top = matches!(event.delta, ScrollDelta::Lines(delta) if delta.y > 0.0);
+        self.input_escaped = std::mem::take(&mut self.list_took_input)
+            && toward_top
+            && self.list.max_offset_for_scrollbar().y > px(0.0);
+        if self.input_escaped {
+            self.pinned = false;
+            self.spring.reset();
+            self.spring_last_tick = None;
+        }
     }
 
     fn on_selection_mouse_move(
@@ -6155,7 +6214,11 @@ impl Transcript {
                 // changed (the tail), this is O(changed rows) per commit, never
                 // O(reply).
                 for row in &self.rows[old_range.clone()] {
-                    self.render_cache.borrow_mut().invalidate_row(&row.id);
+                    let mut cache = self.render_cache.borrow_mut();
+                    cache.invalidate_row(&row.id);
+                    if matches!(row.kind, RowKind::User { .. }) {
+                        cache.invalidate_row(&user_markdown_key(&row.id));
+                    }
                 }
                 if old_range.len() == count {
                     // In-place content change, same row count — notably the
@@ -7162,6 +7225,7 @@ impl Transcript {
         row_id: &SharedString,
         row_ix: usize,
         text: SharedString,
+        markdown: Option<UserMarkdown>,
         theme: &Theme,
         window: &Window,
         cx: &mut Context<Self>,
@@ -7187,6 +7251,23 @@ impl Transcript {
             // Wrapping can change with the window width while expanded.
             fold.user_expansion_height = (full_h - collapsed_h).max(0.0);
         }
+
+        // Height motion uses the same ease-out curve as sidebars, tool folds,
+        // and pane transitions, with duration scaled to travel distance. The
+        // full text remains laid out behind the clip; only the viewport over it
+        // changes, so glyph wrapping never shifts.
+        let duration_ms = fold
+            .duration_ms
+            .max(user_resize_duration_ms(full_h - collapsed_h));
+        let animating = collapsible
+            && fold.epoch > 0
+            && fold
+                .toggled_at
+                .is_some_and(|at| cx.frame_time().saturating_duration_since(at) < Duration::from_millis(duration_ms + 200))
+            && !motion::reduced_motion(cx);
+        // At rest folded, a long prompt's Markdown lays out only what fills
+        // the fold; motion and the open bubble need all of it.
+        let folded = collapsible && !expanded && !animating;
 
         let hold_key = row_id.clone();
         let hold_height = measured_h.clone();
@@ -7229,20 +7310,24 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(row_id, text, theme, measured_h.clone(), cx.entity_id()));
-        // Height motion uses the same ease-out curve as sidebars, tool folds,
-        // and pane transitions, with duration scaled to travel distance. The
-        // full text remains laid out behind the clip; only the viewport over it
-        // changes, so glyph wrapping never shifts.
-        let duration_ms = fold
-            .duration_ms
-            .max(user_resize_duration_ms(full_h - collapsed_h));
-        let animating = collapsible
-            && fold.epoch > 0
-            && fold
-                .toggled_at
-                .is_some_and(|at| cx.frame_time().saturating_duration_since(at) < Duration::from_millis(duration_ms + 200))
-            && !motion::reduced_motion(cx);
+            .child(match markdown {
+                Some(UserMarkdown {
+                    folded: Some(part), ..
+                }) if folded => {
+                    // The part is shorter than the prompt: its height isn't
+                    // the one the fold animates to.
+                    self.render_user_markdown(row_id, &part, None, theme, window, cx)
+                }
+                Some(UserMarkdown { full, .. }) => self.render_user_markdown(
+                    row_id,
+                    &full,
+                    Some(measured_h.clone()),
+                    theme,
+                    window,
+                    cx,
+                ),
+                None => user_bubble_text(row_id, text, theme, measured_h.clone(), cx.entity_id()),
+            });
         // slopty: the clipped text fades out over its last line, as the pane's edges do (#6).
         let faded = |clip: AnyElement| {
             crate::edge_fade::edge_faded(line_height, false, true, clip).into_any_element()
@@ -7280,6 +7365,84 @@ impl Transcript {
                     cx,
                 ))
             })
+            .into_any_element()
+    }
+
+    /// The chat's checkout, which tells a workspace-file link from a web one.
+    fn workspace_root(&self, cx: &gpui::App) -> Option<SharedString> {
+        let state = self.state.read(cx);
+        self.chat_id
+            .as_deref()
+            .and_then(|chat_id| state.chats.iter().find(|chat| chat.id == chat_id))
+            .or_else(|| state.selected_chat_row())
+            .and_then(|chat| chat.cwd.as_deref())
+            .map(SharedString::from)
+    }
+
+    /// A prompt's Markdown, rendered like a reply's at the bubble's size: its
+    /// own selection keys, links and fences. The canvas behind it records the
+    /// full height for the fold, as [`user_bubble_text`] does for plain text.
+    fn render_user_markdown(
+        &mut self,
+        row_id: &SharedString,
+        tree: &Arc<BlockTree>,
+        measured_h: Option<Rc<Cell<f32>>>,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_key = user_markdown_key(row_id);
+        // Kept across frames like a reply's blocks; replacing the row drops it.
+        self.rendered_rows.insert(row_key.clone());
+        let link = self.link_ui(cx);
+        let tree = self.inline_code_tree(tree, link.as_ref(), cx);
+        let code = tree
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, top)| self.code_uis_for(&row_key, &top.block, ix, cx))
+            .flatten()
+            .collect::<HashMap<_, _>>();
+        let opts = RenderOptions {
+            tasks: None,
+            media: None,
+            row_key: row_key.clone(),
+            veil: None,
+            cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+            now: cx.frame_time(), // slopty: the frame's moment
+            copy: Some(self.copy_ui_for(&row_key, cx)),
+            link,
+            workspace_root: self.workspace_root(cx),
+            code: (!code.is_empty()).then_some(code),
+            run: self.run_ui(cx), // slopty: Run in terminal.
+            code_menu: Some(self.code_menu_ui(cx)),
+            body: (render::MD_TEXT_SIZE, USER_LINE_HEIGHT), // slopty: the bubble's own size
+        };
+        let highlight = self.code_highlight_for(&row_key, &tree, None, cx);
+        let entity_id = cx.entity_id();
+        div()
+            .relative()
+            .when_some(measured_h, |el, measured_h| {
+                el.child(
+                    canvas(
+                        move |bounds, _, _| bounds.size.height,
+                        move |_, height, _, cx| {
+                            // Passive geometry cache, like the plain bubble's.
+                            let height = f32::from(height);
+                            if (measured_h.get() - height).abs() > 0.5 {
+                                measured_h.set(height);
+                                // slopty: told once this frame is drawn, as the plain bubble is.
+                                cx.defer(move |cx| cx.notify(entity_id));
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+            })
+            .child(render::render_tree(&tree, &opts, theme, window, &|ix| {
+                highlight.get(&ix).cloned().flatten()
+            }))
             .into_any_element()
     }
 
@@ -8155,11 +8318,13 @@ impl Transcript {
         let inner: AnyElement = match &row.kind {
             RowKind::User {
                 text,
+                markdown,
                 attachments,
                 pending,
             } => {
                 let attachments = attachments.clone();
                 let text = text.clone();
+                let markdown = markdown.clone();
                 let pending = *pending;
                 // Attachment thumbnails ride ABOVE the bubble, right-aligned
                 // (chat-view.tsx RowView: UserAttachmentStrip then the text
@@ -8208,7 +8373,9 @@ impl Transcript {
                                 // slopty: lit faintly in the theme's hues, under the words (Amp).
                                 .relative()
                                 .children(crate::lit::light_over(px(Theme::BUBBLE_RADIUS), &theme))
-                                .child(self.render_user_body(&row.id, ix, text, &theme, window, cx));
+                                .child(self.render_user_body(
+                                    &row.id, ix, text, markdown, &theme, window, cx,
+                                ));
                     // slopty: a send the agent took loses its tint, not in one frame (#15).
                     let bubble = if self.bubble_sent(&row.id, pending, cx) {
                         bubble
@@ -9717,6 +9884,126 @@ fn user_bubble_runs(text: &str, theme: &Theme) -> Vec<TextRun> {
     runs
 }
 
+/// A prompt's Markdown, and for one too long to fold whole, the leading part
+/// that fills the fold.
+#[derive(Clone)]
+pub struct UserMarkdown {
+    pub full: Arc<BlockTree>,
+    pub folded: Option<Arc<BlockTree>>,
+}
+
+/// The leading part of `tree` that fills `lines` lines: whole blocks, then
+/// the first items of a list, rows of a table or lines of a fence. Counts
+/// source lines, which never outnumber the lines they wrap to, so the part
+/// is never shorter than the fold. `None` when the whole tree is that short.
+fn folded_markdown(tree: &BlockTree, lines: usize) -> Option<BlockTree> {
+    fn take(block: &Block, budget: &mut usize) -> Option<Block> {
+        if *budget == 0 {
+            return None;
+        }
+        let spend =
+            |budget: &mut usize, lines: usize| *budget = budget.saturating_sub(lines.max(1));
+        let runs_lines = |runs: &[InlineRun]| {
+            1 + runs
+                .iter()
+                .map(|r| r.text.matches('\n').count())
+                .sum::<usize>()
+        };
+        Some(match block {
+            Block::Paragraph { runs } | Block::Heading { runs, .. } => {
+                spend(budget, runs_lines(runs));
+                block.clone()
+            }
+            Block::CodeBlock { language, code } => {
+                // The fence's header takes a line of its own.
+                spend(budget, 1);
+                let kept: Vec<&str> = code.lines().take((*budget).max(1)).collect();
+                spend(budget, kept.len());
+                Block::CodeBlock {
+                    language: language.clone(),
+                    code: kept.join("\n"),
+                }
+            }
+            Block::Table {
+                header,
+                rows,
+                align,
+            } => {
+                spend(budget, 1);
+                let kept = rows.len().min((*budget).max(1));
+                spend(budget, kept);
+                Block::Table {
+                    header: header.clone(),
+                    rows: rows[..kept].to_vec(),
+                    align: align.clone(),
+                }
+            }
+            Block::BlockQuote { children } => Block::BlockQuote {
+                children: children
+                    .iter()
+                    .map_while(|child| take(child, budget))
+                    .collect(),
+            },
+            Block::List {
+                ordered_start,
+                items,
+            } => Block::List {
+                ordered_start: *ordered_start,
+                items: items
+                    .iter()
+                    .map_while(|item| {
+                        let kept: Vec<Block> =
+                            item.iter().map_while(|child| take(child, budget)).collect();
+                        (!kept.is_empty()).then_some(kept)
+                    })
+                    .collect(),
+            },
+            Block::Math { .. } => {
+                spend(budget, 2);
+                block.clone()
+            }
+            Block::Rule => {
+                spend(budget, 1);
+                block.clone()
+            }
+        })
+    }
+    let mut budget = lines;
+    let blocks: Vec<Arc<crate::markdown::parser::TopBlock>> = tree
+        .blocks
+        .iter()
+        .map_while(|top| {
+            let block = take(&top.block, &mut budget)?;
+            Some(Arc::new(crate::markdown::parser::TopBlock {
+                range: top.range.clone(),
+                block,
+            }))
+        })
+        .collect();
+    // Something left out: the last block cut short, or blocks after it.
+    let whole = blocks.len() == tree.blocks.len()
+        && blocks
+            .iter()
+            .zip(&tree.blocks)
+            .all(|(part, top)| part.block == top.block);
+    (!whole).then_some(BlockTree { blocks })
+}
+
+/// The render key of a user row's Markdown: its selection, element ids and
+/// cached flattening, apart from the row's own.
+fn user_markdown_key(row_id: &str) -> SharedString {
+    format!("{row_id}:u").into()
+}
+
+/// Whether a prompt's Markdown is only unstyled paragraphs: it reads the same
+/// as typed, so the bubble keeps its plain text.
+fn plain_markdown(tree: &BlockTree) -> bool {
+    tree.blocks.iter().all(|top| match &top.block {
+        Block::Paragraph { runs } => runs.iter().all(|run| run.style == InlineStyle::default()),
+        _ => false,
+    })
+}
+
 fn user_bubble_text(
     row_id: &SharedString,
     text: SharedString,
@@ -9868,16 +10155,19 @@ fn fork_marker(source_title: SharedString, theme: &Theme) -> AnyElement {
                 )
                 .child(rule()),
         )
+        // Centered by flex, not `text_center()`: gpui registers a text line's
+        // layer at the line origin with the text's own width, so glyphs shifted
+        // by alignment paint outside it and can draw over popovers above them.
         .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .truncate()
-                .text_center()
-                .text_size(crate::typography::ui_rems(13.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text_muted)
-                .child(source_title),
+            div().w_full().min_w_0().flex().justify_center().child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text_muted)
+                    .child(source_title),
+            ),
         )
         .into_any_element()
 }
@@ -11350,6 +11640,7 @@ impl Render for Transcript {
             .on_scroll(cx.listener(|this, event: &gpui::ScrollEvent, _, _| {
                 this.wheel_travel += f32::from(event.delta.pixel_delta(px(20.0)).y);
             }))
+            .on_scroll(cx.listener(Self::on_scroll_wheel))
             // FIRST child ⇒ paints first: clears this transcript's slice of the
             // frame's markdown text-selection registry before any row's text
             // elements re-register (document paint order = selection order;
@@ -11415,6 +11706,103 @@ mod tests {
         assert!(!jump_visibility(shown, AT_BOTTOM_PX));
         assert!(!jump_visibility(false, 319.0));
         assert!(jump_visibility(false, 321.0));
+    }
+
+    #[gpui::test]
+    fn a_glided_notch_leaves_the_bottom_and_stays_where_it_lands(cx: &mut gpui::TestAppContext) {
+        struct Root(Entity<Transcript>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::smooth_scroll::smooth_scroll(self.0.clone())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+            let state = cx.new(|_| AppState::new());
+            state.update(cx, |state, _| {
+                state.selected_chat = Some("chat".into());
+                state.transcript_replayed = true;
+                state.transcript = vec![assistant(
+                    "reply",
+                    MessageStatus::Complete,
+                    vec![text_part("text", &"History.\n\n".repeat(120))],
+                )];
+                state.transcript_revision += 1;
+            });
+            cx.new(|cx| Transcript::new(state, cx))
+        });
+        transcript.update(cx, |this, cx| this.sync(cx)); // slopty: no rail
+        let (_, cx) = cx.add_window_view(|_, _| Root(transcript.clone()));
+        // Frames at 120Hz: the glide and the bottom spring both read the
+        // clock.
+        // slopty: on the test dispatcher's clock, which the shell's clock reads.
+        let frame = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(Duration::from_millis(8));
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        };
+        for _ in 0..30 {
+            frame(cx);
+        }
+        let distance = |cx: &mut gpui::VisualTestContext| {
+            transcript.read_with(cx, |this, _| this.distance_from_bottom())
+        };
+        assert!(transcript.read_with(cx, |this, _| this.pinned));
+        assert!(distance(cx) <= 1.0, "{}", distance(cx));
+
+        // A wheel the list never took (an overlay above it let it bubble)
+        // leaves the pin alone.
+        transcript.update_in(cx, |this, window, cx| {
+            this.on_scroll_wheel(
+                &gpui::ScrollEvent {
+                    delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert!(this.pinned, "a wheel the list never saw broke the pin");
+            // Precise input keeps the distance test it always had.
+            this.list_took_input = true;
+            this.on_scroll_wheel(
+                &gpui::ScrollEvent {
+                    delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(0.5))),
+                    ..Default::default()
+                },
+                window,
+                cx,
+            );
+            assert!(
+                this.pinned && !this.input_escaped,
+                "a trackpad took the escape"
+            );
+        });
+
+        // One 3-line notch up. Its glide starts and ends with slices well
+        // under a pixel.
+        cx.simulate_event(gpui::ScrollEvent {
+            position: gpui::point(px(200.0), px(200.0)),
+            delta: gpui::ScrollDelta::Lines(gpui::point(0.0, 3.0)),
+            ..Default::default()
+        });
+        // The glide lands within 200ms; the rest shows the view stays there.
+        for _ in 0..50 {
+            frame(cx);
+        }
+        assert!(
+            !transcript.read_with(cx, |this, _| this.pinned),
+            "scrolling up must release the bottom"
+        );
+        let landed = distance(cx);
+        assert!(
+            (landed - 60.0).abs() <= 1.0,
+            "a 3-line notch scrolls 60px, as it does without smoothing: {landed}"
+        );
     }
 
     #[gpui::test]
@@ -16552,6 +16940,72 @@ mod tests {
         assert_eq!(before.len(), 1);
         assert_eq!(before[0].id, after[0].id);
         assert_eq!(before[0].version, after[0].version);
+    }
+
+    #[test]
+    fn prompts_written_in_markdown_render_it() {
+        let markdown = |text: &str| {
+            let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
+            entry.role = MessageRole::User; // slopty: a prompt, as the record has it
+            entry.status = None;
+            let rows = work_rows(&entry, false, &mut parse);
+            let RowKind::User { markdown, .. } = &rows[0].kind else {
+                panic!("expected a user row");
+            };
+            markdown.clone()
+        };
+        let tree = markdown("Keep **this**\nand `that`\n\n- one\n- two")
+            .unwrap()
+            .full;
+        assert_eq!(tree.blocks.len(), 2);
+        // Typed newlines stay line breaks.
+        let Block::Paragraph { runs } = &tree.blocks[0].block else {
+            panic!("expected a paragraph");
+        };
+        assert!(runs.iter().any(|run| run.text.contains('\n')));
+        // Prose reads the same as typed, so it keeps the plain bubble.
+        assert!(markdown("just a question\n\nand another").is_none());
+    }
+
+    #[test]
+    fn long_prompts_fold_to_their_leading_markdown() {
+        let markdown = |text: &str| {
+            let mut entry = assistant("u1", MessageStatus::Complete, vec![text_part("t0", text)]);
+            entry.role = MessageRole::User; // slopty: a prompt, as the record has it
+            entry.status = None;
+            let rows = work_rows(&entry, false, &mut parse);
+            let RowKind::User { markdown, .. } = &rows[0].kind else {
+                panic!("expected a user row");
+            };
+            markdown.clone().unwrap()
+        };
+        let lines = USER_COLLAPSED_LINES + USER_FOLD_OVERDRAW_LINES;
+        // A prompt that fits whole folds to itself.
+        assert!(markdown("**short**\n\n- one\n- two").folded.is_none());
+        // A long report keeps its heading and the items that fill the fold.
+        let report: String = (1..=240).map(|i| format!("{i}. **case {i}**\n")).collect();
+        let report = markdown(&format!("## Sweep\n\n{report}"));
+        let folded = report.folded.unwrap();
+        assert_eq!(folded.blocks.len(), 2);
+        let Block::List { items, .. } = &folded.blocks[1].block else {
+            panic!("expected the list");
+        };
+        assert_eq!(items.len(), lines - 1);
+        let Block::List { items: all, .. } = &report.full.blocks[1].block else {
+            panic!("expected the list");
+        };
+        // A prefix: each kept item is the item it was.
+        assert_eq!(items[..], all[..items.len()]);
+        // A long fence keeps its first lines; blocks after the fold go.
+        let fence: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        let fenced = markdown(&format!("Run:\n\n```\n{fence}```\n\nthen **this**"));
+        let folded = fenced.folded.unwrap();
+        assert_eq!(folded.blocks.len(), 2);
+        let Block::CodeBlock { code, .. } = &folded.blocks[1].block else {
+            panic!("expected the fence");
+        };
+        assert_eq!(code.lines().count(), lines - 2);
+        assert!(code.starts_with("line 1\nline 2"));
     }
 
     #[test]

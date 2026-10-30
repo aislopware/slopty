@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 75b7260), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ eabad36), see THIRD_PARTY_NOTICES.md
 //! Settings → Shortcuts (feature-inventory §1.4): a table of the rebindable
 //! bindings — click a combo to record (Esc cancels), live conflict detection,
 //! per-row Reset and Restore defaults. Changes emit [`ShortcutsEvent`]; the
@@ -12,7 +12,11 @@ use gpui::{
 use crate::popover; // slopty: appshots removed.
 
 use crate::settings::widgets;
-use crate::settings::{KeymapConfig, ShortcutId, combo_from_keystroke}; // slopty: the pull-request destination's row is gone
+// slopty: the pull-request destination's row is gone
+use crate::settings::{
+    KeyEquivalents, KeymapConfig, ShortcutId, canonical_key, combo_from_keystroke,
+    key_equivalents,
+};
 use crate::state::AppState;
 use crate::theme::Theme;
 use crate::motion::HoverFade as _;
@@ -28,11 +32,26 @@ pub enum RecordOutcome {
     Set(String),
 }
 
-pub fn record_key(key: &str, ctrl: bool, alt: bool, shift: bool, cmd: bool) -> RecordOutcome {
+/// `key` is what the layout reported; `equivalents` that layout's
+/// [`KeyEquivalents`]. The combo stores the US key behind it, the spelling
+/// defaults use (AZERTY ⌘& records as "mod-1"), so stored-combo conflict
+/// checks keep seeing one chord per key. A key no stored combo can reach is
+/// unusable.
+pub fn record_key(
+    key: &str,
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    cmd: bool,
+    equivalents: &KeyEquivalents,
+) -> RecordOutcome {
     if key.eq_ignore_ascii_case("escape") {
         return RecordOutcome::Cancelled;
     }
-    match combo_from_keystroke(ctrl, alt, shift, cmd, key) {
+    let Some(key) = canonical_key(key, equivalents) else {
+        return RecordOutcome::Ignored;
+    };
+    match combo_from_keystroke(ctrl, alt, shift, cmd, &key) {
         Some(combo) => RecordOutcome::Set(combo),
         None => RecordOutcome::Ignored,
     }
@@ -136,6 +155,7 @@ impl ShortcutsPage {
             mods.alt,
             mods.shift,
             mods.platform,
+            &key_equivalents(cx),
         ) {
             RecordOutcome::Cancelled => {
                 self.stop_recording();
@@ -534,10 +554,11 @@ mod tests {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
-            cx.bind_keys([gpui::KeyBinding::new(
+            cx.bind_keys([crate::keys::binding(
                 &crate::settings::platform_combo("mod-n"),
                 crate::shell::NewSession,
                 None,
+                cx,
             )]);
             cx.on_action(move |_: &crate::shell::NewSession, _| observed.set(true));
         });
@@ -582,35 +603,74 @@ mod tests {
 
     #[test]
     fn recording_outcomes() {
+        let us = KeyEquivalents::default();
         assert_eq!(
-            record_key("escape", false, false, false, false),
+            record_key("escape", false, false, false, false, &us),
             RecordOutcome::Cancelled
         );
         assert_eq!(
-            record_key("Escape", true, false, false, false),
+            record_key("Escape", true, false, false, false, &us),
             RecordOutcome::Cancelled
         );
         assert_eq!(
-            record_key("s", false, false, false, true),
+            record_key("s", false, false, false, true, &us),
             RecordOutcome::Set("mod-s".into())
         );
         assert_eq!(
-            record_key("k", false, true, true, true),
+            record_key("k", false, true, true, true, &us),
             RecordOutcome::Set("mod-alt-shift-k".into())
         );
         // Apple-only: elsewhere ctrl IS the primary and records as "mod".
         #[cfg(target_vendor = "apple")] // slopty: an iPad's ⌘ too
         assert_eq!(
-            record_key("tab", true, false, true, false),
+            record_key("tab", true, false, true, false, &us),
             RecordOutcome::Set("ctrl-shift-tab".into())
         );
         // Bare modifiers stay recording.
         assert_eq!(
-            record_key("shift", false, false, true, false),
+            record_key("shift", false, false, true, false, &us),
             RecordOutcome::Ignored
         );
         assert_eq!(
-            record_key("ctrl", true, false, false, false),
+            record_key("ctrl", true, false, false, false, &us),
+            RecordOutcome::Ignored
+        );
+    }
+
+    #[test]
+    fn azerty_records_the_us_key_behind_each_chord() {
+        let azerty = crate::settings::azerty_key_equivalents();
+        // ⌘& is AZERTY's ⌘1: it records as the default's own spelling, so
+        // the conflict check sees Jump to session 1 holding it.
+        let RecordOutcome::Set(combo) = record_key("&", false, false, false, true, &azerty) else {
+            panic!("expected Set");
+        };
+        assert_eq!(combo, "mod-1");
+        assert_eq!(
+            conflict_owner(&KeymapConfig::default(), ShortcutId::NewSession, &combo),
+            Some(ShortcutId::JumpSession(0))
+        );
+        assert_eq!(
+            record_key(":", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-/".into())
+        );
+        // ⌘⇧è types 7, where AZERTY puts US ⌘&.
+        assert_eq!(
+            record_key("7", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-&".into())
+        );
+        // Letters and keys AZERTY keeps in place record as typed.
+        assert_eq!(
+            record_key("é", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-2".into())
+        );
+        assert_eq!(
+            record_key("b", false, false, false, true, &azerty),
+            RecordOutcome::Set("mod-b".into())
+        );
+        // No US key lands on AZERTY's @ key: nothing stored could reach it.
+        assert_eq!(
+            record_key("@", false, false, false, true, &azerty),
             RecordOutcome::Ignored
         );
     }
@@ -656,7 +716,9 @@ mod tests {
         // slopty parity: a combo bound elsewhere is refused at record time (the
         // helper names the owner) — conflicts never persist into the keymap.
         let keymap = KeymapConfig::default();
-        let RecordOutcome::Set(combo) = record_key("r", false, false, false, true) else {
+        let RecordOutcome::Set(combo) =
+            record_key("r", false, false, false, true, &KeyEquivalents::default())
+        else {
             panic!("expected Set");
         };
         assert_eq!(

@@ -674,8 +674,8 @@ mod tests {
             f32::from(cx.debug_bounds("arrows-cap").expect("drawn").origin.y)
         };
         let rest = top(cx);
-        let key = |key: &str| gpui::Keystroke::parse(key).unwrap();
-        let down = |key: &str, is_held: bool| gpui::KeyDownEvent {
+        let key = |key: &'static str| gpui::Keystroke::parse(key).unwrap();
+        let down = |key: &'static str, is_held: bool| gpui::KeyDownEvent {
             keystroke: gpui::Keystroke::parse(key).unwrap(),
             is_held,
             prefer_character_input: false,

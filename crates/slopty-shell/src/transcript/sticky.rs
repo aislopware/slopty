@@ -243,6 +243,7 @@ mod tests {
             kind: match prompt {
                 Some(text) => RowKind::User {
                     text: text.to_owned().into(),
+                    markdown: None,
                     attachments: Arc::default(),
                     pending: false,
                 },

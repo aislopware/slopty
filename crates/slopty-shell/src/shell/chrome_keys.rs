@@ -23,7 +23,7 @@ use gpui::{App, Context, KeyBinding, Window, actions, prelude::*};
 
 use super::{RightSurface, Route, Shell};
 use crate::changes::{FindInDiff, FindNextInDiff, FindPreviousInDiff};
-use crate::settings::{KeymapConfig, ShortcutId, platform_combo};
+use crate::settings::{KeymapConfig, ShortcutId, parse_combo, platform_combo};
 use crate::transcript::{FindInThread, FindNext as FindNextInThread, FindPrevious as FindPreviousInThread};
 
 actions!(
@@ -55,15 +55,14 @@ const UNDO_LASTS: Duration = Duration::from_secs(8);
 pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     let taken = |combo: &str| {
         ShortcutId::ALL.iter().any(|id| {
-            gpui::Keystroke::parse(&platform_combo(keymap.get(*id))).ok()
-                == gpui::Keystroke::parse(&platform_combo(combo)).ok()
+            parse_combo(keymap.get(*id)).ok() == parse_combo(combo).ok()
         })
     };
     let mut bindings = Vec::new();
     macro_rules! fixed {
         ($combo:literal, $action:expr) => {
             if !taken($combo) {
-                bindings.push(KeyBinding::new(&platform_combo($combo), $action, None));
+                bindings.push(crate::keys::binding(&platform_combo($combo), $action, None, cx));
             }
         };
     }
@@ -78,12 +77,13 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
     fixed!("mod-shift-\\", ToggleExpandPane);
     fixed!("mod-i", ToggleInspector);
     // The diff's own find, where the Changes surface has the keyboard.
-    bindings.push(KeyBinding::new(&platform_combo("mod-f"), FindInDiff, Some("Changes")));
-    bindings.push(KeyBinding::new(&platform_combo("mod-g"), FindNextInDiff, Some("Changes")));
-    bindings.push(KeyBinding::new(
+    bindings.push(crate::keys::binding(&platform_combo("mod-f"), FindInDiff, Some("Changes"), cx));
+    bindings.push(crate::keys::binding(&platform_combo("mod-g"), FindNextInDiff, Some("Changes"), cx));
+    bindings.push(crate::keys::binding(
         &platform_combo("mod-shift-g"),
         FindPreviousInDiff,
         Some("Changes"),
+        cx,
     ));
     for (id, action) in [
         (ShortcutId::ReopenClosedTab, Box::new(ReopenClosedTab) as Box<dyn gpui::Action>),
@@ -96,7 +96,7 @@ pub(super) fn bind_keys(cx: &mut App, keymap: &KeymapConfig) {
         }
         // A chord that is no chord (a hand-edited file) binds nothing.
         if let Ok(binding) =
-            KeyBinding::load(&combo, action, None, false, None, &gpui::DummyKeyboardMapper)
+            KeyBinding::load(&combo, action, None, false, None, cx)
         {
             bindings.push(binding);
         }

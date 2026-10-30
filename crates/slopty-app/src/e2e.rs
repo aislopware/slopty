@@ -598,7 +598,9 @@ fn inputs(command: &Command) -> Option<Result<Vec<Input>, String>> {
             return Some(
                 keys.split_whitespace()
                     .map(|text| {
-                        Keystroke::parse(text).map(Input::Key).map_err(|e| format!("{text:?}: {e}"))
+                        Keystroke::parse_with_os(text, slopty_shell::keys::OS)
+                            .map(Input::Key)
+                            .map_err(|e| format!("{text:?}: {e}"))
                     })
                     .collect(),
             );
@@ -685,6 +687,7 @@ fn dispatch(
                 gpui::prepare_keystroke(window, &keystroke, cx);
                 let _sent = cx.update_window(window, |_root, window, cx| {
                     let handled = window.dispatch_keystroke(keystroke.clone(), cx);
+                    let keystroke = keystroke.unparse(slopty_shell::keys::OS);
                     tracing::debug!(%keystroke, handled, "keys");
                 });
             }

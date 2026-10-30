@@ -108,18 +108,20 @@ pub(crate) const TREE_KEY_CONTEXT: &str = "FileTree";
 pub(crate) fn bind_keys(cx: &mut gpui::App) {
     use crate::settings::platform_combo;
     cx.bind_keys([
-        gpui::KeyBinding::new(&platform_combo("mod-shift-."), ToggleHiddenFiles, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(
+        crate::keys::binding(&platform_combo("mod-shift-."), ToggleHiddenFiles, Some(KEY_CONTEXT), cx),
+        crate::keys::binding(
             &platform_combo("mod-shift-v"),
             ToggleMarkdownPreview,
             Some(KEY_CONTEXT),
+            cx,
         ),
         gpui::KeyBinding::new("alt-z", ToggleWordWrap, Some(KEY_CONTEXT)),
-        gpui::KeyBinding::new(&platform_combo("alt-mod-c"), CopyPath, Some(TREE_KEY_CONTEXT)),
-        gpui::KeyBinding::new(
+        crate::keys::binding(&platform_combo("alt-mod-c"), CopyPath, Some(TREE_KEY_CONTEXT), cx),
+        crate::keys::binding(
             &platform_combo("mod-backspace"),
             DeleteSelection,
             Some(TREE_KEY_CONTEXT),
+            cx,
         ),
     ]);
 }

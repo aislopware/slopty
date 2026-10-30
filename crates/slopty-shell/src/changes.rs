@@ -69,10 +69,11 @@ gpui::actions!(changes, [FindInDiff, FindNextInDiff, FindPreviousInDiff, ToggleD
 // slopty: ⇧⌘Y shows or hides the changed files' tree (Claude desktop's `toggleDiffFileList`).
 /// Binds the pane's own keys that the shell's keymap does not.
 pub(crate) fn bind_keys(cx: &mut App) {
-    cx.bind_keys([gpui::KeyBinding::new(
+    cx.bind_keys([crate::keys::binding(
         &crate::settings::platform_combo("mod-shift-y"),
         ToggleDiffTree,
         Some("Changes"),
+        cx,
     )]);
 }
 

@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ c02739d), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ 3d2f1e6), see THIRD_PARTY_NOTICES.md
 //! Settings → Appearance: system behavior, independent light/dark variants,
 //! and the optional interactive accent overlay.
 
@@ -735,6 +735,14 @@ fn treatment_word(treatment: SurfaceTreatment) -> &'static str {
     }
 }
 
+fn smooth_scrolling_helper(enabled: bool, reduced: bool) -> &'static str {
+    if enabled && reduced {
+        "Mouse wheels step instantly while motion is reduced."
+    } else {
+        "Mouse wheels glide instead of jumping. Trackpads are unaffected."
+    }
+}
+
 fn surface_helper(surface: SurfacePreference, resolved: SurfaceTreatment) -> String {
     match surface {
         SurfacePreference::ThemeDefault => format!(
@@ -933,6 +941,7 @@ fn accent_swatch(
         .id(SharedString::from(format!("accent-{}", selection.label())))
         .aria_label(selection.label())
         .aria_selected(selected)
+        // slopty: no tooltip here; its caller's hint names the accent.
         .flex_none()
         .w(px(30.0))
         .h(px(34.0))
@@ -1447,6 +1456,7 @@ impl Render for AppearancePage {
                 .into_any_element(),
         ];
         let pause_in_background = crate::motion::pause_in_background(cx);
+        let smooth_scrolling = crate::settings::smooth_scrolling(cx);
         let motion_rows = vec![
             widgets::card_row(&theme, true)
                 .child(
@@ -1500,6 +1510,43 @@ impl Render for AppearancePage {
                         crate::motion::set_pause_in_background(!pause_in_background, cx);
                         cx.notify();
                     })),
+                )
+                .into_any_element(),
+            widgets::card_row(&theme, false)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(widgets::row_title(&theme, "Smooth scrolling"))
+                        .child(widgets::meta_line(
+                            &theme,
+                            vec![
+                                div()
+                                    .child(smooth_scrolling_helper(
+                                        smooth_scrolling,
+                                        crate::motion::reduced_motion(cx),
+                                    ))
+                                    .into_any_element(),
+                            ],
+                        )),
+                )
+                .child(
+                    widgets::toggle_switch(&theme, smooth_scrolling, "smooth-scrolling")
+                        .id("smooth-scrolling-toggle")
+                        .tab_index(0)
+                        .role(gpui::Role::Switch)
+                        .aria_label("Smooth scrolling")
+                        .map(|el| crate::surface_chrome::focus_ring(el, &theme)) // slopty: as its neighbours'
+                        .cursor_pointer()
+                        .aria_toggled(if smooth_scrolling {
+                            gpui::Toggled::True
+                        } else {
+                            gpui::Toggled::False
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::settings::set_smooth_scrolling(!smooth_scrolling, cx);
+                            cx.notify();
+                        })),
                 )
                 .into_any_element(),
         ];

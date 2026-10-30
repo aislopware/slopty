@@ -1547,7 +1547,7 @@ impl Element for TerminalElement {
         // What this view built of its rows last frame, and what it builds of them in this one.
         let mut rows_before = self.view.update(cx, |view, _cx| view.take_row_cache());
         let mut rows_after = RowCache::with_capacity(rows_before.0.len());
-        let text_system = Arc::clone(window.text_system());
+        let text_system = Rc::clone(window.text_system());
         let focused = self.focused;
         let sprite_thickness = (f32::from(grid.underline.thickness) * scale).round().max(1.0);
         // Textures for the placed images are made (and stale ones dropped) before the read.

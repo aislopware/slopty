@@ -1158,7 +1158,7 @@ impl Shell {
             }
         };
         let combo = self.settings.keymap.get(id);
-        let valid = Keystroke::parse(&platform_combo(combo)).is_ok();
+        let valid = crate::settings::parse_combo(combo).is_ok();
         Some(
             crate::keys::combo_text(if valid { combo } else { id.default_combo() }).to_string(),
         )
@@ -1890,7 +1890,7 @@ mod tests {
                 window.draw(cx).clear(cx);
             });
         };
-        let key = |down: bool, key: &str, cx: &mut gpui::VisualTestContext| {
+        let key = |down: bool, key: &'static str, cx: &mut gpui::VisualTestContext| {
             let keystroke = gpui::Keystroke::parse(key).unwrap();
             cx.update(|window, cx| {
                 window.dispatch_event(

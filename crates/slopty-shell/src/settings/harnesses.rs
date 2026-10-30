@@ -1,4 +1,4 @@
-// Derived from zeron (MIT, github.com/zeronsh/zeron @ 053ce2e), see THIRD_PARTY_NOTICES.md
+// Derived from zeron (MIT, github.com/zeronsh/zeron @ daf047b), see THIRD_PARTY_NOTICES.md
 //! Settings → Providers: install and enable harnesses, one card row per agent.
 //!
 //! The state is PER-DEVICE and lives on the engine (`harness-prefs.json` in

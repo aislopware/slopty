@@ -292,6 +292,52 @@ paths = [
     "crates/ui/src/shell/sidebar_sections.rs",
     # zeron's mark: the shell draws Slopty's (`crates/slopty-shell/assets/icons/slopty-logo.svg`).
     "crates/ui/assets/icons/zeron-logo.svg",
+    # Zeron Cloud, its providers, plans and billing, onboarding into them and the native-subagent
+    # switch (#966, #1046): Slopty runs agents on the person's own machines and never touches
+    # their accounts.
+    "crates/proto/src/cloud.rs",
+    "crates/proto/src/plan_usage.rs",
+    "crates/proto/src/program_status.rs",
+    "crates/proto/src/providers.rs",
+    "crates/proto/src/run_errors.rs",
+    "crates/rpc/src/ipc_auth.rs",
+    "crates/notify/",
+    "crates/ui/src/cloud.rs",
+    "crates/ui/src/onboarding.rs",
+    "crates/ui/src/settings/billing.rs",
+    "crates/ui/src/settings/cloud.rs",
+    "crates/ui/src/settings/delegation.rs",
+    "crates/ui/assets/icons/github-mark.svg",
+    "crates/ui/assets/icons/minus.svg",
+    "crates/ui/assets/icons/wallet.svg",
+    # Agent CLIs Slopty does not install (#978) and the fx effects (#1099).
+    "crates/ui/assets/icons/muse-mark.svg",
+    "crates/ui/assets/icons/fx-mark.svg",
+    # The engine's socket transport: Slopty's shell reads its view model in process.
+    "crates/rpc/src/ws.rs",
+    "crates/rpc/src/device_room.rs",
+    "crates/rpc/examples/",
+    "crates/doc/src/workspace.rs",
+    "crates/doc/tests/attachments_roundtrip.rs",
+    # Mobile apps on zeron's mobile core: Slopty's iPhone and iPad run the shell itself.
+    "crates/mobile-bindgen/",
+    "crates/proto/src/agent_messages.rs",
+    # Its own terminal over direct links with predictive echo (#975): Slopty's terminals are
+    # libghostty's, over its own transport.
+    "crates/term/",
+    "crates/term-link/",
+    # Browser element annotations (#814) and reply images (#1036): the GUI is read-only toward
+    # the agent.
+    "crates/ui/src/browser/annotate.js",
+    "crates/ui/assets/icons/cursor.svg",
+    "crates/ui/assets/icons/cursor-square.svg",
+    "crates/ui/src/reply_images.rs",
+    # Settings search (#1018): Slopty's settings are few enough to scan.
+    "crates/ui/src/settings/search.rs",
+    "crates/ui/src/settings/search/",
+    "crates/ui/src/shell/settings_search.rs",
+    # Pull-request pages (above).
+    "crates/ui/src/shell/pull_request_destination_tests.rs",
     # The repository's own files: Slopty has its own.
     "Cargo.toml",
     "Cargo.lock",
@@ -306,6 +352,7 @@ paths = [
     "CONTEXT.md",
     "CONTRIBUTORS.md",
     "THIRD_PARTY_NOTICES.md",
+    ".gitignore",
     "docs/",
     "scripts/",
     ".github/",
