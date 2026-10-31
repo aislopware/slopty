@@ -13023,8 +13023,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `settings::files::tests::a_row_offers_reset_only_off_its_default`,
   `settings::notifications::tests::restore_defaults_turns_every_preference_back_on`,
   `settings::harnesses::tests::autonomy_names_its_default_and_what_full_costs`,
-  `settings::appearance::tests::each_font_slot_knows_its_default`; e2e
-  `changes_files_and_settings_show_the_threads_work` (golden `settings-appearance-defaults`).
+  `settings::appearance::tests::each_font_slot_knows_its_default` and
+  `shell::goldens::settings_appearance_draws_as_its_goldens` (golden
+  `settings-appearance-defaults`).
 - ✅ **In the panes, information is quiet and a failure offers the way on (2026-10-17).** A
   large file shown in part, a partial diff and paused file updates read in `text_muted` on a
   faint ink with the info glyph; amber stays on the prompts that ask for a decision (a reload

@@ -92,6 +92,37 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    from the first frame, and a dump or render reads it and the per-frame check's findings
    without drawing anything from scratch. `walk::*` walks a person's inputs one after another
    in either mode.
+   **Real pixels, in the test process.** `shell::goldens` opens the shell's window as
+   `slopty_shell::start` does (its install, fonts, theme and window options) in a GPUI test
+   window that draws real pixels: Core Text (`gpui_platform::text_system`), the app's assets,
+   and gpui-fast's headless Metal renderer, the `render_frame` the app's window draws with, at
+   the self-test's 1320 × 880 and one pixel to the point (`TestAppContext::build_with_renderer`).
+   The state is set as the view model sets it, and the engine, where a page asks it, is a
+   stand-in answering through the same RPC client, in the words its producers make
+   (`ServerInvite::reaching`, `slopty_deploy::Failure::unnamed`, `slopty_testkit::stack`). A
+   frame takes milliseconds, with no app, no daemon and no guest. A golden's picture and scene
+   are its surface's (a settings page beside the sections, a dialog with its shadow; one
+   composition the whole window): the picture goes to `crates/slopty-e2e/golden` through the
+   comparator the self-test uses (`slopty_testkit::golden`), and what it paints (a line per
+   primitive and per run of glyphs) is an insta snapshot. What it says is the whole window's
+   accessibility tree, below the fold too, as the self-test's words were, also a snapshot. So a
+   changed word, place or colour fails as text in a lane's quick check. Dark is held, not kept:
+   the dark frame says what the light one says, places every node and lays out every primitive
+   as light does (colours and depths aside, dark's lit edge on a float aside), paints no colour
+   only the other theme has, and sets no text fainter than light sets it under a contrast of 3
+   (`scene::fainter`); a dark picture is kept only where the page shows the appearance itself.
+   A golden that is not there fails unless the run accepts (`cargo xtask remote
+   --accept-snapshots`, which accepts the pictures with the snapshots, or `INSTA_UPDATE=always`);
+   CI's comparing runs (`INSTA_UPDATE=no`) write none. A golden has one writer: this test writes
+   the self-test's first frames (`interface`, `interface-frosted`) with their words, and S1 holds
+   the app's frames on the real stack to them without writing them, so the two drawing apart
+   fails there. A Mac with no Metal device fails, since every Mac the shell's tests run on has
+   one. This Mac's GPU and the e2e guest's drew the interface, the frosted interface and the
+   Settings pages alike to the pixel, but for what one run's own state put there (a toast, a
+   port); a hosted runner (`xcode-27`) drew Settings → Appearance
+   in both themes and the agents, shortcuts, devices and appearance-defaults pages in light so
+   too, and has drawn no other yet (`docs/decisions/testing.md`, "Goldens render in the test
+   process"). Settings is drawn so, page by page (`shell::goldens::settings_*`).
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
    launches a server, ptyd, the worker registered with the server, and the app (built with
    `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker
@@ -103,11 +134,15 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    painted the state in the same dump, and `surfaces`: what that frame painted as surfaces, each
    with its bounds, its buffer's size and pixel format and the `IOSurface` it lies in, so a
    visual's frames are seen on the surface path); `render` is GPUI drawing its own window to a PNG,
-   composited over one slate backdrop, compared numerically with `crates/slopty-e2e/golden`,
-   and what the same frame says in words (its accessibility tree's roles, labels and values, a
-   line a node) compared exactly with the `.txt` beside it, so a changed word fails with the
-   lines that changed where the pixel tolerance cannot see it (`--accept` writes every golden
-   its frame differs from by one pixel or one word, within the tolerance too, so no golden
+   composited over one slate backdrop (`slopty_testkit::golden::over_backdrop`) and compared
+   with `crates/slopty-e2e/golden` by its worst window: a frame fails when any 16-pixel square
+   holds more than 24 differing pixels, or a straight run of 64 differs, since GPU noise scatters
+   and a real change is compact (pixelmatch's windowed rule), or when more than 0.2 % of its
+   pixels differ (0.05 % on the simulator), as a weight or a hinting changed across a page. The
+   words the same frame says (its accessibility tree's roles, labels and values, a line a node)
+   are compared exactly with the `.txt` beside it, so a changed word fails with the
+   lines that changed where the picture's comparison cannot see it (`--accept` writes every golden
+   its frame differs from by one pixel or one word, within the noise too, so no golden
    keeps drawing a word or a shade the app has since changed; `--accept-all` rewrites every
    golden, and `--review` writes none and fails on none, leaving each changed frame's render
    and diff in the artifacts, so a design review

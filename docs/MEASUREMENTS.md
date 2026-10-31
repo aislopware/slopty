@@ -18767,3 +18767,74 @@ SLOPTY_LANE=M cargo xtask remote --head --e2e app
 # 5.13.2`), from that clone, by the xtask under test
 SLOPTY_REPO_ROOT=$PWD SLOPTY_LANE=X <xtask> remote -p slopty-net --only <the changed paths>
 ```
+
+## 2026-10-31 — Goldens drawn in the test process: parity with the guest, time, and the windows
+
+This Mac (M1 Max, macOS 27.0.1) drawing the shell in the test process
+(`slopty_shell::shell::goldens`) against the e2e guest (a macOS 26.6.2 VM on this Mac's
+paravirtual GPU), whose goldens were accepted on 10-30 (`docs/decisions/testing.md`, "Goldens
+render in the test process"). Each frame at 1320 × 880, 1x (1,161,600 pixels); the differences
+are ImageMagick's absolute and peak error at zero fuzz.
+
+**Parity, before anything moved.**
+
+| state | pixels apart | peak | words |
+| --- | --- | --- | --- |
+| interface | 0 | 0 | same |
+| interface-frosted | 0 | 0 | same |
+| settings-appearance-light | 0 (the same PNG, byte for byte) | 0 | same |
+
+The moved goldens against the guest's whole frames, each cropped to its own surface:
+
+| golden | pixels apart | where |
+| --- | --- | --- |
+| settings-agents, -shortcuts, -devices, -appearance-defaults (pages) | 0 | — |
+| settings-devices-add, -add-server, -add-failed (dialogs) | 0 | — |
+| settings-archived | 55 | the e2e's archive toast at the page's left edge |
+| settings-devices-invite | a 240 × 212 box only | the code and the address under it carried the e2e run's own port (55054); the in-process server's is fixed (7373) |
+
+A hosted runner (`xcode-27`, run 41194412265) drew Settings → Appearance in light and dark with no
+pixel apart from the guest's goldens, and the four pages of the table's first row with none apart
+from the guest's crops; it drew no other state in that run.
+
+**Time, the Settings goldens.**
+
+| | states | PNG | time |
+| --- | --- | --- | --- |
+| e2e, before (the guest, serial; `.research/e2e-reduction-2026-10-31/A-inventory.md`) | 10 | 20, light and dark | #35's Settings part about 38 s (14 of its 18 PNG, of 48.9 s), #6 4.7 s, #7 10.8 s: about 53.5 s, 5.4 s a state |
+| in-process, after (5 tests here, at once beside the shell's other 1,340) | 10 | 12 (10 light, 2 dark), 20 snapshots, 10 dark checks | 10.1 s of test time: Appearance 2.8 s (2 states), Devices 3.7 s (5), Agents, Shortcuts and Archived 1.2 s each; the longest bounds the wall |
+
+The interface's two frames, with their dark checks, take 1.8 s in one test.
+
+**The windows, on the self-test's own diffs.** The 39 `*.diff.png` under
+`target/remote/*/artifacts` (10-30 and 10-31), their red pixels counted; 36 passed the old rule
+(0.2 % of the frame) alone.
+
+| | diffs | worst 16 × 16 window |
+| --- | --- | --- |
+| failed the share | 3 | 256 (the inspector redone) |
+| real changes the share passed | 13 | row "301" gone (4, 113), toolbar icons swapped in `media-files` (4, 99), the invite's status line (4, 46–47), a token line in `inspector-session-light` (1, 83) |
+| Slopty's own bugs the share passed | 8 | S2's stream past its mask (5, 39–174), the terminal's rail caught fading (3, 48: a 3 × 24 pt thumb) |
+| noise | 15 | at most 15 (`surface-live-screen-takeover-dark`, G) |
+
+**Dark's text against its ground** (WCAG's ratio, the ground the colour most of a run's box
+shows), the lowest runs of the ten Settings states that show (not under an opaque quad painted
+after them), in each theme:
+
+| run | light | dark |
+| --- | --- | --- |
+| a row's separator dots (`#…4d`) | 1.49 | 1.82 |
+| a shortcut's hint (`#…61`) | 1.71 | 2.14 |
+| a missing agent's rows (`#…69`) | 1.75 | 2.34 |
+| a missing agent's icons (`#…8c`) | 2.12 | 3.11 |
+| the theme menu's check, the accent on its highlighted row | over 5 | 3.26 |
+| Add device's field placeholder | 3.96 | 3.58 |
+| light's secondary grey `#62626a` left on dark's page `#171717` (none does) | — | 2.94 |
+
+```sh
+# parity: the in-process frames against the guest's goldens (and each moved golden against the
+# guest's frame cropped to it), with ImageMagick
+magick compare -metric AE -fuzz 0 <in-process>.png crates/slopty-e2e/golden/<name>.png null:
+# the in-process goldens, timed in a lane's check (nextest's junit.xml under the lane's target)
+SLOPTY_LANE=L-H cargo xtask remote -p slopty-shell
+```

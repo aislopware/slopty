@@ -2017,6 +2017,108 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   round (the worker's own process tests and the view model's fixture tests hold that state),
   and per-round WebKit process counts and transport timings, which move to nightly.
 
+  Built (2026-10-31): items 1 and 3, and the Settings pages and the self-test's first frames
+  moved under item 2, which this refines: dark is held by four checks, not a colour mapping.
+  - **The harness.** gpui-fast #81 (af75fa48) adds a test context built with a text system and
+    a renderer factory (`TestAppContext::build_with_renderer`), transparency in the headless
+    renderer (so a frosted window draws as the app's does), and rendering at a scale. The pin
+    also brings #80, which names each surface's buffer in the retained check's text; that
+    check's other users (`slopty-kit`, `slopty-terminal`, `slopty-visual-gpu`) pass on it.
+    `slopty_shell::shell::goldens` opens the window as `start` does, through its `install`,
+    `main_window_options` and `prepare_main_window`. `slopty_testkit::golden` (feature
+    `golden`, off for xtask) holds the comparator, the backdrop and the words, and the
+    self-test uses the same module.
+  - **What a golden holds.** Its picture and its scene are its surface's (a page beside the
+    sections, cut at Settings' own column width; a dialog with room for its shadow); its words
+    are the whole window's accessibility tree, as the self-test's `.txt` were, below the fold
+    and the focused section tab too. The stand-in's strings come from their producers: the
+    invite from `ServerInvite::reaching`, a run's failure from `slopty_deploy::Failure::unnamed`,
+    the pinned moment and the server's name from `slopty_testkit::stack`. The look on the
+    tailnet's answer is a Status node now, which the self-test asserts and this test settles on.
+  - **The comparator** fails a frame on any of three: a 16-pixel square holding more than 24
+    differing pixels, a straight run of 64, or more than 0.2 % of its pixels (0.05 % on the
+    simulator, kept until a simulator's diffs are measured against the windows, which are in
+    device pixels). A changed 40 × 40 icon fails. 590 scattered noise pixels pass, and ten
+    times that fills no window but fails on its share, as a weight or a hinting changed across
+    a page would. The windows were measured on the 36 diffs under `target/remote/*/artifacts`
+    (10-30 and 10-31) that passed the share alone. 21 of them fail the windows:
+    - 13 are real changes the old rule let through: row "301" gone from the terminal's floats
+      (4 frames, a window of 113), two toolbar icons swapped in `media-files` (4, 99), a token
+      line changed in `inspector-session-light` (1, 83), and the invite's status line (4, 46).
+    - 8 are Slopty's own bugs, not the GPU's noise. One is the stream's picture past its mask
+      in S2's `surface-live-screen-takeover` (5 runs across four lanes, 39 to 174), which
+      229d0236b likely fixed; no run has shown it yet. The other is the terminal's rail caught
+      as it faded (3 frames, 48): its 3 × 24 pt thumb lingers 1.4 s and fades for 0.26 s after a
+      scroll, and the dark frame, drawn just after its light twin, fell at that edge in some
+      runs. The self-test now waits it out before a float's goldens
+      (`slopty_e2e::RAIL_AT_REST`, held to the shell's linger and fade by a test in
+      `slopty-app`).
+    - The other 15 held at most 15 differing pixels in any window.
+  - **Dark, refining item 2.** The relation the ruling named, each light colour mapped to its
+    dark one through the theme's token pairs, failed on correct pages. The shell works colours
+    out in code as well as from the theme (a switch's knob, a hover's opacity of its own in each
+    theme), two colours alike in light part in dark, and a glyph's raster is a pixel wider or
+    narrower on the other ground, which moves runs and the depths of what overlaps them. A
+    state's dark frame is held instead to four checks against its light one, whose picture is
+    the one reviewed and kept:
+    1. It says the light frame's words.
+    2. It lays out as light does: the same nodes at the same bounds, and every primitive of the
+       same kind, place, clip, corners, borders and fade, colours and depths aside, a run of
+       glyphs within a point (`scene::moved`). The one primitive only dark paints is let be:
+       the lit top edge a float takes inside its ring on dark (`Theme::elevation`, an inset
+       shadow with no blur, over the fill).
+    3. Neither frame paints a colour only the other theme has, at that colour's opacity: a
+       colour left as it was when the theme changed (`scene::foreign`).
+    4. No text that shows is fainter in dark than in light under a contrast of 3 (WCAG's ratio,
+       against the colour most of the run's box shows; a run under an opaque quad painted after
+       it, the page under a dialog, shows nowhere; `scene::fainter`). On the ten Settings
+       states the quietest live words in dark stand at 3.26 (a menu's check, the accent on its
+       highlighted row) and 3.58 (a field's placeholder), and what light sets faint by design
+       stands higher in dark than in light: a row's separator dots 1.49 and 1.82, a missing
+       agent's rows 1.75 and 2.34, a shortcut's hint 1.71 and 2.14. A fixed floor fails those
+       at 3, or at 1.5 passes light's secondary grey left in dark, which stands at 2.9 on the
+       dark page.
+
+    A dark picture is kept only where a page shows both themes' colours itself (Appearance and
+    its theme menu).
+  - **Parity, measured before anything moved.** This Mac is an M1 Max on macOS 27.0.1; the
+    guest is a macOS 26.6.2 VM on this Mac's paravirtual GPU, and its goldens were accepted on
+    10-30. The opaque interface, the frosted one and Settings → Appearance in light, drawn here
+    and compared with the guest's goldens (1,161,600 pixels each), had no pixel apart, even
+    within the slack, and the same words; the Appearance render was the golden's PNG byte for
+    byte. The moved pages and dialogs, compared with the guest's frames cropped to them, had no
+    pixel apart either, but for the toast the e2e's archive left beside the archived page and
+    the run's own port in the invite's code. So the goldens were accepted from this Mac's run
+    (`INSTA_UPDATE=always`), not a runner's. Parity is held since: the in-process test writes
+    `interface` and `interface-frosted` with their words, and S1 holds the app's frames on the
+    real stack to them without writing them, so the two drawing apart fails there.
+  - **A hosted runner** (`xcode-27`, run 41194412265) drew Settings → Appearance in light and
+    dark with no pixel apart from the guest's goldens, and the agents, shortcuts, devices and
+    appearance-defaults pages with none apart from the guest's crops. The dialogs, the archived
+    page, the defaults' dark and the interface frames were not drawn there in that run.
+  - **No silent pass.** A Mac with no Metal device fails, since the shell's tests run only on
+    Macs and every one has one. A golden that is not there fails unless the run accepts
+    (`INSTA_UPDATE=always`, the self-test's `--accept`), so CI's comparing runs
+    (`INSTA_UPDATE=no`) write none; a frame that matches leaves no render behind.
+  - **Settings moved.** 10 states in 5 tests, 12 PNG files (10 light, 2 dark), and 20
+    snapshots (words and scene); the interface's two frames add their scene snapshots. The
+    other 8 dark PNG files and the 20 `.txt` are deleted, every one's content held here (words
+    and the dark checks). The e2e keeps what only the stack has: the address the server gives,
+    that a look on the tailnet finds none and says so, and that a real SSH run fails naming the
+    machine. Before, the 10 states took about 53.5 s of the guest's serial time for 20 PNG
+    files; now 10.1 s of test time on this Mac for the 10 (the five tests run at once beside
+    the shell's other tests, the longest, Devices' five states, 3.7 s), and the interface's two
+    frames 1.8 s (`docs/MEASUREMENTS.md`, "Goldens drawn in the test process").
+  - **Limits, said plainly:**
+    - A hairline or a card's edge moved by a pixel at a contrast of 64 or less is an edge both
+      pictures explain, so the comparator passes it. The light scene snapshot holds it for an
+      in-process golden and the layout check for its dark; nothing holds it for an e2e golden.
+    - A one-pixel line shorter than 64 pixels that vanished alone fills no window past 24; the
+      scene holds it in-process.
+    - A dark colour that is wrong but the dark theme's (a token swapped for another) is caught
+      only where a dark picture is kept, or where it sets text fainter than light under 3.
+    - Below the fold a page is held in words only, as the self-test held it.
+
 - ✅ **A change's smoke cases follow from its paths; a lane check runs the gate's tool steps
   its change reaches; an e2e run builds once** (2026-10-31). Items 5 and 6 of "Goldens render in
   the test process" above, as far as they stand without the gate's smoke jobs, which come with
