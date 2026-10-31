@@ -328,6 +328,10 @@ pub struct ScreenView {
     glass: Arc<glass::Glass>,
     /// The newest picture's size and colour; `None` before the first.
     shape: Option<glass::Shape>,
+    /// The pictures the view draws in GPUI's own frame, as the glass had them when the view was
+    /// last told ([`Self::take_pictures`]): the whole target's under a region's layer, and while
+    /// a render captures the window, the newest.
+    pictures: Pictures,
     /// Where the picture's layer is placed from, in the window the view last drew in.
     host: Option<Host>,
     /// Where a striped picture's lower stripe's layer is placed from, in that window.
@@ -1036,7 +1040,10 @@ impl ScreenView {
         })));
         let pump = Self::pump(glass.shapes(), handle.cursor(), cx);
         // A render that captures the window draws the picture itself ([`capture_pictures`]).
-        let capture = cx.observe_global::<CapturePictures>(|_view, cx| cx.notify());
+        let capture = cx.observe_global::<CapturePictures>(|view, cx| {
+            view.take_pictures(cx);
+            cx.notify();
+        });
         // Somebody is watching a remote window: the platform must not dim or sleep under it.
         let acquisition = cx.prevent_idle_sleep("Slopty remote window");
         let awake = cx.spawn(async move |_this, _cx| match acquisition.await {
@@ -1055,6 +1062,7 @@ impl ScreenView {
             handle,
             glass,
             shape: None,
+            pictures: Pictures::default(),
             host: None,
             lower_host: None,
             system_keys: false,
@@ -1766,10 +1774,24 @@ impl ScreenView {
         if shape.region.is_none() {
             self.size = shape.size;
         }
+        self.take_pictures(cx);
         if first {
             cx.emit(ScreenViewEvent::Ready);
         }
         cx.notify();
+    }
+
+    /// Take the pictures the view draws in GPUI's own frame from the glass, as they are now:
+    /// the whole target's under a region's layer, and the newest while a render captures the
+    /// window. Only when the view is told (a new shape, a capture beginning or ending), never in
+    /// a render: a picture reaches the glass on the decoder's thread without telling the view,
+    /// and a frame that drew the view again from the last one must show what one built afresh
+    /// does.
+    fn take_pictures(&mut self, cx: &App) {
+        self.pictures = Pictures {
+            base: self.shape.and_then(|shape| shape.region).and_then(|_| self.glass.base()),
+            captured: capturing(cx).then(|| self.glass.last()).flatten(),
+        };
     }
 
     /// Put `buffer` up as a picture off the stream would be (tests and the workspace's frame
@@ -1781,6 +1803,14 @@ impl ScreenView {
         self.glass.offer(picture, glass::test_stamp(self.test_pictures));
         self.test_pictures = self.test_pictures.saturating_add(1);
         self.shaped(shape, cx);
+    }
+
+    /// Hand `picture` to the glass as the decoder's thread does (tests): the view is told only
+    /// through its pump, of a new shape.
+    #[cfg(test)]
+    fn decoded(&mut self, picture: glass::Picture) {
+        self.glass.offer(picture, glass::test_stamp(self.test_pictures));
+        self.test_pictures = self.test_pictures.saturating_add(1);
     }
 
     /// Put a picture of `region` of the target up (tests).
@@ -3052,7 +3082,8 @@ struct CapturePictures(bool);
 
 impl Global for CapturePictures {}
 
-/// While `on`, every stream draws its newest picture in GPUI's own frame too, over its layer.
+/// While `on`, every stream draws its newest picture in GPUI's own frame too, over its layer:
+/// the one it had as the capture began, or as a picture of a new shape came since.
 ///
 /// A render of the window (`Window::render_to_image`) has GPUI's drawable only, and the layers
 /// are the window server's to composite. The surface shader is the layer's, so the picture is
@@ -3063,6 +3094,16 @@ pub fn capture_pictures(on: bool, cx: &mut App) {
 
 pub(crate) fn capturing(cx: &App) -> bool {
     cx.try_global::<CapturePictures>().is_some_and(|capture| capture.0)
+}
+
+/// The pictures a [`ScreenView`] draws in GPUI's own frame ([`ScreenView::take_pictures`]).
+#[derive(Default)]
+struct Pictures {
+    /// The newest picture of the whole target, under a region's layer; `None` when the newest
+    /// picture shows the whole.
+    base: Option<glass::Picture>,
+    /// The newest picture, over its layer, while a render captures the window.
+    captured: Option<glass::Picture>,
 }
 
 /// What the pointer overlay paints.
@@ -3282,10 +3323,10 @@ impl Render for ScreenView {
                 let native = host.native.clone();
                 let lower_native = self.lower_host.as_ref().map(|host| host.native.clone());
                 let (zoom, whole, target) = (self.zoom, self.size, self.native);
-                let captured = capturing(cx).then(|| self.glass.last()).flatten();
+                let captured = self.pictures.captured.clone();
                 // Under a region's layer, the newest picture of the whole target, drawn by GPUI:
                 // it fills what the region does not reach until a region that does comes.
-                let base = shape.region.and_then(|_| self.glass.base());
+                let base = self.pictures.base.clone();
                 let (glass, laid_out) = (Arc::clone(&self.glass), Rc::clone(&self.laid_out));
                 #[cfg(test)]
                 let (layer_at, lower_at, base_at) = (
@@ -5938,6 +5979,54 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(layer(&view, cx), Some((rect(-100., -150., 800., 600.), fit)), "the whole");
         assert_eq!(base(cx), None, "nothing under a picture of the whole");
+    }
+
+    /// The pictures the view draws in GPUI's own frame are the ones it was told of, so a frame
+    /// that drew it again from the last one shows what a frame built afresh does
+    /// (`slopty_kit::retained::stale`). While a render captures the window, the newest picture
+    /// as the capture began, though more reach the glass on the decoder's thread, telling the
+    /// view nothing while their shape holds; and under a region's layer, the whole target's
+    /// newest as the region came, though a picture of the whole reaches the glass before the
+    /// view hears of its shape.
+    #[gpui::test]
+    fn the_pictures_drawn_in_the_frame_are_the_ones_the_view_was_told_of(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, _rx, cx) = windowed(cx);
+        // The pump tells the view of a new shape, as the stream's does.
+        let _cursor = pumped(&view, cx);
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        let stale = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 8))
+        };
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        cx.update(|_w, cx| capture_pictures(true, cx));
+        cx.run_until_parked();
+        let captured = view.read_with(cx, |v, _| v.pictures.captured.is_some());
+        assert!(captured, "a capture draws the newest picture");
+        assert_eq!(stale(cx), None, "as the capture began");
+        view.update(cx, |v, _| v.decoded(glass::Picture::new(picture(800, 600))));
+        cx.run_until_parked();
+        assert_eq!(stale(cx), None, "a picture of the same shape tells the view nothing");
+        cx.update(|_w, cx| capture_pictures(false, cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.pictures.captured.is_none()), "the capture over");
+        assert_eq!(stale(cx), None, "the capture over");
+
+        let region = Region { x: 200, y: 150, w: 400, h: 300 };
+        view.update(cx, |v, cx| {
+            v.zoom = Zoom::FIT.about((0.5, 0.5), 2.0, 8.0);
+            v.show_region(picture(400, 300), region, cx);
+        });
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.pictures.base.is_some()), "the whole under it");
+        assert_eq!(stale(cx), None, "the region over the whole");
+        view.update(cx, |v, _| v.decoded(glass::Picture::new(picture(800, 600))));
+        assert_eq!(stale(cx), None, "a picture of the whole the view has not heard of yet");
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.pictures.base.is_none()), "told, nothing under it");
+        assert_eq!(stale(cx), None, "the whole, told");
     }
 
     /// This Mac's pointer pushing at an edge of a zoomed picture pans it toward that edge for

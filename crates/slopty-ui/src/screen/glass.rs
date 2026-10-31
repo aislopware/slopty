@@ -5,7 +5,9 @@
 //! [`VideoLayer`], which draws it on the layer's thread and never waits for a GPUI frame; the
 //! view only places the layer where the picture goes, in its own frame, like any native. A
 //! picture costs the window no frame. The view is told only when what it draws around the
-//! picture changes: the first picture, and a new size or chroma ([`Shape`]).
+//! picture changes: the first picture, and a new size or chroma ([`Shape`]). A picture it draws
+//! in GPUI's own frame ([`Glass::base`], [`Glass::last`]) it takes when it is told, never in a
+//! render, which would draw a newer one than the frame drawn again from the last showed.
 //!
 //! The [`Pacer`] is kept here, where all three threads reach it. A picture is offered to it on
 //! the decoder's thread and put up on the layer when the pacer takes it. The layer's report
@@ -222,8 +224,8 @@ struct Slot {
     layer: Option<Layer>,
     /// The lower stripe's layer, once a striped picture came.
     lower: Option<Layer>,
-    /// The newest picture the pacer took: a render that captures the window draws it, and a
-    /// layer attached after it came shows it first.
+    /// The newest picture the pacer took: the view takes it for a render that captures the
+    /// window, and a layer attached after it came shows it first.
     last: Option<Picture>,
     /// The newest picture of the whole target, which the view draws under a region's layer.
     base: Option<Picture>,
