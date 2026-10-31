@@ -45,6 +45,11 @@ zed itself so it is never behind zed while longbridge lags.
     names the app to switch on under System Settings → Privacy & Security → Developer Tools
     (the terminal, or the multiplexer if builds run inside one; only you can switch it). It
     also checks the free space against the floor below.
+- `cargo xtask outline <file>...` prints a Rust file's items (`mod`, `fn`, `struct`, `enum`,
+  `trait`, `impl` and their functions, `const`, `static`, `type`, `macro_rules!`, and an item
+  macro's contents such as `proptest!`'s), one line each with its line range, nested under what
+  holds them. Read a large file by its outline first, then only the ranges you need. It scans
+  tokens rather than parsing, so it also outlines a file in the middle of an edit.
 - **Checks run where they return soonest** (`docs/decisions/tooling.md`, "Checks run where they
   return soonest"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside
   the real index (`--only <path>`, repeatable: `HEAD` plus the edits under those paths alone, so

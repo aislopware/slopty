@@ -32,6 +32,7 @@ mod linux;
 mod local;
 mod memstat;
 mod nightly;
+mod outline;
 mod prune;
 mod ptys;
 mod release;
@@ -145,6 +146,8 @@ enum Cmd {
     /// tree's: refused when that check failed, has not ended, a later check of the lane took the
     /// same paths, or main moved one of them since.
     Stage(remote::stage::StageOpts),
+    /// A Rust file's items with their line ranges, nested, one line each: what to read of it.
+    Outline(outline::OutlineOpts),
     /// How CI is doing: the last Deep nightly job by job (verdict, wall time, what failed),
     /// then how long each push to `gate` took to reach main, and the spread: the wait a lane
     /// feels.
@@ -399,6 +402,7 @@ pub fn main() -> Result<()> {
         Cmd::Land(opts) => land::run(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
         Cmd::Stage(opts) => remote::stage::run(&sh, &opts),
+        Cmd::Outline(opts) => outline::run(&opts),
         Cmd::CiHealth { since } => health::run(&sh, since.as_deref()),
         Cmd::GateWait { hours } => remote::gate_wait(&sh, hours),
         Cmd::Toolchain { version } => toolchain::run(&sh, version.as_deref()),
