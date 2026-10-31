@@ -1,31 +1,45 @@
 name: E2E
+run-name: >-
+  ${{ github.event_name == 'schedule' && 'E2E nightly' || format('E2E: {0}', inputs.sha || github.sha) }}
 
-# The app's live tests (`cargo xtask e2e app`): the real app with ptyd and the worker, driven
-# through its test socket, its frames compared with the goldens. They used to run only on a
-# developer's Mac before each land, minutes of every core there; here they take a runner instead
-# (docs/decisions/tooling.md, "Nothing heavy runs here before a land"). A workflow of its own, so
-# its build never holds the gate's concurrency group, and `promote` waits for none of it: it is
-# not a gate lane until its renders are shown to match the goldens drawn on a Mac with a GPU of
-# its own. A changed frame leaves its render and diff in the `e2e-app` artifact, which
-# `cargo xtask e2e app --accept` reproduces locally. It runs at most every four hours, started by
-# `ci.yml`'s `promote` once main moves, and by hand; not on each land: on every push it held a
-# sixth macOS slot almost all the time, so the gate's fifth lane waited for it. Not on a
-# schedule, as main moves only by `promote`'s token, which GitHub does not count as a push, so a
-# scheduled run kept checking out the last commit a person pushed (0d67253b, for two days)
-# (docs/decisions/tooling.md, "The app's e2e runs on a schedule").
+# The live tests (`cargo xtask e2e`): the real app with ptyd and the worker, the server with the
+# CLI and MCP, and the iOS app in the simulator on the iPhone and the iPad, each driven through
+# its test socket, every case on one commit (docs/decisions/testing.md, "Goldens render in the
+# test process; e2e is a smoke set chosen by what a change reaches"). Two ways in, both
+# dispatched on `gate`, so the run reads the compile cache the test shards fill there (a cache is
+# read by its own branch alone, and a run on main built the app for 600 s,
+# .research/ci-speed-2026-10-11.md item 10):
+# - Nightly: the schedule, which runs on main, only dispatches this on `gate` with main's head.
+#   main moves only by `promote`'s token, which GitHub does not count as a push, so a scheduled
+#   run's own commit was the last one a person pushed (0d67253b, for two days). GitHub starts a
+#   schedule late or not at all under load, so `promote` starts one when none started for 26
+#   hours.
+# - By hand, on the commit named (`gh workflow run e2e.yml --ref gate -f sha=<commit>`).
+# `--review`: a changed frame fails nothing here and leaves its render and diff in the
+# `e2e-<case>` artifact, since a runner's GPU draws apart from the Macs the goldens were drawn
+# on; a red here is the behaviour's, and is never retried (`NEXTEST_RETRIES=0`). Each job's
+# summary holds the run's record: every phase's seconds, the whole run's tests and each that
+# failed.
 on:
+  schedule:
+    - cron: "47 3 * * *"
   workflow_dispatch:
     inputs:
       sha:
-        description: The commit to test; `promote` names the one it pushed to main
+        description: The commit to test; empty for the ref's head
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
   contents: read
+
+# `bash` named, so a step runs with pipefail, which GitHub's default shell leaves off.
+defaults:
+  run:
+    shell: bash
 
 env:
   CARGO_TERM_COLOR: always
@@ -40,20 +54,40 @@ env:
   # this name (docs/decisions/platform.md, "Xcode 27.1").
   DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
   # `.cargo/config.toml` wraps rustc in sccache; where it keeps its units is
-  # .github/actions/sccache's call.
-  # `promote` dispatches this on `gate`, whose cache the test shards fill: a run on main read
-  # main's, which nothing else fills, and built the app and daemons for 600 s
-  # (.research/ci-speed-2026-10-11.md item 10). On R2 every ref shares one cache.
+  # .github/actions/sccache's call. On R2 every ref shares one cache.
   # The server stays up to the end, so the last step's statistics count the run: idle for ten
   # minutes while the tests ran, it had exited and shown none.
   SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
-  e2e-app:
-    name: e2e (app)
+  # The schedule's run: every case on main's head, dispatched on `gate` (the header).
+  nightly:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+          gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$sha"
+          echo "every e2e case started on main's head, $sha, on gate" >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    if: github.event_name == 'workflow_dispatch'
+    name: e2e (${{ matrix.case }}${{ matrix.sim && format(' {0}', matrix.sim) || '' }})
     runs-on: xcode-27
     # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { case: app, sim: "" }
+          - { case: server, sim: "" }
+          - { case: ios, sim: iphone }
+          - { case: ios, sim: ipad }
     steps:
       # Spotlight off: it indexes every file a build and its tests write, and on a three-core
       # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
@@ -70,10 +104,13 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      # The Mac's triple, and the simulator's for the ios case.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-          targets: aarch64-apple-darwin
+          targets: >-
+            ${{ matrix.case == 'ios' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
       - id: cargo-home
         uses: actions/cache/restore@v6
@@ -94,18 +131,41 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - id: prebuilt
+        uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
-      - uses: actions/cache@v6
+      # Ghostty's zig packages only for a build of libghostty-vt: with the prebuilt for these
+      # exact inputs restored, nothing builds it, and the fetch was 51-74 s of every run
+      # (.research/e2e-reduction-2026-10-31/B-anatomy.md), as ci.yml's lanes already skip it.
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - working-directory: vendor/ghostty
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
+      # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
+      - if: matrix.case == 'ios'
+        id: xcodegen
+        uses: actions/cache@v6
+        with:
+          path: ~/.local/xcodegen
+          key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
+      - if: matrix.case == 'ios' && steps.xcodegen.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
+      - if: matrix.case == 'ios'
+        run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
       # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
@@ -137,15 +197,23 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`, "An e2e
-      # case runs in a guest here").
-      - run: xtask e2e app --review --test-threads 3
+      # A red is the behaviour's: no test is retried, the named overrides' retries included.
+      - env:
+          CASE: ${{ matrix.case }}
+          SIM: ${{ matrix.sim }}
+          NEXTEST_RETRIES: "0"
+        run: |
+          args=("$CASE" --review)
+          [ "$CASE" = ios ] && args+=(--sim "$SIM")
+          # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
+          # "An e2e case runs in a guest here").
+          [ "$CASE" = app ] && args+=(--test-threads 3)
+          xtask e2e "${args[@]}"
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-app
+          name: e2e-${{ matrix.case }}${{ matrix.sim }}
           path: target/e2e/artifacts
           if-no-files-found: ignore
       - if: always()
         run: $SCCACHE_PATH --show-stats
-
