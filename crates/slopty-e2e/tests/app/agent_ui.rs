@@ -13,7 +13,7 @@ use slopty_e2e::Dump;
 use slopty_e2e::harness::{ServedApp, bin_dir};
 
 use crate::served::{
-    STEP, heard, holding, node, open_thread, says, seen, start, tell, thread_until,
+    SETTLE, STEP, heard, holding, node, open_thread, says, seen, start, tell, thread_until,
     type_in_terminal,
 };
 
@@ -100,7 +100,8 @@ async fn ui(stack: &ServedApp, cwd: &Path, args: &[&str]) -> (bool, Value) {
 /// of its own, each change shown in place with no notice over it, since the agent's chat is the
 /// one on screen (a chat off screen is marked with one, `shell::agent_ui::tests`), and `ui_state`
 /// reports that layout: the sidebar and the shells shown, the README's pane and the shell's, with
-/// its session, and nobody typing.
+/// its session, and nobody typing. Neither pane takes the keyboard: it stays in the session's
+/// terminal, also once the README's text has come back from the worker and drawn.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn an_agents_tools_lay_out_the_window() {
@@ -143,6 +144,8 @@ async fn an_agents_tools_lay_out_the_window() {
     assert_eq!(hid[0]["did"], "hid the sidebar", "{hid:?}");
     assert_eq!(region(&hid[0]["window"], "sidebar")["shown"], false, "{hid:?}");
     assert!(node(&hidden, "Button", "Hide sidebar").is_none());
+    let session = hidden.focused.clone();
+    assert!(session.starts_with("terminal:"), "the session's terminal has the keyboard: {session}");
 
     // Then it lays the window out.
     tell(&mut stack, ARRANGE).await;
@@ -184,10 +187,24 @@ async fn an_agents_tools_lay_out_the_window() {
     let tabs = window["tabs"].as_array().cloned().unwrap_or_default();
     let readme = tabs.iter().find(|t| t["kind"] == "file").unwrap_or(&Value::Null);
     assert_eq!(readme["region"], "pane", "{window}");
-    assert_eq!(readme["selected"], true, "{window}");
     assert!(readme["target"].as_str().is_some_and(|t| t.contains("README.md")), "{window}");
     let terminal = tabs.iter().find(|t| t["id"] == opened["made"]["id"]).unwrap_or(&Value::Null);
     assert_eq!(terminal["terminal"], opened["made"]["terminal"], "its tab, by its id: {window}");
+    // An agent's opens leave the keyboard where the person had it.
+    for tab in [readme, terminal] {
+        assert_eq!(tab["selected"], false, "{window}");
+    }
+
+    // Still so once the README's text came back from the worker and drew: opened at a line, the
+    // view builds its source editor only then, and that editor takes nothing by itself.
+    tokio::time::sleep(SETTLE).await;
+    let drawn = stack.driver.dump().await.unwrap();
+    assert_eq!(drawn.focused, session, "the session's terminal kept the keyboard");
+    let (ok, later) = ui(&stack, &repo, &["state"]).await;
+    assert!(ok, "{later}");
+    let tabs = later["window"]["tabs"].as_array().cloned().unwrap_or_default();
+    assert_eq!(tabs.len(), 2, "the README's pane and the shell's: {later}");
+    assert!(tabs.iter().all(|t| t["selected"] == false), "neither pane selected: {later}");
 
     stack.shutdown().await;
 }
