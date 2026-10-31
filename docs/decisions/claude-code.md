@@ -1048,16 +1048,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under `~/.claude`), registers itself as each hook the relay registers, `async` as the relay
     is, to record payloads, and scrubs paths, the user name, e-mail addresses and every id to
     numbered placeholders. Attachments keep only their type. It lets Claude Code go only once
-    no hook it started still runs (Claude Code cancels those as it exits), and keeps in
+    no hook it started still runs (Claude Code cancels those as it exits), is waited on for
+    `SessionEnd` (which `-p` would exit without once a turn ran), and keeps in
     `arrivals.jsonl` the order and time the transcript's writes and the hooks reached it, so a
     test can replay what Slopty heard. In those scratch runs alone its sink stands in for the
     person at the permission dialogs `-p` would otherwise refuse, and only there does Claude
     Code wait on it (`permission`: one command refused, the rest allowed); in a Slopty session
-    nothing answers one. Nine scenarios as of 2.1.314: `edit` (read, edit, overwrite, ranged
-    read), `tools` (tasks, glob, grep, bash, a failing bash, a background bash, a create, a
-    subagent), `interrupt`, `compact` (a prompt, `/rename`, then `/compact`), `permission` (a
-    command refused, then a command, an edit and a write allowed), `background` (canned),
-    `auto`, `fork` and `notebook`. A snapshot that moves after a recapture is the format moving.
+    nothing answers one. Nine scenarios, `background` 2.1.316's and the rest 2.1.314's: `edit`
+    (read, edit, overwrite, ranged read), `tools` (tasks, glob, grep, bash, a failing bash, a
+    background bash, a create, a subagent), `interrupt`, `compact` (a prompt, `/rename`, then
+    `/compact`), `permission` (a command refused, then a command, an edit and a write allowed),
+    `background` (canned), `auto`, `fork` and `notebook`. A snapshot that moves after a recapture
+    is the format moving.
   - Entries: prompt (a slash command or `!` keeps its name), answer text, thinking, a tool call
     paired with its result, compaction with its summary, Esc, and Claude Code's notes (API
     errors, command output, informational lines). Tool details are typed for Edit/MultiEdit
@@ -2813,3 +2815,58 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_stop_ends_the_turn_a_notice_moved_on`;
     `conversation::tests::a_command_s_turn_ends_with_its_output`; `slopty-worker` `threads.rs`
     `hooks`, which holds each turn's state and end as well as the status.
+
+- ✅ **Claude Code 2.1.316 is the version pinned** (2026-10-31, from 2.1.314; 2.1.315 reached npm
+  the day before with no changelog entry or release of its own, so 2.1.316's entry covers both).
+  `xtask::claude::VERSION`, `draft::CHECKED_WITH`, the stand-in
+  (`slopty_testkit::claude_tui::VERSION`), the mod's recording, the canned `background` scenario
+  and the registry samples are its. The scenarios a model answers (`edit`, `tools`, `interrupt`,
+  `compact`, `permission`, `auto`, `fork`, `notebook`) stay 2.1.314's: they are recorded through
+  the person's signed-in managed launcher, which still runs 2.1.314, and the recorder refuses a
+  `claude` of another version, so they are recorded again once it moves. What changed that
+  reaches Slopty, by the changelog, the SDK's types, the build's own schemas and the recordings:
+  - **No record, field or hook payload the decoder reads moved.** Both builds have the same 33
+    hook events, the same fields in each payload and in the statusline's input, and the same
+    record types and subtypes. The `background` recording holds the same records and fields as
+    before, and the registry samples, measured again in the official TUI against the canned API
+    (at rest, at work, at a permission, at a question, with a background shell), the same fields
+    but the `tmux` pane, which the measurement's clean environment gave it none of.
+  - **A command's result may tell the model more than it printed.** 2.1.316 adds two notes to
+    what the model reads of a Bash call, `memoryLimitNote` (the kernel killed a process for lack
+    of memory while it ran) and `triggeredNote` (a line of advice a server-side rule adds), beside
+    2.1.314's `staleReadFileStateHint` and `ghRateLimitHint`; a command that printed nothing reads
+    as "(Bash completed with no output)" followed by them. The TUI draws none of them. The
+    inspector's command card shows the structured stdout and stderr, and a result whose text says
+    more is kept as what the model read (`ToolResult::seen`, "Details for Claude"), so the notes
+    are there with no change. A large output kept in a file now holds its head, a line for the
+    middle left out and its tail in `stdout` (`stdoutHoldsOutputEnd`), so the card's tail is the
+    command's real end.
+  - **The mod API holds what the mod uses.** In the declarations 2.1.316 writes for mods,
+    `prompt.edit`, `prompt.change` and `$.env.get` are as they were, and the mod's quick check
+    passes against them. `$.prompt.media` now answers any mod's `prompt.submit` hook, not only a
+    managed install's, but only as a prompt is submitted, so the mirror of a box still being typed
+    reads its pictures from Claude Code's store as before.
+  - **A prompt holding invisible characters sends on the first Enter.** 2.1.314 held such a
+    prompt for a second Enter, so an `agent_tell` holding one stayed in the box; 2.1.316 sends it
+    cleaned on the one Enter the worker's writer sends. A command holding one still waits for the
+    person's review in the TUI.
+  - **The recorder is waited on for `SessionEnd`.** Every scenario's 2.1.314 recording ended with
+    `SessionEnd`; recorded again, on 2.1.314 and 2.1.316 alike, none did: once a turn ran, `-p`
+    exits before an asynchronous `SessionEnd` hook reaches the sink, which before only won a race
+    with the exit, while in the TUI `/exit` ran the relay's (`prompt_input_exit`, measured on
+    2.1.316). The sink registers for `SessionEnd` as a hook Claude Code waits on
+    (`fixtures::WAITED`), so every capture holds it, as a TUI's relay hears it.
+  - **The canned hold outlasts the mod recording's queue.** A `scenario:hold` turn waited 4 s,
+    and the mod recording sends its queued prompt again about 4 s after the turn's submit: in
+    2.1.316's run the turn had ended first, and the transcript held no second `enqueue` and
+    `dequeue`. It waits 8 s (`canned::HOLD`), and the recording matches 2.1.314's but for the
+    version.
+  - **Fixes only, otherwise**, among them shell commands no longer left running when Claude Code
+    exits by itself, Grep and Glob no longer hanging when their search outlives its timeout, and
+    a sub-agent keeping the model it inherited when woken. Left unset:
+    `CLAUDE_CODE_SUBAGENT_EFFORT`, `CLAUDE_CODE_DISABLE_ULTRATHINK` and the starting program's
+    `blockReadsExemptPaths`; the `initialize` answer's new `pending_elicitation_requests` is for
+    SDK hosts, and Slopty sends no `initialize`. `bashEditDiffEnabled`'s description now says what
+    2.1.314's code already did: off by default outside auto and bypass modes, so a command's edits
+    (`bashEditDiff`) show in the inspector where the person's setting or mode has Claude Code take
+    them.

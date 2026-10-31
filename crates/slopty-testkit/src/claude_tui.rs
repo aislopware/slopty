@@ -6,7 +6,7 @@
 //!
 //! - **Its record of itself**, `<config>/sessions/<pid>.json` (`pid`, `sessionId`, `cwd`, `kind`
 //!   `interactive`, `version`), where `<config>` is `CLAUDE_CONFIG_DIR` or `~/.claude`, written as
-//!   it starts and again for each session it moves to, and removed as it ends. As 2.1.314 does, it
+//!   it starts and again for each session it moves to, and removed as it ends. As 2.1.316 does, it
 //!   says there what it does (`status`: `idle`, `busy` through a turn, `waiting` while a question
 //!   waits on the person, `waitingFor` `input needed`) and since when (`statusUpdatedAt`,
 //!   `updatedAt`, milliseconds since the epoch), written again as that changes.
@@ -77,7 +77,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{Value, json};
 
 /// What it says its version is.
-pub const VERSION: &str = "2.1.314";
+pub const VERSION: &str = "2.1.316";
 
 /// The longest a hook is waited for when its entry names no timeout, in seconds.
 const HOOK_TIMEOUT_S: u64 = 60;

@@ -920,7 +920,7 @@ mod tests {
         assert_eq!(live[1].cwd.as_deref(), Some("/w"));
     }
 
-    /// What Claude Code 2.1.314 records of itself at rest, at work, at rest with a background
+    /// What Claude Code 2.1.316 records of itself at rest, at work, at rest with a background
     /// shell running and at its two dialogs (its own records, scrubbed): waiting on the person
     /// at a dialog alone, for a permission or a question as it says, since when it says. A
     /// dialog that says what it needs is said in those words, another dialog is input, and a
