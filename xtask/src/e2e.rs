@@ -511,10 +511,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         if sims.is_empty() { vec![None] } else { sims.iter().copied().map(Some).collect() };
     for (pass, sim) in passes.iter().enumerate() {
         hold_if_stopping();
-        // The host build and the app with it (`--host`), before the install: the boot and the
-        // wait both ran in the background, so joining one first loses nothing, and the
-        // simulator's first-boot work goes on while it waits.
-        if let Some(waiting) = awaiting.take() {
+        // The host build and the app with it (`--host`), joined before the install. The boot and
+        // the wait both run in the background; the simulator settles from its first boot while
+        // the build is on its way, so the two overlap, and once more after the install.
+        let host_coming = awaiting.is_some();
+        let mut host = |record: &mut Record| -> Result<()> {
+            let Some(waiting) = awaiting.take() else { return Ok(()) };
             let started = std::time::Instant::now();
             let came = waiting
                 .join()
@@ -524,6 +526,10 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             if let Some(missing) = missing_record(&suites) {
                 bail!("{missing} in the host build {}", opts.host.as_deref().unwrap_or_default());
             }
+            Ok(())
+        };
+        if sim.is_none() {
+            host(&mut record)?;
         }
         let device = sim.map(|sim| {
             let family = sim.family();
@@ -540,21 +546,17 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                     None => crate::ios::boot_simulator(sh, sim)?,
                 };
                 record.phase(&format!("simulator {family} boot"), started.elapsed(), None);
+                if on_ci() && host_coming {
+                    settled(sh, family, "boot", &mut record);
+                }
+                host(&mut record)?;
                 if let Some(app) = &app {
                     let started = std::time::Instant::now();
                     crate::ios::install(sh, &udid, app)?;
                     record.phase(&format!("simulator {family} install"), started.elapsed(), None);
                 }
                 if on_ci() {
-                    let started = std::time::Instant::now();
-                    match settle(sh) {
-                        Some(after) => println!("  the {family} settled in {after:.0?}"),
-                        None => println!(
-                            "  the {family} did not settle within {SETTLE_MOST:?}: its tests run \
-                             beside its daemons"
-                        ),
-                    }
-                    record.phase(&format!("simulator {family} settle"), started.elapsed(), None);
+                    settled(sh, family, "install", &mut record);
                 }
                 Ok((
                     sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
@@ -909,6 +911,20 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
 /// work 18-20 minutes (`docs/decisions/testing.md`, "An iOS run starts once its simulator has
 /// settled").
 const SETTLE_MOST: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// Wait for the machine to settle after the simulator `family`'s `step` ([`settle`]), saying how
+/// long it took and recording it.
+fn settled(sh: &Shell, family: &str, step: &str, record: &mut Record) {
+    let started = std::time::Instant::now();
+    match settle(sh) {
+        Some(after) => println!("  the {family} settled after its {step} in {after:.0?}"),
+        None => println!(
+            "  the {family} did not settle after its {step} within {SETTLE_MOST:?}: its tests \
+             run beside its daemons"
+        ),
+    }
+    record.phase(&format!("simulator {family} settle after the {step}"), started.elapsed(), None);
+}
 
 /// How long the machine took to settle once a simulator booted and took the app: until its CPU
 /// is half idle or more on two 4 s samples of `top` in a row. A booted simulator's daemons

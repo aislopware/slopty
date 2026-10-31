@@ -334,9 +334,10 @@ alone when the push reaches no other. When the plan has `e2e (ios)` too, the Mac
 the simulator suite's test binary and the iOS app and hands them on as the artifact `host-build-<attempt>`
 before its own tests, with the iOS app built on the host build's units (`--pack`); a push that
 reaches the simulator alone gets a `mac` job that only builds and packs. `e2e (ios)` compiles
-nothing: it boots the iPhone meanwhile, takes the build (`--host`), installs the app, waits for the
-simulator to settle (the runner's CPU half idle on two `top` samples in a row, at most 10 minutes)
-and runs S5 on the iPhone; the iPad's launch-and-layout
+nothing: it boots the iPhone meanwhile and lets it settle from its first boot while the build is
+on its way (the runner's CPU half idle on two `top` samples in a row, at most 10 minutes), takes the
+build (`--host`), installs the app, settles once more and runs S5 on the iPhone; the iPad's
+launch-and-layout
 check runs in `e2e.yml` only (`docs/decisions/testing.md`, "The simulator's runner builds no Mac
 side"). Both read the gate's compile cache, retry
 nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once

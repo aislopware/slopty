@@ -2363,13 +2363,15 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     built them again on cores the first boot held at 0 % idle. That run took 23.5 minutes (the
     `mac` job queued 5 of them behind a probe), of which the iOS app's build was 963 s.
   - **The simulator's runner only boots, installs and tests.** `xtask e2e ios --host <artifact>`
-    starts the boot and a wait for the artifact at once, joins both, installs the app, waits for
-    the simulator to settle and runs the suite; it compiles nothing, so its job takes neither the
-    iOS targets nor zig nor xcodegen. The wait asks for the artifact every 10 s and reads the
-    run's jobs every minute: a job ended red or cancelled means no build is coming, and it fails
-    at once rather than at its 40-minute limit. The same path serves `e2e.yml`. On an idle
-    runner a first boot holds all three cores for 70 s of boot and 294 s more (probe run
-    41225144069), which the wait now overlaps.
+    starts the boot and a wait for the artifact at once, joins the boot, waits for the
+    simulator to settle from its first boot while the artifact is still on its way, joins the
+    wait, installs the app, settles once more and runs the suite; it compiles nothing, so its job
+    takes neither the iOS targets nor zig nor xcodegen. The wait asks for the artifact every 10 s
+    and reads the run's jobs every minute: a job ended red or cancelled means no build is coming,
+    and it fails at once rather than at its 40-minute limit. The same path serves `e2e.yml`. On
+    an idle runner a first boot holds all three cores for 70 s of boot and 294 s more (probe run
+    41225144069), which the wait now overlaps; with the settle after the install alone, that
+    work was waited out only once the build had come (249 s in run 41226170614).
   - **The iPad's light check leaves the gate.** It runs in every `e2e.yml` run, nightly and at a
     round's end, as a job of its own beside the iPhone's from the same host build, where its
     first boot costs no push 16 minutes. The person does not use the iPad (its light check of
