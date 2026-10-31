@@ -913,3 +913,34 @@ fn prebuilt_libraries_go_once_unused() {
     assert!(!stale.exists() && !staging.exists());
     assert_eq!(prebuilt(&f.root.join("missing"), f.now, false).unwrap(), 0);
 }
+
+/// A file a clone shares counts nothing until either side writes it, since deleting it frees
+/// nothing; then the blocks written count, on each side.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_clone_counts_only_the_blocks_it_does_not_share() {
+    use std::os::unix::fs::FileExt as _;
+    let f = Fixture::new("clone");
+    let unit = f.root.join("libslopty.rlib");
+    std::fs::write(&unit, vec![7_u8; 4 * MIB]).unwrap();
+    let whole = u64::try_from(4 * MIB).unwrap();
+    assert!(size(&unit) >= whole, "{}", size(&unit));
+    let clone = f.root.join("clone.rlib");
+    assert!(
+        std::process::Command::new("/bin/cp")
+            .arg("-c")
+            .arg(&unit)
+            .arg(&clone)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!((size(&unit), size(&clone)), (0, 0), "every block shared");
+    let written = File::options().write(true).open(&clone).unwrap();
+    written.write_all_at(&[1; 4096], 0).unwrap();
+    // APFS counts a write in a private size once it reaches the disk.
+    written.sync_all().unwrap();
+    let written = size(&clone);
+    assert!(written > 0 && written < whole, "{written}");
+    assert_eq!(size(&unit), written, "the source's own copy of the block is its own now");
+}

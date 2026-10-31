@@ -1,11 +1,12 @@
 name: Check
 
-# A working tree's checks on a runner instead of this Mac (`cargo xtask remote`): nothing heavy
-# runs on a developer's Mac, whose cores and disk are the person's (docs/decisions/tooling.md,
-# "Every compile runs on a runner"). `remote` commits the tree as it is (staged or not) to a
-# branch `check/<name>` and starts this with that commit. Dispatched on `gate`, so the run reads
-# and fills the compile cache the gate's lanes use: a cache is read by its own branch and main
-# only, and a `check/*` branch of its own would start cold every time.
+# What the Mac that asks cannot check of a lane's tree (`cargo xtask remote`): Linux's clippy
+# and tests of its crates, an e2e case, a probe; or, with `--place runner`, the crates' checks
+# whole. The Mac runs the rest itself, iOS clippy included (docs/decisions/tooling.md, "A lane's
+# check returns in minutes"). `remote` commits the tree as it is (staged or not) to a branch
+# `check/<name>` and starts this with that commit. Dispatched on `gate`, so the run reads and
+# fills the compile cache the gate's lanes use: a cache is read by its own branch and main only,
+# and a `check/*` branch of its own would start cold every time.
 on:
   workflow_dispatch:
     inputs:
@@ -34,8 +35,11 @@ on:
         description: "What the tests do with insta snapshots: compare, accept"
         default: compare
       full:
-        description: "yes: every check (iOS and Linux clippy, rustdoc); no: fmt, host clippy, tests"
+        description: "yes: every check (iOS and Linux clippy too); no: fmt, host clippy, rustdoc, tests"
         default: "no"
+      lint:
+        description: "all: the lints `full` names; linux: Linux clippy alone, the Mac that asked ran the rest"
+        default: all
       runner:
         description: The runner image of the probe and the e2e case (xcode-27, ubuntu-24.04, ubuntu-24.04-arm)
         default: xcode-27
@@ -75,7 +79,9 @@ jobs:
   # The checks of the crates named, in two jobs side by side (`xtask check --part`): the lints on
   # an arm Linux runner, as the gate's Apple and Linux lint lanes run them, and the tests on Linux
   # when every crate tests there, else on a Mac. Only what needs a Mac takes one of the five
-  # (docs/decisions/tooling.md, "A remote check lints on Linux").
+  # (docs/decisions/tooling.md, "A remote check lints on Linux"). A check whose Mac ran the rest
+  # (`lint: linux`) sets up and runs Linux clippy alone: its runner ran host clippy and rustdoc
+  # again after a cold setup, 9 minutes for 3 of work.
   lint:
     if: inputs.packages != ''
     name: lint (${{ inputs.name }})
@@ -96,15 +102,18 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-      # Host clippy and rustdoc for the Mac; with --full, both iOS triples and Linux.
+      # Host clippy and rustdoc for the Mac; with --full, both iOS triples and Linux; Linux's
+      # alone for `lint: linux`.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-          components: rustfmt, clippy
+          components: ${{ inputs.lint == 'linux' && 'clippy' || 'rustfmt, clippy' }}
           targets: >-
-            aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
-            x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
-      - uses: dtolnay/rust-toolchain@nightly
+            ${{ inputs.lint != 'linux' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            aarch64-apple-ios-sim, ' || '' }}x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
+            x86_64-unknown-linux-musl
+      - if: inputs.lint != 'linux'
+        uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       # The cargo cache the gate's tools lane saves (ci.yml), read and never saved.
@@ -121,23 +130,30 @@ jobs:
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # zig compiles the build scripts' C for every triple linted here.
       - uses: ./.github/actions/zig
-      # Linux clippy (--full) builds libghostty-vt for the Linux triples.
+      # Linux clippy (--full) builds libghostty-vt for the Linux triples. Linting Linux alone
+      # (`lint: linux`), it fetches zig's packages only when the gate's build of it misses, as
+      # that build is for exactly those triples: the fetch took 89 s a run with the cache hit.
       - if: inputs.full == 'yes'
         id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
       - if: inputs.full == 'yes'
+        id: prebuilt
         uses: actions/cache/restore@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-clippy-linux-${{ steps.ghostty.outputs.key }}
-      - if: inputs.full == 'yes'
+      - if: >-
+          inputs.full == 'yes' && (inputs.lint != 'linux' ||
+          steps.prebuilt.outputs.cache-hit != 'true')
         uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: inputs.full == 'yes'
+      - if: >-
+          inputs.full == 'yes' && (inputs.lint != 'linux' ||
+          steps.prebuilt.outputs.cache-hit != 'true')
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
@@ -170,19 +186,26 @@ jobs:
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
       # Of the tools lane's six, the lints run the two `xtask check` runs: shear and typos.
-      - run: >-
+      - if: inputs.lint != 'linux'
+        run: >-
           xtask setup --lane clippy-host --lane clippy-ios --lane clippy-linux --lane rustdoc
           --tool cargo-shear --tool typos-cli
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - if: inputs.lint == 'linux'
+        run: xtask setup --lane clippy-linux
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
       - env:
           PACKAGES: ${{ inputs.packages }}
           FULL: ${{ inputs.full }}
+          LINT: ${{ inputs.lint }}
         run: |
           args=(--part lint)
+          [ "$LINT" = linux ] && args=(--part linux)
           for p in $PACKAGES; do args+=(-p "$p"); done
-          [ "$FULL" = yes ] || args+=(--quick)
+          [ "$FULL" = yes ] || [ "$LINT" = linux ] || args+=(--quick)
           xtask check "${args[@]}" 2>&1 | tee target/remote/lint.log
       - if: always()
         run: $SCCACHE_PATH --show-stats
@@ -450,6 +473,9 @@ jobs:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-testsui-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-
+      # zig's packages every time: the gate's build of libghostty-vt holds the UI shard's
+      # triples, and the simulator's case or a probe builds others, whose lazy fetch inside the
+      # build failed a lane on one 502 (run 37080698786).
       - uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg

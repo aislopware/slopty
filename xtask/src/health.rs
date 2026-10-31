@@ -70,6 +70,12 @@ struct Check {
     full: bool,
     total_s: u64,
     local_s: u64,
+    /// How long it waited for its lane directory (recorded since 2026-10-31).
+    #[serde(default)]
+    queued_s: u64,
+    /// A warm of the after-pass, not a lane's check.
+    #[serde(default)]
+    warm: bool,
 }
 
 /// One e2e case run in this Mac's guest (`target/remote/e2e-history.jsonl`): when it ended,
@@ -111,7 +117,8 @@ fn spread(mut samples: Vec<u64>) -> String {
 }
 
 /// The spread of the lanes' checks over the last day, quick and full, from what
-/// `xtask remote` recorded (`target/remote/history.jsonl`): from its start to its verdict. A
+/// `xtask remote` recorded (`target/remote/history.jsonl`): from its start to its verdict, and
+/// how long it waited for its lane directory; the after-pass's warms apart. A
 /// quick check that carried an e2e case waits for it in the guest, which the part here leaves
 /// out: those are shown apart, so the verdict's gap over the part here reads as the e2e case it
 /// is and not as a queue (2026-10-18: 161 of 300 checks; the others' gap p50 1 s, p90 6 s).
@@ -128,11 +135,11 @@ fn checks() -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .context("the clock is before 1970")?
         .as_secs();
-    let day: Vec<Check> = text
+    let (warms, day): (Vec<Check>, Vec<Check>) = text
         .lines()
         .filter_map(|line| serde_json::from_str::<Check>(line).ok())
         .filter(|c| now.saturating_sub(c.at) <= 86_400)
-        .collect();
+        .partition(|c| c.warm);
     for full in [false, true] {
         let depth = if full { "full" } else { "quick" };
         let of: Vec<&Check> = day.iter().filter(|c| c.full == full).collect();
@@ -141,10 +148,12 @@ fn checks() -> Result<()> {
             continue;
         }
         println!(
-            "{} {depth} checks in a day: verdict {}; the part here {}",
+            "{} {depth} checks in a day: verdict {}; the part here {}; queued for a lane \
+             directory {}",
             of.len(),
             spread(of.iter().map(|c| c.total_s).collect()),
             spread(of.iter().map(|c| c.local_s).collect()),
+            spread(of.iter().map(|c| c.queued_s).collect()),
         );
         let (with_e2e, crates_alone): (Vec<&Check>, Vec<&Check>) =
             of.iter().partition(|c| guest_part(c, &guest).is_some());
@@ -165,6 +174,13 @@ fn checks() -> Result<()> {
             );
         }
     }
+    if !warms.is_empty() {
+        println!(
+            "{} warms of lane directories after main's lock moved: {}",
+            warms.len(),
+            spread(warms.iter().map(|c| c.total_s).collect())
+        );
+    }
     Ok(())
 }
 
@@ -180,14 +196,10 @@ struct GateRun {
     conclusion: String,
 }
 
-/// What a job's failure counts as: its lane, or the promote that no token may make when a
-/// workflow file changed, which `land --wait` and `xtask promote` make from a checkout.
-fn red_cause<'a>(job: &'a str, why: &[String]) -> &'a str {
-    if job == "promote" && why.iter().any(|line| line.contains("changes .github/workflows")) {
-        "promote refused (a workflow file)"
-    } else {
-        job.strip_prefix("gate (").and_then(|j| j.strip_suffix(')')).unwrap_or(job)
-    }
+/// What a job's failure counts as: its lane, as the gate's job names it (`gate (<lane>)`), or
+/// the job.
+fn red_cause(job: &str) -> &str {
+    job.strip_prefix("gate (").and_then(|j| j.strip_suffix(')')).unwrap_or(job)
 }
 
 /// The gate's red runs over the last day: each with the lanes that failed and the first line
@@ -230,7 +242,7 @@ fn reds(sh: &Shell) -> Result<()> {
         let sha = run.sha.get(..8).unwrap_or(&run.sha);
         for job in failed {
             let why = why(sh, job.id);
-            let cause = red_cause(&job.name, &why);
+            let cause = red_cause(&job.name);
             let n = causes.entry(cause.to_owned()).or_default();
             *n = n.saturating_add(1);
             let first = why.first().map_or("", String::as_str);
@@ -383,28 +395,27 @@ fn strip(line: &str) -> String {
 mod tests {
     use super::{Check, GuestRun, guest_part, red_cause, says_why, strip};
 
-    /// A red counts against the lane that failed; a promote refused for a workflow file counts
-    /// apart, since every lane passed.
+    /// A red counts against the lane that failed, or the job when it is no lane's.
     #[test]
     fn a_red_counts_against_its_lane() {
-        assert_eq!(red_cause("gate (rustdoc)", &[]), "rustdoc");
-        assert_eq!(
-            red_cause("gate (tests worker)", &["FAIL [ 2.1s] a".to_owned()]),
-            "tests worker"
-        );
-        let refused = ["##[error]5eed12fac2 changes .github/workflows, which this token may not \
-                        push; run cargo xtask promote"
-            .to_owned()];
-        assert_eq!(red_cause("promote", &refused), "promote refused (a workflow file)");
-        assert_eq!(red_cause("promote", &["##[error]not a fast-forward".to_owned()]), "promote");
+        assert_eq!(red_cause("gate (rustdoc)"), "rustdoc");
+        assert_eq!(red_cause("gate (tests worker)"), "tests worker");
+        assert_eq!(red_cause("promote"), "promote");
     }
 
     /// A check's e2e part is the guest run of its name recorded while it ran, and none for a
     /// check of crates alone or another lane's run.
     #[test]
     fn a_check_s_e2e_part_is_its_guest_run() {
-        let check =
-            Check { at: 1_000, name: "A".to_owned(), full: false, total_s: 300, local_s: 40 };
+        let check = Check {
+            at: 1_000,
+            name: "A".to_owned(),
+            full: false,
+            total_s: 300,
+            local_s: 40,
+            queued_s: 0,
+            warm: false,
+        };
         let run = |at, name: &str| GuestRun {
             at,
             name: name.to_owned(),

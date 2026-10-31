@@ -34,9 +34,11 @@ use crate::tools::{
     HOST_ONLY_CRATES, TRIPLES, WORKSPACE_HACK, lint_linux, packages_in, quiet_step,
 };
 
-/// Which part of the checks to run. A remote check runs the two on runners of their own, side by
-/// side: the lints on Linux and the tests on Linux or a Mac, as the crates need
-/// (`docs/decisions/tooling.md`, "A remote check lints on Linux").
+/// Which part of the checks to run. A check placed on runners (`remote --place runner`) runs the
+/// lints and the tests on runners of their own, side by side: the lints on Linux and the tests on
+/// Linux or a Mac, as the crates need (`docs/decisions/tooling.md`, "A remote check lints on
+/// Linux"). A full check here sends a runner Linux's clippy alone (`docs/decisions/tooling.md`,
+/// "A lane's check returns in minutes").
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Part {
     /// Every check.
@@ -46,6 +48,12 @@ pub enum Part {
     Lint,
     /// The tests alone.
     Tests,
+    /// Linux clippy alone: what a check's runner adds to the lints the Mac that asked ran
+    /// (`remote`).
+    Linux,
+    /// Host clippy and rustdoc: the lints that leave builds for the next check, without fmt,
+    /// shear and typos (a warm, `local`).
+    Builds,
 }
 
 pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()> {
@@ -54,7 +62,8 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     }
     let (fuzzed, crates): (Vec<String>, Vec<String>) =
         crates.iter().cloned().partition(|c| c == FUZZ);
-    if !fuzzed.is_empty() {
+    // The fuzz crate builds for the host alone.
+    if !fuzzed.is_empty() && !matches!(part, Part::Linux | Part::Builds) {
         fuzz(sh, part)?;
     }
     if crates.is_empty() {
@@ -77,6 +86,11 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     let built = selected(names().chain([WORKSPACE_HACK]));
     let (p, b) = (&packages, &built);
     let host = TRIPLES[0];
+    if part == Part::Linux {
+        lint_linux(sh, &names().collect::<Vec<_>>())?;
+        println!("✔ linted {} for Linux ({:.1?})", crates.join(", "), started.elapsed());
+        return Ok(());
+    }
     if part == Part::Tests {
         if cfg!(target_os = "macos") {
             // As the gate's macOS lanes test on a runner: the binaries the tests spawn built
@@ -109,7 +123,9 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
         println!("✔ tested {} ({:.1?})", crates.join(", "), started.elapsed());
         return Ok(());
     }
-    quiet_step("cargo fmt", cmd!(sh, "cargo +nightly fmt {p...} -- --check"))?;
+    if part != Part::Builds {
+        quiet_step("cargo fmt", cmd!(sh, "cargo +nightly fmt {p...} -- --check"))?;
+    }
     // The live `slopty-e2e` targets, which no test build takes, are linted here.
     let live: &[&str] = if names().any(|c| c == crate::e2e::LIVE_PACKAGE) {
         &["--features", crate::e2e::LIVE]
@@ -137,6 +153,10 @@ pub fn run(sh: &Shell, crates: &[String], quick: bool, part: Part) -> Result<()>
     // the gate it was the first cause of red gate runs (`docs/decisions/tooling.md`, "rustdoc
     // runs in the quick check").
     rustdoc(sh, &names().collect::<Vec<_>>())?;
+    if part == Part::Builds {
+        println!("✔ built {} ({:.1?})", crates.join(", "), started.elapsed());
+        return Ok(());
+    }
     quiet_step("cargo shear", cmd!(sh, "cargo shear {p...}"))?;
     // Relative, with `--force-exclude`: `typos.toml`'s excludes hold for the named directories
     // too, as they do for the gate's run over the whole tree; typos matches them against a path

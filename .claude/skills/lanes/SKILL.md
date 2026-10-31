@@ -20,23 +20,27 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   failed build leaves in place: `remote` checks `HEAD` plus its own `--only` paths either way.
 - A lane checks its edits with `SLOPTY_LANE=<its name> cargo xtask remote -p <its crates> --only
   <its paths>`, quick (no `--full`): fmt, host clippy, rustdoc and the tests, here in about a
-  minute. The gate is the full check; `--full` (iOS and Linux clippy, the Mac's own tests of a
-  crate Linux tests) is for a change to `cfg(target_os = "ios")` or Linux-only code, not for
-  every checkpoint. `remote` formats the lane's changed Rust files under `--only`
-  before it checks, and the first red ends the check (a failure here cancels the runners' run),
-  so a red comes back in seconds: fix it and check again. No cargo in the checkout itself.
-  Checks run in the background while the lane moves on, and it reports a checkpoint on green.
-- E2e runs once per round, after every lane's work has landed: one whole suite (`--e2e app`,
-  then `--e2e ios`) and one golden accept, reviewed by eye, with its reds going back to the
-  lanes that own them. A checkpoint lands on its quick check; a behaviour is proved by a
-  headless GPUI or model test in that check, and a new e2e case is written then but first run in
-  the round's suite. A lane runs a filtered case (`--e2e app -E 'test(...)'`; after a red
-  `-E failed`) only to chase a bug no headless test can reach, and accepts no goldens itself.
+  minute. The gate is the full check; `--full` (iOS clippy here, Linux clippy on a runner) is
+  for a change to `cfg(target_os = "ios")` or Linux-only code, not for every checkpoint. Crates
+  that test on Linux may go to runners with `--place runner`, quick only: a full check there
+  takes a runner Mac for the Mac's own tests.
+  `remote` formats the lane's changed Rust files under `--only` and runs the gate's tool steps
+  its change reaches before it checks, and the first red ends the check, so a red comes back in
+  seconds: fix it and check again. No cargo in the checkout itself, and no runner or VM on
+  this Mac. Checks run in the background while the lane moves on, and it reports a checkpoint
+  on green.
+- E2e runs once per round, after every lane's work has landed, on hosted runners: the cases the
+  round's commits reach and one golden accept from the run's artifacts, reviewed by eye, with
+  its reds going back to the lanes that own them. A red e2e case is a bug in the product or the
+  test, never retried. A checkpoint lands on its quick check; a behaviour is proved by a
+  headless GPUI or model test in that check, and a new e2e case is written then but first runs in
+  the round's suite. A lane runs a filtered case (`--e2e app -E 'test(...)'`; after a red `-E
+  failed`) only to chase a bug no headless test can reach, and accepts no goldens itself.
 - This Mac's cores are the limit, not the number of agents: at most 4 lanes at once, at most 2 of
   them building GUI crates here. A lane spawns no sub-agents and keeps one check in flight under
-  its own lane name, the same name every time (a new name, `C2x` beside `C2`, is a cold target
-  dir and a cold build). Crates that test on Linux may go to runners with `--place runner`, quick
-  only: a full check there takes a runner Mac for the Mac's own tests.
+  one name, the same every time: `<dir>-<lane>` with the directory its brief names (`L-H`,
+  `M-X`). Checks sharing a directory take it in turn only while their work there runs, and one
+  that moves the lock works in a warm clone of its own.
 - Lanes do not commit. A checkpoint is a green `--only` check of exactly its paths, named by
   the `<name>@<sha>` its verdict prints: the orchestrator stages what that check passed
   (`cargo xtask stage <name>@<sha>`, never `git add`),

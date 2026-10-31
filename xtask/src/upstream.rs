@@ -1025,9 +1025,11 @@ fn check_on_runner(
         keep_branch: false,
         place: crate::remote::Place::Runner,
         tests_on: None,
+        linux_only: false,
         no_wait: false,
         repeat: None,
         until_fail: None,
+        after: false,
     };
     let checkout = Shell::new()?;
     checkout.change_dir(root);

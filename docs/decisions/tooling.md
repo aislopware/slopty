@@ -3403,9 +3403,14 @@ more full-window layer.
      Whether every lane gets its own clone instead of sharing L and M (C-workflow's first
      recommendation: cargo builds one at a time per directory) is decided by what a clone grows to
      (`du` of L by part); it is taken if four of them fit above the disk floor.
-  3. **Prune is off the critical path.** The pass before a build runs only under the floor
-     itself, the pass after runs once the verdict is printed, and the volume keeps enough free
-     space that no pass evicts units idle for only an hour.
+  3. **Prune is off the critical path.** The pass before a build runs only under the floor and
+     its headroom, and a check still under the floor after it is refused, since a cold app check
+     writes about 30 GB; the pass after runs once the verdict is printed, and the volume keeps
+     enough free space that no pass evicts units idle for only an hour. The floor goes from 50 GB
+     to 30: the 50 was for a full gate built here, which now runs hosted, and with the volume
+     75-85 GB free a pass acted after almost every check (two passes evicted 1 501 units, 21.5 GB,
+     on 10-31). Prune counts an APFS clone by the blocks it does not share, so a lane
+     directory's clone takes none of the budget until it is written.
   4. **The runner half of a check does only what this Mac cannot.** No host clippy or rustdoc
      there when the work here runs them, and the zig fetch only on a cache miss. Then iOS clippy
      runs here in the lane's warm directory, so a full check of crates that do not build on Linux
@@ -3424,6 +3429,39 @@ more full-window layer.
      beside the test run); and the share of clippy reds whose every diagnostic is machine-
      applicable (whether a `clippy --fix` pass over a lane's own files, like its format pass, is
      worth building).
+
+  As built, the same evening:
+  - **Item 1.** Checks under one name wait for each other; a newer one no longer cancels the
+    older one's run. A check waiting for a directory keeps every other hold out of it: clones,
+    evictions and warms. The release after the guest's copy is not built, since the guest path
+    goes with the hosted e2e.
+  - **Item 2.** The lock-moving set also takes `.cargo/` and `rust-toolchain.toml`. A clone's
+    source is the directory whose build holds most of the registry and git packages the check's
+    crates reach at its lock, and the clone keeps only those packages' units. The submodules'
+    checkouts are not cloned, since a clone's worktree shared the source's `HEAD` and index, and
+    a clone stopped halfway is cloned again. Every directory used in the last 6 hours whose tree
+    is at another lock is warmed, `-lock` directories excepted, one at a time, under a lock of
+    its own so passes started meanwhile still prune, and none while the volume is under the
+    floor and its headroom. A warm gives its directory up within a quarter second once a check
+    waits for it.
+  - **Per-lane clones are not taken.** Four GUI clones would take 30-50 GB more, and the shared
+    directories queue no one now that a check holds one only while it works there. A lane
+    directory is evicted whole after a day idle (3 hours when the volume is short), the most
+    recently used one kept; a `-lock` directory goes once `HEAD` holds its lock.
+  - **Warms run at nice 10.** Against a group at nice 10, nice 15 and nice 20 took the same half
+    of the CPU. Only Darwin's background policy yields, and it reaches exec'd children in part
+    and keeps work to the efficiency cores, so it is not taken.
+  - **Item 6.** Each 5 s poll is one request for the run, conditional on its `ETag`, and the
+    jobs are asked every 20 s or when the run's status moves. A 304 costs nothing against the
+    hourly limit: a waiting check went from 1,876 counted requests an hour to 106.
+  - **Item 8.** Units rebuilt after another lane's check because cargo keys a git dependency's
+    units without its revision, so two gpui-fast revisions overwrite each other's artifacts; item
+    2 ends that. Units rebuilt after an hour idle because prune evicted them; item 3 ends that.
+    rustdoc beside the test run would save about 10 s at p50 and needs nextest to run from the
+    build's metadata; not built. A `clippy --fix` pass would have fixed a tenth of clippy reds;
+    not built.
+  - **Measured after** (`MEASUREMENTS.md`, "a lane's check without a queue"): no check queued,
+    and lane checks ran p50 50 s and p90 85 s, against 70 s and 241 s before.
 
   Not taken, and why:
   - **The Cranelift backend.** Its rustup component has no unwinding on aarch64 macOS, so

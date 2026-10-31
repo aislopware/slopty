@@ -1,16 +1,18 @@
-//! `xtask remote`: the checks of a working tree on a GitHub runner instead of this Mac.
+//! `xtask remote`: a lane's checks of its working tree, here and on GitHub's runners.
 //!
-//! This Mac's cores and disk are the person's, so nothing heavy compiles here
-//! (`docs/decisions/tooling.md`, "Every compile runs on a runner"). `remote` commits the working
-//! tree as it is, staged or not, beside the real index, pushes that commit to `check/<name>`,
-//! and starts `.github/workflows/check.yml` on it: `cargo xtask check -p …` for the crates
-//! named, and an `xtask e2e` case. It waits for the run, prints what failed, and after an e2e
-//! case that accepts goldens, or a check that accepts snapshots, applies what the run wrote to the
-//! tree. The real index, `HEAD`
-//! and the tree are never touched, so lanes editing this checkout keep working meanwhile.
+//! `remote` commits the working tree as it is, staged or not, beside the real index, and checks
+//! that commit: its crates here, in a lane directory held only while the work here runs
+//! (`crate::local`), and what this Mac cannot check on a runner, where it pushes the commit to
+//! `check/<name>` and starts `.github/workflows/check.yml` on it: Linux's clippy and tests of
+//! the crates named, an `xtask e2e` case, a probe. It waits for the run, prints what failed, and
+//! after an e2e case that accepts goldens, or a check that accepts snapshots, applies what the
+//! run wrote to the tree. The real index, `HEAD` and the tree are never touched, so lanes editing
+//! this checkout keep working meanwhile. Once the verdict is out, an after-pass in the
+//! background prunes and warms the lane directories (`docs/decisions/tooling.md`, "A lane's
+//! check returns in minutes").
 //!
 //! The run is dispatched on `gate`, so it reads and fills the compile cache the gate's lanes
-//! use; a newer check of the same name cancels the older one.
+//! use. Checks of one name run one after another, a newer one waiting for the older.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -28,8 +30,9 @@ const WORKFLOW: &str = "check.yml";
 /// The ref it is dispatched on, whose compile cache it shares.
 const REF: &str = "gate";
 
-/// How often the run is asked about.
-const POLL: Duration = Duration::from_secs(20);
+/// How often the run is asked about: a 20 s poll added about 10 s to every check that waited on a
+/// runner (`.research/check-speed-2026-10-31/A-anatomy.md` §7).
+const POLL: Duration = Duration::from_secs(5);
 
 /// The longest wait for GitHub to list the run after dispatching it.
 const FIND: Duration = Duration::from_secs(180);
@@ -46,8 +49,7 @@ const SHOWN: usize = 400;
 /// The half here fails in seconds (fmt, clippy, a test: a median of 28 s over 38 such checks on
 /// 2026-10-16 and 17), while the runners' half went on for the rest of its run (a median of 16
 /// min), so a lane heard of a red it could have fixed fifteen minutes earlier, and its run held
-/// a Mac slot meanwhile. A newer check of the same name cancels that run anyway, so its verdict
-/// was never read.
+/// a Mac slot meanwhile for a verdict the lane's next check made moot.
 type Abandon = AtomicBool;
 
 /// Sleeps `period`, a second at a time, and says whether the check was abandoned meanwhile.
@@ -123,7 +125,8 @@ struct MacJob {
     check: Option<String>,
 }
 
-/// The lane a check's name belongs to: what comes before its first `-` (`A-cuts` is lane A's).
+/// The lane directory a check's name shares: what comes before its first `-` (`L-h` and `L-x`
+/// share `target/local/L`); a name without one has a directory of its own.
 fn lane(name: &str) -> &str {
     name.split('-').next().unwrap_or(name)
 }
@@ -136,16 +139,12 @@ fn lane(name: &str) -> &str {
 ///   lanes asking at once do not both start. Another workflow's queued jobs are not held: the Deep
 ///   workflow's matrix lists all its macOS jobs as queued while it runs one at a time, and counting
 ///   them kept every check waiting for hours (Deep run 38133881188).
-/// - One check of a lane at a time: another of the same lane waits for it. One of the same name
-///   does not: dispatching cancels it (`check.yml`'s concurrency group), giving its Mac back.
+/// - A check of the same name holds none: one of its runs still in flight is a stopped check's,
+///   since checks of a name run one at a time, and dispatching cancels it (`check.yml`'s
+///   concurrency group), giving its Mac back.
 fn mac_verdict(jobs: &[MacJob], name: &str, mine: usize) -> Option<String> {
     if jobs.iter().any(|j| j.gate && j.queued) {
         return Some("the gate's macOS jobs are queued".to_owned());
-    }
-    let others: Vec<&str> =
-        jobs.iter().filter_map(|j| j.check.as_deref()).filter(|check| *check != name).collect();
-    if let Some(sibling) = others.iter().find(|check| lane(check) == lane(name)) {
-        return Some(format!("lane {}'s check {sibling} holds a Mac", lane(name)));
     }
     let held = jobs
         .iter()
@@ -303,12 +302,13 @@ impl Goldens {
 /// `cargo xtask remote` options.
 #[derive(clap::Args, Clone, Debug)]
 pub struct RemoteOpts {
-    /// Who asks: a lane's name. A newer check of the same name cancels the older one, and the
-    /// commit goes to the branch `check/<name>`.
+    /// Who asks: a lane's name. Checks of one name run one at a time, a newer one waiting for
+    /// the older, and the commit goes to the branch `check/<name>`. Names alike before their
+    /// first `-` share a lane directory (`L-H` and `L-X` work in `target/local/L`).
     #[arg(long, env = "SLOPTY_LANE", default_value = "main")]
     pub name: String,
-    /// A crate for `cargo xtask check` (fmt, clippy for the host, iOS and Linux, nextest,
-    /// rustdoc, shear, typos); repeat for several.
+    /// A crate to check (fmt, host clippy, rustdoc, shear, typos and the tests; iOS and Linux
+    /// clippy with `--full`); repeat for several.
     #[arg(short = 'p', long = "package")]
     pub packages: Vec<String>,
     /// An `xtask e2e` case to run after the checks: app, ios, server, worker, …; or `auto`, the
@@ -340,8 +340,8 @@ pub struct RemoteOpts {
     /// of `HEAD`: another lane's unfinished edits elsewhere stay out of the check.
     #[arg(long = "only", value_name = "PATH")]
     pub only: Vec<String>,
-    /// Every check: iOS and Linux clippy and rustdoc too, not only fmt, host clippy and the
-    /// tests.
+    /// Every check: iOS clippy here and Linux clippy on a runner too, not only fmt, host clippy,
+    /// rustdoc and the tests.
     #[arg(long)]
     pub full: bool,
     /// Accept every insta snapshot the tests change, and apply them to the tree.
@@ -376,8 +376,16 @@ pub struct RemoteOpts {
     /// `none`, or Linux for Linux's own paths.
     #[arg(skip)]
     pub tests_on: Option<&'static str>,
-    /// Fail at once, naming the holder, when another check of this lane holds its directory,
-    /// rather than wait for it.
+    /// The runner lints Linux alone: the rest of the lints ran here.
+    #[arg(skip)]
+    pub linux_only: bool,
+    /// The after-pass a check starts in the background once its verdict is out: the idle lane
+    /// directories evicted, a prune pass, and a warm of each directory used lately that is
+    /// built at another lock than `HEAD`'s.
+    #[arg(long, hide = true)]
+    pub after: bool,
+    /// Fail at once, naming the holder, rather than wait: for another check of this name, or for
+    /// a check, clone or eviction in the lane directory (a warm there gives way at once).
     #[arg(long)]
     pub no_wait: bool,
 }
@@ -385,9 +393,9 @@ pub struct RemoteOpts {
 /// Where a check's crates are checked.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Place {
-    /// fmt, host clippy, shear, typos and the Mac's tests on this Mac, at full power, in the
-    /// lane's own directory (`crate::local`); iOS and Linux clippy, rustdoc and Linux's tests of
-    /// a full check, and every e2e case and probe, on runners, side by side.
+    /// fmt, host clippy, rustdoc, shear, typos, the Mac's tests and a full check's iOS clippy on
+    /// this Mac, in a lane directory (`crate::local`); a full check's Linux clippy and Linux's
+    /// tests, and every e2e case and probe, on runners, side by side.
     #[default]
     Auto,
     /// Everything on runners, as before the router.
@@ -410,6 +418,9 @@ struct Listed {
 }
 
 pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
+    if opts.after {
+        return after(sh);
+    }
     if opts.filter.as_deref() == Some(FAILED) {
         let mut narrowed = opts.clone();
         narrowed.filter = Some(last_failed(&opts.name)?);
@@ -435,6 +446,18 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let root = crate::tools::repo_root()?;
     let dir = root.join("target").join("remote").join(&opts.name);
     std::fs::create_dir_all(&dir)?;
+    let checked = {
+        // One check of a name at a time: its snapshot's index, its logs and its records are the
+        // name's.
+        let (_named, waited) = hold_name(&dir, &opts.name, opts.no_wait)?;
+        check(sh, opts, &root, &dir, waited)
+    };
+    after_in_background(&root);
+    checked
+}
+
+/// A check of `opts`, its records in `dir`, which waited `named` for another check of its name.
+fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration) -> Result<()> {
     // The app's e2e case in this Mac's guest rather than on a runner Mac
     // (`docs/decisions/tooling.md`, "An e2e case runs in a guest here").
     let in_guest = opts.attach.is_none()
@@ -461,57 +484,22 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         && !opts.accept_snapshots
         && cfg!(target_os = "macos");
     if !here {
-        // The gate's tool steps the change reaches run here first, in seconds, as for a check
-        // here: a runner's check runs fmt, shear and typos of its crates alone.
-        let sha = if opts.attach.is_some() {
-            None
-        } else {
-            let sha = if opts.head {
-                cmd!(sh, "git rev-parse HEAD").read()?
-            } else {
-                format_own(sh, &opts.only);
-                snapshot(sh, &root, &dir, &opts.name, &opts.only)?
-            };
-            stage::started(sh, &dir, &sha, if opts.head { &[] } else { &opts.only });
-            let held = hold_lane(&root, lane(&opts.name), opts.no_wait)?;
-            let tools = tools_hold(&root, lane(&opts.name), &sha, &opts.packages);
-            drop(held);
-            if let Err(e) = tools {
-                println!("✘ the gate's tools: {e:#}");
-                stage::verdict(&dir, false);
-                return Err(e.context("the gate's tools"));
-            }
-            Some(sha)
-        };
-        let ran = on_runners(sh, opts, &root, &dir, sha.as_deref(), None);
-        stage::verdict(&dir, ran.is_ok());
+        let ran = elsewhere(sh, opts, root, dir);
+        stage::verdict(dir, ran.is_ok());
         return ran;
     }
     let started = Instant::now();
-    // The lane's tree and target dirs are one check's at a time: each check syncs the tree to
-    // its own commit, under whatever another is building there.
-    let _lane = hold_lane(&root, lane(&opts.name), opts.no_wait)?;
+    // The tree as the lane asked about it, before any wait for its directory.
     let sha = if opts.head {
         cmd!(sh, "git rev-parse HEAD").read()?
     } else {
         format_own(sh, &opts.only);
-        snapshot(sh, &root, &dir, &opts.name, &opts.only)?
+        snapshot(sh, root, dir, &opts.name, &opts.only)?
     };
-    stage::started(sh, &dir, &sha, if opts.head { &[] } else { &opts.only });
-    // What only a runner checks: a full check's iOS and Linux clippy and rustdoc, with Linux's
-    // tests when every crate tests there too; and the e2e case or probe.
-    let mut there = opts.clone();
-    if opts.full {
-        let linux = crate::gate::linux_tested();
-        let all = opts.packages.iter().all(|p| linux.contains(&p.as_str()));
-        there.tests_on = Some(if all { "ubuntu-24.04" } else { "none" });
-    } else {
-        there.packages.clear();
-    }
-    if in_guest {
-        there.e2e = None;
-        there.filter = None;
-    }
+    stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
+    let changed = changed_paths(sh, opts.head, &sha)?;
+    let place = Workdir::of(&opts.name, &changed);
+    let there = runners_part(opts, in_guest);
     let remote = !there.packages.is_empty() || there.e2e.is_some() || there.probe.is_some();
     let case = opts.e2e.as_deref().unwrap_or("app");
     let ios = if case == "ios" {
@@ -526,16 +514,29 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     } else {
         String::new()
     };
+    let ios_said = if opts.full { ", iOS clippy" } else { "" };
     println!(
-        "▶ {} checked here (fmt, host clippy, shear, typos, the Mac's tests){guest_said}{}",
+        "▶ {} checked here in target/local/{} (fmt, host clippy, rustdoc, shear, typos{ios_said}, \
+         the Mac's tests){guest_said}{}",
         opts.packages.join(" "),
+        place.name,
         if remote { format!("; on runners: {}", describe(&there)) } else { String::new() }
     );
+    let depth = if opts.full { crate::local::Depth::Full } else { crate::local::Depth::Quick };
     // A failure here ends the runners' half at once: its run is cancelled, or never dispatched.
     let abandon = Abandon::new(false);
     let (local, runners) = std::thread::scope(|scope| {
         let local = scope.spawn(|| {
-            let outcome = match tools_hold(&root, lane(&opts.name), &sha, &opts.packages) {
+            // The runners' half is dispatched meanwhile: it waits for no lane directory.
+            let mut held = match place.hold(root, &sha, opts, true) {
+                Ok(held) => held,
+                Err(e) => {
+                    abandon.store(true, Ordering::Release);
+                    return Err(e);
+                }
+            };
+            let queued = held.waited().saturating_add(named);
+            let outcome = match tools_hold(root, &place.name, &sha, &changed, &opts.packages) {
                 Err(e) => {
                     println!("✘ the gate's tools: {e:#}");
                     Ok(crate::local::Outcome {
@@ -545,23 +546,44 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
                     })
                 }
                 Ok(()) if opts.packages.is_empty() => Ok(crate::local::Outcome::nothing()),
-                Ok(()) => crate::local::check(&root, lane(&opts.name), &sha, &opts.packages),
+                Ok(()) => crate::local::check(
+                    root,
+                    &mut held,
+                    &sha,
+                    &opts.packages,
+                    depth,
+                    place.moves_lock,
+                ),
             };
             let passed = outcome.as_ref().is_ok_and(|o| o.passed);
-            let e2e =
-                if passed && in_guest { e2e_runs(&root, opts, &sha, ios) } else { Vec::new() };
+            let e2e = if passed && in_guest {
+                e2e_runs(root, opts, &place.name, &sha, ios)
+            } else {
+                Vec::new()
+            };
+            // The work here is done, the guest's e2e runs with it: the directory goes to the
+            // next check while the runners finish. Held through the runners' wait, it sat idle
+            // for 44 % of the time it was held, and 29 % of the checks queued for it over 30 s
+            // (p90 311 s; `.research/check-speed-2026-10-31/A-anatomy.md` §2).
+            drop(held);
             if !passed || e2e.iter().any(|ran| !ran.result.as_ref().is_ok_and(|o| o.passed)) {
                 abandon.store(true, Ordering::Release);
             }
-            outcome.map(|o| (o, e2e))
+            outcome.map(|o| (o, e2e, queued))
         });
-        let runners =
-            remote.then(|| on_runners(sh, &there, &root, &dir, Some(&sha), Some(&abandon)));
+        let runners = remote.then(|| on_runners(sh, &there, root, dir, Some(&sha), Some(&abandon)));
         (local.join(), runners)
     });
-    let (local, e2e) = match local {
-        Ok(outcome) => outcome?,
-        Err(_) => bail!("the local check panicked"),
+    let (local, e2e, queued) = match local {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(e)) => {
+            stage::verdict(dir, false);
+            return Err(e);
+        }
+        Err(_) => {
+            stage::verdict(dir, false);
+            bail!("the local check panicked");
+        }
     };
     let said: Vec<String> = e2e
         .iter()
@@ -595,16 +617,30 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
             local.load
         );
     }
-    record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
+    record(
+        root,
+        &Record {
+            name: &opts.name,
+            full: opts.full,
+            packages: &opts.packages,
+            local: &local,
+            runners: runners.as_ref().map(Result::is_ok),
+            took,
+            queued,
+            dir: &place.name,
+            moves_lock: place.moves_lock,
+            warm: false,
+        },
+    );
     for ran in &e2e {
         if let Ok(o) = &ran.result {
-            record_e2e(&root, opts, ran, o);
+            record_e2e(root, opts, ran, o);
         }
     }
     // Each half's verdict, last, where the lane reads: the runners' failure came above the
     // local half's lines, which said "passed", and a lane took the check for green.
     let runners_failed = runners.as_ref().and_then(|r| r.as_ref().err());
-    stage::verdict(&dir, local.passed && runners_failed.is_none() && e2e_passed);
+    stage::verdict(dir, local.passed && runners_failed.is_none() && e2e_passed);
     if !local.passed || runners_failed.is_some() || !e2e_passed {
         let here = if local.passed { "passed" } else { "FAILED" };
         let here = match &e2e_said {
@@ -634,21 +670,184 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     Ok(())
 }
 
-/// The gate's tool steps (`gate::Tool`) that the check's commit `sha` reaches, over the check's
-/// own tree, side by side, before anything compiles: they take seconds, and each was a red only
-/// the gate found (a stale `workspace-hack`, a vendored file `cargo fmt --all` reaches, a lock
-/// whose new `tempfile` moved the hack; 2026-10-31). A change inside the checked `crates` is
-/// formatted, sheared and spelled by their own steps (`crate::check`), so those three run over
-/// the whole tree only for a change outside them.
-fn tools_hold(root: &Path, lane: &str, sha: &str, crates: &[String]) -> Result<()> {
-    let sh = Shell::new()?;
-    sh.change_dir(root);
-    let changed = cmd!(sh, "git diff --name-only HEAD {sha}").quiet().read()?;
-    let changed: Vec<&str> = changed.lines().collect();
+/// What of check `opts` only a runner checks, beside the work here: a full check's Linux clippy
+/// of the crates that build there, with Linux's tests when every crate tests there too; and the
+/// e2e case (unless it runs `in_guest`) or the probe. A full check of crates no Linux builds
+/// dispatches nothing: its iOS clippy runs here, where a runner repeated host clippy and rustdoc
+/// after a cold setup first (`.research/check-speed-2026-10-31/A-anatomy.md` §4).
+fn runners_part(opts: &RemoteOpts, in_guest: bool) -> RemoteOpts {
+    let mut there = opts.clone();
+    if opts.full {
+        let linux = crate::gate::linux_tested();
+        let all = opts.packages.iter().all(|p| linux.contains(&p.as_str()));
+        there.tests_on = Some(if all { "ubuntu-24.04" } else { "none" });
+        there.linux_only = true;
+        there.packages.retain(|p| crate::tools::LINUX_CRATES.contains(&p.as_str()));
+    } else {
+        there.packages.clear();
+    }
+    if in_guest {
+        there.e2e = None;
+        there.filter = None;
+    }
+    there
+}
+
+/// A check whose crates are not checked here (`--place runner`, `--run`, an accept): the gate's
+/// tool steps the change reaches here first, in seconds, in its lane directory, then the runners'
+/// part.
+fn elsewhere(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path) -> Result<()> {
+    let sha = if opts.attach.is_some() {
+        None
+    } else {
+        let sha = if opts.head {
+            cmd!(sh, "git rev-parse HEAD").read()?
+        } else {
+            format_own(sh, &opts.only);
+            snapshot(sh, root, dir, &opts.name, &opts.only)?
+        };
+        stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
+        let changed = changed_paths(sh, opts.head, &sha)?;
+        // The tools' tree in a lane directory, held while they run, and never cloned for them:
+        // nothing builds there. Nothing at all when the commit changes nothing (`--head`).
+        let tools = if changed.is_empty() {
+            Ok(())
+        } else {
+            let place = Workdir::of(&opts.name, &changed);
+            let held = place.hold(root, &sha, opts, false)?;
+            let tools = tools_hold(root, &place.name, &sha, &changed, &opts.packages);
+            drop(held);
+            tools
+        };
+        if let Err(e) = tools {
+            println!("✘ the gate's tools: {e:#}");
+            return Err(e.context("the gate's tools"));
+        }
+        Some(sha)
+    };
+    on_runners(sh, opts, root, dir, sha.as_deref(), None)
+}
+
+/// The lane directory a check works in.
+struct Workdir {
+    /// Its name under `target/local/`.
+    name: String,
+    /// Whether the check's commit moves the lock ([`moves_lock`]).
+    moves_lock: bool,
+}
+
+impl Workdir {
+    /// Where check `name` of a commit that changes `changed` works: the directory its name
+    /// shares ([`lane`]), or `<name>-lock` of its own when the commit moves the lock, so the
+    /// checks that share a directory never build at its lock, nor it at theirs, and a lane's own
+    /// directory stays at `HEAD`'s for its checks once the lock lands.
+    fn of(name: &str, changed: &[String]) -> Self {
+        let moves = moves_lock(changed);
+        let name = if moves {
+            format!("{name}{}", crate::local::LOCK_SUFFIX)
+        } else {
+            lane(name).to_owned()
+        };
+        Self { name, moves_lock: moves }
+    }
+
+    /// The directory held for check `opts` of commit `sha`, with `seed` cloned from a warm one
+    /// first where it is new, and its state saying at once what the check is
+    /// (`local::State::at`).
+    fn hold(
+        &self,
+        root: &Path,
+        sha: &str,
+        opts: &RemoteOpts,
+        seed: bool,
+    ) -> Result<crate::local::Held> {
+        if self.moves_lock {
+            println!(
+                "▶ this check moves the lock: it works in target/local/{}, not in \
+                 target/local/{}",
+                self.name,
+                lane(&opts.name)
+            );
+        }
+        let who = crate::local::Who::Check { no_wait: opts.no_wait };
+        let mut held = crate::local::hold(root, &self.name, who)?;
+        if seed {
+            let sh = Shell::new()?;
+            sh.change_dir(root);
+            let spec = format!("{sha}:Cargo.lock");
+            let lock = cmd!(sh, "git show {spec}").quiet().output()?.stdout;
+            held.waited_too(crate::local::seed_dir(root, &self.name, &lock, &opts.packages)?);
+        }
+        let dir = crate::local::dir(root, &self.name);
+        crate::local::State::read(&dir).at(sha, self.moves_lock).write(&dir);
+        Ok(held)
+    }
+}
+
+/// The paths commit `sha` changes on its parent, the `HEAD` it was made on: none for a check of
+/// `HEAD` as committed.
+fn changed_paths(sh: &Shell, head: bool, sha: &str) -> Result<Vec<String>> {
+    if head {
+        return Ok(Vec::new());
+    }
+    let parent = format!("{sha}^");
+    let changed = cmd!(sh, "git diff --name-only {parent} {sha}").quiet().read()?;
+    Ok(changed.lines().map(str::to_owned).collect())
+}
+
+/// Whether a change to `changed` (paths from the repository's root) moves what the dependencies
+/// build from: the lock, the root manifest, the workspace hack, a vendored crate or submodule,
+/// cargo's configuration or the toolchain. Lanes carrying an unlanded lock into a directory
+/// others shared alternated gpui revisions minute by minute, and each switch rebuilt gpui and
+/// every GUI crate: 22 % of checks recompiled gpui and took 49 % of all local cargo time
+/// (`.research/check-speed-2026-10-31/A-anatomy.md` §3.2).
+fn moves_lock(changed: &[String]) -> bool {
+    changed.iter().any(|path| {
+        matches!(path.as_str(), "Cargo.lock" | "Cargo.toml" | "rust-toolchain.toml")
+            || ["workspace-hack/", "vendor/", ".cargo/"].iter().any(|dir| path.starts_with(dir))
+    })
+}
+
+/// The lock on check name `name`'s records (`target/remote/<name>/.lock`), held until dropped,
+/// and how long it was waited for; with `no_wait` refused at once. Two agents checking under one
+/// name wrote one snapshot index.
+fn hold_name(dir: &Path, name: &str, no_wait: bool) -> Result<(std::fs::File, Duration)> {
+    let path = dir.join(".lock");
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {path}"))?;
+    let asked = Instant::now();
+    if file.try_lock().is_err() {
+        ensure!(!no_wait, "another check named {name} runs: wait for it (no --no-wait)");
+        println!("  waiting for the other check named {name}");
+        file.lock().with_context(|| format!("lock {path}"))?;
+        println!("  took the name {name} after {}s", asked.elapsed().as_secs());
+    }
+    Ok((file, asked.elapsed()))
+}
+
+/// The gate's tool steps (`gate::Tool`) that the check's commit `sha`, changing `changed`,
+/// reaches, over the check's own tree in lane directory `dir`, side by side, before anything
+/// compiles: they take seconds, and each was a red only the gate found (a stale
+/// `workspace-hack`, a vendored file `cargo fmt --all` reaches, a lock whose new `tempfile` moved
+/// the hack; 2026-10-31). A change inside the checked `crates` is formatted, sheared and spelled
+/// by their own steps (`crate::check`), so those three run over the whole tree only for a change
+/// outside them.
+fn tools_hold(
+    root: &Path,
+    dir: &str,
+    sha: &str,
+    changed: &[String],
+    crates: &[String],
+) -> Result<()> {
     if changed.is_empty() {
         return Ok(());
     }
-    let tree = crate::gate::snapshot_commit(root, &crate::local::dir(root, lane), sha)?;
+    let changed: Vec<&str> = changed.iter().map(String::as_str).collect();
+    let tree = crate::local::sync_tree(root, &crate::local::dir(root, dir), sha)?;
     let dirs: Vec<String> = crate::tools::packages_in(&tree)?
         .into_iter()
         .filter(|package| crates.contains(&package.name))
@@ -702,36 +901,6 @@ fn reached_tools(changed: &[&str], dirs: &[String]) -> Vec<crate::gate::Tool> {
         .collect()
 }
 
-/// The lock on lane `lane`'s directory (`target/local/<lane>/.lock`, holding its holder's pid),
-/// held until dropped: waited for, saying who holds it, or with `no_wait` refused at once.
-fn hold_lane(root: &Path, lane: &str, no_wait: bool) -> Result<std::fs::File> {
-    use std::io::Write as _;
-    let dir = crate::local::dir(root, lane);
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {dir}"))?;
-    let path = dir.join(".lock");
-    let mut file = std::fs::File::options()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open {path}"))?;
-    if file.try_lock().is_err() {
-        let holder = std::fs::read_to_string(&path).unwrap_or_default();
-        let holder = holder.trim();
-        ensure!(
-            !no_wait,
-            "{lane}'s check (pid {holder}) holds target/local/{lane}: wait for it (no --no-wait), \
-             or check under another lane's name"
-        );
-        println!("  waiting for {lane}'s check (pid {holder})");
-        file.lock().with_context(|| format!("lock {path}"))?;
-    }
-    file.set_len(0)?;
-    write!(file, "{}", std::process::id())?;
-    Ok(file)
-}
-
 /// Whether the app's e2e case of a check here goes to this Mac's guest: unless
 /// `SLOPTY_E2E_GUEST=0`, or `--place runner`.
 fn e2e_in_guest() -> bool {
@@ -761,12 +930,12 @@ struct Ran {
 fn e2e_runs(
     root: &Path,
     opts: &RemoteOpts,
+    lane: &str,
     sha: &str,
     ios: Option<crate::ios::SimKind>,
 ) -> Vec<Ran> {
     use crate::gate::impact::Runs;
     use crate::ios::SimKind;
-    let lane = lane(&opts.name);
     let repeat = match (opts.repeat, opts.until_fail) {
         (_, Some(n)) => guest::Repeat::UntilFail(n),
         (n, None) => guest::Repeat::Times(n.unwrap_or(1)),
@@ -866,28 +1035,50 @@ fn record_e2e(root: &Path, opts: &RemoteOpts, ran: &Ran, outcome: &guest::Outcom
         .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
 }
 
-/// One check's latency, appended to `target/remote/history.jsonl` for `ci-health`.
-fn record(
-    root: &Path,
-    opts: &RemoteOpts,
-    local: &crate::local::Outcome,
+/// One check's latency, as [`record`] writes it.
+struct Record<'a> {
+    /// The check's name, `<dir>-warm` for a warm.
+    name: &'a str,
+    /// Whether it was a full check.
+    full: bool,
+    /// The crates it checked.
+    packages: &'a [String],
+    /// What the work here found and cost.
+    local: &'a crate::local::Outcome,
+    /// Whether the runners' part passed, when there was one.
     runners: Option<bool>,
+    /// Seconds from its start to its verdict.
     took: u64,
-) {
+    /// How long it waited for its lane directory.
+    queued: Duration,
+    /// Its lane directory under `target/local/`.
+    dir: &'a str,
+    /// Whether its commit moved the lock.
+    moves_lock: bool,
+    /// Whether it was a warm of the after-pass, not a lane's check.
+    warm: bool,
+}
+
+/// One check's latency, appended to `target/remote/history.jsonl` for `ci-health`.
+fn record(root: &Path, check: &Record<'_>) {
     let line = serde_json::json!({
         "at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
-        "name": opts.name,
-        "full": opts.full,
-        "packages": opts.packages,
-        "local_s": local.took.as_secs(),
-        "local_passed": local.passed,
-        "local_failed": local.failed,
-        "runners_passed": runners,
-        "total_s": took,
-        "thermal": local.thermal,
-        "load": local.load,
+        "name": check.name,
+        "full": check.full,
+        "packages": check.packages,
+        "local_s": check.local.took.as_secs(),
+        "local_passed": check.local.passed,
+        "local_failed": check.local.failed,
+        "runners_passed": check.runners,
+        "total_s": check.took,
+        "queued_s": check.queued.as_secs(),
+        "dir": check.dir,
+        "moves_lock": check.moves_lock,
+        "warm": check.warm,
+        "thermal": check.local.thermal,
+        "load": check.local.load,
     });
     let path = root.join("target").join("remote").join("history.jsonl");
     let written = std::fs::OpenOptions::new()
@@ -897,6 +1088,138 @@ fn record(
         .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
     if let Err(e) = written {
         println!("  latency not recorded in {path}: {e}");
+    }
+}
+
+/// The after-pass, started in the background once a check's verdict is out
+/// ([`after_in_background`]). One pass at a time evicts and prunes: a lock-moving check's
+/// directory goes once `HEAD` holds what it moved, the lane directories idle for a day go whole
+/// (for three hours when the volume is under its floor and headroom), then a prune pass. Then,
+/// one pass at a time again, under a lock of its own so the passes behind it still prune, it
+/// warms each lane directory used lately whose build is at another lock than `HEAD`'s
+/// (`local::warm_due`), so the first check after a gpui-fast bump finds gpui built; none while
+/// the volume is under its floor and headroom. A warm holds its directory as one, which gives
+/// way to a check that wants it (`local::Held::stoppable`).
+fn after(sh: &Shell) -> Result<()> {
+    let root = crate::tools::repo_root()?;
+    sh.change_dir(&root);
+    let remote = root.join("target").join("remote");
+    let started = Instant::now();
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    println!("▶ after-pass {} at {at}", std::process::id());
+    let head = cmd!(sh, "git rev-parse HEAD").read()?;
+    let limits = crate::prune::Limits::from_env()?;
+    if let Some(_pruning) = try_hold(&remote.join("after.lock"))? {
+        // A directory a lock-moving check worked in, once `HEAD` holds what it moved.
+        for (name, sha) in crate::local::lock_dirs(&root) {
+            let changed =
+                cmd!(sh, "git diff --name-only {head} {sha}").quiet().ignore_stderr().read();
+            let changed: Option<Vec<String>> =
+                changed.ok().map(|c| c.lines().map(str::to_owned).collect());
+            if changed.is_some_and(|changed| !moves_lock(&changed)) {
+                crate::local::evict(&root, &name, "HEAD holds the lock its check moved");
+            }
+        }
+        let short = crate::prune::free_space(&root)? < limits.with_headroom()?.floor;
+        let idle = if short { crate::local::EVICTED_SHORT } else { Duration::MAX };
+        crate::local::evict_idle(&root, idle);
+        crate::prune::auto();
+    }
+    let Some(_warming) = try_hold(&remote.join("warm.lock"))? else {
+        println!("  after-pass done, another warms ({:.1?})", started.elapsed());
+        return Ok(());
+    };
+    let free = crate::prune::free_space(&root)?;
+    if free < limits.with_headroom()?.floor {
+        println!(
+            "  no warm: {} GB free, under the floor and its headroom ({:.1?})",
+            free / 1_000_000_000,
+            started.elapsed()
+        );
+        return Ok(());
+    }
+    // The warms' builds are one process group, which a check that wants a directory stops
+    // whole: cargo and rustc go with the warm. Spawned by a check, the pass leads one already.
+    if let Err(e) = rustix::process::setpgid(None, None) {
+        println!("  no warm: the pass leads no process group of its own ({e})");
+        return Ok(());
+    }
+    let spec = format!("{head}:Cargo.lock");
+    let head_lock = cmd!(sh, "git show {spec}").quiet().output()?.stdout;
+    for (name, packages) in crate::local::warm_due(&root, &head_lock) {
+        let Ok(mut held) = crate::local::hold(&root, &name, crate::local::Who::Free) else {
+            continue;
+        };
+        let short = head.get(..10).unwrap_or(&head);
+        println!("▶ warming target/local/{name} at {short}: {}", packages.join(" "));
+        let started = Instant::now();
+        let depth = crate::local::Depth::Warm;
+        match crate::local::check(&root, &mut held, &head, &packages, depth, false) {
+            Ok(local) => record(
+                &root,
+                &Record {
+                    name: &format!("{name}-warm"),
+                    full: false,
+                    packages: &packages,
+                    local: &local,
+                    runners: None,
+                    took: started.elapsed().as_secs(),
+                    queued: Duration::ZERO,
+                    dir: &name,
+                    moves_lock: false,
+                    warm: true,
+                },
+            ),
+            Err(e) => println!("  the warm of target/local/{name} failed: {e:#}"),
+        }
+        drop(held);
+    }
+    println!("  after-pass done ({:.1?})", started.elapsed());
+    Ok(())
+}
+
+/// The lock file at `path` held until dropped, or `None` when another holds it.
+fn try_hold(path: &Path) -> Result<Option<std::fs::File>> {
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {path}"))?;
+    Ok(file.try_lock().is_ok().then_some(file))
+}
+
+/// The largest the after-pass's log grows before a pass starts it again.
+const AFTER_LOG: u64 = 4 << 20;
+
+/// Start the after-pass ([`after`]) in a process group of its own, its output in
+/// `target/remote/after.log`, and return at once: a prune pass before and after every check took
+/// about 5 s of each and ran inside it (`.research/check-speed-2026-10-31/A-anatomy.md` §1.1).
+fn after_in_background(root: &Path) {
+    use std::os::unix::process::CommandExt as _;
+    let Ok(exe) = std::env::current_exe() else { return };
+    let log = root.join("target").join("remote").join("after.log");
+    let fresh = std::fs::metadata(&log).is_ok_and(|m| m.len() > AFTER_LOG);
+    let opened = std::fs::OpenOptions::new()
+        .create(true)
+        .append(!fresh)
+        .write(true)
+        .truncate(fresh)
+        .open(&log);
+    let Ok(out) = opened else { return };
+    let Ok(err) = out.try_clone() else { return };
+    let started = std::process::Command::new(exe)
+        .args(["remote", "--after"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(err)
+        .process_group(0)
+        .spawn();
+    if let Err(e) = started {
+        println!("  the after-pass did not start: {e}");
     }
 }
 
@@ -911,7 +1234,7 @@ fn on_runners(
     abandon: Option<&Abandon>,
 ) -> Result<()> {
     let started = Instant::now();
-    let what = describe(opts);
+    let mut what = describe(opts);
     let (run, short) = if let Some(id) = opts.attach {
         let run_id = id.to_string();
         let viewed = cmd!(sh, "gh run view {run_id} --json url,displayTitle").read()?;
@@ -930,7 +1253,9 @@ fn on_runners(
             stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
             sha
         };
-        actions_present(sh, opts.workflow_ref.as_deref().unwrap_or(REF), &sha, opts)?;
+        let on = opts.workflow_ref.as_deref().unwrap_or(REF);
+        let opts = &actions_present(sh, on, &sha, opts)?;
+        what = describe(opts);
         // The tree as it was asked about, dispatched once a Mac is free for it.
         let macs = mac_jobs(opts);
         if macs > 0 {
@@ -1105,7 +1430,11 @@ fn apply_accepted(sh: &Shell, patch: &Path) -> Result<usize> {
 /// What the run checks, in a few words.
 fn describe(opts: &RemoteOpts) -> String {
     let mut parts = Vec::new();
-    if !opts.packages.is_empty() {
+    if !opts.packages.is_empty() && opts.linux_only {
+        let tests = tests_on(opts);
+        let tests = if tests == "none" { String::new() } else { format!(", tests on {tests}") };
+        parts.push(format!("Linux clippy of {}{tests}", opts.packages.join(" ")));
+    } else if !opts.packages.is_empty() {
         let depth = if opts.full { "full" } else { "quick" };
         let tests = tests_on(opts);
         let mac = mac_tested(&opts.packages);
@@ -1320,15 +1649,25 @@ fn local_actions(workflow: &str) -> Vec<&str> {
     paths
 }
 
-/// Refuses a check whose snapshot `sha` lacks a local action that `on`'s [`WORKFLOW`] runs. The
-/// workflow comes from `on` and the actions from the snapshot, so a commit that removes one and
-/// is not on `on` yet failed every lane's check at setup (run 38153490688, the zig action).
-fn actions_present(sh: &Shell, on: &str, sha: &str, opts: &RemoteOpts) -> Result<()> {
-    cmd!(sh, "git fetch --quiet origin {on}").run().with_context(|| format!("fetching {on}"))?;
-    // The remote-tracking branch, not `FETCH_HEAD`, which another lane's fetch may replace.
-    let path = format!("origin/{on}:.github/workflows/{WORKFLOW}");
+/// Check `opts` as `on`'s [`WORKFLOW`] can run it ([`fit`]), refused when it cannot, or when its
+/// snapshot `sha` lacks a local action the workflow runs. The workflow comes from `on` and the
+/// actions from the snapshot, so a commit that removes one and is not on `on` yet failed every
+/// lane's check at setup (run 38153490688, the zig action). The check's own branch,
+/// `check/<name>`, is pushed only after this, the snapshot on it: its workflow is the
+/// snapshot's.
+fn actions_present(sh: &Shell, on: &str, sha: &str, opts: &RemoteOpts) -> Result<RemoteOpts> {
+    let path = if on == format!("check/{}", opts.name) {
+        format!("{sha}:.github/workflows/{WORKFLOW}")
+    } else {
+        cmd!(sh, "git fetch --quiet origin {on}")
+            .run()
+            .with_context(|| format!("fetching {on}"))?;
+        // The remote-tracking branch, not `FETCH_HEAD`, which another lane's fetch may replace.
+        format!("origin/{on}:.github/workflows/{WORKFLOW}")
+    };
     let workflow = cmd!(sh, "git show {path}").quiet().read()?;
-    if let Some(unfit) = unfit(&workflow, opts) {
+    let opts = fit(&workflow, on, opts);
+    if let Some(unfit) = unfit(&workflow, &opts) {
         bail!(
             "{on}'s {WORKFLOW} cannot run this check: {unfit}. Land the workflow change first, or \
              try it with --workflow-ref <branch>"
@@ -1347,7 +1686,24 @@ fn actions_present(sh: &Shell, on: &str, sha: &str, opts: &RemoteOpts) -> Result
          first, or try that change's workflow with --workflow-ref",
         missing.iter().map(|m| format!("./{m}")).collect::<Vec<_>>().join(", ")
     );
-    Ok(())
+    Ok(opts)
+}
+
+/// Check `opts` as `on`'s `workflow` (the text of its [`WORKFLOW`]) can run it: one without the
+/// `lint` input, older than a full check's lints here, lints everything on the runner, as
+/// before, rather than refuse the check.
+fn fit(workflow: &str, on: &str, opts: &RemoteOpts) -> RemoteOpts {
+    let mut fitted = opts.clone();
+    if opts.linux_only && !declares(workflow, "lint") {
+        println!("  {on}'s {WORKFLOW} has no `lint` input yet: the runner lints all of it again");
+        fitted.linux_only = false;
+    }
+    fitted
+}
+
+/// Whether `workflow` declares the input `key`.
+fn declares(workflow: &str, key: &str) -> bool {
+    workflow.lines().any(|l| l.trim_end() == format!("      {key}:"))
 }
 
 /// Why `workflow` (the text of the [`WORKFLOW`] a check dispatches) cannot run what `opts` asks,
@@ -1357,11 +1713,8 @@ fn actions_present(sh: &Shell, on: &str, sha: &str, opts: &RemoteOpts) -> Result
 /// runner serves, and the lane waited two hours (run 38234704645).
 fn unfit(workflow: &str, opts: &RemoteOpts) -> Option<String> {
     let sent = dispatched(opts, "");
-    let undeclared: Vec<&str> = sent
-        .iter()
-        .map(|(key, _)| *key)
-        .filter(|key| !workflow.lines().any(|l| l.trim_end() == format!("      {key}:")))
-        .collect();
+    let undeclared: Vec<&str> =
+        sent.iter().map(|(key, _)| *key).filter(|key| !declares(workflow, key)).collect();
     if !undeclared.is_empty() {
         return Some(format!("it declares no input {}", undeclared.join(", ")));
     }
@@ -1374,7 +1727,8 @@ fn unfit(workflow: &str, opts: &RemoteOpts) -> Option<String> {
 /// workflow's default, and always the name and the commit.
 fn dispatched(opts: &RemoteOpts, sha: &str) -> Vec<(&'static str, String)> {
     let snapshots = if opts.accept_snapshots { "accept" } else { "compare" };
-    let fields: [(&str, String, &str); 12] = [
+    let lint = if opts.linux_only { "linux" } else { "all" };
+    let fields: [(&str, String, &str); 13] = [
         ("name", opts.name.clone(), ""),
         ("sha", sha.to_owned(), ""),
         ("packages", opts.packages.join(" "), ""),
@@ -1384,6 +1738,7 @@ fn dispatched(opts: &RemoteOpts, sha: &str) -> Vec<(&'static str, String)> {
         ("sim", opts.sim.clone(), "iphone"),
         ("snapshots", snapshots.to_owned(), "compare"),
         ("full", (if opts.full { "yes" } else { "no" }).to_owned(), "no"),
+        ("lint", lint.to_owned(), "all"),
         ("runner", opts.runner.clone(), "xcode-27"),
         ("test_runner", tests_on(opts).to_owned(), "xcode-27"),
         ("probe", opts.probe.clone().unwrap_or_default(), ""),
@@ -1537,44 +1892,68 @@ fn find(sh: &Shell, title: &str, before: &[u64]) -> Result<Listed> {
 /// The run's conclusion once it completes, printing each change of its status meanwhile.
 ///
 /// The first red ends it: once the lint job failed while other jobs still run, the run is
-/// cancelled and taken for failed, since the lane fixes the lint and checks again, which cancels
-/// the run anyway, and its Mac job would hold a slot meanwhile (`docs/decisions/tooling.md`, "A
-/// check's first red ends it"). Once the check failed here (`abandon`), the run is cancelled and
-/// `ABANDONED` returned.
+/// cancelled and taken for failed, since the lane fixes the lint and checks again, and its Mac
+/// job would hold a slot meanwhile (`docs/decisions/tooling.md`, "A check's first red ends it").
+/// Once the check failed here (`abandon`), the run is cancelled and `ABANDONED` returned.
+///
+/// Each poll asks for the run alone, and every [`JOBS_EVERY`] polls, or when its status moves,
+/// for its jobs (their reds, and the runners the queued ones ask for), each only if it changed
+/// since it was last read ([`Conditional`]): an answer that it did not costs nothing of the
+/// hourly limit every lane and the gate's tooling share. `gh run view --json
+/// status,conclusion,jobs` made three requests a poll, up to 2,160 an hour for one check at a
+/// 5 s poll (`docs/MEASUREMENTS.md`).
 fn finish(sh: &Shell, id: u64, abandon: Option<&Abandon>) -> Result<String> {
     #[derive(serde::Deserialize)]
-    struct State {
+    struct Run {
         status: String,
-        conclusion: String,
+        conclusion: Option<String>,
     }
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<RunJob>,
+    }
+    let mut run = Conditional::new(format!("repos/{{owner}}/{{repo}}/actions/runs/{id}"));
+    let mut jobs =
+        Conditional::new(format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs?per_page=100"));
     let id = id.to_string();
     let started = Instant::now();
     let mut last = String::new();
     let mut ended_early = false;
+    let mut polls = 0_u32;
     loop {
         // A transient API error is asked again, not taken for the run's end.
-        let state = cmd!(sh, "gh run view {id} --json status,conclusion").quiet().read();
-        if let Ok(state) = state {
-            let state: State = serde_json::from_str(&state).context("gh run view's JSON")?;
+        let state = run.get(sh).and_then(|body| serde_json::from_str::<Run>(body).ok());
+        if let Some(state) = state {
             if state.status == "completed" {
-                return Ok(if ended_early { "failure".to_owned() } else { state.conclusion });
+                let conclusion = state.conclusion.unwrap_or_default();
+                return Ok(if ended_early { "failure".to_owned() } else { conclusion });
             }
-            let jobs = run_jobs(sh, &id).unwrap_or_default();
-            if let Some((job, label)) = unservable(&jobs) {
-                let _cancelled =
-                    cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().ignore_stderr().run();
-                bail!(
-                    "run {id}'s job `{job}` is queued for runner `{label}`, which no runner \
-                     serves, so it would never start; the run is cancelled. Its workflow is \
-                     not the one this xtask dispatches for: land the workflow change first, or \
-                     try it with --workflow-ref <branch>"
-                );
-            }
-            if !ended_early && let Some(job) = first_red(&jobs) {
-                println!("  {job} failed: the run's other jobs are cancelled");
-                let _cancelled =
-                    cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().ignore_stderr().run();
-                ended_early = true;
+            let listed = (polls.is_multiple_of(JOBS_EVERY) || state.status != last)
+                .then(|| jobs.get(sh).and_then(|body| serde_json::from_str::<Jobs>(body).ok()))
+                .flatten();
+            if let Some(Jobs { jobs }) = listed {
+                if let Some((job, label)) = unservable(&jobs) {
+                    let _cancelled = cmd!(sh, "gh run cancel {id}")
+                        .quiet()
+                        .ignore_stdout()
+                        .ignore_stderr()
+                        .run();
+                    bail!(
+                        "run {id}'s job `{job}` is queued for runner `{label}`, which no runner \
+                         serves, so it would never start; the run is cancelled. Its workflow is \
+                         not the one this xtask dispatches for: land the workflow change first, \
+                         or try it with --workflow-ref <branch>"
+                    );
+                }
+                if !ended_early && let Some(job) = first_red(&jobs) {
+                    println!("  {job} failed: the run's other jobs are cancelled");
+                    let _cancelled = cmd!(sh, "gh run cancel {id}")
+                        .quiet()
+                        .ignore_stdout()
+                        .ignore_stderr()
+                        .run();
+                    ended_early = true;
+                }
             }
             if state.status != last {
                 let secs = started.elapsed().as_secs();
@@ -1582,6 +1961,7 @@ fn finish(sh: &Shell, id: u64, abandon: Option<&Abandon>) -> Result<String> {
                 last = state.status;
             }
         }
+        polls = polls.wrapping_add(1);
         ensure!(started.elapsed() < FINISH, "run {id} still {last} after {FINISH:?}");
         if pause(POLL, abandon) {
             let _cancelled =
@@ -1591,6 +1971,66 @@ fn finish(sh: &Shell, id: u64, abandon: Option<&Abandon>) -> Result<String> {
     }
 }
 
+/// How many polls of a run go by between two asks for its jobs: 20 s at a 5 s poll.
+const JOBS_EVERY: u32 = 4;
+
+/// A GitHub API resource asked for again with the `ETag` it was last read with
+/// (`If-None-Match`): the API answers 304 when it did not change, which does not count against
+/// the hourly limit (measured 2026-10-31: a 200 took one request of it, a 304 none).
+struct Conditional {
+    /// Its path, as `gh api` takes it.
+    path: String,
+    /// The `ETag` of its last answer.
+    etag: Option<String>,
+    /// Its body as last read.
+    body: Option<String>,
+}
+
+impl Conditional {
+    const fn new(path: String) -> Self {
+        Self { path, etag: None, body: None }
+    }
+
+    /// The resource as it is now, read again only when it changed; `None` when the API did not
+    /// answer with it.
+    fn get(&mut self, sh: &Shell) -> Option<&str> {
+        let header = self.etag.as_ref().map(|etag| format!("If-None-Match: {etag}"));
+        let conditional: Vec<&str> =
+            header.iter().flat_map(|header| ["-H", header.as_str()]).collect();
+        let path = &self.path;
+        // `gh` exits 1 on a 304 and prints its headers all the same.
+        let out = cmd!(sh, "gh api --include {conditional...} {path}")
+            .quiet()
+            .ignore_status()
+            .ignore_stderr()
+            .output()
+            .ok()?;
+        let text = String::from_utf8(out.stdout).ok()?;
+        let (status, etag, body) = answer(&text)?;
+        match status {
+            200 => self.body = Some(body.to_owned()),
+            304 => {}
+            _ => return None,
+        }
+        if let Some(etag) = etag {
+            self.etag = Some(etag.to_owned());
+        }
+        self.body.as_deref()
+    }
+}
+
+/// An HTTP answer as `gh api --include` prints it: the status, the `ETag` and the body.
+fn answer(text: &str) -> Option<(u16, Option<&str>, &str)> {
+    let (head, body) = text.split_once("\r\n\r\n").or_else(|| text.split_once("\n\n"))?;
+    let mut lines = head.lines();
+    let status = lines.next()?.split(' ').nth(1)?.parse().ok()?;
+    let etag = lines.find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("etag").then(|| value.trim())
+    });
+    Some((status, etag, body))
+}
+
 /// A job of a run, as the Actions API lists it.
 #[derive(serde::Deserialize, Default)]
 struct RunJob {
@@ -1598,18 +2038,8 @@ struct RunJob {
     status: String,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(default)]
     labels: Vec<String>,
-}
-
-/// The jobs of run `id`.
-fn run_jobs(sh: &Shell, id: &str) -> Option<Vec<RunJob>> {
-    #[derive(serde::Deserialize)]
-    struct Jobs {
-        jobs: Vec<RunJob>,
-    }
-    let url = format!("repos/{{owner}}/{{repo}}/actions/runs/{id}/jobs");
-    let jobs: Jobs = serde_json::from_str(&cmd!(sh, "gh api {url}").quiet().read().ok()?).ok()?;
-    Some(jobs.jobs)
 }
 
 /// The lint job, when it failed while another job of its run has not completed: the red that
@@ -1727,6 +2157,23 @@ mod tests {
         let probe = opts(&["--probe", "true"]);
         let without = ours.replace("      probe:\n", "      tried:\n");
         assert_eq!(unfit(&without, &probe).as_deref(), Some("it declares no input probe"));
+        // A Linux-only lint goes to a workflow without the input as a whole one, not refused.
+        let linux = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]), false);
+        assert!(super::fit(&ours, "gate", &linux).linux_only);
+        let older = ours.replace("      lint:\n", "      linted:\n");
+        let fitted = super::fit(&older, "gate", &linux);
+        assert!(!fitted.linux_only && unfit(&older, &fitted).is_none());
+    }
+
+    /// An answer `gh api --include` prints gives its status, `ETag` and body, a 304's empty.
+    #[test]
+    fn an_answer_gives_its_status_etag_and_body() {
+        let ok = "HTTP/2.0 200 OK\nAccess-Control-Allow-Origin: *\r\nEtag: W/\"5a29\"\r\n\
+                  X-Ratelimit-Used: 469\r\n\r\n{\"status\":\"queued\"}";
+        assert_eq!(super::answer(ok), Some((200, Some("W/\"5a29\""), "{\"status\":\"queued\"}")));
+        let same = "HTTP/2.0 304 Not Modified\nEtag: \"5a29\"\r\nVary: Accept\r\n\r\n";
+        assert_eq!(super::answer(same), Some((304, Some("\"5a29\""), "")));
+        assert_eq!(super::answer("gh: not found"), None);
     }
 
     /// Every runner a workflow's job names outright is one a check knows is served, so a job
@@ -1862,35 +2309,53 @@ mod tests {
         MacJob { gate: true, queued, check: None }
     }
 
-    /// A second check of a lane waits for the first to let go of the lane's directory, or with
-    /// `--no-wait` is refused at once with the holder's pid; another lane is never held up.
+    /// A check that moves the lock works in a directory of its own; any other in the directory
+    /// its name shares.
     #[test]
-    fn a_lane_s_directory_is_one_check_s_at_a_time() {
-        let root = scratch("lane-lock");
-        let first = super::hold_lane(&root, "L", true).expect("free");
-        let refused = super::hold_lane(&root, "L", true).expect_err("held");
-        let pid = std::process::id().to_string();
-        assert!(refused.to_string().contains(&format!("pid {pid}")), "{refused}");
-        let other = super::hold_lane(&root, "M", true).expect("another lane's is free");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let waiting = {
-            let root = root.clone();
-            std::thread::spawn(move || {
-                let held = super::hold_lane(&root, "L", false);
-                let _sent = tx.send(held.is_ok());
-                held
-            })
+    fn a_check_that_moves_the_lock_works_apart() {
+        let place = |name: &str, paths: &[&str]| {
+            let changed: Vec<String> = paths.iter().map(|p| (*p).to_owned()).collect();
+            let place = super::Workdir::of(name, &changed);
+            (place.name, place.moves_lock)
         };
-        assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(),
-            "the second check waits while the first holds the lane"
+        assert_eq!(place("L-h", &["crates/slopty-shell/src/lib.rs"]), ("L".to_owned(), false));
+        assert_eq!(place("L-h", &[]), ("L".to_owned(), false));
+        for moved in [
+            "Cargo.lock",
+            "Cargo.toml",
+            "workspace-hack/Cargo.toml",
+            "vendor/ghostty",
+            "vendor/noq-udp/src/unix.rs",
+            ".cargo/config.toml",
+            "rust-toolchain.toml",
+        ] {
+            let moving = place("L-h", &["crates/a/src/lib.rs", moved]);
+            assert_eq!(moving, ("L-h-lock".to_owned(), true));
+        }
+        assert_eq!(place("U", &["crates/slopty-net/Cargo.toml"]), ("U".to_owned(), false));
+        assert_eq!(place("U", &["Cargo.lock"]), ("U-lock".to_owned(), true));
+    }
+
+    /// A quick check dispatches nothing of its crates; a full one only Linux's clippy, and the
+    /// tests when Linux tests every crate; none for crates no Linux builds.
+    #[test]
+    fn a_full_check_asks_a_runner_only_for_linux() {
+        let quick = super::runners_part(&opts(&["-p", "slopty-net"]), false);
+        assert_eq!(quick.packages, [""; 0], "a quick check's crates are checked here");
+        let mac = super::runners_part(&opts(&["-p", "slopty-shell", "--full"]), false);
+        assert!(mac.packages.is_empty(), "iOS clippy runs here");
+        let net = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]), false);
+        assert!(net.linux_only && net.packages == ["slopty-proto"]);
+        assert_eq!(super::tests_on(&net), "ubuntu-24.04");
+        assert!(super::dispatched(&net, "").contains(&("lint", "linux".to_owned())));
+        let mixed = super::runners_part(
+            &opts(&["-p", "slopty-proto", "-p", "slopty-shell", "--full"]),
+            false,
         );
-        drop(first);
-        let took = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("it goes on");
-        assert!(took, "it holds the lane once the first let go");
-        drop(waiting.join().expect("joins"));
-        drop(other);
-        let _gone = std::fs::remove_dir_all(&root);
+        assert_eq!(super::tests_on(&mixed), "none");
+        assert!(mixed.linux_only && mixed.packages == ["slopty-proto"], "Linux builds the one");
+        let placed = opts(&["-p", "slopty-proto", "--full", "--place", "runner"]);
+        assert!(!super::dispatched(&placed, "").iter().any(|(key, _)| *key == "lint"));
     }
 
     /// A check runs the gate's hakari step when it changes a member's manifest, the lock, the
@@ -1994,10 +2459,9 @@ mod tests {
     }
 
     #[test]
-    fn a_lane_holds_one_mac_check_and_a_rerun_replaces_its_own() {
-        // Another check of lane A waits for the first.
-        let why = mac_verdict(&[check("A-perf", false)], "A-cuts", 1);
-        assert!(why.is_some_and(|w| w.contains("A-perf")));
+    fn a_rerun_replaces_its_own_mac_check() {
+        // Another check of a name sharing the directory is another lane's: one Mac of two.
+        assert_eq!(mac_verdict(&[check("A-perf", false)], "A-cuts", 1), None);
         // The same name does not wait: its dispatch cancels the older run, whose Macs come
         // back, so they are not counted against it either.
         let own = [check("A-cuts", false), check("A-cuts", false), check("W-x", false)];

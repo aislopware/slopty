@@ -59,13 +59,18 @@ pub const DEFAULT_IDLE_HOURS: u64 = 24;
 /// about 60 GB, so this holds several days of them. The volume's floor still guards the disk.
 pub const DEFAULT_BUDGET_GB: u64 = 200;
 
-/// The free space `target/`'s volume keeps, in GB (`SLOPTY_DISK_FLOOR_GB`): a cold full gate
-/// writes about 35 GB, so a build that starts above the floor finishes before the disk does.
-pub const DEFAULT_FLOOR_GB: u64 = 50;
+/// The free space `target/`'s volume keeps, in GB (`SLOPTY_DISK_FLOOR_GB`): a lane's cold local
+/// check of the app's crates writes up to about 30 GB, so one that starts above the floor
+/// finishes before the disk does. It was 50 while a full gate, about 35 GB cold, built here;
+/// the gate runs on hosted runners now (`docs/decisions/tooling.md`, "The gate and e2e run on
+/// free hosted runners"), and at 50 with this volume 75-85 GB free a pass acted after almost
+/// every check, evicting units idle for an hour that the next check built again (1 501 units,
+/// 21.5 GB, in two passes on 2026-10-31; "A lane's check returns in minutes").
+pub const DEFAULT_FLOOR_GB: u64 = 30;
 
 /// The free space a pass that acts leaves above the floor, in GB (`SLOPTY_DISK_HEADROOM_GB`):
-/// what the checks that start before the next pass may write. A pass runs before and after each
-/// check, but lanes build side by side, and on 2026-10-12 the volume fell under the floor while
+/// what the checks that start before the next pass may write. A pass runs after each check, but
+/// lanes build side by side, and on 2026-10-12 the volume fell under the floor while
 /// 30 GB of units sat unused for 1 to 6 hours: a lane's local check of the app's crates writes
 /// up to about 30 GB cold, and a fork's cold build more. A pass that has to act frees this much
 /// more than the floor, least recently used first, so the floor holds between passes.
@@ -326,8 +331,9 @@ pub fn fork_targets(root: &Utf8Path) -> Vec<Utf8PathBuf> {
     out
 }
 
-/// The pass after a check (`check`, `gate`, and each local half of `remote`): every build
-/// directory, busy ones skipped, held to the floor and its headroom; never fails its caller.
+/// The pass after a check (`check`, `gate`, and `remote`'s after-pass once its verdict is out):
+/// every build directory, busy ones skipped, held to the floor and its headroom; never fails its
+/// caller.
 pub fn auto() {
     let pass = || -> Result<Vec<(Utf8PathBuf, Report)>> {
         let root = repo_root()?;
@@ -664,7 +670,8 @@ impl Plan {
             if planned >= excess || c.last_use > recent {
                 break;
             }
-            if c.fate != Fate::Kept {
+            // A unit whose blocks a clone shares all frees nothing (`own_bytes`): it stays.
+            if c.fate != Fate::Kept || c.bytes == 0 {
                 continue;
             }
             let Some(survey) = surveys.get_mut(c.s.saturating_sub(first)) else { continue };
@@ -1565,8 +1572,8 @@ fn size(path: &Utf8Path) -> u64 {
     tally(path).bytes
 }
 
-/// A tree's bytes on disk: those of files with one name, and the inodes of files with several,
-/// so a total counts a hard-linked file once.
+/// A tree's bytes on disk ([`own_bytes`]): those of files with one name, and the inodes of files
+/// with several, so a total counts a hard-linked file once.
 #[derive(Default)]
 struct Tally {
     bytes: u64,
@@ -1577,7 +1584,7 @@ struct Tally {
 fn tally(path: &Utf8Path) -> Tally {
     fn walk(path: &std::path::Path, out: &mut Tally) {
         let Ok(meta) = std::fs::symlink_metadata(path) else { return };
-        let bytes = meta.blocks().saturating_mul(512);
+        let bytes = own_bytes(path, &meta);
         out.bytes = out.bytes.saturating_add(bytes);
         if meta.nlink() > 1 && !meta.is_dir() {
             out.linked.push((meta.dev(), meta.ino(), bytes));
@@ -1595,6 +1602,67 @@ fn tally(path: &Utf8Path) -> Tally {
     let mut out = Tally::default();
     walk(path.as_std_path(), &mut out);
     out
+}
+
+/// The bytes the file at `path` (`meta` its metadata) holds on disk that no other file shares:
+/// on APFS the private size of a file that may share blocks (`ATTR_CMNEXT_PRIVATESIZE`), so a
+/// lane directory cloned from another (`local::seed_dir`) counts only the blocks either side
+/// wrote since, and a unit both share counts as what deleting it frees, nothing; elsewhere, and
+/// for anything else, its blocks. Counted at full size, each clone added 16-20 GB to `target/`
+/// (from 82 to 96 GB when one appeared, 2026-10-31), and five took it over its budget for space
+/// no pass could free.
+fn own_bytes(path: &std::path::Path, meta: &std::fs::Metadata) -> u64 {
+    let blocks = meta.blocks().saturating_mul(512);
+    if meta.is_file() { private_size(path).unwrap_or(blocks) } else { blocks }
+}
+
+/// The private size of the file at `path`, its bytes no clone shares (`getattrlist(2)`), when it
+/// may share blocks with another (`EF_MAY_SHARE_BLOCKS`); `None` for any other, or where the
+/// volume does not say. A file never cloned is left to its blocks: APFS counts a write in its
+/// private size only once the write reaches the disk.
+#[cfg(target_os = "macos")]
+fn private_size(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+    /// `<sys/stat.h>`'s: the file may share blocks with another.
+    const EF_MAY_SHARE_BLOCKS: u64 = 0x1;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let extended = libc::ATTR_CMNEXT_PRIVATESIZE | libc::ATTR_CMNEXT_EXT_FLAGS;
+    let mut asked = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: extended,
+    };
+    // The answer's length (a `u32`), the attributes it holds (an `attribute_set_t`, five `u32`s,
+    // the extended common ones last), then the private size (an `off_t`) and the extended flags
+    // (a `u64`), in the order of their bits.
+    let mut answer = [0_u8; 40];
+    // SAFETY: `getattrlist(2)` reads the NUL-terminated path and the attribute list and writes at
+    // most `answer.len()` bytes into `answer`, all of which outlive the call.
+    let status = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut asked).cast(),
+            answer.as_mut_ptr().cast(),
+            answer.len(),
+            libc::FSOPT_NOFOLLOW | libc::FSOPT_ATTR_CMN_EXTENDED,
+        )
+    };
+    let returned = answer.get(20..24)?.try_into().ok().map(u32::from_ne_bytes)?;
+    let flags = answer.get(32..40)?.try_into().ok().map(u64::from_ne_bytes)?;
+    if status != 0 || returned & extended != extended || flags & EF_MAY_SHARE_BLOCKS == 0 {
+        return None;
+    }
+    u64::try_from(i64::from_ne_bytes(answer.get(24..32)?.try_into().ok()?)).ok()
+}
+
+/// Off a Mac no volume says: a file's blocks stand for its size.
+#[cfg(not(target_os = "macos"))]
+const fn private_size(_path: &std::path::Path) -> Option<u64> {
+    None
 }
 
 /// The sizes a pass needs: the whole target directory's, each unit's and cache's paths', and

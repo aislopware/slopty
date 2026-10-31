@@ -18838,3 +18838,104 @@ magick compare -metric AE -fuzz 0 <in-process>.png crates/slopty-e2e/golden/<nam
 # the in-process goldens, timed in a lane's check (nextest's junit.xml under the lane's target)
 SLOPTY_LANE=L-H cargo xtask remote -p slopty-shell
 ```
+
+## 2026-10-31 — a lane's check without a queue: holds, clones, warms, prune and polling
+
+This Mac (M1 Max, ten cores, 32 GB, /Volumes/Lacie 931 GB with 75-85 GB free), lanes building
+beside every probe at load 14-21 (`docs/decisions/tooling.md`, "A lane's check returns in
+minutes"). Seconds unless named.
+
+**Queue and run, per check** (`target/lanes/waits.jsonl`, written by `target/lanes/check-as.sh`):
+
+| | checks | queued p50 / p90 / max | ran p50 / p90 |
+| --- | --- | --- | --- |
+| before (17:29-18:32, outer lock, whole-check hold) | 16 | 0 / 0 / 86 | 70 / 241 |
+| after (from 19:13, holds only while working here) | 11 | 0 / 0 / 0 | 50 / 85 |
+
+The sample is small; the study's baseline was a shared-directory queue p90 of 311 s, with 29 %
+of checks queued over 30 s. In `target/remote/history.jsonl`, the two days before had 615 quick
+checks at a verdict p50 76 s and p90 553 s, 98 full ones at 487 s and 933 s. After: ten lane
+checks, 15-64 s, one at 333 s (the first green in a lock-move directory cloned from M, which held
+no GUI stack: the clone source is ranked by what it built since). Lane H's five checks carrying
+a gpui-fast bump (d146205 to af75fa4) ran in `target/local/L-H-lock`; L stayed at `HEAD`'s lock
+for lane T's four checks beside them, 15, 47, 35 and 29 s.
+
+**Why units rebuilt.** A clone of L right after lane H's check there (H's lock), then
+`slopty-shell`'s tests built at `HEAD`'s lock: 18 units rebuilt in 103 s, the gpui-fast stack
+(ztracing, gpui_util, scheduler, sum_tree, gpui, gpui_apple, gpui_macos, gpui_platform,
+gpui_tokio, …) and `slopty-shell`. Cargo keys a git dependency's units without its revision, so
+two revisions overwrite each other's artifacts. `CARGO_LOG=cargo::core::compiler::fingerprint=info`
+printed nothing on cargo 1.99.1; `cargo -v` names each dirty unit's cause. After an hour idle the
+cause was prune: the after-pass evicted 467 units (9.9 GB) at 19:19 and 1,034 (11.6 GB) at 19:24,
+reading 79 GB free under its line of 50 + 30 GB.
+
+**rustdoc beside the tests** (`--timings`, an edit to `crates/slopty-shell/src/lib.rs` in a clone
+of L): the test build 13.2 s wall over 2 units, CPU 58 % and under 40 % in its last 4 s; rustdoc
+of `slopty-shell` 14.5 s, one process. Over the 163 green GUI checks since 10-30:
+
+| step | p50 | p90 |
+| --- | --- | --- |
+| rustdoc | 27 | 55 |
+| clippy | 21 | 54 |
+| test build | 23 | 54 |
+| test run | 10 | 28 |
+
+rustdoc cannot overlap the test build (cargo locks the target dir); beside the test run it
+would save about 10 s at p50 and 28 s at p90, with nextest running from the build's metadata.
+
+**Clippy reds a `clippy --fix` would have fixed**: of 150 host-clippy reds from 10-30 02:24 to
+10-31 19:15 (147 snapshots readable), 61 held a compile error; of the 89 lint-only, 15 held
+only machine-applicable lints (`unused_qualifications`, `semicolon_if_nothing_returned`,
+`derive_partial_eq_without_eq`, …), 7 lints applicable in some forms, 67 a lint no tool fixes
+(`needless_pass_by_ref_mut` 30, `too_long_first_doc_paragraph` 18, `arithmetic_side_effects` 14,
+`format_push_string` 10, `type_complexity` 9, …). Applicability from each lint's emission sites
+in clippy `rust-1.99.0`, 22 settled by hand.
+
+**Disk.** `du` at 19:30: L's target 16.1 GB and e2e-target 1.5; M's 6.0 and 4.5; L-H-lock's
+15.8; all of `target/` 69.6 GB. `clonefile` takes a 20 GB lane directory in 0.7-1.7 s and no
+space until a side writes. A GUI lock-move clone made from M wrote 6.0 GB in its first 6
+minutes; an xtask clone writes about 0.8 GB a check; a GUI lane's clone grows about 8 GB an hour
+of work. Prune's dry pass over every build directory at 20:40 counted `target/` at 57.7 GB by
+blocks and 40.1 GB by APFS private size (`ATTR_CMNEXT_PRIVATESIZE`): 17.6 GB were blocks
+clones share, which no pass frees. The pass took 4.1 s against 2.4 s (one more `getattrlist` a
+file).
+
+**Warm priority.** Ten busy processes per group, 8 s, on the ten cores, against a group at
+nice 10, CPU share of the other group:
+
+| the other group | share |
+| --- | --- |
+| nice 15 | 49.5 %, 49.9 % |
+| nice 20 | 50.3 % |
+| `taskpolicy -c utility` | 44 % |
+| `taskpolicy -c background` | 38 % |
+| `PRIO_DARWIN_BG`, set by each process | 3.7 % |
+| `PRIO_DARWIN_BG`, set by the parent, then exec | 29 % |
+
+**Polling a run.** `gh run view --json status,conclusion,jobs` makes three REST requests a poll
+(`GH_DEBUG=api`). Three plain `gh api` requests for a run moved `X-Ratelimit-Used` from 405 to
+407; three with the run's `ETag` in `If-None-Match` came back 304 and left it at 407. On
+`M-R@89b3ef4438`'s run 41206556175, polled as `finish` polls for its 236 s:
+
+| requests | before | after |
+| --- | --- | --- |
+| made | 123 | 52 |
+| counted | 123 | 7 |
+| counted, an hour | 1,876 | 106 |
+
+The same check (`-p slopty-proto -p xtask --full`, the workflow read from its snapshot): 91 s
+here (lints, iOS clippy, tests), Linux clippy alone on the runner 79.9 s on a cold cache,
+verdict in 4 min 19 s, queued 0.
+
+```sh
+# queue and run per check
+jq -s '[.[] | .ran_s] | sort' target/lanes/waits.jsonl
+# why a unit rebuilt
+cargo -v test -p slopty-shell --no-run 2>&1 | grep Dirty
+cargo build -p slopty-shell --tests --timings
+# prune's sizes
+cargo xtask prune --dry-run
+# what a poll costs against the hourly limit
+GH_DEBUG=api gh run view <run> --json status,conclusion,jobs
+gh api -i repos/aislopware/slopty/actions/runs/<run> -H 'If-None-Match: <etag>' | grep -i ratelimit-used
+```
