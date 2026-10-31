@@ -14722,3 +14722,22 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `view::paint_oracle::a_split_closed_beside_the_session_paints_its_rows_where_a_frame_from_scratch_does`,
   which keeps the band through the panel's hand-off, lets it go once when the keyboard stays, and
   draws red 11's report again for the hand-off after the frame.
+- ✅ **What shows a file takes the keyboard only when handed it (2026-10-31).** A file's view built
+  its source editor, and its Markdown preview, holding the keyboard: whichever showed the file took
+  it as it was built, on the first draw after the file's text came back from its machine, and a jump
+  to a line took it again, as gpui-kit's caret move focuses the editor. The pane frame then made the
+  file the focused pane. A file an agent opens stands beside the session with the keyboard left
+  where the person had it (as a diff does, the entry "A diff the person brings to the front has the
+  keyboard"), so whenever the text came back before the agent read the window again, the file took
+  the keyboard from the person: the app e2e saw it as a race (red 13). A reload, as when an agent
+  edits an open file on disk, rebuilt the editor and took it the same way. Ruled: what shows a file
+  takes the keyboard only from the pane's hand-off (`focus_view`, as the person brings the pane
+  forward by a link, the tree, ⌘P or a press). A hand-off made while the file loads leaves the
+  keyboard in the loading state, which passes it on once the file shows, and a keyboard in what
+  showed the file passes on to what replaces it (a reload's new editor, the preview or the source
+  the toggle shows); nothing else moves it (`FilesSurface::settle_keyboard`), and a jump to a line
+  moves only the caret. Tests: `slopty-shell`
+  `shell::agent_ui::tests::an_agents_file_at_a_line_leaves_the_keyboard_when_its_text_comes_late`,
+  `an_agents_markdown_file_leaves_the_keyboard_when_its_text_comes_late`,
+  `a_file_the_person_opens_at_a_line_takes_the_keyboard_when_its_text_comes`,
+  `a_markdown_file_the_person_opens_takes_the_keyboard_when_its_text_comes`.

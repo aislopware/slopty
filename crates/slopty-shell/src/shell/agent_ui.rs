@@ -1118,6 +1118,171 @@ mod tests {
         });
     }
 
+    /// The display's frames until nothing more changes.
+    fn frames(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        cx.run_until_parked();
+    }
+
+    /// Who holds the keyboard once a file's view has drawn its text.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Held {
+        /// The pane the view counts as focused is the file's.
+        file_focused: bool,
+        /// The session's terminal holds it.
+        session: bool,
+        /// The file's pane holds it.
+        file: bool,
+        /// What takes it in the file's view (its editor, its Markdown preview) holds it.
+        view: bool,
+    }
+
+    /// Who holds the keyboard after `open` opens `link`, a file of chat `a`'s folder, beside
+    /// the session, its text coming back from the machine only once the open has drawn, as a
+    /// worker's read takes longer than a frame: the view builds what shows the text (the source
+    /// editor at a line, else the Markdown preview) only then.
+    fn opened_late(
+        cx: &mut TestAppContext,
+        link: &str,
+        open: impl FnOnce(&mut Shell, &str, &mut Window, &mut Context<Shell>),
+    ) -> Held {
+        use super::super::retention_tests::{DESKTOP, launch};
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = runtime.enter();
+        let (out, mut requests) = tokio::sync::mpsc::channel(256);
+        let (replies, inbound) = tokio::sync::mpsc::channel(16);
+        let engine = crate::state::EngineHandle::from_test_client(slopty_view_rpc::RpcClient::new(
+            out, inbound,
+        ));
+        let (shell, cx) = launch(cx, DESKTOP);
+        shell.update(cx, |shell, cx| {
+            shell.state.update(cx, |state, cx| {
+                state.set_test_engine(engine);
+                state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
+                cx.notify();
+            });
+            shell.open_chat("a".into(), cx);
+        });
+        frames(cx);
+        let holds = |pane, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| shell.read(cx).pane_holds_keyboard(pane, window, cx))
+        };
+        assert!(holds(Pane::Session, cx), "the session's terminal holds the keyboard");
+        shell.update_in(cx, |shell, window, cx| open(shell, link, window, cx));
+        frames(cx);
+        let read = std::iter::from_fn(|| requests.try_recv().ok())
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw).unwrap())
+            .find(|request| request["method"] == methods::READ_WORKSPACE_FILE)
+            .expect("the open asks the machine for the file");
+        let text = "# Slopty\n\nOne app for many machines.\nThe third line.\n";
+        let file = slopty_view_proto::WorkspaceFileText {
+            checkout_id: String::new(),
+            path: read["params"]["path"].as_str().unwrap().to_owned(),
+            text: Some(text.into()),
+            content_hash: Some("readme".into()),
+            size: u64::try_from(text.len()).unwrap(),
+            modified_at: None,
+            encoding: slopty_view_proto::WorkspaceTextEncoding::Utf8,
+            line_ending: Some(slopty_view_proto::WorkspaceLineEnding::Lf),
+            read_only_reason: None,
+            truncated: false,
+        };
+        runtime.block_on(async {
+            let answer = serde_json::json!({ "id": read["id"], "ok": file });
+            replies.send(answer.to_string()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while replies.capacity() < replies.max_capacity() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        });
+        frames(cx);
+        let (id, view) = shell.read_with(cx, |shell, _| {
+            let (id, view) = shell.file_surfaces.iter().next().expect("the file's view");
+            (*id, view.clone())
+        });
+        let target = view.read_with(cx, FilesSurface::keyboard_target);
+        let target = target.expect("the text shows, in what takes the keyboard");
+        let file = Pane::View(RightSurface::File(id));
+        cx.update(|window, cx| {
+            let shell = shell.read(cx);
+            Held {
+                file_focused: shell.panes_now(cx).focused() == file,
+                session: shell.pane_holds_keyboard(Pane::Session, window, cx),
+                file: shell.pane_holds_keyboard(file, window, cx),
+                view: target.is_focused(window),
+            }
+        })
+    }
+
+    /// README.md of chat `a`'s folder at its third line, which shows its source.
+    const AT_A_LINE: &str = "file:///work/app/README.md#L3";
+    /// README.md whole, which shows its Markdown preview.
+    const WHOLE: &str = "file:///work/app/README.md";
+
+    /// The file an agent opens.
+    fn by_an_agent(shell: &mut Shell, link: &str, window: &mut Window, cx: &mut Context<Shell>) {
+        let file = Target::File(link.to_owned());
+        shell.agent_open(&file, Some("local"), window, cx).unwrap();
+    }
+
+    /// The file the person opens: a link they click, as the tree and ⌘P open one too.
+    fn by_the_person(shell: &mut Shell, link: &str, window: &mut Window, cx: &mut Context<Shell>) {
+        assert!(shell.open_workspace_file_link("a", link, window, cx));
+    }
+
+    /// The keyboard where the person had it: in the session's terminal.
+    const IN_THE_SESSION: Held =
+        Held { file_focused: false, session: true, file: false, view: false };
+    /// The keyboard in the file's view, in what shows the file.
+    const IN_THE_FILE: Held = Held { file_focused: true, session: false, file: true, view: true };
+
+    /// A file an agent opens at a line stands beside the session while the keyboard stays where
+    /// the person had it, also when its text comes back after the open and the view builds its
+    /// source editor only then (red 13): what shows a file takes the keyboard only from the
+    /// pane's hand-off, never as it is built.
+    #[gpui::test]
+    fn an_agents_file_at_a_line_leaves_the_keyboard_when_its_text_comes_late(
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(opened_late(cx, AT_A_LINE, by_an_agent), IN_THE_SESSION);
+    }
+
+    /// The same for a Markdown file an agent opens whole, whose preview is built as its text
+    /// comes.
+    #[gpui::test]
+    fn an_agents_markdown_file_leaves_the_keyboard_when_its_text_comes_late(
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(opened_late(cx, WHOLE, by_an_agent), IN_THE_SESSION);
+    }
+
+    /// A file the person opens at a line takes the keyboard in its source editor, also when its
+    /// text comes back after the open.
+    #[gpui::test]
+    fn a_file_the_person_opens_at_a_line_takes_the_keyboard_when_its_text_comes(
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(opened_late(cx, AT_A_LINE, by_the_person), IN_THE_FILE);
+    }
+
+    /// A Markdown file the person opens whole takes the keyboard in its preview, also when its
+    /// text comes back after the open.
+    #[gpui::test]
+    fn a_markdown_file_the_person_opens_takes_the_keyboard_when_its_text_comes(
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(opened_late(cx, WHOLE, by_the_person), IN_THE_FILE);
+    }
+
     /// A file link is named by its path, unescaped.
     #[test]
     fn a_file_is_marked_by_its_path() {

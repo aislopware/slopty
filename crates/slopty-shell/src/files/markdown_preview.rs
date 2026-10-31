@@ -157,7 +157,6 @@ pub(super) struct MarkdownPreview {
     code_fences: HashMap<SharedString, render::CodeFenceRuntime>,
     copied_code: Option<(SharedString, usize)>,
     copied_clear: Option<Task<()>>,
-    needs_focus: bool,
     suspended: bool,
     selection_pointer: Option<gpui::Point<gpui::Pixels>>,
     selection_task: Option<Task<()>>,
@@ -294,7 +293,6 @@ impl MarkdownPreview {
             code_fences: HashMap::new(),
             copied_code: None,
             copied_clear: None,
-            needs_focus: true,
             suspended: false,
             selection_pointer: None,
             selection_task: None,
@@ -612,7 +610,6 @@ impl MarkdownPreview {
         }
         if self.suspended {
             self.suspended = false;
-            self.needs_focus = true;
             self.version = None;
         }
     }
@@ -1112,10 +1109,6 @@ impl MarkdownPreview {
 impl Render for MarkdownPreview {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::of(cx).clone();
-        if self.needs_focus {
-            self.needs_focus = false;
-            window.focus(&self.focus, cx);
-        }
         self.resize_media(window, cx);
         self.cache.borrow_mut().retain_rows(&std::mem::take(&mut self.visible_rows));
         if self.diagram_style != crate::theme::style_generation() {

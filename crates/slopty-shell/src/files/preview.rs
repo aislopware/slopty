@@ -307,6 +307,18 @@ fn estimated_highlighted_file_bytes(highlight: &HighlightedFile) -> usize {
         }))
 }
 
+/// Put the editor's caret at `position`, scrolled into view, leaving the keyboard where it is:
+/// gpui-kit's `set_cursor_position` also focuses the editor, and what shows a file takes the
+/// keyboard only when the pane hands it on (`FilesSurface::settle_keyboard`).
+fn place_caret(
+    state: &mut super::editor::FileEditorState,
+    position: gpui_base::input::Position,
+    cx: &mut Context<super::editor::FileEditorState>,
+) {
+    let offset = state.text().position_to_offset(&position);
+    state.set_selected_range(offset..offset, cx);
+}
+
 fn document_key(context: &FilesRequestContext, path: String) -> DocumentKey {
     DocumentKey {
         chat_id: context.target.chat_id.clone().unwrap_or_default(),
@@ -363,42 +375,56 @@ impl FilesSurface {
         }
     }
 
+    /// What takes the keyboard in the open document: its image, its Markdown preview while that
+    /// shows, else its source editor; none while the document loads.
+    pub(crate) fn keyboard_target(&self, cx: &gpui::App) -> Option<FocusHandle> {
+        let document =
+            self.preview.active.as_ref().and_then(|path| self.preview.documents.get(path))?;
+        if let Some(view) = &document.image {
+            return Some(view.focus_handle(cx));
+        }
+        if document.show_markdown {
+            return document.markdown.as_ref().map(|view| view.focus_handle(cx));
+        }
+        document.editor.as_ref().map(|editor| editor.focus_handle(cx))
+    }
+
+    /// The pane's hand-off of the keyboard: to what shows the open document, or, while the
+    /// document loads, to its loading state, which hands it on once the document shows
+    /// ([`Self::settle_keyboard`]).
     pub(crate) fn focus_editor(&self, window: &Window, cx: &mut Context<Self>) {
-        if let Some(view) = self
+        let loading = self
             .preview
             .active
             .as_ref()
             .and_then(|path| self.preview.documents.get(path))
-            .and_then(|d| d.image.clone())
-        {
-            let focus = view.focus_handle(cx);
-            window.defer(cx, move |window, cx| focus.focus(window, cx));
-            return;
-        }
-        if let Some(view) = self
-            .preview
-            .active
-            .as_ref()
-            .and_then(|path| self.preview.documents.get(path))
-            .filter(|d| d.show_markdown)
-            .and_then(|d| d.markdown.clone())
-        {
-            let focus = view.focus_handle(cx);
-            window.defer(cx, move |window, cx| focus.focus(window, cx));
-            return;
-        }
-        let Some(editor) = self
-            .preview
-            .active
-            .as_deref()
-            .and_then(|path| self.preview.documents.get(path))
-            .and_then(|document| document.editor.clone())
+            .is_some_and(|document| matches!(document.phase, DocumentPhase::Loading));
+        let Some(focus) =
+            self.keyboard_target(cx).or_else(|| loading.then(|| self.keyboard_waits.clone()))
         else {
             return;
         };
-        let focus = editor.focus_handle(cx);
         // Tab activation remounts this surface after the click handler returns.
         window.defer(cx, move |window, cx| focus.focus(window, cx));
+    }
+
+    /// What shows the open document takes the keyboard only when the pane hands it on
+    /// ([`Self::focus_editor`]), never as it is built, so a file an agent opens leaves the
+    /// keyboard where the person had it (`docs/decisions/ui.md`, "What shows a file takes the
+    /// keyboard only when handed it"). A hand-off made while the document loaded goes on to it
+    /// once it shows, and a keyboard in what showed it before goes on to what replaces that (a
+    /// reload's new editor, a toggle's preview).
+    pub(super) fn settle_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.keyboard_target(cx);
+        let handed = self.keyboard_waits.is_focused(window)
+            || self
+                .keyboard_in
+                .as_ref()
+                .is_some_and(|held| held.is_focused(window) && target.as_ref() != Some(held));
+        if handed && let Some(target) = &target {
+            window.focus(target, cx);
+        }
+        self.keyboard_in = target.filter(|target| target.is_focused(window));
     }
 
     /// A chat link can arrive before the file and editor have finished loading.
@@ -431,7 +457,7 @@ impl FilesSurface {
         &mut self,
         path: &str,
         editor: Option<&Entity<super::editor::FileEditorState>>,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some((line, column)) = self.pending_line_navigation else {
@@ -461,11 +487,7 @@ impl FilesSurface {
                     }
                     None => 0,
                 };
-                state.set_cursor_position(
-                    gpui_base::input::Position::new(row, character),
-                    window,
-                    cx,
-                );
+                place_caret(state, gpui_base::input::Position::new(row, character), cx);
             });
         }
         self.pending_line_navigation = None;
@@ -484,7 +506,7 @@ impl FilesSurface {
             let retry = owner
                 .update(cx, |surface, cx| {
                     surface.line_navigation_generation == generation
-                        && !surface.center_active_line(line, window, cx)
+                        && !surface.center_active_line(line, cx)
                 })
                 .unwrap_or(false);
             if let Some(retries) = retries.checked_sub(1)
@@ -498,7 +520,7 @@ impl FilesSurface {
         });
     }
 
-    fn center_active_line(&self, line: u32, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn center_active_line(&self, line: u32, cx: &mut Context<Self>) -> bool {
         let Some(document) =
             self.preview.active.as_deref().and_then(|path| self.preview.documents.get(path))
         else {
@@ -522,9 +544,7 @@ impl FilesSurface {
                 // A newly mounted editor has no layout when the cursor is first
                 // placed. Repeat the move after layout so it can scroll there.
                 let position = editor.read(cx).cursor_position();
-                editor.update(cx, |state, cx| {
-                    state.set_cursor_position(position, window, cx);
-                });
+                editor.update(cx, |state, cx| place_caret(state, position, cx));
                 return false;
             };
             // The editor paints this offset before clamping it, so a line near
@@ -570,9 +590,10 @@ impl FilesSurface {
                 view.update(cx, super::markdown_preview::MarkdownPreview::suspend);
             }
         }
-        if self.preview.documents.get(&path).is_some_and(|d| !d.show_markdown) {
-            self.focus_editor(window, cx);
-        }
+        // What the toggle shows takes the keyboard, the preview built now if it never showed.
+        let editor = self.preview.documents.get(&path).and_then(|d| d.editor.clone());
+        let _shown = self.prepare_markdown_preview(&path, editor.as_ref(), cx);
+        self.focus_editor(window, cx);
         cx.notify();
     }
 
@@ -2083,7 +2104,9 @@ impl FilesSurface {
         // One loading voice that never flashes, and a failed read that says what failed
         // and offers the way on (M30, M31).
         if matches!(document.phase, DocumentPhase::Loading) {
+            // It holds a keyboard handed to the view until the document shows.
             return div()
+                .track_focus(&self.keyboard_waits)
                 .flex_1()
                 .flex()
                 .items_center()
@@ -2190,16 +2213,11 @@ impl FilesSurface {
             return None;
         }
         let text = document.file.as_ref()?.text.clone()?;
-        let focus_editor = !document.show_markdown;
         let editor =
             super::editor::new_file_editor(text, path, self.preview.word_wrap, theme, window, cx);
         let event_path = path.to_owned();
         let editor_events = super::editor::subscribe_to_changes(&editor, event_path, cx);
         let editor_observer = cx.observe(&editor, |_, _, cx| cx.notify());
-        if focus_editor {
-            let focus = editor.focus_handle(cx);
-            window.defer(cx, move |window, cx| focus.focus(window, cx));
-        }
         let document = self.preview.documents.get_mut(path)?;
         document.editor = Some(editor.clone());
         document.editor_events = Some(editor_events);

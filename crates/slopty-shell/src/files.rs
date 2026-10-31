@@ -664,6 +664,11 @@ pub struct FilesSurface {
     /// Floating rail state for the file tree (the menu-scrollbar treatment).
     tree_bar: crate::popover::MenuScrollbarState,
     tree_focus: FocusHandle,
+    /// Holds a keyboard the pane handed this view while its document loads, and hands it on to
+    /// what shows the document once it does (`preview::settle_keyboard`).
+    keyboard_waits: FocusHandle,
+    /// What showed the open document and held the keyboard at the last draw.
+    keyboard_in: Option<FocusHandle>,
     search: Entity<ComposerInput>,
     search_restore_tree_focus: bool,
     search_state: FileSearchState,
@@ -716,7 +721,9 @@ impl Render for FilesSurface {
             Some(self.render_explorer_header(&theme, cx))
         };
         let body = if is_editor {
-            self.render_preview(window, cx)
+            let body = self.render_preview(window, cx);
+            self.settle_keyboard(window, cx);
+            body
         } else {
             self.render_explorer(&theme, cx).into_any_element()
         };
@@ -1001,6 +1008,8 @@ impl FilesSurface {
             tree_bar: crate::popover::MenuScrollbarState::default(),
             // The tree is one keyboard stop; its arrows walk the rows (M8).
             tree_focus: cx.focus_handle().tab_stop(true),
+            keyboard_waits: cx.focus_handle(),
+            keyboard_in: None,
             search,
             search_restore_tree_focus: false,
             search_state: FileSearchState::default(),
