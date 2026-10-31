@@ -256,6 +256,10 @@ enum Cmd {
     ClaudeMod(claude_mod::ClaudeModCmd),
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
+    /// What a change reaches of the e2e smoke set (`reach`), the gate's run of it (`plan`), and
+    /// each case's verdict in a run's logs (`verdicts`).
+    #[command(subcommand)]
+    Smoke(gate::impact::SmokeCmd),
     /// Format everything (rustfmt nightly if present, taplo).
     Fmt,
     /// Clippy on all targets and all triples with `-D warnings`.
@@ -459,6 +463,7 @@ pub fn main() -> Result<()> {
             Ok(())
         }
         Cmd::E2e(opts) => e2e::run(&sh, &opts),
+        Cmd::Smoke(cmd) => gate::impact::run(&sh, &cmd),
         Cmd::Fixtures { cmd } => fixtures::run(&cmd),
         Cmd::ClaudeMod(cmd) => claude_mod::run(&cmd),
         Cmd::Fmt => gate::fmt(&sh, true),
