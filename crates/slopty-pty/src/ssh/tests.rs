@@ -54,17 +54,20 @@ fn the_cache_holds_one_version_per_destination() {
 }
 
 /// A fake `ssh` in `dir`: `-G` resolves every host to `alice@box.example` (or fails), the
-/// install call keeps its standard input in `got` and exits `tic_exit`, and the session
-/// prints its `TERM` and arguments. Every call is a line in `log`.
+/// install call keeps its standard input in `got`, notes in `stderr` whether its standard error
+/// is `/dev/null` and exits `tic_exit`, and the session prints its `TERM` and arguments. Every
+/// call is a line in `log`.
 struct FakeSsh {
     path: PathBuf,
     log: PathBuf,
     got: PathBuf,
+    stderr: PathBuf,
 }
 
 impl FakeSsh {
     fn new(dir: &Path, resolves: bool, tic_exit: u8) -> Self {
         let (path, log, got) = (dir.join("ssh"), dir.join("log"), dir.join("got"));
+        let stderr = dir.join("stderr");
         let resolve = if resolves {
             "printf 'user alice\\nhostname box.example\\nport 22\\n'; exit 0"
         } else {
@@ -74,15 +77,18 @@ impl FakeSsh {
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{log}'\n\
              if [ \"$1\" = -G ]; then {resolve}; fi\n\
              for last; do :; done\n\
-             case $last in *'tic -x -'*) cat > '{got}'; exit {tic_exit};; esac\n\
+             case $last in *'tic -x -'*)\n\
+             if [ /dev/fd/2 -ef /dev/null ]; then echo discarded; else echo kept; fi > '{stderr}'\n\
+             cat > '{got}'; exit {tic_exit};; esac\n\
              printf 'session TERM=%s args=%s\\n' \"$TERM\" \"$*\"\n",
             log = log.display(),
             got = got.display(),
+            stderr = stderr.display(),
         );
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        Self { path, log, got }
+        Self { path, log, got, stderr }
     }
 
     fn calls(&self) -> Vec<String> {
@@ -132,6 +138,18 @@ async fn the_first_login_installs_the_entry_and_later_ones_trust_the_cache() {
     assert!(notes.is_empty(), "{notes:?}");
     assert_eq!(fake.calls().len(), 4, "one -G, no install: {:?}", fake.calls());
     assert_eq!(session(ssh).await, format!("session TERM=xterm-ghostty args={SEND} box"));
+}
+
+/// ssh prints a keyboard-interactive login's instructions, the host's banner and why it failed
+/// on standard error, so the install's ssh keeps the terminal's. A test's standard error is a
+/// pipe or a terminal, never `/dev/null`, so an ssh that sees `/dev/null` there was given it.
+#[tokio::test]
+async fn the_install_leaves_ssh_its_standard_error_to_speak_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeSsh::new(dir.path(), true, 0);
+    let (_ssh, decision, _notes) = prepared(&fake.options(dir.path()), &["box"]).await;
+    assert_eq!(decision, Decision::Installed("alice@box.example".to_owned()));
+    assert_eq!(std::fs::read_to_string(&fake.stderr).unwrap().trim(), "kept");
 }
 
 #[tokio::test]

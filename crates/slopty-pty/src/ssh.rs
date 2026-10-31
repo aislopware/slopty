@@ -34,8 +34,9 @@ pub const FALLBACK_TERM: &str = "xterm-256color";
 const SEND_ENV: [&str; 3] = ["COLORTERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION"];
 
 /// Run on the remote host with the entry on its standard input. `sh -c` so a fish or csh login
-/// shell reads it the same; nothing when `tic` is missing, which fails the install.
-const REMOTE_TIC: &str = "sh -c 'command -v tic >/dev/null 2>&1 && mkdir -p \"$HOME/.terminfo\" && tic -x - 2>/dev/null'";
+/// shell reads it the same; nothing when `tic` is missing, which fails the install. Its steps
+/// say nothing on standard error, so what reaches the terminal there is ssh's own.
+const REMOTE_TIC: &str = "sh -c 'command -v tic >/dev/null 2>&1 && mkdir -p \"$HOME/.terminfo\" 2>/dev/null && tic -x - 2>/dev/null'";
 
 /// ssh's options that take a value (OpenSSH 10's `getopt` string, the letters before a `:`).
 const TAKES_VALUE: &str = "BbcDEeFIiJLlmOoPpQRSWw";
@@ -273,8 +274,11 @@ async fn install(ssh: &Path, connect: &[OsString]) -> io::Result<()> {
         .arg(REMOTE_TIC)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        // ssh asks for a password or a host key on the terminal itself, not on these.
-        .stderr(Stdio::null())
+        // ssh asks for a password or a host key on the terminal itself, but prints a
+        // keyboard-interactive login's instructions (a second factor's choices), the host's
+        // banner and why it failed on standard error: left there, a login that waits on them
+        // shows nothing (ghostty `4d7de0a48`). The remote steps' own errors stay quiet.
+        .stderr(Stdio::inherit())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
         // A host that closes early answers through the exit status below.
