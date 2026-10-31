@@ -169,6 +169,26 @@ fn at_work(row: &ThreadRow) -> bool {
     row.status.phase == Phase::Working && row.status.wait.is_none()
 }
 
+/// Whether `row`'s agent waits on the person: an Esc in its terminal would answer for them.
+fn asks_the_person(row: &ThreadRow) -> bool {
+    row.status.phase == Phase::NeedsYou
+}
+
+/// Why a stop of `agent` stops nothing: `asks`, the agent in its tree that waits on the person
+/// and what it asks them, left to the person; else none of them is at work.
+fn nothing_to_stop(agent: ThreadId, asks: Option<&ThreadRow>) -> String {
+    let Some(row) = asks else {
+        return format!("agent {agent} and the agents under it are not at work: nothing to stop");
+    };
+    let what = row.status.wait.as_ref().map(|w| w.text.trim()).filter(|t| !t.is_empty());
+    let what = what.map(|t| format!(" ({t})")).unwrap_or_default();
+    format!(
+        "agent {} waits on the person{what}: an Esc would answer for them, so it is left to them \
+         in its own terminal",
+        row.id
+    )
+}
+
 /// The name an agent is read by: its title, else its id.
 fn name_of(row: &ThreadRow) -> String {
     let title = row.title.trim();
@@ -649,8 +669,9 @@ impl Hub {
 
     /// Stop the turn of `agent` and of every agent under it at work, the deepest first: an Esc
     /// in each one's terminal, its session and terminal kept. One that waits on the person is
-    /// left to the person, and with none at work there is nothing to stop. An agent stops only
-    /// itself and the agents under it.
+    /// left to the person, and with none at work there is nothing to stop: the refusal names
+    /// the one that asks the person, if one does. An agent stops only itself and the agents
+    /// under it.
     pub(super) async fn agent_stop(
         &self,
         caller: super::Caller,
@@ -676,17 +697,21 @@ impl Hub {
                 .filter(|(_, r)| there(r) && at_work(r) && under(&state, r.id, agent))
                 .map(|(worker, r)| (depth_below(&state, r.id, agent), worker, r.id))
                 .collect();
+            if stops.is_empty() {
+                let asks = state
+                    .board
+                    .row(agent)
+                    .into_iter()
+                    .chain(state.board.agent_rows())
+                    .map(|(_, r)| r)
+                    .find(|r| there(r) && asks_the_person(r) && under(&state, r.id, agent));
+                return error(ErrorCode::Conflict, &nothing_to_stop(agent, asks));
+            }
             drop(state);
             stops.sort_by_key(|(depth, _, id)| (std::cmp::Reverse(*depth), *id));
             stops.dedup_by_key(|(_, _, id)| *id);
             stops.into_iter().map(|(_, worker, id)| (worker, id)).collect()
         };
-        if stops.is_empty() {
-            return error(
-                ErrorCode::Conflict,
-                &format!("agent {agent} and the agents under it are not at work: nothing to stop"),
-            );
-        }
         for (worker, thread) in stops {
             let stop = Verb::AgentStop { agent: thread };
             match self.forward_to(worker, None, stop, super::FORWARD_TIMEOUT).await {

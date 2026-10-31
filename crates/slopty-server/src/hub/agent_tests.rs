@@ -7,7 +7,7 @@ use slopty_proto::thread::wire::ThreadRow;
 use slopty_proto::thread::{Phase, ThreadId};
 use slopty_settings::Autonomy;
 
-use super::ladder::tests::{row, snapshot, started_by};
+use super::ladder::tests::{asking, row, snapshot, started_by};
 use super::tests::{registration, summary};
 use super::*;
 
@@ -209,6 +209,31 @@ async fn an_agent_reaches_only_its_own_tree() {
     let parent_of = |id| agents.iter().find(|a| a.id == id).and_then(|a| a.parent);
     assert_eq!(agents.len(), 4);
     assert_eq!(parent_of(grandchild.id), Some(child.id), "a tree at any depth");
+}
+
+/// A stop of an agent that waits on the person stops nothing and names what it asks: an Esc
+/// would answer for the person, so it is left to them. One whose tree is all at rest says so.
+#[tokio::test]
+async fn a_stop_leaves_a_question_to_the_person() {
+    let mut fleet = Fleet::new();
+    let ask = |row| asking(row, "Which colour for the build?");
+    let child = started_by(ask(row(Phase::NeedsYou, 2_000, Some(SessionId::new()))), &fleet.parent);
+    let resting = started_by(row(Phase::Done, 3_000, Some(SessionId::new())), &fleet.parent);
+    let rows = vec![fleet.parent.clone(), child.clone(), resting.clone()];
+    fleet.lease.handle(snapshot(rows));
+
+    let refused = fleet.parent_says(Verb::AgentStop { agent: child.id }).await;
+    let Outcome::Error { code: ErrorCode::Conflict, message } = refused else {
+        panic!("{refused:?}")
+    };
+    assert!(message.contains(&child.id.to_string()), "{message}");
+    assert!(message.contains("waits on the person (Which colour for the build?)"), "{message}");
+    let refused = fleet.parent_says(Verb::AgentStop { agent: resting.id }).await;
+    let Outcome::Error { code: ErrorCode::Conflict, message } = refused else {
+        panic!("{refused:?}")
+    };
+    assert!(message.contains("not at work: nothing to stop"), "{message}");
+    assert!(fleet.rx.try_recv().is_err(), "no Esc reaches a worker");
 }
 
 /// A terminal whose agent runs stays an agent's though a session it ran before ended later
