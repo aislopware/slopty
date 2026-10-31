@@ -3364,3 +3364,171 @@ more full-window layer.
   - **Measured** (MEASUREMENTS.md, "noq 1.4.0 on the simulated network"): with patch 22 every
     simulated scenario reads as on 1.3.0 to the millisecond, and the shaped-link echo runs stay
     within their run-to-run spread.
+- ✅ **A lane's check returns in minutes: no queue, no repeated work** (2026-10-31). The
+  person saw each check take 20-30 minutes while the coding between checks took little, and
+  asked for 5-10. Three studies (`.research/check-speed-2026-10-31/`: A-anatomy from the records,
+  B-compile on compilers, linkers and caches, C-workflow on how large Rust projects and parallel
+  agents keep the loop short) found that a single quick check is already short (green: a median
+  138 s for GUI crates, p90 343 s; 65 s for the rest) and that the minutes go around it. From a
+  lane's first ask to its first green, the median was 6.5 min and the p90 31 min; the 47 % of
+  episodes that met a red took a median 13.6 min. Of 39.7 lane-hours inside checks over 36 h,
+  35 % were e2e runs in the guest, 15 % runner time after the work here had finished, 13 % the
+  queue on the shared directories' locks, and 38 % the checks' own work, of which half was
+  recompiling gpui and its dependants. The causes:
+  - **The lock is held over an idle directory.** A full check kept L while it only waited on a
+    hosted runner, and an e2e run kept M through the whole guest run: L was held 4.95 h of 11.2 h
+    that way, and 29 % of checks on a shared directory queued more than 30 s (p90 311 s).
+  - **Dependencies are rebuilt for nothing.** Lanes carrying an unlanded `Cargo.lock` into a
+    shared directory alternated gpui revisions minute by minute, and prune, run before and after
+    every check while free space sat under its floor plus headroom, evicted warm units: 22 % of
+    checks recompiled gpui, and they took 49 % of all local cargo time.
+  - **A full check's runner repeats what passed here.** The hosted runner starts cold (146 s of
+    setup, 89 s of it a zig fetch that runs even on a cache hit) and then runs host clippy (162 s)
+    and rustdoc (23 s) again before the iOS clippy it is there for: about 9 minutes for 3 of work.
+  - **Reds that a lane check could have caught reach the gate.** Today the gate went red three
+    times on steps a lane check never runs: `cargo hakari` after a lock pick, the gate's `cargo fmt
+    --all` over vendored crates, and the lock pick itself. Each costs a gate, a fix and a re-check.
+
+  Ruled:
+  1. **A check holds its directory only while it works in it.** `remote` takes the directory's
+     lock itself and lets it go when the work here ends: before the wait on runners, and after the
+     guest's copy for e2e. Agents that share a directory check under names of their own
+     (`L-<lane>`, which `lane()` already maps onto L), so their runs and records stay apart, and
+     `target/lanes/check-as.sh`'s outer lock goes. New lanes go to the less busy directory, and
+     lanes with the same crates share one.
+  2. **A check that moves the lock never runs in a shared directory.** One whose `--only` names the
+     root `Cargo.lock` or `Cargo.toml`, `workspace-hack/` or `vendor/` runs in a directory of its
+     own, an APFS clone of a warm one. When main's lock moves, L and M are warmed once in the
+     background at nice 10, so the first lane check after a gpui-fast bump does not pay for it.
+     Whether every lane gets its own clone instead of sharing L and M (C-workflow's first
+     recommendation: cargo builds one at a time per directory) is decided by what a clone grows to
+     (`du` of L by part); it is taken if four of them fit above the disk floor.
+  3. **Prune is off the critical path.** The pass before a build runs only under the floor
+     itself, the pass after runs once the verdict is printed, and the volume keeps enough free
+     space that no pass evicts units idle for only an hour.
+  4. **The runner half of a check does only what this Mac cannot.** No host clippy or rustdoc
+     there when the work here runs them, and the zig fetch only on a cache miss. Then iOS clippy
+     runs here in the lane's warm directory, so a full check of crates that do not build on Linux
+     dispatches nothing. No runner or VM runs on this Mac for it: the person ruled the same day
+     that the gate and e2e run on hosted runners and the tart VMs leave this Mac (the entry
+     after this one).
+  5. **A lane check runs every step of the gate's tools lane that its paths reach**: fmt as the
+     gate formats (path dependencies and vendored crates included), hakari, deny and shear for a
+     manifest or lock, taplo for TOML, typos and the commit lint as now, all from the gate's own
+     code. A gate never goes red on something a lane check would have caught in seconds.
+  6. **Runs are polled every 5 s**, not 20.
+  7. **E2e stays once per round** (testing.md, "Goldens render in the test process"), never in a
+     lane's checkpoint.
+  8. **Measured before taken:** cargo's fingerprint log on a check after another lane's and after
+     an hour idle (why units rebuild); `--timings` of a GUI check (whether rustdoc should run
+     beside the test run); and the share of clippy reds whose every diagnostic is machine-
+     applicable (whether a `clippy --fix` pass over a lane's own files, like its format pass, is
+     worth building).
+
+  Not taken, and why:
+  - **The Cranelift backend.** Its rustup component has no unwinding on aarch64 macOS, so
+    `catch_unwind` and `should_panic` tests break.
+  - **The parallel front end** (`-Zthreads`). It is nightly only and capped by the jobserver at
+    the load lanes run under.
+  - **Another linker.** Apple's ld-prime is already the fastest on macOS.
+  - **sccache here.** It skips incremental, proc-macro and check units, which is most of a lane
+    check.
+  - **Bazel or Buck2.** No measured gain for a cargo workspace was found.
+  - **Folding clippy into the test build.** Rejected on 10-29: it weakens the tests' MIR checks.
+  - **An XProtect exemption.** A fresh 100 MB test binary's first launch cost 5-15 ms more than
+    its second here, so it is not a cost.
+  - **Batching changes in a merge queue.** It pays at hundreds of changes an hour; with four
+    lanes it only adds bisecting.
+
+  The target: a single check's p90 at 5 minutes or less and a lane's ask-to-green p90 at 10,
+  measured from `target/lanes/waits.jsonl` (queue and run seconds per check, recorded since
+  17:30 today) and `target/remote/history.jsonl`.
+- ✅ **The gate and e2e run on free hosted runners; this Mac runs none** (2026-10-31). The
+  person ruled that no runner and no VM runs on this Mac any more (the tart guests and the warm
+  runners took its cores and over 300 GB of its disk while they work on it through Parsec), that
+  the gate runs on GitHub's runners as fast as they go, that landing never means waiting, and
+  that every free resource an open-source project gets is used. Three studies
+  (`.research/hosted-gate-2026-10-31/`: A-hosted-anatomy from 100 gate runs, 270 job logs and
+  every org run in the window; B-free-resources; C-hosted-ci) found:
+  - **Push to main took a median 666 s, p90 1,046 s.** The run alone took 530 s; the rest was
+    waiting behind the run before (41 of 73 runs waited, a mean 266 s), and 22 pushes were
+    replaced unrun.
+  - **The `tests ui` shard ends last in 21 of 30 green runs** (median 459 s: setup 120, build
+    280, tests 38), and 76 s of its setup is a zig install and fetch for a shard that builds no
+    ghostty. The `linux` job fetches zig even when its prebuilt cache hits (83 s).
+  - **Mac test builds cannot be shared or moved.** The build dominates each shard and Apple's
+    SDK licence keeps Mac binaries on Apple hardware, so one build feeding partitioned runs
+    would take about the three shards' sum on one 3-core runner. sccache already serves 96-100 %
+    of Rust compiles; what remains is harnesses, links, build scripts and proc macros.
+  - **Nothing in the e2e cases needs a VM.** A hosted Mac grants Screen Recording,
+    Accessibility and PostEvent to the step's bash, and on 10-12 a hosted probe passed the HID
+    tests 8 of 8 and logged `TCC Allow` for screen capture. The app case already runs hosted
+    (median 21.4 min, 733 s of it a build the gate never warms). The guests existed to keep
+    windows and input off the person's screen; a hosted runner's screen is its own.
+  - **The free plan:** unlimited minutes, 20 jobs at once of which 5 are Macs (3 M1 cores, 7 GB;
+    `xcode-27` is the only macOS 27 label, in preview), 10 GB of Actions cache (over quota
+    today: 26 stale `cargo-home` entries, 8.8 GB). Cirrus and BuildJet are gone and MacStadium's
+    program is full; Blacksmith (macOS 27 on M4) and Namespace sponsor open source on
+    application, which is the person's to make.
+
+  Ruled:
+  1. **Runs on `gate` overlap and `promote` never needs a hand.** The concurrency group goes;
+     a red run still cancels itself. `promote` fast-forwards `main` and succeeds when `main`
+     already holds the commit, so a later green run carries an earlier one. It pushes with a
+     deploy key that may write (one repository, nothing else), so `cargo xtask promote` by
+     hand ends. Tokens need a `workflows` permission to change `.github/workflows` and no
+     published source says whether an SSH deploy key does, so a probe push of a workflow change
+     to a scratch branch settles it first; if GitHub refuses it, the person creates a GitHub App
+     with Contents and Workflows write instead.
+  2. **No job sets up what it does not use.** The UI shard drops zig, `zig-pkg` and ghostty's
+     prebuilt steps; every job fetches zig only on a prebuilt miss; nextest rides in the xtask
+     cache entry; the image's Rust is used when it is the pinned one. The tools job deletes
+     superseded `cargo-home` entries after it saves one, so the small entries stop being
+     evicted. The encoder probe says when a shard holds no VideoToolbox test instead of
+     blaming the encoder.
+  3. **E2e smoke runs in the gate on hosted runners, for the cases a push reaches**
+     (testing.md, "Goldens render in the test process", item 5): `e2e-mac` builds once in one
+     feature set and runs S1-S3 on the same runner; `e2e-ios` boots its simulator during the
+     build and runs the iPhone and the iPad; S4 and S6 move to a Linux runner once
+     `slopty-e2e` builds there. `promote` needs them. Nobody waits on it: landing returns when
+     the push is made, and overlapping runs keep a long one from holding the next.
+  4. **The round's whole suite and its golden accept run hosted.** `remote --e2e` dispatches
+     `e2e.yml` and returns its verdict and artifacts; goldens are accepted from a run's
+     artifact. The VM case, `screen`, `input` and `--screen-recording` run nightly on a hosted
+     Mac, deploying to the runner itself.
+  5. **The office Macs take Mac work only when idle.** Two Macs on the company GitLab
+     (gitlab.jmango360.com, a Mac mini M4 and a MacBook M5, shared for jmango360's iOS builds)
+     run Slopty's Mac jobs from a prepared tart image in harbor.jmango360.dev, only while no
+     job of theirs runs or waits; a waiting jmango360 job cancels Slopty's at once and the gate
+     falls back to the hosted runner. The image, the routing and the numbers are the next
+     entry's.
+  6. **This Mac sheds every runner piece, each once its replacement is green.** The warm
+     runners (`xtask warm`, `gate --warm`, the `warm` jobs, `SLOPTY_RUNNERS`, nextest's `warm`
+     profile, the 99 GB bundle and both registrations) go now: no run used them. The guest path
+     (`remote/guest.rs`, the guest parts of `remote.rs`, `health.rs` and `local.rs`) and the
+     three VMs go after one green hosted run each of the app, the iPhone and the iPad, with the
+     accept done from an artifact. `vm.rs` and tart go after the nightly VM case is green
+     hosted. The Docker parts of `xtask linux` go after S6 is green on a Linux runner.
+  7. **Measured before taken:** a probe on `xcode-27` (`csrutil status`, a TCC row written, a
+     launchd agent's capture) decides how the VM case asserts its grants; a per-shard
+     dependency target dir restored from R2; why cargo-zigbuild's C never hits sccache; e2e at
+     opt-level 0; the simulator's settle on `xcode-27`; clippy-linux split per triple; folding
+     the `rest` shard away once the shell's pure crates test on Linux, which frees a Mac slot
+     for overlapping runs.
+
+  Not taken, and why:
+  - **A nextest archive for the unit tests.** It pays only where one build feeds several
+    runs; for e2e it does (item 3).
+  - **Selecting unit tests by reach.** The person ruled on 2026-10-17 that a gate shard is
+    skipped only exactly.
+  - **Cancelling superseded runs.** A cancelled run throws its work away; overlap keeps it.
+  - **Larger hosted runners.** They are for paid plans.
+  - **Building Mac test binaries on Linux.** Apple's SDK licence forbids the SDK off Apple
+    hardware.
+
+  The target: push to main at a median of about 455 s and a p90 of about 640 s after items 1
+  and 2 (replayed over the 30 green runs), about 330 s and 516 s after item 7's dependency
+  cache and clippy split, and 7-10 minutes for a push that reaches the app's smoke cases.
+  Supersedes "The gate runs on warm runners here", "An e2e case runs in a guest here", "The
+  simulator case runs in the guest too" and "The e2e guest makes room before each copy, to a
+  budget" as each piece moves.
