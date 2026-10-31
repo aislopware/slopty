@@ -234,7 +234,7 @@ enum Holds {
 impl Running {
     /// Whether it is done.
     fn finished(&self) -> bool {
-        *self.done.borrow() || self.done.has_changed().is_err()
+        *self.done.borrow() || self.done.is_closed()
     }
 
     /// Whether a save of `path` waits for it. A committed path is matched by its last

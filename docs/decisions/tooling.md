@@ -22,11 +22,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Dependency refresh is a routine, not an event** (2026-09-12): `cargo upgrade --dry-run
   --incompatible` (cargo-edit) lists what the reqs hold back, `cargo update` moves the rest;
   bump the reqs in `Cargo.toml` and the tool floors in `xtask::setup`, then gate and e2e.
-  The one crate that must not follow crates.io is `core-video`: `gpui::SurfaceSource:
-  From<CVPixelBuffer>` is typed against the fork's version (0.5.2 while zed stays there), so a
-  bump to 0.6 fails `slopty-ui` — it moves when the fork's does (comment beside the req).
+  A crate that must not move alone says so beside its req and in the newest refresh's entry
+  (below, "the refresh of 2026-10-31"): `noq` goes with its vendored crates, resvg and usvg
+  with the forks'. `core-video`, once held at the fork's version, left the tree on 2026-10-30.
 
-- ✅ nextest 0.9.148 · insta 1.49 · proptest 1.12 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
+- ✅ nextest 0.9.150 · insta 1.49 · proptest 1.12 · cargo-mutants 27.1 · cargo-llvm-cov 0.9 ·
   cargo-deny 0.20.2 · cargo-shear 1.14.0 · cargo-hack 0.6.45 · cargo-semver-checks 0.51 ·
   typos 1.51.1 · taplo 0.10 · bacon 3.26 · samply 0.13.1 · tracing-tracy 0.12.
 
@@ -3282,3 +3282,46 @@ more full-window layer.
     mechanism, not longbridge #30"), which has no overlay surface to hold and routes pointer
     input to a native only where it is the topmost hitbox.
   - **#85, left out:** a Windows frame request, and Slopty builds GPUI for no Windows.
+
+- ✅ **nextest asks for the release setup installs; the refresh of 2026-10-31** (2026-10-31).
+  - **nextest 0.9.150.** 0.9.149 stops `self update` trusting the eMudhra CAs whose keys were
+    disclosed, and 0.9.150 fixes GHSA-vc25-qg58-w57c (a rerun of a crafted portable recording
+    ran code during the build; the record store is now format 3.0). Neither reaches Slopty:
+    setup installs with binstall, never `self update`, and no config here records runs. Ruled:
+    `.config/nextest.toml` sets `nextest-version` to setup's pin, and
+    `setup::nextest_requires_the_release_setup_installs` holds the two equal, so setup's list
+    stays where a release is chosen while nextest itself refuses a machine left behind. An older
+    nextest skips the keys it does not know: one before 0.9.131 would drop `flaky-result` and
+    let a flake pass. `archive --zstd-long` is not taken: the guest's archives are about 6 MB.
+  - **What moved that reaches Slopty.** merman 0.9.3 (the Markdown view's Mermaid fences): its
+    label sanitizer parses with html5ever 0.40 instead of lol_html's rewriter (cssparser 0.36
+    and selectors 0.37 left with it), its front matter reads with granit-parser 2, and labels
+    keep literal and escaped text; its notes ask for SVG snapshots to be reviewed, so the media
+    case's diagram is the golden to look at. The graph now holds three html5evers: 0.27
+    (gpui-kit's gpui-base), 0.39 (wry's dom_query) and 0.40. parking_lot 0.13 for Slopty's own
+    locks: faster under contention (parked threads are woken after the lock is released), no
+    automatic eventual fairness, and `const_mutex` gone, since `Mutex::new` is const; GPUI and
+    other dependencies stay on 0.12 beside it. hpke 0.15 serializes an X25519 private key
+    clamped, so a device key an older build stored reads back as the same key. tree-sitter-md
+    0.5.4: the scanner no longer overflows its state buffer on deep nesting, and long runs of
+    `*`, `_` or backticks parse in linear time. tokio 1.54's `fs::File::set_modified` and
+    `watch::Receiver::is_closed` replace a detour through std (a fetched file's time, the
+    scratch index's) and two `has_changed().is_err()`. rmcp 3.8's server refuses requests to a
+    2026-07-28 client, and `slopty mcp` only notifies. notify 8.2.1 watches FSEvents through
+    objc2-core-services (only the worker's measurement test builds it). backtrace 0.3.77 takes
+    gimli 0.34 and object 0.40 into the crash symbolizer.
+  - **tempfile stays on getrandom 0.4.** Its requirement spans 0.3 and 0.4, and a whole
+    `cargo update` handed it the 0.3 that GPUI's rand_core already pulls in, cargo preferring a
+    version the graph holds. The hack would then have had to list getrandom 0.3 for every Apple
+    target. The lock keeps tempfile on 0.4.3, as before the refresh, and the gate's
+    `cargo hakari generate --diff` is what catches such a pick.
+  - **What still holds, and why.** noq 1.4.0: `noq-proto` and `noq-udp` are vendored at 1.3.0
+    with their patches, and `noq` is the same release as them (`~1.3.0`), so 1.4.0 comes when
+    they are rebased onto it (109 upstream commits). resvg and usvg 0.49: gpui-fast and
+    gpui-kit build 0.48, and `slopty-shell` writes an SVG out with usvg for GPUI to parse again,
+    so the three move together, the forks first. Dependencies' pins: `cc ~1.2.1`
+    (tree-sitter-sequel), `taffy =0.15.0` (gpui), `unicode-properties =0.1.3` (gpui_web),
+    `psm =0.1.24` (pest's new pest_stack_guard), `generic-array =0.14.7` (crypto-common), and
+    granit-parser 1 (rust-i18n's serde-saphyr 1, from gpui-kit). syn 3, phf 0.14 and
+    miniz_oxide 0.9 reach the graph only through dependencies. notify 9 and ec4rs 2 are
+    release candidates.

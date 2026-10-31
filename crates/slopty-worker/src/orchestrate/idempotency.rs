@@ -51,7 +51,7 @@ impl Slot {
     fn lapsed(&self, now: Instant, lifetime: Duration) -> bool {
         match self.answered {
             Some(at) => now.duration_since(at) >= lifetime,
-            None => self.answer.has_changed().is_err(),
+            None => self.answer.is_closed(),
         }
     }
 }

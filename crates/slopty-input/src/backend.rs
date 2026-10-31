@@ -733,7 +733,7 @@ mod hid {
     /// The process's parameter connection to the HID system, opened on first use and kept for
     /// the process's life, so a Caps Lock change costs its call alone. A failed open is tried
     /// again next time.
-    static CONNECTION: parking_lot::Mutex<Option<io_connect_t>> = parking_lot::const_mutex(None);
+    static CONNECTION: parking_lot::Mutex<Option<io_connect_t>> = parking_lot::Mutex::new(None);
 
     /// Open a parameter connection to the HID system.
     fn open() -> Result<io_connect_t, InputError> {

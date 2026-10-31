@@ -44,7 +44,7 @@ enum Job {
 }
 
 /// The process's input threads, for [`let_go_everywhere`].
-static CENSUS: Census = Census { live: parking_lot::const_mutex(Vec::new()) };
+static CENSUS: Census = Census { live: parking_lot::Mutex::new(Vec::new()) };
 
 /// Let go of every key and button held down through any stream's input in this process, and
 /// wait up to `within` for the releases to be posted. `false` when a thread did not answer in

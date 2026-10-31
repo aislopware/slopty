@@ -29,7 +29,7 @@ bstr = { version = "1" }
 bytemuck = { version = "1", default-features = false, features = ["aarch64_simd", "derive", "extern_crate_alloc", "min_const_generics", "wasm_simd"] }
 byteorder = { version = "1" }
 bytes = { version = "1", features = ["serde"] }
-chacha20 = { version = "0.10", default-features = false, features = ["rng", "xchacha"] }
+chacha20 = { version = "0.10", default-features = false, features = ["rng", "xchacha", "zeroize"] }
 chrono = { version = "0.4", features = ["serde"] }
 codespan-reporting = { version = "0.13", default-features = false, features = ["termcolor"] }
 collections = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
@@ -53,9 +53,8 @@ futures-util = { version = "0.3", default-features = false, features = ["async-a
 getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 gpui = { git = "https://github.com/aislopware/gpui-fast.git", features = ["profiler", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", features = ["font-kit", "test-support"] }
-granit-parser = { version = "1" }
 half = { version = "2", features = ["num-traits"] }
-hashbrown = { version = "0.17" }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "equivalent", "inline-more"] }
 http_client = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["test-support"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 hyper = { version = "1", features = ["client", "http1", "http2", "server"] }
@@ -76,9 +75,7 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBase", "CGColorSpace", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
 once_cell = { version = "1" }
 parking_lot = { version = "0.12", features = ["arc_lock"] }
-phf = { version = "0.13", features = ["macros"] }
-phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", default-features = false, features = ["std"] }
-phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
+phf_shared = { version = "0.13" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
 profiling = { version = "1" }
 proptest = { version = "1", features = ["attr-macro"] }
@@ -100,7 +97,7 @@ similar = { version = "3", features = ["unicode"] }
 slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
-stable_deref_trait = { version = "1" }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 tinystr = { version = "0.8", default-features = false, features = ["alloc", "zerovec"] }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -135,17 +132,14 @@ digest = { version = "0.11", features = ["alloc", "mac", "oid"] }
 either = { version = "1", features = ["use_std"] }
 fastrand = { version = "2" }
 foldhash = { version = "0.2" }
-granit-parser = { version = "1" }
-hashbrown = { version = "0.17" }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "equivalent", "inline-more"] }
 hybrid-array = { version = "0.4", default-features = false, features = ["alloc", "subtle", "zeroize"] }
 indexmap = { version = "2", features = ["serde"] }
 log = { version = "0.4", default-features = false, features = ["serde", "std"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
-phf = { version = "0.13", features = ["macros"] }
-phf_shared-582f2526e08bb6a0 = { package = "phf_shared", version = "0.14", default-features = false, features = ["std"] }
-phf_shared-594e8ee84c453af0 = { package = "phf_shared", version = "0.13" }
+phf_shared = { version = "0.13" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
 regex-automata = { version = "0.4" }
@@ -157,7 +151,7 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = { version = "0.11" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union"] }
-stable_deref_trait = { version = "1" }
+stable_deref_trait = { version = "1", default-features = false, features = ["alloc"] }
 subtle = { version = "2", default-features = false, features = ["const-generics", "i128"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
@@ -179,7 +173,7 @@ gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = [
 gpui_macos = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["font-kit", "runtime_shaders", "test-support"] }
 gpui_platform = { git = "https://github.com/aislopware/gpui-fast.git", default-features = false, features = ["runtime_shaders", "wayland", "x11"] }
 libc = { version = "0.2" }
-miniz_oxide = { version = "0.8", features = ["simd"] }
+miniz_oxide = { version = "0.9", features = ["simd"] }
 naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
@@ -190,6 +184,7 @@ objc2-core-audio-types = { version = "0.3", default-features = false, features =
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFByteOrder", "CFCalendar", "CFCharacterSet", "CFError", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFNotificationCenter", "CFPlugInCOM", "CFSet", "CFStream", "CFUUID", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGBitmapContext", "CGColor", "CGContext", "CGDisplayConfiguration", "CGDisplayStream", "CGFont", "CGPath", "CGSession", "objc2"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["CMAttachment", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "objc2", "objc2-core-audio-types", "objc2-core-video", "std"] }
+objc2-core-services = { version = "0.3", default-features = false, features = ["FSEvents", "dispatch2", "libc", "std"] }
 objc2-core-text = { version = "0.3", default-features = false, features = ["CTFont", "CTFontCollection", "CTFontDescriptor", "CTGlyphInfo", "objc2", "std"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVHostTime", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "objc2-io-surface", "objc2-metal", "std"] }
 objc2-file-provider = { version = "0.3", default-features = false, features = ["Extension", "NSFileProviderDomain", "NSFileProviderEnumerating", "NSFileProviderError", "NSFileProviderItem", "NSFileProviderModifyItemOptions", "NSFileProviderReplicatedExtension", "NSFileProviderRequest", "block2", "objc2-uniform-type-identifiers", "std"] }
@@ -229,7 +224,7 @@ futures-lite = { version = "2" }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
-miniz_oxide = { version = "0.8", features = ["simd"] }
+miniz_oxide = { version = "0.9", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 notify = { version = "8" }
@@ -266,7 +261,7 @@ futures-lite = { version = "2" }
 gpui_apple = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 gpui_ios = { git = "https://github.com/aislopware/gpui-fast.git", features = ["runtime_shaders", "test-support"] }
 libc = { version = "0.2" }
-miniz_oxide = { version = "0.8", features = ["simd"] }
+miniz_oxide = { version = "0.9", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 naga = { git = "https://github.com/gfx-rs/wgpu", rev = "3b3506ea31154edc04de64debda0e780cba2639c", default-features = false, features = ["msl-out", "wgsl-in"] }
 notify = { version = "8" }

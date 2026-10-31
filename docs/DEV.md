@@ -17,11 +17,19 @@ zed itself so it is never behind zed while longbridge lags.
 - Before coding, bring the ground up to date: `cargo xtask upstream check` and `sync` whatever
   is behind (the four forks and zed; ghostty is `vendor/ghostty`), `rustup update` and, when
   `upstream check` says stable moved, `cargo xtask toolchain` (it pins the newest stable in
-  `rust-toolchain.toml` and every workflow that names it), `cargo update -w`, and
-  `cargo binstall -y <tool>` for any gate tool `cargo info <tool>` shows behind. A lockfile
-  change that adds or drops a proc-macro dependency also needs `cargo xtask ci-profile`, which
-  rewrites `.cargo/ci-profile.toml` (CI compiles the proc macros unoptimised; the gate's tools
-  lane fails while the file is stale, and `cargo gate --fix` rewrites it).
+  `rust-toolchain.toml` and every workflow that names it), and the crates and tools:
+  - `cargo update` and `cargo update --manifest-path fuzz/Cargo.toml` take every compatible
+    release (`-w` would move only the workspace's own packages); `cargo upgrade --dry-run
+    --incompatible --pinned` (cargo-edit) lists the majors and exact pins the requirements hold
+    back. A crate that must not move alone says so beside its requirement (`noq`, `usvg`).
+  - `cargo hakari generate` afterwards: a lock move alone changes the hack's features. A move
+    that adds or drops a proc-macro dependency also needs `cargo xtask ci-profile`, which
+    rewrites `.cargo/ci-profile.toml` (CI compiles the proc macros unoptimised; the gate's tools
+    lane fails while the file is stale, and `cargo gate --fix` rewrites both).
+  - A gate tool `cargo info <tool>` shows behind moves by its pin in `xtask/src/setup.rs`
+    (nextest's in `.config/nextest.toml` too, which a test holds equal), then `cargo xtask setup
+    --tool <tool>`: setup installs the pinned release over any other, so a bare
+    `cargo binstall` of a newer one lasts only until the next setup.
 - `cargo xtask setup` installs tools (binstall) and initialises submodules, puts ghostty's
   patches into its zig's standard library, then runs `cargo xtask doctor`.
   - zig is the one `vendor/ghostty/build.zig.zon` names (`minimum_zig_version`, 0.17 since
@@ -336,8 +344,8 @@ what an agent that owns those crates runs before it reports. Its builds name `wo
 beside the crates, so every crate set resolves the third-party dependencies with the features
 the gate gives them and reuses one build of each; a bare `cargo nextest run -p <crate>`
 resolves its own and builds its own copies (add `-p workspace-hack` to share).
-`cargo hakari generate` rewrites the hack when a manifest changes its dependencies
-(`cargo gate --fix` runs it; the gate fails on a stale one).
+`cargo hakari generate` rewrites the hack when a manifest changes its dependencies or the lock
+moves (`cargo gate --fix` runs it; the gate fails on a stale one).
 
 ### Warm runners
 With the repository variable `SLOPTY_RUNNERS` at `warm`, a push to `gate` or a `v*` tag runs the

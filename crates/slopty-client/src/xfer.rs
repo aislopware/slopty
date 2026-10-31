@@ -1467,7 +1467,7 @@ async fn write_file(
         file.set_permissions(mode).await.map_err(io)?;
     }
     if let Some(mtime) = header.mtime_ms.to_system() {
-        file.into_std().await.set_modified(mtime).map_err(io)?;
+        file.set_modified(mtime).await.map_err(io)?;
     }
     tokio::fs::rename(&partial, &target).await.map_err(io)?;
     let mut state = fetch.state.lock();

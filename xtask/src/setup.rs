@@ -10,7 +10,9 @@ use crate::tools::{has, has_metal, step};
 /// version as `=`, so setup puts the pinned release back over a newer one, and taking a new
 /// release means moving its pin here.
 const TOOLS: &[(&str, &str)] = &[
-    ("cargo-nextest", "0.9.148"),
+    // `.config/nextest.toml` requires this release too (`nextest-version`), so a machine left
+    // on an older one fails loudly rather than skip the keys it does not know.
+    ("cargo-nextest", "0.9.150"),
     ("cargo-deny", "0.20.2"),
     ("cargo-shear", "1.14.0"),
     ("cargo-hack", "0.6.45"),
@@ -255,6 +257,17 @@ mod tests {
                 assert!(!text.contains(&format!("{tool}@")), "{} pins {tool}", path.display());
             }
         }
+    }
+
+    /// nextest's own guard asks for the release setup installs, so moving one moves both: a
+    /// guard behind the pin lets a stale nextest run the config, one ahead fails every check.
+    #[test]
+    fn nextest_requires_the_release_setup_installs() {
+        let root = crate::tools::repo_root().expect("repo root");
+        let text = std::fs::read_to_string(root.join(".config/nextest.toml")).expect("the config");
+        let config: toml::Table = text.parse().expect("its TOML");
+        let required = config.get("nextest-version").and_then(toml::Value::as_str);
+        assert_eq!(required, super::pinned("cargo-nextest"), "`nextest-version` is the pin");
     }
 
     /// A release is older by its parts as numbers, not as text, and the pin itself or anything

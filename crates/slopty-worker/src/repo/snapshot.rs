@@ -376,13 +376,7 @@ async fn same_age(own: &Path, copy: &Path) -> Result<(), Failed> {
     let stamp = |e: std::io::Error| Failed(format!("the scratch index's time: {e}"));
     let written = tokio::fs::metadata(own).await.and_then(|m| m.modified()).map_err(stamp)?;
     let copy = tokio::fs::OpenOptions::new().write(true).open(copy).await.map_err(stamp)?;
-    let copy = copy.into_std().await;
-    tokio::task::spawn_blocking(move || {
-        copy.set_times(std::fs::FileTimes::new().set_modified(written))
-    })
-    .await
-    .map_err(|e| Failed(format!("the scratch index's time: {e}")))?
-    .map_err(stamp)
+    copy.set_modified(written).await.map_err(stamp)
 }
 
 /// What a range's review says when either branch is in neither the clone nor its `origin`.

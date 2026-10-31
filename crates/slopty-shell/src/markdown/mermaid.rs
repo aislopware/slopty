@@ -4,8 +4,6 @@ use parking_lot::Mutex;
 
 use crate::theme::Theme;
 
-/// The engine that draws the diagrams and its version, which a cached diagram is keyed by.
-pub const ENGINE_VERSION: &str = "merman/0.9";
 /// The largest diagram source drawn; a longer one shows as code.
 pub const MAX_SOURCE_BYTES: usize = 16 * 1024;
 // Bound inputs and serialize the engine's CPU work across previews; UI owners discard results

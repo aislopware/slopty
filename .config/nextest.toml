@@ -1,3 +1,8 @@
+# The release `cargo xtask setup` installs (`xtask/src/setup.rs` pins it, and a test there keeps
+# the two equal): an older nextest refuses this config instead of skipping the keys it does not
+# know, such as `flaky-result` (0.9.131), which would let a flake pass.
+nextest-version = "0.9.150"
+
 # Before the first test of a bare `cargo nextest run`, every binary a test spawns is built
 # (`cargo xtask spawned-bins`), so no test builds them inside its own timeout. Under `cargo xtask`
 # they are built already and the script returns at once; xtask builds into its own target dir, so

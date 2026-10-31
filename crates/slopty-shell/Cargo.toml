@@ -41,6 +41,8 @@ image = { version = "0.25.10", default-features = false, features = [
     "tiff",
     "ico",
 ] }
+# GPUI's release: an SVG written out here is parsed again by GPUI, so the two move together
+# (gpui-fast's `usvg` first).
 usvg = "0.48"
 # Mermaid's successor renderer (follows Mermaid 12; Zed's choice): every diagram kind, SVG out,
 # the cytoscape layouts Zed uses; no ELK, no export or font discovery (GPUI measures text).
