@@ -19064,6 +19064,8 @@ settles only while its build is on its way").
 | 41228523444 | e73417604 | the Mac's job builds the iOS app too | 7 m 04 s, red | 7 m 31 s, stopped | — |
 | 41231747992 | 019176072 | settle beside the wait, then after the install | 8 m 20 s | 21 m 03 s | 21 m 46 s |
 | 41236746342 | 4b37550cf | the simulator's part packed first; settle only until its build | 8 m 17 s | 8 m 03 s | 9 m 43 s |
+| 41238712553 | 231f65216 | the build's download goes again on a failure | 8 m 17 s | 9 m 21 s | 10 m 47 s |
+| 41245915658 | 1dffe896b | the simulator held still while its build downloads, through curl | 7 m 25 s | 6 m 08 s | 8 m 55 s |
 
 `e2e (ios)`'s phases:
 
@@ -19073,6 +19075,8 @@ settles only while its build is on its way").
 | 41226170614 | none | 962.9 s | beside the app | 249.0 s (after the install) | 21.8 s | 56.4 s |
 | 41231747992 | none | none | 312.0 s (`bootstatus` 206 s, `notifyutil` 100 s) | 601.5 s without calm, then 207.7 s after the install | 22.8 s | 48.9 s |
 | 41236746342 | none | none | 244.3 s | 94.9 s, until the build came 337 s in | 21.0 s | 51.8 s |
+| 41238712553 | none | none | 126.6 s | 304.5 s, until the build came 416 s in, 170 s after its upload | 17.1 s | 64.2 s |
+| 41245915658 | none | none | 154.0 s | 115.3 s, until the build came 267 s in, 14 s after its upload | 21.7 s | 33.4 s |
 
 Settling only until the build comes (`e2e.yml` run 41235899472, every simulator test): the iPhone
 booted in 155.5 s, was still busy when the build came 358 s into the run (204.8 s of settle),
@@ -19132,6 +19136,7 @@ artifact listed within a second of it) to the run having it unpacked:
 | 41242744274 (iPad) | the same | 4 s | 13.4 s, 11 MB/s, after 31 s to stop | 4.8 s | 52 s |
 | 41243711881 (iPhone) | curl, held still in-process (250 processes) | 8 s | 9.5 s, 13 MB/s | 1.1 s | 19 s |
 | 41243711881 (iPad) | the same (290 processes) | 12 s | 5.2 s, 25 MB/s | 1.6 s | 23 s |
+| 41245915658 (gate) | the same (252 processes) | 10 s | 2.3 s, 55 MB/s | 1.7 s | 14 s |
 
 The artifact is 125 MB (deflate) of a 392 MB tar, 245 MB of it the iOS app's debug dylib; on
 this Mac the tar inflates in 0.47 s and zstd's level 3 would make it 102 MB, while stripping

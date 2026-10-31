@@ -2442,7 +2442,10 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     then the iPhone's runner listed the build 8 s after its upload ended, downloaded it in 9.5 s
     with 250 processes held (13 MB/s), unpacked it in 1.1 s, and had it 19 s after the upload,
     the iPad's 23 s (run 41243711881). The full iPhone suite and the iPad's check passed after
-    the hold in both runs.
+    the hold in both runs. In the gate (run 41245915658) the iPhone's runner had the build 14 s
+    after its upload, the download 2.3 s at 55 MB/s, and `e2e (ios)` took 6 m 08 s: the whole
+    check took 8 m 55 s from the push to main, `e2e (mac)` (7 m 25 s) and the UI shard now its
+    longest jobs.
   - What it costs: the boot's work waits those seconds, then goes on. Ruled out: a smaller
     payload (stripping local symbols saves 17 % of the 245 MB debug dylib, zstd 102 MB to
     deflate's 113 MB) leaves a 1-4 MB/s download slow, and asking for the artifact more often
