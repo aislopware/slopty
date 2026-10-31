@@ -438,6 +438,9 @@ pub struct ScreenView {
     probe: health::Probe,
     /// What is wrong with the stream, as last read.
     health: Option<Health>,
+    /// The worker has sent this client sound, as last read with the health or as the controls'
+    /// menu opened ([`Self::has_audio`]).
+    heard: bool,
     _health: Task<()>,
     /// The link's round trip, from the workspace: how long this client's hold on a display's
     /// pointer outlasts [`LOCAL_HOLD`].
@@ -1122,6 +1125,7 @@ impl ScreenView {
             hud_details: false,
             probe: health::Probe::default(),
             health: None,
+            heard: false,
             _health: Self::watch_health(cx),
             rtt: None,
             shown_rtt: None,
@@ -1423,18 +1427,29 @@ impl ScreenView {
     /// notified the view, which a still stream may never do. The overlay, while it shows, is
     /// sampled here and drawn again: a still stream draws no frame that would.
     fn read_health(&mut self, cx: &mut Context<Self>) {
-        let health = self.probe.read(&self.handle.stats(), &self.glass.pacing(), Instant::now());
+        let stats = self.handle.stats();
+        let health = self.probe.read(&stats, &self.glass.pacing(), Instant::now());
         let changed = health != self.health;
         if changed {
             self.health = health;
             cx.emit(ScreenViewEvent::Health);
         }
+        let heard = self.hear(&stats);
         if self.hud.is_some() {
             self.sample_hud(cx);
         }
-        if changed || self.hud.is_some() {
+        if changed || heard || self.hud.is_some() {
             cx.notify();
         }
+    }
+
+    /// Take from `stats` whether the worker has sent sound, never in a render: the counters
+    /// move on the sound's own thread, telling nobody. Whether it changed.
+    const fn hear(&mut self, stats: &ScreenStats) -> bool {
+        let heard = stats.audio_packets > 0;
+        let changed = heard != self.heard;
+        self.heard = heard;
+        changed
     }
 
     /// What is wrong with the stream, as last read; `None` while all is well.
@@ -1662,10 +1677,10 @@ impl ScreenView {
     }
 
     /// Whether the worker has sent any sound to this client (the mute control is pointless
-    /// before that).
+    /// before that), as the view last read it: once a second, and as the controls' menu opens.
     #[must_use]
-    pub fn has_audio(&self) -> bool {
-        self.handle.stats().audio_packets > 0
+    pub const fn has_audio(&self) -> bool {
+        self.heard
     }
 
     /// Whether audio playback is silenced on this client.
@@ -6027,6 +6042,36 @@ mod tests {
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.pictures.base.is_none()), "told, nothing under it");
         assert_eq!(stale(cx), None, "the whole, told");
+    }
+
+    /// The controls' menu offers Mute once the worker's sound has come, as the view read it when
+    /// it was told: the menu opening, or the health's tick a second on. Sound counted on its
+    /// own thread meanwhile leaves the open menu as a frame built afresh draws it
+    /// (`slopty_kit::retained::stale`).
+    #[gpui::test]
+    fn the_menu_offers_mute_as_the_view_last_heard_the_sound(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        cx.update(|_w, cx| cx.set_reduce_motion(true));
+        let stale = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| slopty_kit::retained::stale(window, cx, 8))
+        };
+        let open = |open: bool, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| view.update(cx, |v, cx| v.set_controls_open(open, window, cx)));
+            cx.run_until_parked();
+        };
+        open(true, cx);
+        assert!(!view.read_with(cx, |v, _| v.has_audio()), "no sound yet");
+        assert_eq!(stale(cx), None, "the menu open, no Mute");
+        view.read_with(cx, |v, _| v.handle.played(3));
+        assert_eq!(stale(cx), None, "sound the view has not read yet");
+        cx.executor().advance_clock(HUD_PERIOD);
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.has_audio()), "read on the health's tick");
+        assert_eq!(stale(cx), None, "the menu offers Mute");
+        open(false, cx);
+        open(true, cx);
+        assert!(view.read_with(cx, |v, _| v.has_audio()), "and as the menu opens again");
+        assert_eq!(stale(cx), None, "open again");
     }
 
     /// This Mac's pointer pushing at an edge of a zoomed picture pans it toward that edge for

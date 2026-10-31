@@ -84,6 +84,9 @@ pub(super) struct Sound {
     _ends: oneshot::Sender<()>,
     /// The router [`SOUND`] is attached on; `None` for a sound with nothing behind it.
     router: Option<ScreenRouter>,
+    /// What a sound with nothing behind it is said to have played ([`Self::played`]).
+    #[cfg(feature = "headless")]
+    playing: Option<watch::Sender<SoundStats>>,
 }
 
 impl Drop for Sound {
@@ -123,15 +126,31 @@ impl Sound {
         };
         // Not kept: the task ends on its own once `ends` drops.
         let _task = runtime.spawn(task.run(ended));
-        Self { muted, stats, _ends: ends, router: Some(router.clone()) }
+        Self {
+            muted,
+            stats,
+            _ends: ends,
+            router: Some(router.clone()),
+            #[cfg(feature = "headless")]
+            playing: None,
+        }
     }
 
     /// A sound with nothing behind it, for a handle with no worker.
     #[cfg(feature = "headless")]
     pub(super) fn detached(muted: Arc<Muted>) -> Self {
-        let (_stats_tx, stats) = watch::channel(SoundStats::default());
+        let (playing, stats) = watch::channel(SoundStats::default());
         let (ends, _ended) = oneshot::channel();
-        Self { muted, stats, _ends: ends, router: None }
+        Self { muted, stats, _ends: ends, router: None, playing: Some(playing) }
+    }
+
+    /// Count `packets` more played on a sound with nothing behind it, as its task counts them
+    /// on its own thread, telling nobody.
+    #[cfg(feature = "headless")]
+    pub(super) fn played(&self, packets: u64) {
+        if let Some(playing) = &self.playing {
+            playing.send_modify(|stats| stats.packets = stats.packets.saturating_add(packets));
+        }
     }
 
     pub(super) fn muted(&self) -> &Muted {

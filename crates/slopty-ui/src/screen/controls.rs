@@ -132,7 +132,11 @@ impl ScreenView {
             return;
         }
         self.controls_open = open;
-        if !open {
+        if open {
+            // Its rows as the stream stands now, the sound among them.
+            let stats = self.handle.stats();
+            self.hear(&stats);
+        } else {
             self.focus.focus(window, cx);
         }
         cx.notify();

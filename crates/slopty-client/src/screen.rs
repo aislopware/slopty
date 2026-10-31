@@ -712,6 +712,12 @@ impl ScreenHandle {
         Self::detached_on(&ScreenRouter::default(), stream)
     }
 
+    /// The worker's sound plays `packets` more on a handle with no worker behind it: its
+    /// counters move as a live sound's do, on another thread, telling nobody.
+    pub fn played(&self, packets: u64) {
+        self.sound.played(packets);
+    }
+
     /// A handle with no worker behind it, on `router`: the handles of one router share their
     /// worker's sound, and its mute, as a connection's do.
     #[must_use]
