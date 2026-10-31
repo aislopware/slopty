@@ -277,17 +277,21 @@ async fn a_local_page_a_shell_asks_for_is_offered() {
 mod stream {
     use super::*;
 
-    /// Where the picture moves between two renders a moment apart, in pixels, a few points wider
-    /// each way: the window's stream, whose drawn page scrolls every frame, so its pixels are left
-    /// out of a golden while its chrome is held. Only the stream's layer is looked at, so chrome
-    /// fading in round it (the pane's overflow button, a tooltip) is no part of it. `None` when
-    /// nothing moved: the stream is not live.
+    /// The stream's whole layer, in pixels, once its picture moves between two renders a moment
+    /// apart: the window's drawn page scrolls every frame, so all of the picture is left out of a
+    /// golden while its chrome is held ([`goldens_masked`]). Leaving out only what moved in those
+    /// 300 ms kept the rest of the page in, a different scroll on every run. Only the layer is
+    /// looked at, so chrome fading in round it (the pane's overflow button, a tooltip) is no sign
+    /// of life. `None` when nothing in it moved: the stream is not live.
     async fn moving(drv: &mut Driver, renders: &Path) -> Option<PixelRect> {
         let layer = drv.dump().await.unwrap().screens.iter().find_map(|s| s.layer)?;
         let first = drv.render(&renders.join("moving-a.png")).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         let second = drv.render(&renders.join("moving-b.png")).await.unwrap();
         let (a, b) = (&first.image, &second.image);
+        if a.dimensions() != b.dimensions() {
+            return None;
+        }
         #[expect(clippy::cast_precision_loss, reason = "window points")]
         let [lx, ly, lw, lh] = layer.map(|v| v as f32 * first.scale);
         let inside = |x: u32, y: u32| {
@@ -295,21 +299,16 @@ mod stream {
             let (x, y) = (x as f32, y as f32);
             x >= lx && x < lx + lw && y >= ly && y < ly + lh
         };
-        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
-        for (x, y, pixel) in a.enumerate_pixels().filter(|(x, y, _)| inside(*x, *y)) {
-            let other = b.get_pixel_checked(x, y)?;
-            if pixel.0.iter().zip(other.0).take(3).any(|(p, q)| p.abs_diff(q) > 24) {
-                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
-            }
-        }
+        let moved = a.enumerate_pixels().filter(|(x, y, _)| inside(*x, *y)).any(|(x, y, pixel)| {
+            pixel.0.iter().zip(b.get_pixel(x, y).0).take(3).any(|(p, q)| p.abs_diff(q) > 24)
+        });
+        #[expect(clippy::cast_precision_loss, reason = "pixels")]
+        let (width, height) = (a.width() as f32, a.height() as f32);
+        let (left, top) = (lx.max(0.0).floor(), ly.max(0.0).floor());
+        let (right, bottom) = ((lx + lw).min(width).ceil(), (ly + lh).min(height).ceil());
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
-        let pad = (4.0 * first.scale).round() as u32;
-        (x1 >= x0).then(|| {
-            let (left, top) = (x0.saturating_sub(pad), y0.saturating_sub(pad));
-            let span =
-                |from: u32, to: u32| to.saturating_add(pad).saturating_sub(from).saturating_add(1);
-            [left, top, span(left, x1), span(top, y1)]
-        })
+        let rect = [left, top, right - left, bottom - top].map(|v| v as u32);
+        moved.then_some(rect)
     }
 
     /// What the stream's health mark says when its machine keeps up less well than the stream
@@ -319,22 +318,38 @@ mod stream {
     /// asserted before each golden, and a stalled one fails it.
     const STRAINED: [&str; 2] = ["Frames late", "Low bandwidth"];
 
-    /// [`goldens`] with the pixels and the words inside `masks` left out, and those of a strained
-    /// stream's health mark ([`STRAINED`]).
-    async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, masks: &[PixelRect]) {
+    /// [`goldens`] with the stream's picture left out (`stream`, [`moving`]), and a strained
+    /// stream's health mark ([`STRAINED`]). Its pixels go a point wider each way, for the
+    /// picture's edge. Its words go a point narrower, so chrome centred on that edge (the
+    /// sidebar's splitter, once the picture fills the view) still counts.
+    async fn goldens_masked(drv: &mut Driver, renders: &Path, name: &str, stream: PixelRect) {
         for (dark, appearance) in [(false, "light"), (true, "dark")] {
             drv.ok(&Command::Appearance { dark }).await.unwrap();
             tokio::time::sleep(Duration::from_millis(600)).await;
             let golden = format!("{name}-{appearance}");
             let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
             println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-            let strained = frame
+            let strained: Vec<PixelRect> = frame
                 .a11y
                 .iter()
                 .filter(|n| n.label.as_deref().is_some_and(|l| STRAINED.contains(&l)))
-                .map(|n| crate::served::mask_of(n, frame.scale));
-            let left_out: Vec<PixelRect> = masks.iter().copied().chain(strained).collect();
-            let masks = (left_out.as_slice(), left_out.as_slice());
+                .map(|n| crate::served::mask_of(n, frame.scale))
+                .collect();
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
+            let edge = frame.scale.ceil() as u32;
+            let [x, y, w, h] = stream;
+            let (left, top) = (x.saturating_sub(edge), y.saturating_sub(edge));
+            let right = x.saturating_add(w).saturating_add(edge);
+            let bottom = y.saturating_add(h).saturating_add(edge);
+            let picture = [left, top, right.saturating_sub(left), bottom.saturating_sub(top)];
+            let (inset_w, inset_h) = (
+                w.saturating_sub(edge.saturating_mul(2)),
+                h.saturating_sub(edge.saturating_mul(2)),
+            );
+            let inside = [x.saturating_add(edge), y.saturating_add(edge), inset_w, inset_h];
+            let pixels: Vec<PixelRect> = strained.iter().copied().chain([picture]).collect();
+            let words: Vec<PixelRect> = strained.iter().copied().chain([inside]).collect();
+            let masks = (pixels.as_slice(), words.as_slice());
             assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
         }
         drv.ok(&Command::Appearance { dark: false }).await.unwrap();
@@ -345,7 +360,7 @@ mod stream {
     /// then makes fill the view. The worker serves its drawn screen
     /// (`SLOPTY_SYNTHETIC_SCREEN`): real video, encoded, sent and decoded as any worker's, with
     /// no Screen Recording grant and the same windows on every Mac. The picture scrolls, so the
-    /// goldens hold the chrome round it.
+    /// goldens hold the chrome round it, the stream's whole box left out ([`moving`]).
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e app"]
     async fn a_remote_window_is_a_view_beside_the_session_and_fills_it() {
@@ -394,7 +409,7 @@ mod stream {
         let pane =
             moving(drv, &renders).await.expect("the window's picture moves: its stream is live");
         println!("MEASURE remote-window-surface: its picture {pane:?} px");
-        goldens_masked(drv, &renders, "surface-live-screen", &[pane]).await;
+        goldens_masked(drv, &renders, "surface-live-screen", pane).await;
 
         // The window's pane, at the right with the keyboard, fills the view by its header's zoom;
         // filled, no pane wears a header.
@@ -420,7 +435,7 @@ mod stream {
             "filling the view draws the picture larger: {whole:?} against {pane:?}"
         );
         println!("MEASURE remote-window-takeover: its picture {whole:?} px");
-        goldens_masked(drv, &renders, "surface-live-screen-takeover", &[whole]).await;
+        goldens_masked(drv, &renders, "surface-live-screen-takeover", whole).await;
         stack.shutdown().await;
     }
 }
