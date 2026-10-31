@@ -654,3 +654,299 @@ fn the_keyed_grid_paints_what_a_grid_painted_whole_paints_in_core_text() {
     assert!(ink.size.width.0 > 0 && ink.size.height.0 > 0, "Core Text rasterises glyphs");
     histories(&text);
 }
+
+/// How ⌘W's close of an iPad's split hands on the keyboard the closed shell's pane held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Close {
+    /// It leaves it where it was: a touch screen's close, which keeps the soft keyboard down
+    /// until a tap (`docs/decisions/ui.md`).
+    LeavesIt,
+    /// The session's panel takes it as it draws in the frame that lays the session out alone,
+    /// after the shell has read the focus (`slopty-shell`'s `settle_pane_keyboard`).
+    AsThePanelDraws,
+    /// The session's terminal takes it once that frame is drawn, as the shell handed it on
+    /// before: one frame without a field to take what is typed.
+    AfterTheFrame,
+}
+
+/// The session's terminal in its pane, as the shell's terminal panel holds it: told to take the
+/// keyboard, it focuses the terminal as it draws (`TerminalPanel::request_focus`).
+struct Panel {
+    view: gpui::Entity<TerminalView>,
+    take_keyboard: bool,
+}
+
+impl gpui::Render for Panel {
+    fn render(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::{ParentElement as _, Styled as _, div};
+        if std::mem::take(&mut self.take_keyboard) {
+            let focus = self.view.read(cx).focus.clone();
+            window.focus(&focus, cx);
+        }
+        div().size_full().child(self.view.clone())
+    }
+}
+
+/// The panes of an iPad's view as their terminals stand in them: the sidebar, then the session's
+/// pane and, while split, a shell's beside it, each split pane under a finger-high header and
+/// clipped to itself, as the shell's pane frame lays them (`slopty-shell`'s `render_panes`), and
+/// under them the soft keyboard's band, kept clear while a field holds the keyboard
+/// (`Window::text_input_focused`, as the shell's iOS frame reads it, after laying the panes out).
+struct Panes {
+    session: gpui::Entity<Panel>,
+    shell: gpui::Entity<TerminalView>,
+    split: bool,
+    sidebar: f32,
+    keyboard: f32,
+    /// A close whose hand-off of the keyboard this frame makes (`settle_pane_keyboard`).
+    closing: Option<Close>,
+    /// The band each frame kept clear, in order.
+    bands: Vec<f32>,
+}
+
+/// A split pane's header on a touch screen: a finger's row.
+const PANE_HEADER: f32 = 44.0;
+
+/// The soft keyboard over a 13-inch iPad in portrait.
+const SOFT_KEYBOARD: f32 = 372.0;
+
+impl gpui::Render for Panes {
+    fn render(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        use gpui::prelude::FluentBuilder as _;
+        use gpui::{ParentElement as _, Styled as _, div};
+        match self.closing.take() {
+            Some(Close::AsThePanelDraws) => {
+                self.session.update(cx, |panel, cx| {
+                    panel.take_keyboard = true;
+                    cx.notify();
+                });
+            }
+            Some(Close::AfterTheFrame) => {
+                let focus = self.session.read(cx).view.read(cx).focus.clone();
+                cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
+            }
+            Some(Close::LeavesIt) | None => {}
+        }
+        let band = if window.text_input_focused() { self.keyboard } else { 0.0 };
+        self.bands.push(band);
+        let pane = |view: gpui::AnyView, header: bool| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .when(header, |pane| pane.child(div().flex_none().h(px(PANE_HEADER))))
+                .child(div().flex_1().min_h_0().child(view))
+        };
+        div().size_full().pb(px(band)).child(
+            div()
+                .size_full()
+                .flex()
+                .child(div().flex_none().w(px(self.sidebar)).h_full())
+                .child(pane(self.session.clone().into(), self.split))
+                .when(self.split, |area| {
+                    area.child(div().flex_none().w(px(1.0)).h_full())
+                        .child(pane(self.shell.clone().into(), true))
+                }),
+        )
+    }
+}
+
+/// A program's whole screen at `cols` × `rows`: `lines` from the top, the cursor after the last.
+fn screen(seq: u64, cols: u16, rows: u16, lines: &[&str]) -> TermEvent {
+    let last = lines.len().saturating_sub(1);
+    let end = lines.last().map_or(0, |line| line.chars().count()).saturating_add(1);
+    TermEvent::Frame(Frame {
+        seq,
+        full: true,
+        epoch: 0,
+        cols,
+        rows,
+        cursor: Cursor {
+            row: u16::try_from(last).unwrap_or(0),
+            col: u16::try_from(end).unwrap_or(0),
+            shape: CursorShape::Block,
+            visible: true,
+            blink: true,
+        },
+        modes: TermModes::empty(),
+        oldest_line: LineIndex(0),
+        first_visible_line: LineIndex(0),
+        total_lines: u64::from(rows),
+        input_ack: 0,
+        above: None,
+        blocks: None,
+        images: Vec::new(),
+        updates: (0..rows)
+            .map(|row| {
+                let text = lines.get(usize::from(row)).copied().unwrap_or_default();
+                RowUpdate { row, line: Line::from_text(text, cols, Style::DEFAULT).into() }
+            })
+            .collect(),
+    })
+}
+
+/// The grid size `rx` last asked the program for, if it asked.
+fn asked_size(rx: &mut mpsc::Receiver<slopty_proto::ClientMsg>) -> Option<TermSize> {
+    let mut asked = None;
+    while let Ok(msg) = rx.try_recv() {
+        if let slopty_proto::ClientMsg::Term {
+            req: slopty_proto::terminal::TermRequest::Resize(size),
+            ..
+        } = msg
+        {
+            asked = Some(size);
+        }
+    }
+    asked
+}
+
+/// The session's lines, as the stand-in agent's TUI draws them once its turn is done.
+const SESSION: [&str; 2] = ["● Done: Say hello", ">"];
+
+/// What a close drew: what GPUI's check found, how many stretches were drawn again moved, and
+/// the bands its frames kept clear, each change once.
+struct Closed {
+    found: Vec<String>,
+    moved: u64,
+    bands: Vec<f32>,
+}
+
+/// One iPad close on `text` from `seed`: the session split with a shell that holds the keyboard,
+/// the soft keyboard up under both, then ⌘W closes the shell's pane, the session's terminal loses
+/// its header, widens and is undimmed, the keyboard is handed on as `close` says, and each program
+/// redraws at the size it is asked for. GPUI checks every frame that draws something again
+/// against one drawn from scratch at its moment.
+fn pane_closed(text: Arc<dyn PlatformTextSystem>, seed: u64, sidebar: f32, close: Close) -> Closed {
+    use gpui::AppContext as _;
+    let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(seed), None, text);
+    cx.update(|cx| cx.set_global(slopty_shell::theme::Theme::default()));
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (tx, mut rx) = mpsc::channel(1 << 12);
+    let (panes, cx) = cx.add_window_view(|window, cx| {
+        let size = TermSize { cols: 40, rows: 20, ..TermSize::default() };
+        let open = |cx: &mut gpui::Context<Panes>| {
+            let tx = tx.clone();
+            cx.new(|cx| {
+                TerminalView::new(slopty_core::SessionId::new(), size, tx, Theme::default(), cx)
+            })
+        };
+        let (view, shell) = (open(cx), open(cx));
+        let focus = shell.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        let session = cx.new(|_| Panel { view, take_keyboard: false });
+        let keyboard = SOFT_KEYBOARD;
+        Panes { session, shell, split: true, sidebar, keyboard, closing: None, bands: Vec::new() }
+    });
+    slopty_shell::clock::run_on(cx.executor());
+    cx.update(|window, _| {
+        window.set_check_retained(Some(gpui::RetainedCheck::Record));
+        window.set_a11y_active(true);
+    });
+    cx.simulate_scale_factor_change(2.0);
+    cx.simulate_resize(size(px(1032.0), px(1376.0)));
+    let (session, shell) =
+        panes.read_with(cx, |panes, cx| (panes.session.read(cx).view.clone(), panes.shell.clone()));
+    for view in [&session, &shell] {
+        view.update(cx, |view, cx| view.apply(TermEvent::Driver { you: true }, cx));
+    }
+    session.update(cx, |view, cx| view.set_dimmed(true, cx));
+    cx.run_until_parked();
+    // Each program draws at the size its pane asks for, as the worker's do.
+    let mut seq = 0_u64;
+    let mut answer = |cx: &mut VisualTestContext, rx: &mut mpsc::Receiver<_>| {
+        let Some(asked) = asked_size(rx) else { return };
+        seq = seq.saturating_add(1);
+        let s = seq;
+        session.update(cx, |view, cx| view.apply(screen(s, asked.cols, asked.rows, &SESSION), cx));
+        shell.update(cx, |view, cx| {
+            let lines = ["% echo pad surface", "pad surface", "%"];
+            view.apply(screen(s, asked.cols, asked.rows, &lines), cx);
+        });
+        cx.run_until_parked();
+    };
+    // The display's frames for `ms`, each program answering a resize as it comes.
+    let mut frames = |cx: &mut VisualTestContext, rx: &mut mpsc::Receiver<_>, ms: u64| {
+        for _ in 0..ms / 16 {
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+            answer(cx, rx);
+        }
+    };
+    frames(cx, &mut rx, 1_500);
+    let held = cx.update(|window, _| window.text_input_focused());
+    assert!(held, "split, the shell's field holds the keyboard");
+    let before = cx.update(|window, _| {
+        window.reset_layout_stats();
+        window.take_retained_check_reports()
+    });
+    assert_eq!(before, Vec::<String>::new(), "split, every frame as one from scratch");
+    panes.update(cx, |panes, _| panes.bands.clear());
+    // ⌘W: the shell's pane goes, and the session's has the area to itself.
+    panes.update(cx, |panes, cx| {
+        panes.split = false;
+        panes.closing = Some(close);
+        cx.notify();
+    });
+    session.update(cx, |view, cx| view.set_dimmed(false, cx));
+    cx.run_until_parked();
+    frames(cx, &mut rx, 1_500);
+    let (found, moved) = cx.update(|window, _| {
+        (window.take_retained_check_reports(), window.layout_stats().paints_moved)
+    });
+    let mut bands = panes.update(cx, |panes, _| std::mem::take(&mut panes.bands));
+    bands.dedup();
+    Closed { found, moved, bands }
+}
+
+/// ⌘W closing an iPad's split with the soft keyboard up (red 11): the session's terminal moves up
+/// from under its header and widens in one frame, and the keyboard's band goes or stays as the
+/// field holding the keyboard does. Left where it was, as a touch screen leaves it, the band goes
+/// once; taken by the session's panel as it draws, the band holds. Either way every frame paints
+/// the session's rows where a frame from scratch at its moment does. Handed on only once that
+/// frame is drawn, one frame goes by with no field: the band goes and comes back the next frame,
+/// and the rows drawn again for their keys stand clipped inside a band that a frame from scratch
+/// no longer keeps, two frames running, the report the iPad's e2e failed on.
+#[test]
+fn a_split_closed_beside_the_session_paints_its_rows_where_a_frame_from_scratch_does() {
+    let glyphs: Arc<dyn PlatformTextSystem> = Arc::new(Glyphs);
+    let systems = [("every glyph a sprite", glyphs), ("Core Text", gpui_platform::text_system())];
+    for (system, text) in systems {
+        let mut moved = 0_u64;
+        for seed in 1..=2 {
+            for sidebar in [260.0, 259.5, 267.25] {
+                let closes = [
+                    (Close::LeavesIt, vec![SOFT_KEYBOARD, 0.0]),
+                    (Close::AsThePanelDraws, vec![SOFT_KEYBOARD]),
+                ];
+                for (close, bands) in closes {
+                    let at = format!("{system}, seed {seed}, sidebar {sidebar}, {close:?}");
+                    let closed = pane_closed(Arc::clone(&text), seed, sidebar, close);
+                    assert_eq!(closed.found, Vec::<String>::new(), "{at}");
+                    assert_eq!(closed.bands, bands, "{at}: the bands its frames kept");
+                    moved = moved.saturating_add(closed.moved);
+                }
+            }
+            let closed = pane_closed(Arc::clone(&text), seed, 260.0, Close::AfterTheFrame);
+            let at = format!("{system}, seed {seed}");
+            assert_eq!(closed.bands, [SOFT_KEYBOARD, 0.0, SOFT_KEYBOARD], "{at}: the band went");
+            assert!(
+                closed.found.iter().any(|report| report.contains("drew it again too")),
+                "{at}: a hand-off after the frame draws the rows stale: {:#?}",
+                closed.found
+            );
+        }
+        assert!(moved > 0, "{system}: rows were drawn again moved");
+    }
+}
