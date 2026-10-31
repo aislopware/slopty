@@ -249,6 +249,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   hang unreported indefinitely, which is how one e2e run in the loaded guest never got its
   report although the app kept presenting for seconds after the hold.
   gpui-fast now closes a stretch at the first turn end once its first recorded work is a second
-  old, whatever is queued (`fast/interval_deadline.rs`), so a hang reaches the crash list
-  within about a second plus the monitor's 2 s poll. Test:
-  `a_hang_in_a_foreground_that_never_drains_is_reported_within_the_deadline` in the fork.
+  old, whatever is queued (`fast/interval_deadline.rs`). An app that went quiet with the stretch
+  open (a frame pending that never draws, nothing left to run) ends no turn at all, so the
+  monitor closes the stretch at its first poll past that second, on its own thread: an idle app
+  wakes for nothing more. Either way a hang reaches the crash list within about a second plus
+  the monitor's 2 s poll. Tests in the fork:
+  `a_hang_in_a_foreground_that_never_drains_is_reported_within_the_deadline` and
+  `a_hang_before_the_foreground_goes_quiet_is_reported_at_the_first_poll_past_the_deadline`.
