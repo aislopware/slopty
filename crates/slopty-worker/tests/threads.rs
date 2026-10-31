@@ -1093,92 +1093,199 @@ mod hooks {
     /// stamp, an interruption the transcript tells, a compaction shown while it runs (since it
     /// began, whatever the phase beneath it says meanwhile) with the session begun again after
     /// it, the end at its hook's moment or once its process is gone, and a hook relayed late
-    /// passed over.
+    /// passed over. Each moment names the event its time is that of, a hook's arrival or a
+    /// record's stamp or write, and [`Times`] reads when that was from the recording's own files,
+    /// so a recapture of the same session moves no expectation. Every recording's moments are
+    /// compared at once.
     #[tokio::test(start_paused = true)]
     async fn each_recorded_session_shows_each_moment_as_it_came() {
-        let pinned: [(&str, Heard, &[&str]); 5] = [
-            (
-                "permission",
-                Heard::Hooks,
-                &[
-                    "Idle Live now |  | permission",
-                    "Working Live +68 |  | permission",
-                    "Working Live +68 | Active | permission",
-                    "NeedsYou Live permission: Run touch refused.txt +2581 | Active | permission",
-                    "Working Live +4123 | Active | permission",
-                    "NeedsYou Live permission: Run touch allowed.txt +4131 | Active | permission",
-                    "Working Live +4356 | Active | permission",
-                    "NeedsYou Live permission: Edit /work/notes.txt +7669 | Active | permission",
-                    "Working Live +7680 | Active | permission",
-                    "NeedsYou Live permission: Write /work/todo.txt +7808 | Active | permission",
-                    "Working Live +7819 | Active | permission",
-                    "Working Live +7819 | Complete +9389 | permission",
-                    "Done Live +9392 | Complete +9389 | permission",
-                    "Done Exited { resumable: true } +9425 | Complete +9389 | permission",
-                ],
-            ),
-            (
-                "permission",
-                Heard::Record,
-                &[
-                    "Idle Live now |  | permission",
-                    "Working Live +54 | Active | permission",
-                    "NeedsYou Live permission: Wants permission +2581 | Active | permission",
-                    "Working Live +2633 | Active | permission",
-                    "NeedsYou Live permission: Wants permission +4131 | Active | permission",
-                    "NeedsYou Live permission: Run touch allowed.txt +4131 | Active | permission",
-                    "Working Live +4356 | Active | permission",
-                    "NeedsYou Live permission: Wants permission +7669 | Active | permission",
-                    "Working Live +7680 | Active | permission",
-                    "NeedsYou Live permission: Wants permission +7808 | Active | permission",
-                    "Working Live +7819 | Active | permission",
-                    "Done Live +9389 | Complete +9389 | permission",
-                    "Done Exited { resumable: true } now | Complete +9389 | permission",
-                ],
-            ),
-            (
-                "interrupt",
-                Heard::Hooks,
-                &[
-                    "Idle Live now |  | interrupt",
-                    "Working Live +143 |  | interrupt",
-                    "Working Live +143 | Active | interrupt",
-                    "Stopped Live +5186 | Interrupted +5186 | interrupt",
-                    "Stopped Exited { resumable: true } +5209 | Interrupted +5186 | interrupt",
-                ],
-            ),
-            (
-                "interrupt",
-                Heard::Record,
-                &[
-                    "Idle Live now |  | interrupt",
-                    "Working Live +108 | Active | interrupt",
-                    "Stopped Live +5186 | Interrupted +5186 | interrupt",
-                    "Stopped Exited { resumable: true } now | Interrupted +5186 | interrupt",
-                ],
-            ),
-            (
-                "compact",
-                Heard::Hooks,
-                &[
-                    "Idle Live now |  | compact",
-                    "Working Live +430 |  | compact",
-                    "Working Live +430 | Active | compact",
-                    "Done Live +2326 | Complete +2326 | compact",
-                    "Done Live +2326 | Complete +2227 | compact",
-                    "Done Live +2326 | Complete +2227, Complete +2259 | compact",
-                    "Working Live compacting: Compacting the conversation +2389 \
-                 | Complete +2227, Complete +2259 | compact",
-                    "Idle Live +6877 | Complete +2227, Complete +2259 | compact",
-                    "Idle Live +6877 | Complete +2227, Complete +2259, Complete +6883 | compact",
-                    "Idle Exited { resumable: true } +6900 \
-                 | Complete +2227, Complete +2259, Complete +6883 | compact",
-                ],
-            ),
+        const PROMPT: &str = "UserPromptSubmit";
+        const ASKED: &str = "PermissionRequest";
+        const BEFORE: &str = "PreToolUse";
+        const AFTER: &str = "PostToolUse";
+        // Claude Code's record of itself says each status as its hook comes (`record_status`),
+        // so heard by the record alone a dialog is still said at its hook's moment.
+        let p = Times::of("permission");
+        let at =
+            |what: &str, since: u64, turns: &str| format!("{what} +{since} | {turns} | permission");
+        let asks = |what: &str| format!("NeedsYou Live permission: {what}");
+        // The turn ends at its stop summary's stamp.
+        let ended = format!("Complete +{}", p.stamp("system/stop_hook_summary", 1));
+        let permission_hooks = vec![
+            "Idle Live now |  | permission".to_owned(),
+            at("Working Live", p.hook(PROMPT, 1), ""),
+            at("Working Live", p.hook(PROMPT, 1), "Active"),
+            at(&asks("Run touch refused.txt"), p.hook(ASKED, 1), "Active"),
+            // The refused dialog is answered by the next call's hook.
+            at("Working Live", p.hook(BEFORE, 2), "Active"),
+            at(&asks("Run touch allowed.txt"), p.hook(ASKED, 2), "Active"),
+            at("Working Live", p.hook(AFTER, 1), "Active"),
+            at(&asks("Edit /work/notes.txt"), p.hook(ASKED, 3), "Active"),
+            at("Working Live", p.hook(AFTER, 3), "Active"),
+            at(&asks("Write /work/todo.txt"), p.hook(ASKED, 4), "Active"),
+            at("Working Live", p.hook(AFTER, 4), "Active"),
+            at("Working Live", p.hook(AFTER, 4), &ended),
+            at("Done Live", p.hook("Stop", 1), &ended),
+            at("Done Exited { resumable: true }", p.hook("SessionEnd", 1), &ended),
         ];
-        for (name, heard, moments) in pinned {
-            assert_eq!(replayed(name, heard).await, moments, "{name}, heard by {heard:?}");
+        let permission_record = vec![
+            "Idle Live now |  | permission".to_owned(),
+            at("Working Live", p.stamp("user", 1), "Active"),
+            at(&asks("Wants permission"), p.hook(ASKED, 1), "Active"),
+            // The refused dialog is answered by its call's result, as it is written.
+            at("Working Live", p.written("user:tool_result", 1), "Active"),
+            at(&asks("Wants permission"), p.hook(ASKED, 2), "Active"),
+            at(&asks("Run touch allowed.txt"), p.hook(ASKED, 2), "Active"),
+            at("Working Live", p.hook(AFTER, 1), "Active"),
+            at(&asks("Wants permission"), p.hook(ASKED, 3), "Active"),
+            at("Working Live", p.hook(AFTER, 3), "Active"),
+            at(&asks("Wants permission"), p.hook(ASKED, 4), "Active"),
+            at("Working Live", p.hook(AFTER, 4), "Active"),
+            at("Done Live", p.stamp("system/stop_hook_summary", 1), &ended),
+            format!("Done Exited {{ resumable: true }} now | {ended} | permission"),
+        ];
+
+        let i = Times::of("interrupt");
+        let at =
+            |what: &str, since: u64, turns: &str| format!("{what} +{since} | {turns} | interrupt");
+        // The turn ends at the record that tells the interruption.
+        let interrupted = format!("Interrupted +{}", i.stamp("user:text", 1));
+        let interrupt_hooks = vec![
+            "Idle Live now |  | interrupt".to_owned(),
+            at("Working Live", i.hook(PROMPT, 1), ""),
+            at("Working Live", i.hook(PROMPT, 1), "Active"),
+            at("Stopped Live", i.stamp("user:text", 1), &interrupted),
+            at("Stopped Exited { resumable: true }", i.hook("SessionEnd", 1), &interrupted),
+        ];
+        let interrupt_record = vec![
+            "Idle Live now |  | interrupt".to_owned(),
+            at("Working Live", i.stamp("user", 1), "Active"),
+            at("Stopped Live", i.stamp("user:text", 1), &interrupted),
+            format!("Stopped Exited {{ resumable: true }} now | {interrupted} | interrupt"),
+        ];
+
+        let c = Times::of("compact");
+        let at =
+            |what: &str, since: u64, turns: &str| format!("{what} +{since} | {turns} | compact");
+        // The answer's turn ends at its stop summary's stamp, each command's at its output's.
+        let answered = format!("Complete +{}", c.stamp("system/stop_hook_summary", 1));
+        let renamed = format!("{answered}, Complete +{}", c.stamp("system/local_command", 1));
+        let compacted = format!("{renamed}, Complete +{}", c.stamp("user", LAST));
+        let compact_hooks = vec![
+            "Idle Live now |  | compact".to_owned(),
+            at("Working Live", c.hook(PROMPT, 1), ""),
+            at("Working Live", c.hook(PROMPT, 1), "Active"),
+            at("Working Live", c.hook(PROMPT, 1), &answered),
+            at("Done Live", c.hook("Stop", 1), &answered),
+            at("Done Live", c.hook("Stop", 1), &renamed),
+            at(
+                "Working Live compacting: Compacting the conversation",
+                c.hook("PreCompact", 1),
+                &renamed,
+            ),
+            // Begun again after the compaction.
+            at("Idle Live", c.hook("SessionStart", 2), &renamed),
+            at("Idle Live", c.hook("SessionStart", 2), &compacted),
+            at("Idle Exited { resumable: true }", c.hook("SessionEnd", 1), &compacted),
+        ];
+
+        let pinned = [
+            ("permission", Heard::Hooks, permission_hooks),
+            ("permission", Heard::Record, permission_record),
+            ("interrupt", Heard::Hooks, interrupt_hooks),
+            ("interrupt", Heard::Record, interrupt_record),
+            ("compact", Heard::Hooks, compact_hooks),
+        ];
+        let mut shown = Vec::new();
+        for (name, heard, _) in &pinned {
+            shown.push((*name, *heard, replayed(name, *heard).await));
         }
+        assert_eq!(shown, pinned, "each recording's moments, heard each way");
+    }
+
+    /// Which of a kind of record [`Times`] reads: the last.
+    const LAST: usize = 0;
+
+    /// When a recording's events came, in ms into it (as [`Recorded`] shows a time), read from
+    /// its own files alone: each hook when it arrived, each record of the main transcript by its
+    /// own stamp and when it was written.
+    struct Times {
+        /// Each hook's event and when it came, in order.
+        hooks: Vec<(String, u64)>,
+        /// Each record's kind ([`kind`]), its stamp (none before the recording began), and when
+        /// it was written, in order.
+        records: Vec<(String, Option<u64>, u64)>,
+    }
+
+    impl Times {
+        /// The times of recording `name`, its start as [`Replay`] takes it.
+        fn of(name: &str) -> Self {
+            let scenario = fixtures().join(name);
+            let steps = lines(&scenario.join("arrivals.jsonl"));
+            let base = began(&scenario, &steps);
+            let hooks = lines(&scenario.join("hooks.jsonl"));
+            let text = std::fs::read_to_string(scenario.join("transcript.jsonl")).unwrap();
+            let (mut unread_hooks, mut unread_lines) = (hooks.iter(), text.lines());
+            let mut times = Self { hooks: Vec::new(), records: Vec::new() };
+            for step in &steps {
+                let (count, ms) = step_of(step);
+                if step["file"] == "hooks.jsonl" {
+                    for hook in unread_hooks.by_ref().take(count) {
+                        let event = hook["input"]["hook_event_name"].as_str().unwrap();
+                        times.hooks.push((event.to_owned(), ms));
+                    }
+                } else if step["file"] == "transcript.jsonl" {
+                    for line in unread_lines.by_ref().take(count) {
+                        let Ok(record) = serde_json::from_str::<Value>(line) else { continue };
+                        let stamp =
+                            record["timestamp"].as_str().and_then(|at| ms_of(at).checked_sub(base));
+                        times.records.push((kind(&record), stamp, ms));
+                    }
+                }
+            }
+            times
+        }
+
+        /// When the `n`th hook of `event` (from 1) came.
+        fn hook(&self, event: &str, n: usize) -> u64 {
+            let mut of = self.hooks.iter().filter(|(e, _)| e == event);
+            let found = of.nth(n.checked_sub(1).expect("counted from 1"));
+            found.unwrap_or_else(|| panic!("no hook {event} #{n}")).1
+        }
+
+        /// The `n`th record of `kind` (from 1, or [`LAST`]): its stamp, and when it was written.
+        fn record(&self, kind: &str, n: usize) -> (Option<u64>, u64) {
+            let mut of = self.records.iter().filter(|(k, ..)| k == kind);
+            let found = match n.checked_sub(1) {
+                Some(index) => of.nth(index),
+                None => of.next_back(),
+            };
+            let (_, stamp, written) = found.unwrap_or_else(|| panic!("no record {kind} #{n}"));
+            (*stamp, *written)
+        }
+
+        /// The stamp of the `n`th record of `kind`.
+        fn stamp(&self, kind: &str, n: usize) -> u64 {
+            self.record(kind, n).0.unwrap_or_else(|| panic!("{kind} #{n} stamped in the recording"))
+        }
+
+        /// When the `n`th record of `kind` was written.
+        fn written(&self, kind: &str, n: usize) -> u64 {
+            self.record(kind, n).1
+        }
+    }
+
+    /// A record's kind: its type, `/` its subtype, `:` its content's first block's type
+    /// (`system/stop_hook_summary`, `user:tool_result`; `user` for words typed in).
+    fn kind(record: &Value) -> String {
+        let mut kind = record["type"].as_str().unwrap_or_default().to_owned();
+        if let Some(subtype) = record["subtype"].as_str() {
+            kind = format!("{kind}/{subtype}");
+        }
+        if let Some(block) = record.pointer("/message/content/0/type").and_then(Value::as_str) {
+            kind = format!("{kind}:{block}");
+        }
+        kind
     }
 
     /// However a recorded session is heard, by its hooks or by its record alone, its turns end

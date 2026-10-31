@@ -1054,12 +1054,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     test can replay what Slopty heard. In those scratch runs alone its sink stands in for the
     person at the permission dialogs `-p` would otherwise refuse, and only there does Claude
     Code wait on it (`permission`: one command refused, the rest allowed); in a Slopty session
-    nothing answers one. Nine scenarios, `background` 2.1.316's and the rest 2.1.314's: `edit`
-    (read, edit, overwrite, ranged read), `tools` (tasks, glob, grep, bash, a failing bash, a
-    background bash, a create, a subagent), `interrupt`, `compact` (a prompt, `/rename`, then
-    `/compact`), `permission` (a command refused, then a command, an edit and a write allowed),
-    `background` (canned), `auto`, `fork` and `notebook`. A snapshot that moves after a recapture
-    is the format moving.
+    nothing answers one. Nine scenarios, every one recorded with 2.1.316: `edit` (read, edit,
+    overwrite, ranged read), `tools` (tasks, glob, grep, bash, a failing bash, a background bash,
+    a create, a subagent), `interrupt`, `compact` (a prompt, `/rename`, then `/compact`),
+    `permission` (a command refused, then a command, an edit and a write allowed), `background`
+    (canned), `auto`, `fork` and `notebook`. A snapshot that moves after a recapture is the
+    format moving. The worker's replays of `permission`, `interrupt` and `compact` name the event
+    each moment's time is that of (a hook's arrival, a record's stamp or write) and read when it
+    was from the recording, so a recapture moves them only where what the session showed moved.
   - Entries: prompt (a slash command or `!` keeps its name), answer text, thinking, a tool call
     paired with its result, compaction with its summary, Esc, and Claude Code's notes (API
     errors, command output, informational lines). Tool details are typed for Edit/MultiEdit
@@ -2819,18 +2821,30 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **Claude Code 2.1.316 is the version pinned** (2026-10-31, from 2.1.314; 2.1.315 reached npm
   the day before with no changelog entry or release of its own, so 2.1.316's entry covers both).
   `xtask::claude::VERSION`, `draft::CHECKED_WITH`, the stand-in
-  (`slopty_testkit::claude_tui::VERSION`), the mod's recording, the canned `background` scenario
-  and the registry samples are its. The scenarios a model answers (`edit`, `tools`, `interrupt`,
-  `compact`, `permission`, `auto`, `fork`, `notebook`) stay 2.1.314's: they are recorded through
-  the person's signed-in managed launcher, which still runs 2.1.314, and the recorder refuses a
-  `claude` of another version, so they are recorded again once it moves. What changed that
-  reaches Slopty, by the changelog, the SDK's types, the build's own schemas and the recordings:
+  (`slopty_testkit::claude_tui::VERSION`), the mod's recording, every conversation scenario and
+  the registry samples are its: the canned `background` with the official build, and the eight a
+  model answers (`edit`, `tools`, `interrupt`, `compact`, `permission`, `auto`, `fork`,
+  `notebook`) through the person's signed-in managed launcher once it ran 2.1.316 (the recorder
+  refuses a `claude` of another version). What changed that reaches Slopty, by the changelog,
+  the SDK's types, the build's own schemas and the recordings:
   - **No record, field or hook payload the decoder reads moved.** Both builds have the same 33
     hook events, the same fields in each payload and in the statusline's input, and the same
-    record types and subtypes. The `background` recording holds the same records and fields as
-    before, and the registry samples, measured again in the official TUI against the canned API
-    (at rest, at work, at a permission, at a question, with a background shell), the same fields
-    but the `tmux` pane, which the measurement's clean environment gave it none of.
+    record types and subtypes. Every scenario's recording holds the records, fields and hook
+    payloads its 2.1.314 one did (`auto` three more, below); what differs is the model's (its
+    words, a call more or fewer, a thinking block) and the run's (times, durations, the order of
+    a turn's last record and its `Stop`, how often Claude Code wrote its `last-prompt` and
+    `atis-latch` bookkeeping). The registry samples, measured again in the official TUI against
+    the canned API (at rest, at work, at a permission, at a question, with a background shell),
+    hold the same fields but the `tmux` pane, which the measurement's clean environment gave it
+    none of.
+  - **A call shows as Claude Code took it in, not as the model wrote it.** In the `auto`
+    recording the model put `cd /work &&` before its `curl` this time. Claude Code drops a `cd`
+    into the session's own directory from the call it records, shows, puts to auto mode's
+    classifier and hands the hooks, and keeps the model's words beside it for the API: the
+    record's `wireToolInputs` holds them, `wireIngestContext` the directory it judged them by,
+    and a `deferred_tools_record` attachment which copy it sent. All three were in 2.1.312's
+    build already and are new only to the recordings. The decoder reads the call's `input`, the
+    command the TUI shows and the hooks name, and skips the rest.
   - **A command's result may tell the model more than it printed.** 2.1.316 adds two notes to
     what the model reads of a Bash call, `memoryLimitNote` (the kernel killed a process for lack
     of memory while it ran) and `triggeredNote` (a line of advice a server-side rule adds), beside

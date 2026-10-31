@@ -6,7 +6,7 @@ expression: "decode(\"edit\").snapshot()"
   origin: ~
   entries:
     - id: 00000000-0000-4000-8000-000000000003
-      at_ms: 1793345886461
+      at_ms: 1793430838777
       body:
         Prompt:
           text:
@@ -17,7 +17,7 @@ expression: "decode(\"edit\").snapshot()"
           images: []
           command: ~
     - id: toolu_01
-      at_ms: 1793345888630
+      at_ms: 1793430840693
       body:
         Tool:
           name: Read
@@ -37,7 +37,7 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793345888833
+            at_ms: 1793430840758
             images: []
             said: ~
             record: 00000000-0000-4000-8000-000000000018
@@ -53,7 +53,7 @@ expression: "decode(\"edit\").snapshot()"
           title: ~
           record: 00000000-0000-4000-8000-000000000017
     - id: toolu_02
-      at_ms: 1793345890863
+      at_ms: 1793430841973
       body:
         Tool:
           name: Edit
@@ -86,7 +86,7 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793345890913
+            at_ms: 1793430842002
             images: []
             said: ~
             record: 00000000-0000-4000-8000-000000000023
@@ -94,14 +94,14 @@ expression: "decode(\"edit\").snapshot()"
           title: ~
           record: 00000000-0000-4000-8000-000000000022
     - id: toolu_03
-      at_ms: 1793345893384
+      at_ms: 1793430843158
       body:
         Tool:
           name: Write
           input:
-            text: "{\n  \"content\": \"alpha\\nBETA\\ngamma\\ndelta\\n\",\n  \"file_path\": \"/work/notes.txt\"\n}"
+            text: "{\n  \"content\": \"alpha\\nBETA\\ngamma\\ndelta\",\n  \"file_path\": \"/work/notes.txt\"\n}"
             lines: 4
-            chars: 80
+            chars: 78
             full: ~
           detail:
             Write:
@@ -120,6 +120,7 @@ expression: "decode(\"edit\").snapshot()"
                       - " BETA"
                       - " gamma"
                       - +delta
+                      - "\\ No newline at end of file"
                 added: 1
                 removed: 0
                 clipped_lines: 0
@@ -127,15 +128,15 @@ expression: "decode(\"edit\").snapshot()"
           result:
             status: Ok
             text: ~
-            at_ms: 1793345893417
+            at_ms: 1793430843177
             images: []
             said: ~
-            record: 00000000-0000-4000-8000-000000000029
+            record: 00000000-0000-4000-8000-000000000028
             seen: ~
           title: ~
-          record: 00000000-0000-4000-8000-000000000028
+          record: 00000000-0000-4000-8000-000000000027
     - id: toolu_04
-      at_ms: 1793345894990
+      at_ms: 1793430844285
       body:
         Tool:
           name: Read
@@ -151,27 +152,27 @@ expression: "decode(\"edit\").snapshot()"
               limit: 2
               start_line: 2
               lines: 2
-              total_lines: 5
+              total_lines: 4
           result:
             status: Ok
             text: ~
-            at_ms: 1793345895010
+            at_ms: 1793430844298
             images: []
             said: ~
-            record: 00000000-0000-4000-8000-000000000033
+            record: 00000000-0000-4000-8000-000000000032
             seen:
               text: ""
               lines: 2
               chars: 14
               full:
-                record: 00000000-0000-4000-8000-000000000033
+                record: 00000000-0000-4000-8000-000000000032
                 part:
                   Result:
                     tool_use_id: toolu_04
           title: Read notes.txt · lines 2-3
-          record: 00000000-0000-4000-8000-000000000032
-    - id: "00000000-0000-4000-8000-000000000036:0"
-      at_ms: 1793345896778
+          record: 00000000-0000-4000-8000-000000000031
+    - id: "00000000-0000-4000-8000-000000000035:0"
+      at_ms: 1793430845186
       body:
         Text:
           text: done
@@ -183,15 +184,15 @@ expression: "decode(\"edit\").snapshot()"
     - prompt: 00000000-0000-4000-8000-000000000003
       prompt_ids:
         - 00000000-0000-4000-8000-000000000002
-      started_ms: 1793345886461
-      ended_ms: 1793345896794
+      started_ms: 1793430838777
+      ended_ms: 1793430845200
       models:
         - claude-haiku-5-5
       usage:
         input: 10
-        cache_read: 87127
-        cache_write: 8179
-        output: 775
-        thinking: 361
+        cache_read: 86728
+        cache_write: 7901
+        output: 526
+        thinking: 114
       mode: default
-      context: 19565
+      context: 19287
