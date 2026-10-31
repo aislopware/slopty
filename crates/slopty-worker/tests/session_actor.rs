@@ -1417,6 +1417,20 @@ mod actor {
         usize::try_from(slopty_pty::pty::unread(program.tty.as_fd()).unwrap()).unwrap()
     }
 
+    /// Everything typed into the played program's terminal so far, read now as the program
+    /// reads it, without letting the actor run: until a count finds nothing unread. Only that
+    /// count is exact (a count that finds some may leave out bytes Linux has yet to hand from
+    /// the master to the slave), so a single count of some says nothing of what came after.
+    fn typed_by_now(program: &Program) -> Vec<u8> {
+        let mut read = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while unread(program) > 0 {
+            let n = rustix::io::read(program.tty.as_fd(), &mut buf).unwrap();
+            read.extend_from_slice(&buf[..n]);
+        }
+        read
+    }
+
     /// What the played program reads from its terminal in one read.
     async fn read_now(program: &Program) -> Vec<u8> {
         let mut buf = vec![0; 4096];
@@ -1461,8 +1475,7 @@ mod actor {
 
             played.session.submit(me, "Say hello.".to_owned()).unwrap();
             tokio::time::sleep(session::SUBMIT_ENTER.checked_mul(50).unwrap()).await;
-            assert_eq!(unread(&played.program), words.len(), "the words wait, with no Enter");
-            assert_eq!(read_now(&played.program).await, words, "read late, the words alone");
+            assert_eq!(typed_by_now(&played.program), words, "read late, the words alone");
             assert_eq!(
                 read_now(&played.program).await,
                 b"\r",
@@ -1488,8 +1501,8 @@ mod actor {
             let open = fds();
             played.session.submit(me, "Say hello.".to_owned()).unwrap();
             tokio::time::sleep(session::SUBMIT_ENTER.checked_mul(50).unwrap()).await;
-            assert_eq!(unread(&played.program), b"Say hello.".len(), "the Enter waits on");
             assert_eq!(fds(), open, "the worker counts with no descriptor kept");
+            assert_eq!(typed_by_now(&played.program), b"Say hello.", "the Enter waited on");
 
             played.session.close();
             while viewer.rx.recv().await.is_some() {}
@@ -1520,10 +1533,12 @@ mod actor {
             played.session.submit(me, "Say hello.".to_owned()).unwrap();
             let asked = tokio::time::Instant::now();
             tokio::time::sleep_until(asked.checked_add(the_wait(-1)).unwrap()).await;
+            // A count of some, exact here: the words are all that was written, in one write the
+            // kernel hands over whole, so a count finds none of them (and finishes the hand-over)
+            // or all of them.
             assert_eq!(unread(&played.program), b"Say hello.".len(), "the words alone");
             tokio::time::sleep_until(asked.checked_add(the_wait(1)).unwrap()).await;
-            assert_eq!(unread(&played.program), b"Say hello.\r".len(), "the Enter, words unread");
-            assert_eq!(read_now(&played.program).await, b"Say hello.\r");
+            assert_eq!(typed_by_now(&played.program), b"Say hello.\r", "the Enter, words unread");
             played.session.close();
         })
         .await;

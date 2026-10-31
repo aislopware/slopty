@@ -259,10 +259,12 @@ pub fn slave_of(master: &OwnedFd) -> Result<PathBuf, PtyError> {
 /// How many bytes wait in the input queue of `tty`, a terminal's slave end: typed, and not yet
 /// read by its program.
 ///
-/// Linux hands what the master writes to the slave on a kernel worker after the write has
-/// returned, and a poll of the slave finishes that hand-over before it answers (`n_tty_poll`),
-/// so every byte written before the call is counted; macOS hands it over in the write. A
-/// program that reads by lines (canonical mode) is counted its whole lines alone.
+/// A count of none is exact; a count of some may leave out bytes still on their way. Linux
+/// hands what the master writes to the slave on a kernel worker after the write has returned,
+/// and a poll of the slave finishes that hand-over only when it finds nothing to read
+/// (`n_tty_poll`), as a full line discipline also holds the rest back until its program reads;
+/// macOS hands bytes over in the write. A program that reads by lines (canonical mode) is
+/// counted its whole lines alone.
 ///
 /// # Errors
 ///
@@ -1293,10 +1295,10 @@ mod tests {
         (PtyMaster::new(pty.into_master()).unwrap(), tty, path)
     }
 
-    /// What is typed counts as unread from the moment its write returns until the program
-    /// reads it, every byte of it: Linux's hand-over from the master to the slave, which runs
-    /// on a kernel worker after the write, is finished by the count itself. Were the count to
-    /// leave it running, a round would count the bytes still on their way short.
+    /// What is typed into an empty queue counts as unread from the moment its write returns
+    /// until the program reads it, every byte of it: Linux's hand-over from the master to the
+    /// slave, which runs on a kernel worker after the write, is finished by a count that would
+    /// otherwise find nothing. Were the count to leave it running, a round would count none.
     #[tokio::test]
     async fn typed_bytes_are_unread_from_their_write_to_their_read() {
         let (master, tty, _) = raw_pair();
@@ -1311,6 +1313,44 @@ mod tests {
             let n = rustix::io::read(&tty, &mut buf).unwrap();
             assert_eq!(&buf[..n], typed, "round {round}");
         }
+    }
+
+    /// Everything typed into `tty` so far, read as its program reads it: until a count finds
+    /// nothing unread, which on Linux has finished the hand-over of every byte written before.
+    fn drained(tty: &OwnedFd) -> Vec<u8> {
+        let mut read = Vec::new();
+        let mut buf = [0_u8; 4096];
+        while unread(tty).unwrap() > 0 {
+            let n = rustix::io::read(tty, &mut buf).unwrap();
+            read.extend_from_slice(&buf[..n]);
+        }
+        read
+    }
+
+    /// Only a count of none is exact. On Linux a full line discipline holds what does not fit
+    /// on the kernel's side of the terminal, uncounted, until its program reads (as a kernel
+    /// worker that has yet to run holds bytes written while others wait unread); macOS takes no
+    /// more than its queue holds. Reading until a count finds nothing reads every byte typed.
+    #[tokio::test]
+    async fn only_a_count_of_none_is_exact() {
+        let (master, tty, _) = raw_pair();
+        master.writable().await.unwrap();
+        let typed = [b'x'; 8192];
+        let mut written = 0;
+        while let Some(rest) = typed.get(written..).filter(|rest| !rest.is_empty()) {
+            match master.try_write(rest).unwrap() {
+                0 => break,
+                n => written += n,
+            }
+        }
+        let count = usize::try_from(master.unread().unwrap()).unwrap();
+        if cfg!(target_os = "linux") {
+            assert!(count < written, "{count} of {written} counted: the rest waits uncounted");
+        } else {
+            assert_eq!(count, written, "the queue holds what was written, all counted");
+        }
+        assert_eq!(drained(&tty).len(), written, "read until none is counted, all of it");
+        assert_eq!(master.unread().unwrap(), 0);
     }
 
     /// Close `tty`, the slave at `path`, to everyone else, as its program may (`closed`), or

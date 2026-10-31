@@ -2819,9 +2819,10 @@ impl Actor {
 
     /// Whether the program has yet to read some of what was typed, so that an Enter written now
     /// would come in the same read. Never for a program that reads by lines: its read ends at
-    /// the Enter whenever the Enter comes. When the terminal cannot be opened to count (its
-    /// program closed it to everyone else, [`PtyMaster::unread`]), none is taken as unread, and
-    /// the Enter goes on [`SUBMIT_ENTER`] alone.
+    /// the Enter whenever the Enter comes. Only a count of none lets the Enter go, and that count
+    /// is exact even while bytes cross to the program ([`PtyMaster::unread`]). When the terminal
+    /// cannot be opened to count (its program closed it to everyone else), none is taken as
+    /// unread, and the Enter goes on [`SUBMIT_ENTER`] alone.
     fn words_unread(&self) -> bool {
         if self.master.line_discipline().is_ok_and(|d| d.canonical) {
             return false;

@@ -101,9 +101,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       200 ms alone, since a line's read ends at the Enter whenever it comes, and so does one
       whose terminal cannot be opened to look (held exclusive on Linux, its node closed to the
       worker's user on macOS, where XNU refuses an exclusive open to root alone). Linux hands a
-      master's write to the slave on a kernel worker; the look polls the slave first, which
-      finishes that hand-over, so one look is exact there too. The submit is refused while the
-      session needs the person.
+      master's write to the slave on a kernel worker, and a poll of the slave finishes that
+      hand-over only when it finds nothing to read: a look that finds nothing is exact, and only
+      it lets the Enter go; one that finds some may miss bytes still crossing. The submit is
+      refused while the session needs the person.
       Only `agent_tell` submits (`SessionHandle::submit`); the client link carries no submit, and
       `SendMessage`, which no client sent, is gone (2026-10-30). An agent's words go framed as
       an agent's:
