@@ -264,13 +264,13 @@ pub fn run(sh: &Shell, cmd: &IosCmd) -> Result<()> {
     preflight(sh, matches!(cmd, IosCmd::Sim(_)))?;
     match cmd {
         IosCmd::Sim(opts) => {
-            let app = build(sh, Sdk::Simulator, opts)?;
+            let app = build(sh, Sdk::Simulator, opts)?.app;
             if !opts.no_run {
                 run_simulator(sh, &app, opts)?;
             }
         }
         IosCmd::Device(opts) => {
-            let app = build(sh, Sdk::Device, opts)?;
+            let app = build(sh, Sdk::Device, opts)?.app;
             if !opts.no_run {
                 run_device(sh, &app, opts)?;
             }
@@ -308,8 +308,23 @@ pub fn preflight(sh: &Shell, simulator: bool) -> Result<()> {
     Ok(())
 }
 
-/// Build the static library and the app bundle; returns the `.app` path.
-fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
+/// An app built for the simulator or a device: its bundle, and how long each part of its build
+/// took.
+pub struct Built {
+    /// The `.app`.
+    pub app: Utf8PathBuf,
+    /// Each part's time, in order: the app's static library, the extension's, and Xcode's build
+    /// (none when nothing it builds from changed).
+    pub phases: Vec<(&'static str, std::time::Duration)>,
+}
+
+/// The file beside the generated project that holds [`xcode_inputs`] of the last bundle Xcode
+/// built there.
+const XCODE_STAMP: &str = "xcodebuild.inputs";
+
+/// Build the static library and the app bundle.
+fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
+    let mut phases = Vec::new();
     // Wherever cargo builds for `sh` (the checkout's `target`, or a lane's own dir), so a tree
     // built elsewhere finds its libraries where cargo put them.
     let target = crate::tools::target_dir(sh)?;
@@ -328,9 +343,13 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let (links, notify_links) = {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
         let what = format!("{triple}, {profile}");
+        let started = std::time::Instant::now();
         let links = build_static_lib(sh, "slopty-ios", &what, triple, &cargo_flags)?;
+        phases.push(("ios lib", started.elapsed()));
         let release: &[&str] = if opts.release { &["--release"] } else { &[] };
+        let started = std::time::Instant::now();
         let notify_links = build_static_lib(sh, "slopty-notify", &what, triple, release)?;
+        phases.push(("notify lib", started.elapsed()));
         // Xcode links a target only when it has an object file of its own, and every line of
         // the app is in the static library: an empty crate compiled to an object is that file.
         step(
@@ -356,20 +375,11 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
     let app = Linked { lib: &lib, links: &links };
     let notify = Linked { lib: &notify_lib, links: &notify_links };
     let spec = project_spec(sdk, opts.release, &link_object, &app, &notify);
-    sh.write_file(out.join("project.yml"), spec)?;
-    step(
-        "xcodegen generate",
-        &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
-    )?;
+    sh.write_file(out.join("project.yml"), &spec)?;
 
     let configuration = if opts.release { "Release" } else { "Debug" };
     let derived = out.join("derived");
     let xcode_sdk = sdk.xcode_sdk();
-    let project = out.join(format!("{PRODUCT}.xcodeproj"));
-    let xcodebuild = cmd!(
-        sh,
-        "xcodebuild -quiet -project {project} -scheme {PRODUCT} -sdk {xcode_sdk} -configuration {configuration} -derivedDataPath {derived}"
-    );
     let team = match sdk {
         Sdk::Simulator => None,
         Sdk::Device => Some(
@@ -377,17 +387,76 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Utf8PathBuf> {
                 .context("set SLOPTY_TEAM_ID to your Apple Developer team id for device builds")?,
         ),
     };
-    step("xcodebuild", &xcodebuild.args(signing_args(team.as_deref())).arg("build"))?;
     let app = derived
         .join("Build")
         .join("Products")
         .join(format!("{configuration}-{xcode_sdk}"))
         .join(format!("{PRODUCT}.app"));
-    if !app.join(PRODUCT).exists() {
-        bail!("app bundle missing or without its executable: {app}");
+    // Xcode took 13–17 s to find nothing to do: what it builds from is read here instead, and an
+    // unchanged set leaves the bundle it built last as it is.
+    let started = std::time::Instant::now();
+    let version = cmd!(sh, "xcodebuild -version").quiet().read()?;
+    let inputs = xcode_inputs(
+        &[&spec, &version, team.as_deref().unwrap_or("")],
+        &[&lib, &notify_lib],
+        &[&link_object, &out.join(format!("{}.icon", crate::icon::NAME))],
+    )?;
+    let stamp = out.join(XCODE_STAMP);
+    if app.join(PRODUCT).exists() && std::fs::read_to_string(&stamp).ok() == Some(inputs.clone()) {
+        println!("  ✓ xcodebuild: nothing it builds from changed, {app} kept");
+    } else {
+        let _stale = std::fs::remove_file(&stamp);
+        step(
+            "xcodegen generate",
+            &cmd!(sh, "xcodegen generate --quiet --spec {out}/project.yml --project {out}"),
+        )?;
+        let project = out.join(format!("{PRODUCT}.xcodeproj"));
+        let xcodebuild = cmd!(
+            sh,
+            "xcodebuild -quiet -project {project} -scheme {PRODUCT} -sdk {xcode_sdk} -configuration {configuration} -derivedDataPath {derived}"
+        );
+        step("xcodebuild", &xcodebuild.args(signing_args(team.as_deref())).arg("build"))?;
+        if !app.join(PRODUCT).exists() {
+            bail!("app bundle missing or without its executable: {app}");
+        }
+        std::fs::write(&stamp, &inputs).with_context(|| format!("write {stamp}"))?;
     }
+    phases.push(("xcodebuild", started.elapsed()));
     println!("✔ {app}");
-    Ok(app)
+    Ok(Built { app, phases })
+}
+
+/// What an Xcode build of the app reads, as one line to compare with the last build's: the
+/// `texts` it is made from (the project's spec, which holds every setting, path and link flag,
+/// and Xcode's version), each of the `libs` by its size and time (cargo rewrites a static library
+/// only when it links it again, and hashing 790 MB took longer than it saves), and every file
+/// under `files` by its bytes (the link object and the icon's document, written anew each run).
+fn xcode_inputs(texts: &[&str], libs: &[&Utf8Path], files: &[&Utf8Path]) -> Result<String> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    texts.hash(&mut hasher);
+    for lib in libs {
+        let meta = std::fs::metadata(lib).with_context(|| format!("read {lib}"))?;
+        let modified = meta.modified()?.duration_since(std::time::UNIX_EPOCH)?;
+        (lib.as_str(), meta.len(), modified.as_nanos()).hash(&mut hasher);
+    }
+    let mut paths: Vec<Utf8PathBuf> = Vec::new();
+    let mut dirs: Vec<Utf8PathBuf> = files.iter().map(|f| (*f).to_owned()).collect();
+    while let Some(path) = dirs.pop() {
+        if path.is_dir() {
+            for entry in path.read_dir_utf8().with_context(|| format!("list {path}"))? {
+                dirs.push(entry?.into_path());
+            }
+        } else {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    for path in &paths {
+        path.as_str().hash(&mut hasher);
+        std::fs::read(path).with_context(|| format!("read {path}"))?.hash(&mut hasher);
+    }
+    Ok(format!("{:016x}\n", hasher.finish()))
 }
 
 /// Build `package`'s static library; returns the linker flags for the system libraries and
@@ -626,12 +695,12 @@ settings:
 ///
 /// When the build, the boot or the install fails.
 /// The e2e build of the app for the simulator, in `sh`'s directory and target dir; its `.app`.
-pub fn build_for_simulator(sh: &Shell, sim: SimKind, log: &str) -> Result<Utf8PathBuf> {
+pub fn build_for_simulator(sh: &Shell, sim: SimKind, log: &str) -> Result<Built> {
     build(sh, Sdk::Simulator, &IosOpts::for_e2e(sim, log))
 }
 
 pub fn install_on_simulator(sh: &Shell, opts: &IosOpts) -> Result<String> {
-    let app = build(sh, Sdk::Simulator, opts)?;
+    let app = build(sh, Sdk::Simulator, opts)?.app;
     let udid = boot_and_install(sh, &app, opts.sim)?;
     Ok(udid)
 }

@@ -72,22 +72,34 @@ struct Check {
     local_s: u64,
 }
 
-/// One e2e case run in this Mac's guest (`target/remote/e2e-history.jsonl`).
+/// One e2e case run in this Mac's guest (`target/remote/e2e-history.jsonl`): when it ended,
+/// for which check, and how long it took from its build to its verdict (`wall_s`; a line written
+/// before 2026-10-31 has its build's and its tests' seconds instead).
 #[derive(serde::Deserialize)]
 struct GuestRun {
     at: u64,
     name: String,
+    #[serde(default)]
+    wall_s: Option<u64>,
+    #[serde(default)]
     build_s: u64,
+    #[serde(default)]
     tests_s: u64,
 }
 
-/// The e2e case `check` ran in the guest, build and tests in seconds: a run of its name recorded
-/// while it ran. `None` for a check of crates alone.
+impl GuestRun {
+    fn seconds(&self) -> u64 {
+        self.wall_s.unwrap_or_else(|| self.build_s.saturating_add(self.tests_s))
+    }
+}
+
+/// The e2e case `check` ran in the guest, in seconds from its build to its verdict: a run of its
+/// name recorded while it ran. `None` for a check of crates alone.
 fn guest_part(check: &Check, runs: &[GuestRun]) -> Option<u64> {
     let from = check.at.saturating_sub(check.total_s).saturating_sub(5);
     let to = check.at.saturating_add(5);
     let ran = runs.iter().filter(|r| r.name == check.name && (from..=to).contains(&r.at));
-    ran.map(|r| r.build_s.saturating_add(r.tests_s)).reduce(u64::saturating_add)
+    ran.map(GuestRun::seconds).reduce(u64::saturating_add)
 }
 
 /// `p50 …s, p90 …s` of `samples`, or `-` for none.
@@ -393,9 +405,17 @@ mod tests {
     fn a_check_s_e2e_part_is_its_guest_run() {
         let check =
             Check { at: 1_000, name: "A".to_owned(), full: false, total_s: 300, local_s: 40 };
-        let run =
-            |at, name: &str| GuestRun { at, name: name.to_owned(), build_s: 60, tests_s: 180 };
+        let run = |at, name: &str| GuestRun {
+            at,
+            name: name.to_owned(),
+            wall_s: Some(240),
+            build_s: 0,
+            tests_s: 0,
+        };
         assert_eq!(guest_part(&check, &[run(990, "A")]), Some(240));
+        let older: GuestRun =
+            serde_json::from_str(r#"{"at":990,"name":"A","build_s":60,"tests_s":180}"#).unwrap();
+        assert_eq!(guest_part(&check, &[older]), Some(240), "a line of the older shape");
         assert_eq!(guest_part(&check, &[run(990, "B")]), None, "another lane's");
         assert_eq!(guest_part(&check, &[run(600, "A")]), None, "before it began");
         assert_eq!(guest_part(&check, &[]), None, "crates alone");

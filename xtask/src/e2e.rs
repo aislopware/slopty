@@ -14,11 +14,13 @@
 //! Other sessions build in this checkout's `target/` too; a rerun that goes through cargo waits on
 //! their build lock and rebuilds what they edited.
 
+use std::fmt::Write as _;
+
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use xshell::{Shell, cmd};
 
-use crate::tools::step;
+use crate::tools::{WORKSPACE_HACK, step};
 
 /// The feature that builds `slopty-e2e`'s live test targets, which every build that runs or
 /// lints them names (`crates/slopty-e2e/Cargo.toml`).
@@ -26,6 +28,75 @@ pub const LIVE: &str = "slopty-e2e/live";
 
 /// The package whose test targets need [`LIVE`].
 pub const LIVE_PACKAGE: &str = "slopty-e2e";
+
+/// The packages every e2e build selects: the daemons, the CLI, the app, the e2e crate (its live
+/// targets and helpers), the test kit (the stand-ins), and [`WORKSPACE_HACK`], as `xtask check`
+/// names it. The binaries and the test binary a run takes are built by two cargo calls, and cargo
+/// resolves features over the packages each selects: with `-p slopty-e2e` alone the test binary
+/// resolved its own, and 57 units (`slopty-platform` without `e2e`, `tokio`, `objc2`, `syn`, …)
+/// were built a second time, 57–65 s of every run whose core crates changed and 37–126 s on a
+/// runner (`docs/decisions/testing.md`, "Goldens render in the test process", item 6).
+const PACKAGES: [&str; 8] = [
+    "slopty-ptyd",
+    "slopty-workerd",
+    "slopty-serverd",
+    "slopty-cli",
+    "slopty",
+    LIVE_PACKAGE,
+    "slopty-testkit",
+    WORKSPACE_HACK,
+];
+
+/// The features every e2e build turns on, in both of its cargo calls ([`PACKAGES`]): the app's
+/// renderer access for `Render`, which also makes the `slopty-app-e2e` binary the tests start;
+/// the worker's seam that stalls its control streams; and the live test targets.
+const FEATURES: [&str; 3] = ["slopty/e2e", "slopty-workerd/e2e", LIVE];
+
+/// The binaries an e2e suite spawns, each named: every binary of [`PACKAGES`] but the plain
+/// `slopty-app` (174 MB, which the harness never starts: it starts `slopty-app-e2e`) and the
+/// developer's probes `slopty-probe` and `slopty-glass`, which no test runs. `--bins` linked and
+/// copied all thirteen. A binary a test spawns that is missing here is missing from the run, so
+/// `tests::every_binary_of_the_e2e_packages_is_built_or_left_out_by_name` holds the list to the
+/// packages' own.
+pub const BINS: [&str; 10] = [
+    "slopty-app-e2e",
+    "slopty-ptyd",
+    "slopty-worker",
+    "slopty-server",
+    "slopty",
+    PROBE,
+    "slopty-idle-window",
+    "slopty-stub-claude",
+    "slopty-stub-managed-claude",
+    "slopty-stub-window",
+];
+
+/// `-p` for each package of [`PACKAGES`] and `extra`, [`FEATURES`], and the Mac's triple: what
+/// every cargo call of an e2e build selects, the build of the binaries and each test binary's
+/// list or archive alike, so they resolve one feature set and share every unit. The triple, as
+/// every other cargo call on a Mac names it (`gate::mac_target`): the simulator's build is cross
+/// too, so their build scripts and proc macros are one set, where without it the Mac's were built
+/// again with the Mac's `target-cpu`.
+pub fn selection(extra: &[&str]) -> Vec<String> {
+    let mut packages: Vec<&str> = PACKAGES.to_vec();
+    for package in extra {
+        if !packages.contains(package) {
+            packages.push(package);
+        }
+    }
+    let mut args: Vec<String> =
+        packages.iter().flat_map(|p| ["-p".to_owned(), (*p).to_owned()]).collect();
+    args.extend(FEATURES.iter().flat_map(|f| ["--features".to_owned(), (*f).to_owned()]));
+    args.extend(crate::gate::mac_target().iter().map(|a| (*a).to_owned()));
+    args
+}
+
+/// Where an e2e build in `target` (a target dir) leaves its binaries: under the Mac's triple
+/// ([`selection`]).
+pub fn bin_dir(target: &camino::Utf8Path) -> camino::Utf8PathBuf {
+    let triple = crate::gate::mac_target().get(1).copied();
+    triple.map_or_else(|| target.join("debug"), |t| target.join(t).join("debug"))
+}
 
 /// Which live tests to run.
 #[derive(ValueEnum, Clone, Copy, PartialEq, Eq, Debug)]
@@ -211,9 +282,9 @@ const SCREEN: &[Suite] = &[
 
 const INPUT: &[Suite] = &[Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject")];
 
-const IOS: &[Suite] = &[Suite::live("slopty-e2e", "ios")];
+const IOS: [Suite; 1] = [Suite::live("slopty-e2e", "ios")];
 
-const SERVER: &[Suite] = &[Suite::live("slopty-e2e", "server")];
+const SERVER: [Suite; 1] = [Suite::live("slopty-e2e", "server")];
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     // The simulator cases' tools, before a minute of compiling.
@@ -226,7 +297,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
         Case::Server => SERVER.iter().collect(),
-        Case::All => APP.iter().chain(WORKER).chain(SERVER).chain(SCREEN).chain(INPUT).collect(),
+        Case::All => APP.iter().chain(WORKER).chain(&SERVER).chain(SCREEN).chain(INPUT).collect(),
         Case::Ios => IOS.iter().collect(),
     };
     let data_dir = opts
@@ -238,7 +309,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
 
     let artifacts = format!("{data_dir}/artifacts");
     std::fs::create_dir_all(&artifacts)?;
-    let bin_dir = sh.current_dir().join("target/debug");
+    let target = crate::tools::target_dir(sh)?;
+    let bin_dir = bin_dir(&target);
+    // Where each suite's nextest run leaves its JUnit report, which the run's record counts.
+    let profile = std::env::var("NEXTEST_PROFILE").unwrap_or_else(|_| "default".to_owned());
+    let junit = target.join("nextest").join(profile).join("junit.xml");
+    let mut record = Record::default();
     // Daemons the tests spawn get their own sockets and state; nothing installed is touched.
     let _env = [
         sh.push_env("SLOPTY_DATA_DIR", &data_dir),
@@ -273,17 +349,15 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         }
         println!("▶ reusing the last build (--no-build)");
     } else {
-        // Build every binary a suite may spawn up front, so a test never shells out to cargo.
-        // `slopty-e2e` is in there for its own helper binaries (the idle window), and
-        // `slopty-testkit` for the stand-in `claude` the agent and projects suites start.
-        // The app carries the `e2e` feature (renderer access for `Render`), which also makes
-        // the `slopty-app-e2e` bin the tests start. `--bins`, not `--bin slopty-app-e2e`: a
-        // `--bin` filter applies to every selected package and would leave the daemons stale.
-        // The worker carries its own `e2e` feature, the seam that stalls its control streams.
-        build_app(sh, &[])?;
+        // Every binary a suite may spawn up front, so a test never shells out to cargo, and the
+        // suites' test binaries with them: one feature set ([`build`]).
+        let started = std::time::Instant::now();
+        let (packages, tests) = suites_built(&suites);
+        build(sh, &packages, &tests, &[])?;
         std::fs::create_dir_all(&reuse)?;
         let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
         std::fs::write(&cargo_metadata, metadata)?;
+        record.phase("build", started.elapsed(), None);
     }
 
     // Every binary a suite spawns is built: `slopty_testkit::bins` looks no further.
@@ -292,8 +366,10 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     // The iOS case also needs the app in a booted simulator; the test launches it there.
     let simulator = matches!(opts.case, Case::Ios)
         .then(|| -> Result<_> {
+            let started = std::time::Instant::now();
             let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
             let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
+            record.phase("simulator", started.elapsed(), None);
             Ok((
                 sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
                 sh.push_env("SLOPTY_SIM_BUNDLE_ID", crate::ios::BUNDLE_ID),
@@ -312,13 +388,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         let title = format!("{} {} {}", suite.package, suite.test, suite.only.unwrap_or_default());
         let title = title.trim();
         let binaries = recorded(suite);
-        if !opts.no_build && build_suite(sh, suite, &binaries).is_err() {
+        if !opts.no_build && build_suite(sh, suite, &suites, &binaries).is_err() {
             failed.push(title.to_owned());
             continue;
         }
         let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
-        let expr: &[String] = expr.as_ref().map_or(&[], |e| std::slice::from_ref(e));
-        let filter_flag: &[&str] = if expr.is_empty() { &[] } else { &["-E"] };
         let ignored: &[&str] =
             if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
         let output: Vec<String> = match opts.test_threads {
@@ -335,18 +409,20 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         };
         let mut command = cmd!(
             sh,
-            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} {output...} --no-fail-fast {ignored...} {filter_flag...} {expr...}"
+            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} {output...} --no-fail-fast {ignored...} -E {expr}"
         );
         if suite.no_videotoolbox {
             command = command.env(NO_VIDEOTOOLBOX, "1");
         }
         println!("▶ {title}");
+        // A suite that runs nothing writes no report: the last suite's must not count for it.
+        let _gone = std::fs::remove_file(&junit);
         let started = std::time::Instant::now();
         let watchdog = on_ci().then(|| {
             crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER, None)
         });
         let ran = if suite.codes && cfg!(target_os = "macos") {
-            coding_step(sh, command)
+            coding_step(&bin_dir.join(PROBE), command)
         } else {
             Ran::Exited(
                 std::process::Command::from(command)
@@ -379,6 +455,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             }
         };
         println!("  {outcome} {title} ({:.1?})", started.elapsed());
+        let report = std::fs::read_to_string(&junit).ok();
+        record.phase(title, started.elapsed(), report.as_deref().and_then(Tests::of));
     }
     if let Some((_, _, udid)) = &simulator {
         // A simulator left booted keeps CoreAudio busy long after: the client's audio player
@@ -392,6 +470,10 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     {
         bail!("e2e {:?}: `{filter}` matched no test", opts.case);
     }
+    // The record is a report, not a verdict: one it cannot write fails nothing.
+    if let Err(e) = record.report(&format!("{:?}", opts.case)) {
+        println!("  the run's record went unwritten: {e:#}");
+    }
     if failed.is_empty() {
         println!(
             "✔ e2e {:?}: {} suite(s) passed; renders under {artifacts}",
@@ -404,16 +486,104 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     }
 }
 
-/// Build every binary the app's suites spawn: the daemons, the CLI, the app with its `e2e`
-/// feature, the e2e crate's helpers and the testkit's stand-ins. `args` go to cargo, such as a
-/// `--target-dir`.
-pub fn build_app(sh: &Shell, args: &[&str]) -> Result<()> {
+/// What a run cost and ran: each phase's time (the build, the simulator, every suite) and each
+/// suite's tests as nextest's `JUnit` report counts them, summed over the run. A run of several
+/// suites otherwise reads, in its last `Summary` line, as its last suite's tests alone.
+#[derive(Default)]
+struct Record {
+    phases: Vec<(String, std::time::Duration, Option<Tests>)>,
+}
+
+/// One suite's tests, from its `JUnit` report.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Tests {
+    run: u32,
+    /// Each failed test, as `binary test`.
+    failed: Vec<String>,
+}
+
+impl Tests {
+    /// The tests nextest's `JUnit` report `xml` holds, but for its setup scripts, which it
+    /// reports as tests too (`@setup-script:…`), and those that failed; none when `xml` is no
+    /// such report.
+    fn of(xml: &str) -> Option<Self> {
+        let (_, cases) = xml.split_once("<testsuites ")?;
+        let run = cases
+            .split("<testcase ")
+            .skip(1)
+            .filter(|case| !crate::gate::attribute(case, "classname").starts_with('@'))
+            .count();
+        Some(Self {
+            run: u32::try_from(run).unwrap_or(u32::MAX),
+            failed: crate::gate::failed_tests(xml),
+        })
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.run = self.run.saturating_add(other.run);
+        self.failed.extend(other.failed.iter().cloned());
+    }
+}
+
+impl Record {
+    fn phase(&mut self, title: &str, took: std::time::Duration, tests: Option<Tests>) {
+        self.phases.push((title.to_owned(), took, tests));
+    }
+
+    /// Every phase in a line, and the whole run's time and tests.
+    fn line(&self) -> String {
+        let mut whole = Tests::default();
+        let mut took = std::time::Duration::ZERO;
+        let mut phases = Vec::new();
+        for (title, time, tests) in &self.phases {
+            took = took.saturating_add(*time);
+            let counted = tests.as_ref().map_or_else(String::new, |tests| {
+                whole.add(tests);
+                format!(", {} tests", tests.run)
+            });
+            phases.push(format!("{title} {:.1}s{counted}", time.as_secs_f64()));
+        }
+        format!(
+            "{} ({:.1}s): {} tests, {} failed",
+            phases.join("; "),
+            took.as_secs_f64(),
+            whole.run,
+            whole.failed.len()
+        )
+    }
+
+    /// Print the record and, on GitHub Actions, add it to the job's summary with every failed
+    /// test by name.
+    fn report(&self, case: &str) -> Result<()> {
+        let line = self.line();
+        println!("  run: {line}");
+        let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY") else { return Ok(()) };
+        let mut text = format!("### e2e {case}\n\n{line}\n\n");
+        for (_, _, tests) in &self.phases {
+            for test in tests.iter().flat_map(|tests| &tests.failed) {
+                let _written = writeln!(text, "- ✘ `{test}`");
+            }
+        }
+        text.push('\n');
+        let mut file = std::fs::OpenOptions::new().append(true).create(true).open(summary)?;
+        std::io::Write::write_all(&mut file, text.as_bytes())?;
+        Ok(())
+    }
+}
+
+/// Build every binary the suites spawn ([`BINS`]: the daemons, the CLI, the app with its `e2e`
+/// feature, the e2e crate's helpers and the test kit's stand-ins) and the test targets `tests`
+/// of `packages` (beside [`PACKAGES`]), in one cargo call over [`selection`]. The test targets
+/// are in it for more than their binaries: a call that builds a test resolves the selected
+/// packages' dev-dependencies too, so this one and the list or archive after it resolve alike,
+/// and the second compiles nothing. `args` go to cargo, such as a `--target-dir`.
+pub fn build(sh: &Shell, packages: &[&str], tests: &[&str], args: &[&str]) -> Result<()> {
+    let selection = selection(packages);
+    let bins: Vec<&str> = BINS.iter().flat_map(|bin| ["--bin", bin]).collect();
+    let tests: Vec<&str> = tests.iter().flat_map(|test| ["--test", test]).collect();
     step(
         "build daemons and app",
-        &cmd!(
-            sh,
-            "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty -p slopty-e2e -p slopty-testkit --bins --features slopty/e2e --features slopty-workerd/e2e --features {LIVE} {args...}"
-        ),
+        &cmd!(sh, "cargo build {selection...} {bins...} {tests...} {args...}"),
     )
 }
 
@@ -421,13 +591,25 @@ pub fn build_app(sh: &Shell, args: &[&str]) -> Result<()> {
 /// tests that code no video, then (`true`) those that do, behind the encoder probe; neither
 /// captures the screen (that needs the Screen Recording grant).
 pub fn app_filtersets(filter: Option<&str>) -> Vec<(String, bool)> {
-    APP.iter().filter_map(|suite| Some((filterset(suite, filter, false)?, suite.codes))).collect()
+    APP.iter().map(|suite| (filterset(suite, filter, false), suite.codes)).collect()
 }
 
 /// The filterset the simulator case runs with `filter`, as [`run`] composes it.
-pub fn ios_filterset(filter: Option<&str>) -> Option<String> {
-    let [suite] = IOS else { return None };
+pub fn ios_filterset(filter: Option<&str>) -> String {
+    let [suite] = &IOS;
     filterset(suite, filter, false)
+}
+
+/// The filterset the server case runs with `filter`, as [`run`] composes it.
+pub fn server_filterset(filter: Option<&str>) -> String {
+    let [suite] = &SERVER;
+    filterset(suite, filter, false)
+}
+
+/// The environment the server case's suite runs in: the app's, but for the `VideoToolbox`
+/// refusal, which its suite does not take.
+pub fn server_env(data_dir: &str, bin_dir: &str, accept: Option<&str>) -> Vec<(String, String)> {
+    app_env(data_dir, bin_dir, accept).into_iter().filter(|(k, _)| k != NO_VIDEOTOOLBOX).collect()
 }
 
 /// The environment the simulator case's suite runs in: the app's, but for the `VideoToolbox`
@@ -516,11 +698,10 @@ fn on_ci() -> bool {
 /// Whether this Mac's encoder codes one keyframe in time ([`PROBE`]), run from a copy on the
 /// boot volume: a session started from a binary on a volume mounted without ownership waits tens
 /// of seconds on its signature check (`slopty_e2e::harness::bin_dir`).
-fn encoder_answers(sh: &Shell) -> bool {
-    let built = sh.current_dir().join("target/debug").join(PROBE);
+fn encoder_answers(built: &camino::Utf8Path) -> bool {
     let copy = std::env::temp_dir().join(format!("{PROBE}-{}", std::process::id()));
-    if std::fs::copy(&built, &copy).is_err() {
-        println!("  the encoder probe is not built at {}", built.display());
+    if std::fs::copy(built, &copy).is_err() {
+        println!("  the encoder probe is not built at {built}");
         return false;
     }
     let answered = bounded(std::process::Command::new(&copy), PROBE_DEADLINE);
@@ -540,8 +721,8 @@ fn encoder_answers(sh: &Shell) -> bool {
 /// past [`CODING_DEADLINE`]; and after a failure, an encoder that stopped answering (or said so in
 /// the system log) makes it a warning, since it says nothing of the change. A failure while the
 /// encoder still codes is a failure.
-fn coding_step(sh: &Shell, command: xshell::Cmd<'_>) -> Ran {
-    if !encoder_answers(sh) {
+fn coding_step(probe: &camino::Utf8Path, command: xshell::Cmd<'_>) -> Ran {
+    if !encoder_answers(probe) {
         println!(
             "::warning title=VideoToolbox::this runner's video encoder does not code one frame, \
              so the app's tests that stream were not run"
@@ -556,7 +737,7 @@ fn coding_step(sh: &Shell, command: xshell::Cmd<'_>) -> Ran {
     if ran == Ended::Late {
         println!("  the tests that code video passed {CODING_DEADLINE:?}: killed them");
     }
-    if crate::watchdog::encoder_stopped() || !encoder_answers(sh) {
+    if crate::watchdog::encoder_stopped() || !encoder_answers(probe) {
         println!(
             "::warning title=VideoToolbox::this runner's video encoder stopped during the app's \
              tests that stream, so they say nothing of the change"
@@ -623,52 +804,127 @@ fn machine_state() -> String {
     )
 }
 
-/// Build `suite`'s test binary and record where it is, for nextest to run without cargo.
-fn build_suite(sh: &Shell, suite: &Suite, binaries: &std::path::Path) -> Result<()> {
-    let (package, test) = (suite.package, suite.test);
-    println!("▶ build {package} {test}");
+/// The packages beyond [`PACKAGES`] and the test targets an e2e build of `suites` selects.
+fn suites_built<'a>(suites: &[&'a Suite]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let (mut packages, mut tests) = (Vec::new(), Vec::new());
+    for suite in suites {
+        if !packages.contains(&suite.package) {
+            packages.push(suite.package);
+        }
+        if !tests.contains(&suite.test) {
+            tests.push(suite.test);
+        }
+    }
+    (packages, tests)
+}
+
+/// List `suite`'s test binary, built with the run's other `suites`, and record where it is, for
+/// nextest to run without cargo. Over the build's own [`selection`], so it compiles nothing.
+fn build_suite(
+    sh: &Shell,
+    suite: &Suite,
+    suites: &[&Suite],
+    binaries: &std::path::Path,
+) -> Result<()> {
+    let test = suite.test;
+    println!("▶ build {} {test}", suite.package);
     let started = std::time::Instant::now();
-    let live: &[&str] = if package == LIVE_PACKAGE { &["--features", LIVE] } else { &[] };
+    let (packages, _tests) = suites_built(suites);
+    let selection = selection(&packages);
     // In the dev profile the binaries above were built in, so the test binary reuses every unit
     // they compiled: in the test profile it compiled the workspace and its dependencies again,
     // 30–100 s of every e2e run on a runner (`docs/decisions/tooling.md`, "An e2e run builds
     // once").
     let listed = cmd!(
         sh,
-        "cargo nextest list --cargo-profile dev -p {package} --test {test} {live...} --list-type binaries-only --message-format json"
+        "cargo nextest list --cargo-profile dev {selection...} --test {test} --list-type binaries-only --message-format json"
     )
     .read();
+    let package = suite.package;
     let ok = listed.is_ok();
     println!("  {} build {package} {test} ({:.1?})", if ok { "✓" } else { "✘" }, started.elapsed());
     std::fs::write(binaries, listed?)?;
     Ok(())
 }
 
-/// The nextest filterset for a suite: its own, the caller's (else the suite's default), and,
-/// without `screen_recording`, none of the tests that capture.
-fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Option<String> {
+/// The nextest filterset for a suite: its own binary (the build's selection lists every
+/// package's target of the suite's name: `slopty-cli` has a `server` test too), its own filter,
+/// the caller's (else the suite's default), and, without `screen_recording`, none of the tests
+/// that capture.
+fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> String {
+    let binary = format!("binary_id({}::{})", suite.package, suite.test);
     let capture = (suite.kept == Kept::Ignored && !screen_recording)
         .then(|| format!("not {SCREEN_RECORDING}"));
-    let parts: Vec<String> =
-        [suite.only.map(str::to_owned), caller.or(suite.default).map(str::to_owned), capture]
-            .into_iter()
-            .flatten()
-            .map(|part| format!("({part})"))
-            .collect();
-    (!parts.is_empty()).then(|| parts.join(" & "))
+    [
+        Some(binary),
+        suite.only.map(str::to_owned),
+        caller.or(suite.default).map(str::to_owned),
+        capture,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|part| format!("({part})"))
+    .collect::<Vec<_>>()
+    .join(" & ")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{APP, Suite, filterset};
+    use super::{APP, BINS, PACKAGES, Record, Suite, Tests, filterset};
 
-    /// The guest runs both of the app's groups, the one that codes last and on its own.
+    /// The binaries of [`PACKAGES`] an e2e build leaves out, and why (`BINS`).
+    const LEFT_OUT: [(&str, &str); 3] = [
+        ("slopty-app", "the harness starts `slopty-app-e2e`"),
+        ("slopty-probe", "a developer's measurement, which no test runs"),
+        ("slopty-glass", "a developer's measurement, which no test runs"),
+    ];
+
+    /// A run's record counts every suite's tests, not its last suite's alone, leaves out
+    /// nextest's setup script, names each failed test, and takes a missing or foreign report
+    /// for no count rather than for none run.
+    #[test]
+    fn a_runs_record_counts_every_suites_tests() {
+        let report = |cases: &str| {
+            format!(
+                "<?xml version=\"1.0\"?>\n<testsuites name=\"nextest-run\" tests=\"9\">\n\
+                 <testsuite name=\"@setup-script:spawned-bins\"><testcase name=\"spawned-bins\" \
+                 classname=\"@setup-script:spawned-bins\"></testcase></testsuite>\n\
+                 <testsuite name=\"slopty-e2e::app\">{cases}</testsuite></testsuites>"
+            )
+        };
+        let first = report(
+            r#"<testcase name="a" classname="slopty-e2e::app" time="1.0"/>
+               <testcase name="b" classname="slopty-e2e::app" time="1.0"><failure type="x"/>
+               </testcase>
+               <testcase name="c" classname="slopty-e2e::app" time="1.0">
+               <flakyFailure/></testcase>"#,
+        );
+        let second = report(r#"<testcase name="d" classname="slopty-e2e::app" time="1.0"/>"#);
+        let first = Tests::of(&first).unwrap();
+        assert_eq!(first.run, 3, "the setup script is no test");
+        assert_eq!(first.failed, ["slopty-e2e::app b"], "a flaky pass is no failure");
+        assert_eq!(Tests::of("<html></html>"), None, "a foreign file counts nothing");
+
+        let mut record = Record::default();
+        record.phase("build", std::time::Duration::from_secs(14), None);
+        record.phase("app", std::time::Duration::from_millis(211_200), Some(first));
+        record.phase("app codes", std::time::Duration::from_millis(10_500), Tests::of(&second));
+        record.phase("none ran", std::time::Duration::from_millis(100), None);
+        assert_eq!(
+            record.line(),
+            "build 14.0s; app 211.2s, 3 tests; app codes 10.5s, 1 tests; none ran 0.1s \
+             (235.8s): 4 tests, 1 failed"
+        );
+    }
+
+    /// The guest runs both of the app's groups, the one that codes last and on its own, each
+    /// in the app's own binary.
     #[test]
     fn the_guest_runs_the_tests_that_code_after_the_rest() {
         let groups = super::app_filtersets(Some("test(a)"));
         let [(rest, false), (coding, true)] = groups.as_slice() else { panic!("{groups:?}") };
         assert!(
-            rest.starts_with("(not ")
+            rest.starts_with("(binary_id(slopty-e2e::app)) & (not ")
                 && rest.ends_with("& (test(a)) & (not test(~screen_recording::))"),
             "{rest}"
         );
@@ -693,30 +949,114 @@ mod tests {
     fn a_suites_filters_the_callers_and_the_capture_rule_all_apply() {
         let pair = Suite::live("slopty-e2e", "pair").only("test(~on_the_mac)");
         assert_eq!(
-            filterset(&pair, Some("test(pans) | test(zooms)"), false).as_deref(),
-            Some(
-                "(test(~on_the_mac)) & (test(pans) | test(zooms)) & (not test(~screen_recording::))"
-            )
+            filterset(&pair, Some("test(pans) | test(zooms)"), false),
+            "(binary_id(slopty-e2e::pair)) & (test(~on_the_mac)) & (test(pans) | test(zooms)) & \
+             (not test(~screen_recording::))"
         );
-        assert_eq!(filterset(&pair, None, true).as_deref(), Some("(test(~on_the_mac))"));
+        assert_eq!(
+            filterset(&pair, None, true),
+            "(binary_id(slopty-e2e::pair)) & (test(~on_the_mac))"
+        );
 
         let worker = Suite { default: Some("test(~screen_stream)"), ..Suite::live("w", "e2e") };
         assert_eq!(
-            filterset(&worker, None, true).as_deref(),
-            Some("(test(~screen_stream))"),
+            filterset(&worker, None, true),
+            "(binary_id(w::e2e)) & (test(~screen_stream))",
             "the default stands in for no caller filter"
         );
         assert_eq!(
-            filterset(&worker, Some("test(x)"), true).as_deref(),
-            Some("(test(x))"),
+            filterset(&worker, Some("test(x)"), true),
+            "(binary_id(w::e2e)) & (test(x))",
             "and gives way to one"
         );
 
         let gated = Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject");
         assert_eq!(
             filterset(&gated, None, false),
-            None,
+            "(binary_id(slopty-input::inject))",
             "a suite kept by a variable has no capture module"
         );
+    }
+
+    /// Every cargo call of an e2e build selects the same packages and features, the workspace
+    /// hack among them, so the binaries' build and the test binary's archive resolve alike: a
+    /// suite's own package joins the selection, never replaces it.
+    #[test]
+    fn the_build_and_the_archive_select_one_feature_set() {
+        let plain = super::selection(&[]);
+        assert!(plain.windows(2).any(|w| w == ["-p", "workspace-hack"]), "{plain:?}");
+        for feature in super::FEATURES {
+            assert!(plain.windows(2).any(|w| w == ["--features", feature]), "{plain:?}");
+        }
+        let with = super::selection(&["slopty-e2e", "slopty-capture"]);
+        let packages = 2 * PACKAGES.len();
+        assert_eq!(with[..packages], plain[..packages], "the same packages first");
+        assert_eq!(with[packages..packages + 2], ["-p", "slopty-capture"], "and the suite's");
+        assert_eq!(with[packages + 2..], plain[packages..], "the same features and triple");
+    }
+
+    /// The e2e build names its binaries rather than taking every one: each binary of its
+    /// packages is either built ([`BINS`]) or left out by name ([`LEFT_OUT`]), so a new binary a
+    /// test may spawn cannot go missing unseen, and the plain app stays out.
+    #[test]
+    fn every_binary_of_the_e2e_packages_is_built_or_left_out_by_name() {
+        let root = crate::tools::repo_root().expect("root");
+        let packages = crate::tools::packages_in(&root).expect("packages");
+        let mut found = Vec::new();
+        for name in PACKAGES.iter().filter(|p| **p != crate::tools::WORKSPACE_HACK) {
+            let package = packages.iter().find(|p| p.name == *name).expect("a package");
+            found.extend(bins_of(&package.dir, name));
+        }
+        found.sort();
+        let mut named: Vec<String> = BINS
+            .iter()
+            .chain(LEFT_OUT.iter().map(|(bin, _)| bin))
+            .map(|b| (*b).to_owned())
+            .collect();
+        named.sort();
+        assert_eq!(found, named, "the e2e packages' binaries, against BINS and LEFT_OUT");
+        assert!(!BINS.contains(&"slopty-app") && BINS.contains(&crate::e2e::PROBE));
+    }
+
+    /// The binaries cargo makes of the package `name` in `dir`: its `[[bin]]` targets and, unless
+    /// `autobins = false`, `src/main.rs` and `src/bin/` that none of them claims.
+    fn bins_of(dir: &camino::Utf8Path, name: &str) -> Vec<String> {
+        let text = std::fs::read_to_string(dir.join("Cargo.toml")).expect("manifest");
+        let manifest: toml::Table = text.parse().expect("toml");
+        let mut bins = Vec::new();
+        let mut claimed = Vec::new();
+        for bin in manifest.get("bin").and_then(toml::Value::as_array).into_iter().flatten() {
+            let bin_name = bin.get("name").and_then(toml::Value::as_str).expect("a bin's name");
+            let path = bin
+                .get("path")
+                .and_then(toml::Value::as_str)
+                .map_or_else(|| format!("src/bin/{bin_name}.rs"), str::to_owned);
+            bins.push(bin_name.to_owned());
+            claimed.push(path);
+        }
+        let auto = manifest
+            .get("package")
+            .and_then(|p| p.get("autobins"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(true);
+        if !auto {
+            return bins;
+        }
+        if dir.join("src/main.rs").exists() && !claimed.iter().any(|c| c == "src/main.rs") {
+            bins.push(name.to_owned());
+        }
+        for entry in std::fs::read_dir(dir.join("src/bin")).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_owned();
+            let relative = if path.is_dir() {
+                format!("src/bin/{stem}/main.rs")
+            } else {
+                format!("src/bin/{stem}.rs")
+            };
+            if !claimed.contains(&relative) && !bins.contains(&stem) {
+                bins.push(stem);
+            }
+        }
+        bins
     }
 }
