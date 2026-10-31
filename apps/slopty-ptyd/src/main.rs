@@ -59,13 +59,25 @@ struct Args {
     /// place passes it ([`slopty_pty::protocol::inherit_args`]).
     #[arg(long = INHERIT, hide = true, value_name = "FD")]
     inherit: Option<i32>,
+    /// Serve on the socket the ptyd before this build listened on, open on this descriptor,
+    /// taken before anything is read. Passed beside `--inherit` alone.
+    #[arg(long = LISTENER, hide = true, value_name = "FD", requires = "inherit")]
+    listener: Option<i32>,
+}
+
+/// `flag` as clap names it: without its dashes.
+const fn clap_name(flag: &'static str) -> &'static str {
+    match flag.split_at_checked(2) {
+        Some((_dashes, name)) => name,
+        None => flag,
+    }
 }
 
 /// [`slopty_pty::protocol::INHERIT_FLAG`] as clap names a flag.
-const INHERIT: &str = match slopty_pty::protocol::INHERIT_FLAG.split_at_checked(2) {
-    Some((_dashes, name)) => name,
-    None => slopty_pty::protocol::INHERIT_FLAG,
-};
+const INHERIT: &str = clap_name(slopty_pty::protocol::INHERIT_FLAG);
+
+/// [`slopty_pty::protocol::LISTENER_FLAG`] as clap names a flag.
+const LISTENER: &str = clap_name(slopty_pty::protocol::LISTENER_FLAG);
 
 /// `--backlog-bytes`, refused past [`slopty_pty::protocol::MAX_BACKLOG_BYTES`].
 fn backlog_bytes(text: &str) -> Result<usize, String> {
@@ -121,6 +133,7 @@ async fn main() -> Result<()> {
         custody: CUSTODY,
         succession: SUCCESSION,
         inherit: args.inherit,
+        listener: args.listener,
     })
     .await
 }

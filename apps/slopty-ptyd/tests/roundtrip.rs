@@ -426,17 +426,9 @@ mod roundtrip {
         assert!(ran.contains("--inherit"), "the same process runs the new build: {ran:?}");
 
         // The worker that held `held` lost its connection with the old image, not the master;
-        // it dials until the new build listens.
-        let (mut back, mut exits) = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Ok(connected) = PtydClient::connect(&daemon.socket).await {
-                    break connected;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the new build listens");
+        // the listener lives across the `exec`, so its first dial reaches the new build.
+        let (mut back, mut exits) =
+            PtydClient::connect(&daemon.socket).await.expect("the listener came across");
         back.reclaim(held).await.expect("kept for the worker that held it");
         let (mut stranger, _) = PtydClient::connect(&daemon.socket).await.unwrap();
         let refused = stranger.attach(held).await;
@@ -466,6 +458,157 @@ mod roundtrip {
         assert_eq!(exit, (alone, Exit::with(7)), "with its status");
         assert!(exits.try_recv().is_err(), "nothing exited on the way");
         worker.shutdown().await.unwrap();
+    }
+
+    /// `work` started at once on a thread of its own, and its outcome, waited for at most 10 s
+    /// (else `what` fails the test): a FIFO's open waits for its other end, and a thread that
+    /// never returns must not keep the test's runtime from ending.
+    fn off_thread<T: Send + 'static>(
+        what: &'static str,
+        work: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    ) -> impl Future<Output = T> {
+        let (done, outcome) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _gone = done.send(work());
+        });
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), outcome)
+                .await
+                .unwrap_or_else(|_late| panic!("{what}: nothing within 10 s"))
+                .expect("the thread answers")
+                .unwrap_or_else(|e| panic!("{what}: {e}"))
+        }
+    }
+
+    /// Hand `daemon` over to this build held at its start, and dial it there, after the old
+    /// image's `exec` and before the new build runs: what the dial's reclaim of `id` is answered
+    /// once the build is let go. The build, run by the old image, says so on the FIFO `begun`,
+    /// waits on the FIFO `go`, then runs the shell line `then`, `$ptyd` naming this build.
+    async fn reclaim_in_the_middle(
+        daemon: &Daemon,
+        id: SessionId,
+        then: &str,
+    ) -> Result<(), PtyError> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let gate = tempfile::tempdir().unwrap();
+        let (begun, go) = (gate.path().join("begun"), gate.path().join("go"));
+        for fifo in [&begun, &go] {
+            let made = std::process::Command::new("mkfifo").arg(fifo).status().unwrap();
+            assert!(made.success(), "mkfifo {}", fifo.display());
+        }
+        let build = gate.path().join("held-build");
+        std::fs::write(
+            &build,
+            format!(
+                "#!/bin/sh\n\
+                 ptyd='{ptyd}'\n\
+                 [ \"$1\" = --custody ] && exec \"$ptyd\" --custody\n\
+                 echo begun > '{begun}'\n\
+                 read -r line < '{go}'\n\
+                 {then}\n",
+                ptyd = env!("CARGO_BIN_EXE_slopty-ptyd"),
+                begun = begun.display(),
+                go = go.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&build, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ran =
+            off_thread("the old image runs the build", move || std::fs::read_to_string(begun));
+        let (mut asker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        asker.succeed(build).await.expect("no answer: the build runs");
+        assert_eq!(ran.await, "begun\n");
+
+        // No image of ptyd runs now: the dial and its request wait in the listener's queue.
+        let (mut back, _back_exits) = PtydClient::connect(&daemon.socket)
+            .await
+            .expect("the socket answers in the middle of the handover");
+        let reclaimed = tokio::spawn(async move { back.reclaim(id).await });
+        off_thread("the build is let go", move || std::fs::write(go, "go\n")).await;
+        reclaimed.await.unwrap()
+    }
+
+    /// A session spawned on `client`, its shell waiting for a line.
+    async fn held_session(client: &mut PtydClient) -> SessionId {
+        let held = SessionId::new();
+        let spec = SpawnSpec {
+            command: vec!["/bin/sh".into(), "-c".into(), "read x".into()],
+            cwd: None,
+            env: Vec::new(),
+            size: size(),
+        };
+        client.spawn(held, spec).await.unwrap();
+        held
+    }
+
+    /// A worker that dials in the middle of a handover, after the old image's `exec` and before
+    /// the new build starts, is served by the new build: the reclaim it sent meanwhile is
+    /// answered, since the listener lives across the `exec`. The socket answers all along, so a
+    /// new build that took it for another ptyd's, or bound the path afresh, would never answer.
+    #[tokio::test]
+    async fn a_dial_in_the_middle_of_a_handover_is_served_by_the_new_build() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let held = held_session(&mut client).await;
+        let _attached = client.attach(held).await.unwrap();
+        reclaim_in_the_middle(&daemon, held, "exec \"$ptyd\" \"$@\"")
+            .await
+            .expect("the new build answers the dial made before it ran, the session kept");
+        let (mut worker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        worker.shutdown().await.unwrap();
+    }
+
+    /// A new build that cannot take its handover's state (here named on a descriptor that is not
+    /// open) still serves on the listener it was handed, which comes on its command line and is
+    /// taken before anything is read: the dial made in the middle of the handover is answered,
+    /// that no session came across, rather than left in the queue of a listener nothing owns.
+    #[tokio::test]
+    async fn a_new_build_without_its_state_still_serves_its_listener() {
+        let daemon = start().await;
+        let (mut client, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
+        let held = held_session(&mut client).await;
+        let _attached = client.attach(held).await.unwrap();
+        // `$4` is the listener's descriptor (`--inherit <state> --listener <fd>`).
+        let stateless = "exec \"$ptyd\" --inherit 2147483647 --listener \"$4\"";
+        let answer = reclaim_in_the_middle(&daemon, held, stateless).await;
+        assert!(
+            matches!(answer, Err(PtyError::Daemon(PtydError::NoSuchSession))),
+            "answered by the new build, which took no session: {answer:?}"
+        );
+        let (mut worker, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        assert!(worker.list().await.unwrap().is_empty(), "nothing came across");
+        worker.shutdown().await.unwrap();
+    }
+
+    /// A second ptyd started on the socket a ptyd serves ends and leaves that one alone: a
+    /// listener of another process is another ptyd, never taken for this one before an `exec`.
+    #[tokio::test]
+    async fn a_second_ptyd_leaves_the_one_that_serves_alone() {
+        let daemon = start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut second = std::process::Command::new(env!("CARGO_BIN_EXE_slopty-ptyd"));
+        slopty_testkit::env::scrub(&mut second, &dir.path().join("home"))
+            .arg("--socket")
+            .arg(&daemon.socket);
+        // Killed when the wait is given up: one that took the socket over would serve for good.
+        let second = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::from(second).kill_on_drop(true).output(),
+        )
+        .await
+        .expect("the second ptyd ends")
+        .unwrap();
+        let said = String::from_utf8_lossy(&second.stderr);
+        assert!(!second.status.success(), "{said}");
+        let pid = daemon.child.id();
+        assert!(
+            said.contains(&format!("another slopty-ptyd (pid {pid}) is already listening")),
+            "{said}"
+        );
+        let (mut client, _) = PtydClient::connect(&daemon.socket).await.unwrap();
+        client.list().await.expect("the first still serves");
+        client.shutdown().await.unwrap();
     }
 
     /// A handover that cannot happen is refused with why, and leaves every session as it was,

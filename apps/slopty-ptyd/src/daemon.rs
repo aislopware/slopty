@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read as _, Seek as _, Write as _};
-use std::os::fd::{AsFd as _, AsRawFd as _, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -92,13 +92,17 @@ pub struct Config {
     /// The descriptor of the state file the ptyd before this build handed every session over
     /// in ([`PtydRequest::Succeed`]), when this process is that ptyd run anew.
     pub inherit: Option<i32>,
+    /// The descriptor of the socket that ptyd listened on, kept open across the `exec` for this
+    /// build to serve on.
+    pub listener: Option<i32>,
 }
 
-/// Bind and serve until `Shutdown`; first, under a handover, take every session handed over.
+/// Bind and serve until `Shutdown`; first, under a handover, take every session handed over and
+/// the listener to serve on.
 pub async fn run(config: Config) -> Result<()> {
-    let (config, heirs) = match config.inherit {
+    let (config, kept, heirs) = match config.inherit {
         Some(state) => {
-            let (bequest, heirs) = inherit(state);
+            let Inheritance { bequest, listener, heirs } = inherit(state, config.listener);
             let max = slopty_pty::protocol::MAX_BACKLOG_BYTES;
             let config = if let Some(b) = bequest {
                 Config {
@@ -108,12 +112,18 @@ pub async fn run(config: Config) -> Result<()> {
                     ..config
                 }
             } else {
-                tracing::error!(socket = %config.socket.display(), "the handover says nothing of how the ptyd before ran; serving as this command line says");
-                config
+                // Where it listened, which is where workers dial, its listener still says.
+                let bound = listener.as_ref().and_then(|l| l.local_addr().ok());
+                let socket = bound
+                    .as_ref()
+                    .and_then(std::os::unix::net::SocketAddr::as_pathname)
+                    .map_or_else(|| config.socket.clone(), Path::to_path_buf);
+                tracing::error!(socket = %socket.display(), "the handover says nothing of how the ptyd before ran; serving on its socket, the rest as this command line says");
+                Config { socket, ..config }
             };
-            (config, heirs)
+            (config, listener, heirs)
         }
-        None => (config, Vec::new()),
+        None => (config, None, Vec::new()),
     };
     let integration = match slopty_pty::shell_integration::install(&config.shell_dir) {
         Ok(si) => {
@@ -155,14 +165,22 @@ pub async fn run(config: Config) -> Result<()> {
     }
     let socket = config.socket.as_path();
     let said = custody_file(socket);
-    // Bound afresh after a handover too: the old build's listener closed as it ran this one, and
-    // a worker that dialled meanwhile dials again. The custody comes first then: the pid is the
-    // one the file named for the build before, which no worker of the new custody would take,
-    // so this build's words are there before anything can reach it. A ptyd that starts afresh
-    // says it once bound, so it never writes over another one's.
+    // Under a handover this build serves on the listener the build before kept open across the
+    // `exec` for it, never binding the path afresh: a worker that dialled at any moment of the
+    // handover waits in its queue and is served here. The custody comes first then: the pid is
+    // the one the file named for the build before, marked `handing`, which no worker takes for
+    // one that speaks its custody, so this build's words are there before anything is served. A
+    // ptyd that starts afresh says it once bound, so it never writes over another one's.
     let listener = if config.inherit.is_some() {
         say_custody_until_said(said.clone(), config.custody, config.succession);
-        bind_until_bound(socket).await
+        match kept.map(|fd| serve_kept(fd, socket)) {
+            Some(Ok(listener)) => listener,
+            Some(Err(e)) => {
+                tracing::error!(error = %format!("{e:#}"), "the listener kept across the exec does not serve; binding afresh");
+                bind_until_bound(socket).await
+            }
+            None => bind_until_bound(socket).await,
+        }
     } else {
         let listener = bind(socket).await?;
         say_custody_until_said(said.clone(), config.custody, config.succession);
@@ -202,8 +220,10 @@ pub async fn run(config: Config) -> Result<()> {
                     backoff = backoff.saturating_mul(2).min(ACCEPT_BACKOFF_MAX);
                 }
             },
+            // No dial is accepted while it runs: each waits in the listener's queue, for this
+            // build when the handover fails, for the next one when it happens.
             Some(asked) = successions.recv() => {
-                let why = succeed(&state, &config, &asked.program).await;
+                let why = succeed(&state, &config, &asked.program, listener.as_fd()).await;
                 tracing::error!(program = %asked.program.display(), error = %format!("{why:#}"), "every session kept here: the handover did not happen");
                 let _gone = asked.failed.send(format!("{why:#}"));
             }
@@ -221,9 +241,14 @@ pub async fn run(config: Config) -> Result<()> {
     Ok(())
 }
 
-/// Hand every session to the build at `program`, run in place; returns only when that did not
-/// happen, with why, everything as it was.
-async fn succeed(state: &State, config: &Config, program: &Path) -> anyhow::Error {
+/// Hand every session and the `listener` to the build at `program`, run in place; returns only
+/// when that did not happen, with why, everything as it was.
+async fn succeed(
+    state: &State,
+    config: &Config,
+    program: &Path,
+    listener: BorrowedFd<'_>,
+) -> anyhow::Error {
     // The program checked is the one run: `execv` resolves a relative path against the working
     // directory, where the check's spawn would search `PATH`.
     if !program.is_absolute() {
@@ -257,7 +282,7 @@ async fn succeed(state: &State, config: &Config, program: &Path) -> anyhow::Erro
         // Written and run in one synchronous step: on this one thread no task runs meanwhile, so
         // no child is reaped, no byte read and no request served between the record of a
         // session and the `exec`.
-        Ok(()) => match hand_over(config, program, &sessions) {
+        Ok(()) => match hand_over(config, program, &sessions, listener) {
             Err(why) => why,
         },
         Err(_late) => {
@@ -277,12 +302,20 @@ async fn succeed(state: &State, config: &Config, program: &Path) -> anyhow::Erro
 }
 
 /// The handover itself, once every reader is out of its master: the sessions' state into an
-/// unlinked file, it and every master kept open across `exec`, and this process running
-/// `program` with [`inherit_args`]. Whatever was changed for it is put back when it fails.
+/// unlinked file, it, the listener and every master kept open across `exec`, and this process
+/// running `program` with [`inherit_args`]. Whatever was changed for it is put back when it
+/// fails.
+///
+/// The listener goes across rather than closing at the `exec` for the next build to bind the
+/// path afresh. Closed, it left a moment in which a dial was refused, and on macOS one in which
+/// it still answered: XNU finishes closing an image's close-on-exec descriptors only after the
+/// next image runs, so under load the next build found the path taken and backed off, and a
+/// dial the dying listener took in was dropped (`docs/decisions/workers.md`).
 fn hand_over(
     config: &Config,
     program: &Path,
     sessions: &[Arc<Session>],
+    listener: BorrowedFd<'_>,
 ) -> Result<std::convert::Infallible> {
     let path = config.socket.with_extension("succession");
     let mut file = std::fs::OpenOptions::new()
@@ -311,7 +344,8 @@ fn hand_over(
         out.flush().context("write the handover")?;
     }
     file.rewind().context("rewind the handover")?;
-    let kept: Vec<std::os::fd::BorrowedFd<'_>> = std::iter::once(file.as_fd())
+    let kept: Vec<BorrowedFd<'_>> = [file.as_fd(), listener]
+        .into_iter()
         .chain(sessions.iter().map(|session| session.master_fd()))
         .collect();
     let mut failed = None;
@@ -330,7 +364,7 @@ fn hand_over(
         if let Err(e) = say_custody(&said, pid, HANDING, config.succession) {
             tracing::warn!(error = %e, "custody not marked as handing");
         }
-        let why = exec_in_place(program, &inherit_args(file.as_raw_fd()));
+        let why = exec_in_place(program, &inherit_args(file.as_raw_fd(), listener.as_raw_fd()));
         if let Err(e) = say_custody(&said, pid, config.custody, config.succession) {
             tracing::warn!(error = %e, "custody not said again");
         }
@@ -346,12 +380,24 @@ fn hand_over(
     Err(failed)
 }
 
+/// What the ptyd before this build handed over ([`inherit`]).
+struct Inheritance {
+    /// How it ran; `None` when the state file does not say.
+    bequest: Option<Bequest>,
+    /// The socket it listened on, kept open across the `exec`; `None` when it did not come.
+    listener: Option<std::os::unix::net::UnixListener>,
+    /// Every session that came whole, with its master.
+    heirs: Vec<(Heir, OwnedFd)>,
+}
+
 /// Every session the ptyd before this build handed over in the state file on descriptor
-/// `state`, with its master, and how that ptyd ran. As much as came whole: a session whose
-/// record or master is missing is left out, and the rest kept, never ended. Every descriptor
-/// the [`Bequest`] names is taken first, so one whose heir does not read is closed rather than
-/// left open, unowned, for every program this process starts.
-fn inherit(state: i32) -> (Option<Bequest>, Vec<(Heir, OwnedFd)>) {
+/// `state`, with its master, how that ptyd ran, and the socket it listened on, on descriptor
+/// `listener`. As much as came whole: a session whose record or master is missing is left out,
+/// and the rest kept, never ended. The listener is taken before anything is read, so a state
+/// that does not read leaves it served all the same, and every descriptor the [`Bequest`] names
+/// is taken before any heir is read, so one whose heir does not read is closed rather than left
+/// open, unowned, for every program this process starts.
+fn inherit(state: i32, listener: Option<i32>) -> Inheritance {
     let mut heirs = Vec::new();
     let mut taken = HashSet::new();
     let mut take = |raw: i32| {
@@ -359,18 +405,25 @@ fn inherit(state: i32) -> (Option<Bequest>, Vec<(Heir, OwnedFd)>) {
             return Err(std::io::Error::other(format!("descriptor {raw} named twice")));
         }
         #[expect(unsafe_code, reason = "owning the descriptors the image before kept for this one")]
-        // SAFETY: `raw` comes from the handover the image before this one wrote, which kept each
-        // descriptor it names open across the `exec` for this image (`hand_over`); this runs
-        // first, before this process opens a PTY or receives a descriptor, and `taken` lets no
-        // number be taken twice, so nothing else owns it.
+        // SAFETY: `raw` comes from the handover the image before this one made (its command line
+        // and state file), which kept each descriptor it names open across the `exec` for this
+        // image (`hand_over`); this runs first, before this process opens a PTY or receives a
+        // descriptor, and `taken` lets no number be taken twice, so nothing else owns it.
         let fd = unsafe { slopty_pty::succession::take_inherited(raw) };
         fd
     };
+    let listener = listener.and_then(|raw| match take(raw) {
+        Ok(fd) => Some(std::os::unix::net::UnixListener::from(fd)),
+        Err(e) => {
+            tracing::error!(fd = raw, error = %e, "the listener did not come across");
+            None
+        }
+    });
     let file = match take(state) {
         Ok(file) => file,
         Err(e) => {
             tracing::error!(fd = state, error = %e, "the handover's state is not there");
-            return (None, heirs);
+            return Inheritance { bequest: None, listener, heirs };
         }
     };
     let mut frames = Frames::new(std::fs::File::from(file));
@@ -378,11 +431,11 @@ fn inherit(state: i32) -> (Option<Bequest>, Vec<(Heir, OwnedFd)>) {
         Ok(Some(bequest)) => bequest,
         Ok(None) => {
             tracing::error!("the handover's state is empty");
-            return (None, heirs);
+            return Inheritance { bequest: None, listener, heirs };
         }
         Err(e) => {
             tracing::error!(error = %format!("{e:#}"), "the handover's state does not read");
-            return (None, heirs);
+            return Inheritance { bequest: None, listener, heirs };
         }
     };
     let mut masters: HashMap<i32, OwnedFd> = HashMap::new();
@@ -416,7 +469,20 @@ fn inherit(state: i32) -> (Option<Bequest>, Vec<(Heir, OwnedFd)>) {
     if !masters.is_empty() {
         tracing::error!(closed = masters.len(), "masters handed over with no session that reads");
     }
-    (Some(bequest), heirs)
+    Inheritance { bequest: Some(bequest), listener, heirs }
+}
+
+/// The listener the build before kept open across the `exec`, to serve on once it is one: a
+/// socket bound to `socket`, taken by this process's runtime.
+fn serve_kept(listener: std::os::unix::net::UnixListener, socket: &Path) -> Result<UnixListener> {
+    let bound = listener.local_addr().context("the kept descriptor is no socket")?;
+    anyhow::ensure!(
+        bound.as_pathname() == Some(socket),
+        "the kept listener is bound to {bound:?}, not {}",
+        socket.display()
+    );
+    listener.set_nonblocking(true).context("the kept listener")?;
+    UnixListener::from_std(listener).context("serve on the kept listener")
 }
 
 /// Frames read one by one off a file, never more of it at once than the frame being read.
@@ -527,8 +593,8 @@ fn say_custody_until_said(path: PathBuf, custody: &'static str, succession: &'st
     });
 }
 
-/// Bind as [`bind`] does, trying again until it can: under a handover, ending would end every
-/// session handed over, which go on draining meanwhile.
+/// Bind as [`bind`] does, trying again until it can: under a handover whose listener did not
+/// come across, ending would end every session handed over, which go on draining meanwhile.
 async fn bind_until_bound(socket: &Path) -> UnixListener {
     let mut wait = BIND_AGAIN;
     loop {
@@ -543,7 +609,11 @@ async fn bind_until_bound(socket: &Path) -> UnixListener {
     }
 }
 
-/// Create the socket directory (0700) and bind, replacing a dead socket file.
+/// Create the socket directory (0700) and bind, replacing a socket file nothing answers on, or
+/// one only this very process answers on. That one is no other ptyd but this process before an
+/// `exec`: an image whose listener XNU has not finished closing (it does so only after the next
+/// image runs), or a listener a handover kept open that did not come across as one. Another
+/// process that answers is another ptyd, and is left alone.
 async fn bind(socket: &Path) -> Result<UnixListener> {
     if let Some(dir) = socket.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
@@ -551,10 +621,22 @@ async fn bind(socket: &Path) -> Result<UnixListener> {
             .with_context(|| format!("chmod {}", dir.display()))?;
     }
     if socket.exists() {
-        if UnixStream::connect(socket).await.is_ok() {
-            anyhow::bail!("another slopty-ptyd is already listening on {}", socket.display());
+        match UnixStream::connect(socket).await {
+            Ok(probe) => {
+                // The listener's process: the one that listened, which an `exec` keeps.
+                let peer = probe.peer_cred().ok().and_then(|cred| cred.pid());
+                let this = i32::try_from(std::process::id()).ok();
+                if peer.is_none() || peer != this {
+                    let pid = peer.map_or_else(|| "unknown".to_owned(), |pid| pid.to_string());
+                    anyhow::bail!(
+                        "another slopty-ptyd (pid {pid}) is already listening on {}",
+                        socket.display()
+                    );
+                }
+                tracing::warn!(path = %socket.display(), "replacing a listener this process kept from before its exec");
+            }
+            Err(_refused) => tracing::warn!(path = %socket.display(), "removing stale socket"),
         }
-        tracing::warn!(path = %socket.display(), "removing stale socket");
         std::fs::remove_file(socket).context("remove stale socket")?;
     }
     let listener =
@@ -624,7 +706,7 @@ impl Connection {
         }
     }
 
-    async fn reply(&self, ev: &PtydEvent, fd: Option<std::os::fd::BorrowedFd<'_>>) -> Result<()> {
+    async fn reply(&self, ev: &PtydEvent, fd: Option<BorrowedFd<'_>>) -> Result<()> {
         let frame = codec::encode(ev)?;
         fdpass::send(&self.stream, &frame, fd).await?;
         Ok(())
@@ -826,4 +908,25 @@ impl Connection {
 /// Why a request that changes the sessions is refused while a handover is under way.
 fn handing() -> PtydError {
     PtydError::Os("slopty-ptyd is handing its sessions to a new build; ask again".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, UnixStream, bind};
+
+    /// A listener this very process holds on the socket is this process before an `exec` (one
+    /// XNU has not finished closing, or one a handover kept that did not come across), never
+    /// another ptyd: the socket is taken over, and a dial reaches the new listener.
+    #[tokio::test]
+    async fn a_listener_this_process_holds_is_no_rival() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("ptyd.sock");
+        let _before = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let listener = bind(&socket).await.expect("its own listener is no rival");
+        let _dial = UnixStream::connect(&socket).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the dial reaches the new listener")
+            .unwrap();
+    }
 }

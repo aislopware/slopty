@@ -2,15 +2,15 @@
 //!
 //! This is how ptyd hands every session to its next build
 //! ([`crate::protocol::PtydRequest::Succeed`]), with chosen descriptors kept open across the
-//! `exec`. Nothing crosses a socket. The old image clears close-on-exec on each master and on the
-//! state file and `exec`s; the new one finds them open under the numbers the state file names. A
-//! descriptor this process opens itself is close-on-exec from the start (std, tokio and rustix
-//! open every one with `O_CLOEXEC`), so one above 2 open without the flag can only be one the
-//! image before kept for this one: that is what [`take_inherited`] checks before it owns one. Two
-//! kinds are close-on-exec only a moment after they exist on macOS, a PTY `openpty` opens and a
-//! descriptor `recvmsg` brings, so the inheritance is taken first, before this process opens
-//! or receives any. The checks cannot tell a descriptor the image before kept from one another
-//! part of this process owns, so taking one is `unsafe`, on the caller's word.
+//! `exec`. Nothing crosses a socket. The old image clears close-on-exec on each master, on its
+//! listener and on the state file and `exec`s; the new one finds them open under the numbers the
+//! state file names. A descriptor this process opens itself is close-on-exec from the start (std,
+//! tokio and rustix open every one with `O_CLOEXEC`), so one above 2 open without the flag can
+//! only be one the image before kept for this one: that is what [`take_inherited`] checks before
+//! it owns one. Two kinds are close-on-exec only a moment after they exist on macOS, a PTY
+//! `openpty` opens and a descriptor `recvmsg` brings, so the inheritance is taken first, before
+//! this process opens or receives any. The checks cannot tell a descriptor the image before kept
+//! from one another part of this process owns, so taking one is `unsafe`, on the caller's word.
 
 use std::ffi::CString;
 use std::os::fd::{BorrowedFd, FromRawFd as _, OwnedFd, RawFd};

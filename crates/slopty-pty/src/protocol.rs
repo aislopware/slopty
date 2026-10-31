@@ -165,20 +165,29 @@ pub enum PtydRequest {
 /// followed by the descriptor of the handover's state file ([`inherit_args`]).
 pub const INHERIT_FLAG: &str = "--inherit";
 
+/// The flag beside [`INHERIT_FLAG`], followed by the descriptor of the socket the ptyd listened
+/// on ([`inherit_args`]).
+pub const LISTENER_FLAG: &str = "--listener";
+
 /// The command line, after the program, a ptyd runs the build it hands over to with.
 ///
-/// It is [`INHERIT_FLAG`] and the descriptor `exec` keeps open for the state file. Everything else
-/// the new build needs is in that file ([`Bequest`]), so nothing of it depends on the flags a
-/// build takes.
+/// It is [`INHERIT_FLAG`] with the descriptor `exec` keeps open for the state file, and
+/// [`LISTENER_FLAG`] with the one it keeps open for the socket the ptyd listened on. The new
+/// build accepts on that socket where the old one stopped, so a dial at any moment of the
+/// handover waits in its queue and is served, and nothing binds the path afresh. It is named
+/// here rather than in the file so the new build takes it before it reads anything: a state
+/// that does not read still leaves it served, never open with no owner. Everything else the new
+/// build needs is in that file ([`Bequest`]), so nothing of it depends on the flags a build
+/// takes.
 #[must_use]
-pub fn inherit_args(state: i32) -> Vec<String> {
-    vec![INHERIT_FLAG.to_owned(), state.to_string()]
+pub fn inherit_args(state: i32, listener: i32) -> Vec<String> {
+    vec![INHERIT_FLAG.to_owned(), state.to_string(), LISTENER_FLAG.to_owned(), listener.to_string()]
 }
 
 /// What a ptyd running a new build in place hands it, first in the state file.
 ///
 /// The state file is already unlinked, kept open across `exec` and named by
-/// [`inherit_args`]; it holds this frame and then one [`Heir`] per
+/// [`inherit_args`], as the listener is; it holds this frame and then one [`Heir`] per
 /// session. Each session's master is kept open across `exec` too, its descriptor in its heir:
 /// the process stays the same, so nothing has to cross a socket. Kept apart from the worker's
 /// protocol: a change here changes the succession fingerprint, and an install then restarts
@@ -193,9 +202,9 @@ pub struct Bequest {
     pub shell_dir: PathBuf,
     /// How many [`Heir`] frames follow.
     pub sessions: u32,
-    /// Every descriptor kept open across `exec` for the new build besides the state file, its
-    /// masters: written first, so each is taken (and one whose heir does not read closed) even
-    /// when a heir after this frame does not read.
+    /// Every descriptor kept open across `exec` for the new build besides the state file and the
+    /// listener, its masters: written first, so each is taken (and one whose heir does not read
+    /// closed) even when a heir after this frame does not read.
     pub fds: Vec<i32>,
 }
 

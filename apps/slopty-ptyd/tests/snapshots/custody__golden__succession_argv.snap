@@ -1,5 +1,5 @@
 ---
 source: apps/slopty-ptyd/tests/custody.rs
-expression: "inherit_args(7).join(\" \")"
+expression: "inherit_args(7, 8).join(\" \")"
 ---
---inherit 7
+--inherit 7 --listener 8

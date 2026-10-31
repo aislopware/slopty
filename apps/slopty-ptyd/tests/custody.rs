@@ -173,7 +173,7 @@ mod golden {
     /// with, the state file's first frame, and a session's record after it.
     #[test]
     fn every_handover_frame() {
-        insta::assert_snapshot!("succession_argv", inherit_args(7).join(" "));
+        insta::assert_snapshot!("succession_argv", inherit_args(7, 8).join(" "));
         let bequest = Bequest {
             socket: PathBuf::from("/Users/me/.slopty/run/ptyd.sock"),
             backlog_bytes: 1 << 20,

@@ -1372,18 +1372,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   went, ptyd kept nothing across its own end, and an install whose custody moved restarted it.
   The custody hashes the goldens and the shell scripts, which move about weekly, so a routine
   update ended dev servers, builds, editors and every agent TUI but Claude Code's.
-  - **An update hands every session to the new build, in place.** `PtydRequest::Succeed {
-    program }` (an absolute path, so the file checked is the file run) has the running ptyd
-    write a `Bequest` (its socket, backlog size, shell directory and every master's descriptor)
-    and each session's state (`Heir`: the master's descriptor, pid, tty, size, term,
-    checkpoint, ring, exit status, whether a worker held it) into an unlinked file. It clears
-    close-on-exec on that file and on every master and `exec`s `program --inherit <fd>`
+  - **An update hands every session to the new build, in place.** `PtydRequest::Succeed { program }`
+    (an absolute path, so the file checked is the file run) has the running ptyd write a `Bequest`
+    (its socket, backlog size, shell directory and every master's descriptor) and each session's
+    state (`Heir`: the master's descriptor, pid, tty, size, term, checkpoint, ring, exit status,
+    whether a worker held it) into an unlinked file. It clears close-on-exec on that file, on the
+    listener and on every master and `exec`s `program --inherit <fd> --listener <fd>`
     (`slopty_pty::succession`). The pid stays, so the service manager keeps the same process and
-    every shell stays its child: the new build still reaps them and reports their status. Ruled
-    over a second process adopting over a socket, which the plan first named: that one would be
-    no shell's parent (no exit status), and launchd runs one process per job, so two ptyds
-    could not overlap under one label. A session a worker held is kept out of the reader for
-    30 s, for that worker to take back (`PtydRequest::Reclaim`).
+    every shell stays its child: the new build still reaps them and reports their status. Ruled over
+    a second process adopting over a socket, which the plan first named: that one would be no
+    shell's parent (no exit status), and launchd runs one process per job, so two ptyds could not
+    overlap under one label. A session a worker held is kept out of the reader for 30 s, for that
+    worker to take back (`PtydRequest::Reclaim`).
   - **Nothing crosses a socket** (reviewed 2026-10-10). The first cut sent the state file and
     every master over `SCM_RIGHTS` on a socketpair that nobody read until after the `exec`, and
     ran it through std's `Command::exec`. A review found that a Linux socket buffer fills at a
@@ -1406,17 +1406,38 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     install would come back after it. An attach or a reclaim that was waiting for its reader
     when the handover began gives the session up and says so. A handover that fails lets every
     session no connection holds drain again.
-  - **A new build that cannot take over never ends a session.** Everything the new build needs
-    is in the state file, so its command line is only `--inherit <fd>`, and that line is a
-    golden of the succession (`succession_argv`). Under `--inherit` the new image keeps what
-    came whole when part of the state does not read. It binds until it can (50 ms doubling to
-    1 s), its sessions draining meanwhile. It writes its custody file before it binds (the
-    pid is the same, and the old image marked the file `handing` before the `exec`, so no
-    worker of either custody takes the new image for one that speaks its own), and again each
-    second until it can.
-  - **The listener is bound afresh.** The old listener closes at the `exec`, and a worker that
-    dials in those milliseconds dials again. A worker waits up to 2 s for the custody file to
-    name the pid it reached, since ptyd writes it just after it binds.
+  - **A new build that cannot take over never ends a session.** Everything the new build needs is in
+    the state file, so its command line names only the descriptors kept for it, the state file and
+    the listener (`--inherit <fd> --listener <fd>`), and that line is a golden of the succession
+    (`succession_argv`). Under `--inherit` the new image keeps what came whole when part of the
+    state does not read. It writes its custody file before it serves (the pid is the same, and the
+    old image marked the file `handing` before the `exec`, so no worker of either custody takes the
+    new image for one that speaks its own), and again each second until it can.
+  - **The listener is handed over too (2026-10-31).** The old image closed its listener at the
+    `exec` and the new build bound the path afresh, after a dial to see whether another ptyd
+    answered there. A dial in between was refused, and on macOS it could be worse: under load, a
+    close-on-exec listener still answers for a moment after the `exec`, then drops what it took in.
+    The new build took the old image's listener for another ptyd and backed off, and a worker that
+    dialled in that moment got `Closed`. The handover test failed so once, at load 110. Measured
+    with a C program that binds a close-on-exec listener, `exec`s itself and dials it at once, 24 at
+    a time: 6 to 12 dials in 2400 were answered and then saw EOF, with no other thread or eight;
+    none unloaded. Now the listener is kept open across the `exec` like the masters, and the new
+    build accepts on it once it has taken every session and said its custody. It comes on the
+    command line rather than in the state file, so the new build takes it before it reads anything:
+    a state that does not read still leaves it served, on the socket its own address names, never
+    open with no owner and dials in its queue no one answers. No dial is accepted while a handover
+    runs, so one made at any moment of it waits in the listener's queue and is served by the new
+    build, or by the old one when the handover fails. Nothing binds or dials the path. The new flag
+    moved the succession, so the install that brings it restarts ptyd once. A worker that dials in
+    the middle may read `handing` in the custody file and dial again. A worker waits up to 2 s for
+    the custody file to name the pid it reached, since a ptyd that starts afresh writes it just
+    after it binds.
+    - **Never its own rival.** The new build binds afresh only when the listener did not come across
+      (its descriptor missing, or bound elsewhere), until it can (50 ms doubling to 1 s), its
+      sessions draining meanwhile. Its dial then takes a listener whose process is this one (the
+      peer's pid, kept across an `exec`) for an image of itself before the `exec`, never another
+      ptyd, and replaces it. A ptyd that starts afresh does the same, and leaves a listener of any
+      other process alone.
   - **Succession.** A second fingerprint hashes only the handover's goldens (`succession_*`:
     `Succeed`, the command line, `Bequest` and `Heir`). `Succeed` is the last request, so later
     requests move nothing an older ptyd reads of it. `slopty-ptyd --custody` prints both
@@ -1471,6 +1492,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     on, as it would after any terminal closed: that is what `nohup` asks for.
   - Tests:
     - `slopty-ptyd`: `roundtrip::every_session_survives_a_handover_to_a_new_build`,
+      `roundtrip::a_dial_in_the_middle_of_a_handover_is_served_by_the_new_build` (the handover
+      held between the `exec` and the new build by a build that waits at its start),
+      `roundtrip::a_new_build_without_its_state_still_serves_its_listener`,
+      `roundtrip::a_second_ptyd_leaves_the_one_that_serves_alone`,
+      `daemon::tests::a_listener_this_process_holds_is_no_rival`,
       `roundtrip::a_handover_that_cannot_happen_keeps_every_session` (another succession, a
       missing build, an `exec` that fails after the custody was said, and nothing left open
       after it), `every_session_survives_a_handover_to_a_new_build` being a protocol test (same
