@@ -12,8 +12,8 @@ use std::path::Path;
 use slopty_e2e::{A11yNode, Command, Driver, Dump};
 
 use crate::planted::{
-    Turn, answered, inspector, inspector_words, last_answer, plant, resume, stack, terminal_right,
-    thread_of,
+    Turn, answered, inspector, inspector_words, last_answer, plant, resume, stack, subagent_answer,
+    terminal_right, thread_of,
 };
 use crate::served::{SETTLE, STEP, WINDOW, all_holding, middle, says, thread_until};
 
@@ -110,9 +110,19 @@ async fn subagent_card(drv: &mut Driver, renders: &Path, missing: &mut Vec<Strin
         missing.push(format!("the row {CARD:?}"));
         return;
     };
-    // Settled, it says what its run answered ("4"), then its figures, never a blank line.
-    if !card.value.as_deref().is_some_and(|value| value == "4" || value.starts_with("4 · ")) {
-        missing.push(format!("the settled row says its run's answer: {:?}", card.value));
+    // Settled, it says what its run answered, then its figures, the tools it used among them,
+    // never a blank line: both as the recording has them.
+    let (answer, tools) = subagent_answer("tools");
+    let used = format!("{tools} {}", if tools == 1 { "tool" } else { "tools" });
+    let says = card.value.as_deref().is_some_and(|value| {
+        let mut parts = value.split(" · ");
+        parts.next() == Some(answer.as_str()) && parts.any(|part| part == used)
+    });
+    if !says {
+        missing.push(format!(
+            "the settled row says its run's answer {answer:?} and {used:?}: {:?}",
+            card.value
+        ));
     }
     if brief_shown(&shown) {
         missing.push("the run stays shut until a click".to_owned());

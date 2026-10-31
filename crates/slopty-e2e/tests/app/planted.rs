@@ -37,19 +37,60 @@ fn recordings() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../slopty-agent/tests/fixtures/conversation")
 }
 
-/// What the recording `name` last answers: the words of its last assistant record, as Claude Code
-/// wrote them, so a test waits for the end of whichever recording the fixtures hold.
-pub fn last_answer(name: &str) -> String {
-    let text = std::fs::read_to_string(recordings().join(name).join("transcript.jsonl")).unwrap();
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+/// The records of the transcript at `path`, each line's JSON.
+fn read_records(path: &Path) -> Vec<Value> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    text.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok()).collect()
+}
+
+/// The words of the last assistant record of the transcript at `path`.
+fn last_words(path: &Path) -> Option<String> {
+    read_records(path)
+        .into_iter()
         .filter(|record| record["type"] == "assistant")
         .filter_map(|record| record["message"]["content"].as_array().cloned())
         .flatten()
         .filter(|block| block["type"] == "text")
         .filter_map(|block| block["text"].as_str().map(str::to_owned))
         .next_back()
+}
+
+/// What the recording `name` last answers: the words of its last assistant record, as Claude Code
+/// wrote them, so a test waits for the end of whichever recording the fixtures hold.
+pub fn last_answer(name: &str) -> String {
+    last_words(&recordings().join(name).join("transcript.jsonl"))
         .unwrap_or_else(|| panic!("the {name} recording answers in words"))
+}
+
+/// What the one subagent the recording `name` ran answered, and the tools it used, as the
+/// recording has them: the first line of its last words in its own transcript (`subagents/`),
+/// a heading's marks and strong marks left out, and the tool uses the parent's record of the
+/// call counts. A test reads them here rather than copying a recording's answer, which a new
+/// recording moves.
+pub fn subagent_answer(name: &str) -> (String, u64) {
+    let dir = recordings().join(name);
+    let runs = std::fs::read_dir(dir.join("subagents")).unwrap();
+    let runs: Vec<PathBuf> = runs
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .collect();
+    let [run] = runs.as_slice() else {
+        panic!("the {name} recording runs one subagent: {runs:?}");
+    };
+    let answer = last_words(run)
+        .and_then(|words| {
+            words
+                .lines()
+                .map(|line| line.trim_start_matches('#').replace("**", "").trim().to_owned())
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or_else(|| panic!("the {name} recording's subagent answers in words"));
+    let tools = read_records(&dir.join("transcript.jsonl"))
+        .iter()
+        .find_map(|record| record["toolUseResult"]["totalToolUseCount"].as_u64())
+        .unwrap_or_else(|| panic!("the {name} recording counts its subagent's tool uses"));
+    (answer, tools)
 }
 
 /// Whether the thread, as read (`slopty agent read`), holds an answer of the agent's that says

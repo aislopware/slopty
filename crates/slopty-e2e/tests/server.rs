@@ -216,7 +216,10 @@ mod tests {
         ensure!(entry["os"] == "macos", "{entry}");
         ensure!(entry["cpus"].as_u64().is_some_and(|n| n > 0), "{entry}");
         ensure!(entry["memory"].as_u64().is_some_and(|n| n > 0), "{entry}");
-        ensure!(!str_of(&entry, "arch")?.is_empty() && !str_of(&entry, "version")?.is_empty());
+        ensure!(!str_of(&entry, "arch")?.is_empty(), "{entry}");
+        // Its build, by which a person sees a worker to update: this tree's version and wire.
+        let build = str_of(&entry, "build")?;
+        ensure!(build.starts_with(slopty_proto::wire::BUILD), "{build} is not this tree's build");
         let worker_id = str_of(&entry, "worker")?.to_owned();
         clock.lap("workers");
 
