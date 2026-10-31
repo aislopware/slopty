@@ -3539,12 +3539,16 @@ more full-window layer.
      `e2e.yml` and returns its verdict and artifacts; goldens are accepted from a run's
      artifact. The VM case, `screen`, `input` and `--screen-recording` run nightly on a hosted
      Mac, deploying to the runner itself.
-  5. **The office Macs take Mac work only when idle.** Two Macs on the company GitLab
-     (gitlab.jmango360.com, a Mac mini M4 and a MacBook M5, shared for jmango360's iOS builds)
-     run Slopty's Mac jobs from a prepared tart image in harbor.jmango360.dev, only while no
-     job of theirs runs or waits; a waiting jmango360 job cancels Slopty's at once and the gate
-     falls back to the hosted runner. The image, the routing and the numbers are the next
-     entry's.
+  5. **The office Macs are parked.** The person set them aside the same evening: few gates run
+     now and the hosted runners carry them. When they come back, two Macs on the company GitLab
+     (gitlab.jmango360.com, a Mac mini M4 Pro and a MacBook Pro M5 Max, shared for jmango360's
+     iOS builds) run Slopty's Mac jobs from a prepared tart image only while no job of theirs
+     runs or waits, and the gate falls back to the hosted runner. A guard inside the guest gave
+     a waiting jmango360 job its Mac in 5 s in a probe, against 31.5 s for a cancel through
+     GitLab's API alone. The image lives in the office's own registry, not
+     harbor.jmango360.dev: the office reached Harbor in the data centre at about 22 MB/s over 8
+     connections and pushed to its own registry at about 78 MB/s. The work so far is kept in
+     `.research/office-macs-2026-10-31`.
   6. **This Mac sheds every runner piece, each once its replacement is green.** The warm
      runners (`xtask warm`, `gate --warm`, the `warm` jobs, `SLOPTY_RUNNERS`, nextest's `warm`
      profile, the 99 GB bundle and both registrations) go now: no run used them. The guest path
