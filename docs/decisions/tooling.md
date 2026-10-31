@@ -3656,8 +3656,15 @@ more full-window layer.
   6. **The round's end is cut.**
      - The iOS e2e jobs keep a warm simulator build cache and boot the simulator while they
        build.
-     - The bundle builds its three parts at once.
-     - The MacBook takes a new bundle itself when it wakes, so the round does not wait on it.
+     - The bundle's Linux workers and servers build on free hosted Linux runners for the
+       landed commit while this Mac builds the app, about 37 % of a warm bundle's 448 s. The
+       three builds at once here were measured and not taken: 464 s against 448, since the
+       Mac's build alone fills its ten cores with thin-LTO links, and the Mac swapped
+       (`MEASUREMENTS.md`, "the bundle's three builds at once").
+     - The MacBook takes a new bundle itself when it wakes, through a `slopty update --from
+       <worker>` in the CLI that checks the stamp, the sha256 and the Developer ID signature
+       before it swaps the app; until it is built, the deploy runs in the background and the
+       round does not wait on it.
   7. **A flake is fixed when a deterministic test shows it.** The test is red before the fix and
      green after, as the testing decisions already ask. The repeat tool went with the e2e guest
      (item 6 of "The gate and e2e run on free hosted runners").

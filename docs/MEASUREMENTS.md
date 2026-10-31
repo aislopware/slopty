@@ -19024,3 +19024,28 @@ cargo xtask prune --dry-run
 GH_DEBUG=api gh run view <run> --json status,conclusion,jobs
 gh api -i repos/aislopware/slopty/actions/runs/<run> -H 'If-None-Match: <etag>' | grep -i ratelimit-used
 ```
+
+## 2026-10-31 — the bundle's three builds at once
+
+This Mac (M1 Max, ten cores, 32 GB) with other lanes running; `../slopty-export` warm at
+6e0477f75; `cargo xtask bundle --fast`, signed. A new stamp each run recompiles only the five
+binary crates, so the work is the thin-LTO links of 13 binaries: 5 for the Mac, 6 Linux
+workers, 2 Linux servers (`docs/decisions/tooling.md`, "A round's long steps are the model's",
+item 6).
+
+| run | Mac build | Linux workers | Linux servers | builds | whole bundle | swap-outs |
+| --- | --- | --- | --- | --- | --- | --- |
+| one after another | 272.8 s | 131.0 s | 33.3 s | 437.1 s (sum) | 448 s | 0 |
+| at once, the servers' new target dir cold | 477.5 s | 293.0 s | 366.4 s | 477.5 s | 491 s | 71,608 pages |
+| at once, warm | 449.5 s | 303.6 s | 229.5 s | 449.5 s | 464 s | 42,952 pages |
+
+The load average went from 6.6 to 138.6 over the warm run at once. The Mac's build alone fills
+the ten cores (each link runs up to 16 codegen units, five link together), so the Linux builds
+found no idle cores and only slowed it. The Linux parts are 164 s of this Mac's CPU, about
+37 % of the warm bundle, which hosted Linux runners can take instead.
+
+```sh
+# one after another (HEAD's xtask) and at once (M-S@2c6e7679b8's), the stamp moved each run
+cd ../slopty-export && cargo xtask bundle --fast
+vm_stat | grep -i swapouts   # before and after each run
+```
