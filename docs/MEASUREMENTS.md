@@ -19063,6 +19063,7 @@ settles only while its build is on its way").
 | 41226170614 | 3fa479f92 | the Mac's job packs the host build; the iOS job builds the iOS app | 5 m 22 s (queued 5 m) | 22 m 31 s | 23 m 46 s |
 | 41228523444 | e73417604 | the Mac's job builds the iOS app too | 7 m 04 s, red | 7 m 31 s, stopped | — |
 | 41231747992 | 019176072 | settle beside the wait, then after the install | 8 m 20 s | 21 m 03 s | 21 m 46 s |
+| 41236746342 | 4b37550cf | the simulator's part packed first; settle only until its build | 8 m 17 s | 8 m 03 s | 9 m 43 s |
 
 `e2e (ios)`'s phases:
 
@@ -19071,6 +19072,7 @@ settles only while its build is on its way").
 | 41218759169 | 883 s | 363 s | 230 s | 205 s (after the install) | — | 67 s, and the iPad 950 s for 23 s |
 | 41226170614 | none | 962.9 s | beside the app | 249.0 s (after the install) | 21.8 s | 56.4 s |
 | 41231747992 | none | none | 312.0 s (`bootstatus` 206 s, `notifyutil` 100 s) | 601.5 s without calm, then 207.7 s after the install | 22.8 s | 48.9 s |
+| 41236746342 | none | none | 244.3 s | 94.9 s, until the build came 337 s in | 21.0 s | 51.8 s |
 
 Settling only until the build comes (`e2e.yml` run 41235899472, every simulator test): the iPhone
 booted in 155.5 s, was still busy when the build came 358 s into the run (204.8 s of settle),
@@ -19082,7 +19084,13 @@ The same host build took 182 s in 41218759169's `e2e (mac)`, at the same 100 % c
 as the 883 s beside the boot. In 41231747992's `e2e (mac)` the build-only step took 235.5 s for
 the daemons and the app (gpui compiling at +78 s, slopty-ui and slopty-app at +151 s, the link
 done at +235 s), 86.7 s the iOS app's crates, 15.7 s `slopty-notify`, 15.1 s `xcodebuild`, 0.7 s
-the tar (190 MB), 8 s its upload; the iOS job had it 488 s into its run.
+the tar (190 MB), 8 s its upload; the iOS job had it 488 s into its run. Packed first, without
+the Mac app (41236746342): 95.0 s for the daemons and the simulator's test binary, 102.1 s the iOS
+app's crates, 18.5 s `slopty-notify`, 15.9 s `xcodebuild`, uploaded 5 minutes into the job and in
+the iOS job's hands 337 s into its run; the Mac job then built its app and cases in 104.8 s and
+ran them in 75 s. That run's jobs ended at 4 m 50 s (the UI shard), 6 m 16 s (the rest), 8 m 38 s
+(the worker shard), 9 m 00 s (`e2e (ios)`) and 9 m 13 s (`e2e (mac)`) after the push, and
+`promote` at 9 m 42 s.
 
 A simulator's boot on an idle runner, one device at a time (probe runs):
 

@@ -2354,8 +2354,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     the app, which the job uploads as `host-build-<attempt>`. Its own cases build after, with
     their tests, over the same feature set, so they reuse every unit and add only the Mac app's
     and their test binaries. The first cut built the Mac's cases first and packed after them:
-    the Mac app's GPUI crates and link held the simulator's build back about 85 s of the host
-    build's 235 s (run 41231747992). Without the simulator's job the Mac's job builds its cases
+    the Mac app's GPUI crates and link held the simulator's build back, and the simulator's
+    runner had it 488 s into its run (run 41231747992), against 337 s packed first (run
+    41236746342). Without the simulator's job the Mac's job builds its cases
     in the build-only step and tests them `--no-build`. Every hosted runner checks out to
     `/Users/runner/work/slopty/slopty`, so the record's absolute paths hold on the other runner
     unchanged, and the tar keeps the binaries executable, which an artifact's own files do not. A
@@ -2409,7 +2410,8 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     (`xtask e2e ios` without `--host`) still settles after the install.
   - The full iPhone suite, all five tests, passed so, 62.5 s beside daemons still busy 205 s
     after the boot, and the iPad's light check in 23.3 s beside ones busy 304 s on (run
-    41235899472). The guest's failures the earlier ruling answered (no worker address within
+    41235899472). With the simulator's part packed first, the gate's `e2e (ios)` took 8 minutes
+    and the whole check 9 m 43 s from the push to main (run 41236746342), from 46 m 45 s. The guest's failures the earlier ruling answered (no worker address within
     30 s, no agent started within 30 s) came from four cores held 18-20 minutes, with this Mac's
     lanes building beside; a hosted runner holds only the run.
   - A red there is the product's or the test's, as every e2e red: it is read, never retried. If
