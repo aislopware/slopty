@@ -2,8 +2,9 @@ name: noq
 
 # The vendored QUIC stack's own suites (`cargo xtask deep noq`, docs/TESTING.md "Beyond the
 # layers") on every change to the stack, to the toolchain it builds with, or to the command: on
-# arm Linux, and on macOS, where noq-udp's patches to Apple's batched send path run. Deep runs
-# them on Linux every night too.
+# arm Linux, and on macOS, where noq-udp's suite runs a second time with Apple's batched send
+# path compiled in (`fast-apple-datapath`, which its patches change). Deep runs them on Linux
+# every night too.
 on:
   push:
     branches: [ gate ]

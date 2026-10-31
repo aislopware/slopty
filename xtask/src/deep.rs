@@ -166,7 +166,8 @@ pub enum DeepCmd {
     },
     /// The vendored QUIC stack's own suites (`vendor/noq-proto` and `vendor/noq-udp`, outside
     /// the workspace): the protocol's tests over two endpoints in memory and its
-    /// random-interaction proptest, and the socket's sends and receives over loopback.
+    /// random-interaction proptest, and the socket's sends and receives over loopback, on a Mac
+    /// through Apple's batched send path too.
     Noq,
     /// The loom models of the lock-free structures (`--cfg slopty_loom`): the audio ring between
     /// the decoder's thread and the device's render callback, over every interleaving.
@@ -596,22 +597,36 @@ fn loom(sh: &Shell) -> Result<()> {
 
 /// The vendored QUIC stack's own tests, which nothing else runs: `vendor/noq-proto`'s and
 /// `vendor/noq-udp`'s, each outside the workspace. Their patches (`SLOPTY.md` beside each) are
-/// otherwise held only by what Slopty's own tests reach of them, and noq-udp's on the platform
-/// it runs on (Apple's batched send path on a Mac). Each lock is committed beside its crate, so
-/// a run builds what the last did; the proptest draws new cases every run.
+/// otherwise held only by what Slopty's own tests reach of them. noq-udp's batched send path
+/// (`sendmsg_x`, its patches 1 and 2) compiles only under [`NOQ_UDP_BATCHED`], which
+/// `slopty-net` turns on for macOS and iOS leaves off, so a Mac runs the socket's suite both
+/// ways. Each lock is committed beside its crate, so a run builds what the last did; the
+/// proptest draws new cases every run.
 fn noq(sh: &Shell) -> Result<()> {
     let target = deep_dir("noq")?;
-    ["noq-proto", "noq-udp"].into_iter().try_for_each(|name| {
+    let mut suites = vec![("noq-proto", None), ("noq-udp", None)];
+    if cfg!(target_os = "macos") {
+        suites.push(("noq-udp", Some(NOQ_UDP_BATCHED)));
+    }
+    suites.into_iter().try_for_each(|(name, feature)| {
         let manifest = format!("vendor/{name}/Cargo.toml");
+        let features: Vec<&str> = feature.into_iter().flat_map(|f| ["--features", f]).collect();
+        let suite = feature.map_or_else(
+            || format!("{name}'s suite"),
+            |feature| format!("{name}'s suite with {feature}"),
+        );
         step(
-            &format!("{name}'s suite"),
+            &suite,
             &cmd!(
                 sh,
-                "nice -n 10 cargo test --manifest-path {manifest} --locked --target-dir {target}"
+                "nice -n 10 cargo test --manifest-path {manifest} --locked --target-dir {target} {features...}"
             ),
         )
     })
 }
+
+/// noq-udp's feature for Apple's batched datapath (`sendmsg_x` and `recvmsg_x`).
+const NOQ_UDP_BATCHED: &str = "fast-apple-datapath";
 
 /// Crates whose tests run under `leaks --atExit`: the daemons' and the wire's, where memory left
 /// unreachable is memory a long-lived process never gets back. The UI's tests leak on purpose
