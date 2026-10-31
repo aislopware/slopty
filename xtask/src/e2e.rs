@@ -170,6 +170,22 @@ pub struct E2eOpts {
     /// For a rerun right after a build; an edit since then is not in it.
     #[arg(long)]
     no_build: bool,
+    /// Build, record the suites' test binaries, and run nothing: `ci.yml`'s `e2e (mac)` builds
+    /// in one step, hands the build on (`--pack`), then runs its tests with `--no-build`.
+    #[arg(long, conflicts_with_all = ["no_build", "host"])]
+    build_only: bool,
+    /// Also build the simulator suite's test binary, and write the host side of the build (the
+    /// binaries the suites spawn, every suite's test binary and the record) to this tar, which
+    /// another runner of the same workflow run takes with `--host`: the gate builds the Mac's
+    /// side of the e2e once, and the simulator's runner only boots and builds the iOS app
+    /// (`docs/decisions/testing.md`, "The simulator's runner builds no Mac side").
+    #[arg(long, value_name = "TAR", conflicts_with_all = ["no_build", "host"])]
+    pack: Option<camino::Utf8PathBuf>,
+    /// The `ios` case only: take the host side of the build from this artifact of the GitHub
+    /// Actions run this job is in, once the job that built it (`--pack`) uploaded it, instead of
+    /// building it here. The simulator boots and the iOS app builds meanwhile.
+    #[arg(long, value_name = "ARTIFACT", conflicts_with = "no_build")]
+    host: Option<String>,
     /// Also run the tests that capture the screen (each target's `screen_recording` module), which
     /// need the Screen Recording grant.
     #[arg(long)]
@@ -191,7 +207,10 @@ pub struct E2eOpts {
     /// there.
     #[arg(
         long,
-        conflicts_with_all = ["no_build", "data_dir", "test_threads", "stop_on_red", "sim", "screen_recording"]
+        conflicts_with_all = [
+            "no_build", "data_dir", "test_threads", "stop_on_red", "sim", "screen_recording",
+            "build_only", "pack", "host",
+        ]
     )]
     hosted: bool,
     /// With `--hosted`: the commit, which must be on GitHub (`HEAD` when left out).
@@ -336,6 +355,23 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::All => APP.iter().chain(WORKER).chain(&SERVER).chain(SCREEN).chain(INPUT).collect(),
         Case::Ios => IOS.iter().collect(),
     };
+    if opts.host.is_some() && !matches!(opts.case, Case::Ios) {
+        bail!(
+            "--host takes the host build for the simulator's case (`ios`), not `{:?}`",
+            opts.case
+        );
+    }
+    if opts.pack.is_some() && matches!(opts.case, Case::Ios) {
+        bail!(
+            "--pack hands a Mac case's build to the simulator's runner; `ios` takes one (--host)"
+        );
+    }
+    // What this build makes test binaries for: the case's suites, and with `--pack` the
+    // simulator's too, for the runner that takes it.
+    let mut built: Vec<&Suite> = suites.clone();
+    if opts.pack.is_some() {
+        built.extend(IOS.iter().filter(|ios| !suites.iter().any(|s| s.test == ios.test)));
+    }
     let data_dir = opts
         .data_dir
         .clone()
@@ -356,6 +392,9 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         }
     }
     let mut booting = Booting(sims.first().map(|sim| boot_in_background(sh, *sim)));
+    // The host build another job of the run packs, awaited beside the boot and the iOS app's
+    // build, and joined before the first suite.
+    let mut awaiting = opts.host.as_ref().map(|name| await_host(sh, name));
 
     let artifacts = format!("{data_dir}/artifacts");
     std::fs::create_dir_all(&artifacts)?;
@@ -387,27 +426,49 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     let reuse = sh.current_dir().join("target/e2e/reuse");
     let cargo_metadata = reuse.join("cargo-metadata.json");
     let recorded = |suite: &Suite| reuse.join(format!("{}-{}.json", suite.package, suite.test));
+    let missing_record = |suites: &[&Suite]| {
+        suites
+            .iter()
+            .find(|s| !recorded(s).exists() || !cargo_metadata.exists())
+            .map(|missing| format!("no build of {} {} to reuse", missing.package, missing.test))
+    };
+    // A build made elsewhere: the last one here, or the one another runner packed.
+    let prebuilt = opts.no_build || opts.host.is_some();
     if opts.no_build {
-        if let Some(missing) =
-            suites.iter().find(|s| !recorded(s).exists() || !cargo_metadata.exists())
-        {
-            bail!(
-                "no build of {} {} to reuse: run once without --no-build",
-                missing.package,
-                missing.test
-            );
+        if let Some(missing) = missing_record(&suites) {
+            bail!("{missing}: run once without --no-build");
         }
         println!("▶ reusing the last build (--no-build)");
+    } else if let Some(name) = &opts.host {
+        println!("▶ the host build comes from this run's artifact {name}");
     } else {
         // Every binary a suite may spawn up front, so a test never shells out to cargo, and the
         // suites' test binaries with them: one feature set ([`build`]).
         let started = std::time::Instant::now();
-        let (packages, tests) = suites_built(&suites);
+        let (packages, tests) = suites_built(&built);
         build(sh, &packages, &tests, &[])?;
         std::fs::create_dir_all(&reuse)?;
         let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
         std::fs::write(&cargo_metadata, metadata)?;
         record.phase("build", started.elapsed(), None);
+    }
+    // A build handed on, or run later with `--no-build`, records every suite's test binary now
+    // rather than as each suite comes.
+    let listed = opts.build_only || opts.pack.is_some();
+    if listed {
+        for suite in &built {
+            build_suite(sh, suite, &built, &recorded(suite))?;
+        }
+    }
+    if let Some(tar) = &opts.pack {
+        let started = std::time::Instant::now();
+        let records: Vec<std::path::PathBuf> = built.iter().map(|s| recorded(s)).collect();
+        pack(sh, tar, &bin_dir, &records, &cargo_metadata)?;
+        record.phase("pack", started.elapsed(), None);
+    }
+    if opts.build_only {
+        println!("✔ e2e {:?}: built and recorded, nothing run (--build-only)", opts.case);
+        return Ok(());
     }
 
     // Every binary a suite spawns is built: `slopty_testkit::bins` looks no further.
@@ -483,6 +544,19 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                 continue;
             }
         };
+        // The host build, once the simulator took the app and settled: what the wait for it
+        // adds to the run is what is left of it then.
+        if let Some(waiting) = awaiting.take() {
+            let started = std::time::Instant::now();
+            let came = waiting
+                .join()
+                .map_err(|_panic| anyhow::anyhow!("the wait for the host build panicked"))??;
+            println!("  the host build came {came:.0?} into the run");
+            record.phase("host build", started.elapsed(), None);
+            if let Some(missing) = missing_record(&suites) {
+                bail!("{missing} in the host build {}", opts.host.as_deref().unwrap_or_default());
+            }
+        }
         let on = sim.map_or_else(String::new, |sim| format!(" ({})", sim.family()));
         for suite in &suites {
             hold_if_stopping();
@@ -499,7 +573,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             if unbuilt.contains(&binaries) {
                 continue;
             }
-            if !opts.no_build && pass == 0 && build_suite(sh, suite, &suites, &binaries).is_err() {
+            if !prebuilt
+                && !listed
+                && pass == 0
+                && build_suite(sh, suite, &built, &binaries).is_err()
+            {
                 failed.push(title.to_owned());
                 unbuilt.push(binaries);
                 continue;
@@ -674,6 +752,139 @@ fn boot_in_background(
         let udid = crate::ios::boot_simulator(&sh, kind)?;
         Ok((udid, started.elapsed()))
     })
+}
+
+/// Write the host side of an e2e build to the tar `out` for another runner (`--pack`): the
+/// binaries the suites spawn ([`BINS`] in `bin_dir`), each test binary the suites' `records`
+/// list, the records and cargo's metadata, every path relative to the checkout. Every hosted
+/// runner checks out to the same directory, so the records' absolute paths hold there as they
+/// are, and `tar` keeps the binaries executable (an artifact's own files lose the bit).
+fn pack(
+    sh: &Shell,
+    out: &camino::Utf8Path,
+    bin_dir: &camino::Utf8Path,
+    records: &[std::path::PathBuf],
+    cargo_metadata: &std::path::Path,
+) -> Result<()> {
+    let root = sh.current_dir();
+    let relative = |path: &std::path::Path| -> Result<String> {
+        let inside = path.strip_prefix(&root).with_context(|| {
+            format!("{} is outside the checkout {}", path.display(), root.display())
+        })?;
+        Ok(inside.to_string_lossy().into_owned())
+    };
+    let mut files: Vec<String> = Vec::new();
+    for bin in BINS {
+        files.push(relative(bin_dir.join(bin).as_std_path())?);
+    }
+    for record in records {
+        let listing = std::fs::read_to_string(record)
+            .with_context(|| format!("read {}", record.display()))?;
+        for binary in test_binaries(&listing)? {
+            files.push(relative(std::path::Path::new(&binary))?);
+        }
+        files.push(relative(record)?);
+    }
+    files.push(relative(cargo_metadata)?);
+    files.sort();
+    files.dedup();
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    step("pack the host build", &cmd!(sh, "tar -cf {out} {files...}"))
+}
+
+/// The test binaries a suite's record lists: the path of each binary in
+/// `cargo nextest list --list-type binaries-only`'s JSON.
+fn test_binaries(listing: &str) -> Result<Vec<String>> {
+    let listed: serde_json::Value = serde_json::from_str(listing).context("a nextest listing")?;
+    let binaries = listed
+        .get("rust-binaries")
+        .and_then(serde_json::Value::as_object)
+        .context("a nextest listing names its rust-binaries")?;
+    binaries
+        .values()
+        .map(|binary| {
+            binary
+                .get("binary-path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .context("each listed binary has its binary-path")
+        })
+        .collect()
+}
+
+/// How long the simulator's runner waits for the host build ([`await_host`]): the job that packs
+/// it builds the Mac's side in 3 minutes warm and 20 cold on a hosted runner, and is waited on
+/// only after the boot and the iOS app's build.
+const HOST_WAIT_MOST: std::time::Duration = std::time::Duration::from_mins(40);
+
+/// How often [`await_host`] asks for the artifact: one request in each, against the run's
+/// 1,000 an hour.
+const HOST_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait on a thread of its own for the artifact `name` of this GitHub Actions run, which another
+/// job uploads (`--pack`, then `actions/upload-artifact`), then bring it here and unpack its tar
+/// over the checkout; how long from the call it came. A job that packs no build ends red, and
+/// `--stop-on-red` ends this run then.
+fn await_host(sh: &Shell, name: &str) -> std::thread::JoinHandle<Result<std::time::Duration>> {
+    let dir = sh.current_dir();
+    let name = name.to_owned();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        fetch_host(&dir, &name)?;
+        Ok(started.elapsed())
+    })
+}
+
+/// [`await_host`]'s wait, download and unpack, into the checkout `dir`.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
+fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
+    let started = std::time::Instant::now();
+    let (Ok(repo), Ok(run)) = (std::env::var("GITHUB_REPOSITORY"), std::env::var("GITHUB_RUN_ID"))
+    else {
+        bail!("--host takes an artifact of a GitHub Actions run, and this is none");
+    };
+    let sh = Shell::new()?;
+    sh.change_dir(dir);
+    let listing = format!("repos/{repo}/actions/runs/{run}/artifacts?name={name}");
+    let jobs = format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100");
+    let mut asked: u32 = 0;
+    loop {
+        let count = cmd!(sh, "gh api {listing} --jq .total_count")
+            .quiet()
+            .ignore_stderr()
+            .read()
+            .unwrap_or_default();
+        if count.trim().parse::<u32>().is_ok_and(|n| n > 0) {
+            break;
+        }
+        // A job that ended other than green, the one that packs among them, means no build is
+        // coming: asked once a minute, as GitHub caches the jobs' listing that long.
+        if asked.is_multiple_of(6)
+            && let Ok(body) = cmd!(sh, "gh api {jobs}").quiet().ignore_stderr().read()
+            && let Some(stop) = ended_jobs(&body, |_job| false)
+        {
+            bail!("no host build {name} is coming: {stop:?}");
+        }
+        asked = asked.saturating_add(1);
+        if started.elapsed() > HOST_WAIT_MOST {
+            bail!("no artifact {name} in run {run} within {HOST_WAIT_MOST:?}");
+        }
+        std::thread::sleep(HOST_ASK_EVERY);
+    }
+    let into = dir.join("target/e2e/host");
+    let _gone = std::fs::remove_dir_all(&into);
+    cmd!(sh, "gh run download {run} --repo {repo} --name {name} --dir {into}").quiet().run()?;
+    let tars: Vec<std::path::PathBuf> = std::fs::read_dir(&into)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "tar"))
+        .collect();
+    let [tar] = tars.as_slice() else {
+        bail!("the artifact {name} holds {} tars, not one", tars.len());
+    };
+    cmd!(sh, "tar -xf {tar}").quiet().run()?;
+    Ok(())
 }
 
 /// The longest a run waits for its simulator to settle ([`settle`]): in a guest on this Mac
@@ -1425,6 +1636,19 @@ mod tests {
         under.sort_unstable();
         assert_eq!(under, [200, 201, 202, 300]);
         assert_eq!(descendants(listing, 300), Vec::<u32>::new());
+    }
+
+    /// A packed build carries each test binary its suites' records list (`--pack`).
+    #[test]
+    fn a_record_names_its_test_binaries() {
+        let listing = r#"{"rust-build-meta":{"target-directory":"/w/target"},
+            "rust-binaries":{"slopty-e2e::ios":{"binary-id":"slopty-e2e::ios",
+            "binary-path":"/w/target/aarch64-apple-darwin/debug/deps/ios-0123","kind":"test"}}}"#;
+        assert_eq!(
+            super::test_binaries(listing).unwrap(),
+            ["/w/target/aarch64-apple-darwin/debug/deps/ios-0123"]
+        );
+        assert!(super::test_binaries("{}").is_err(), "a listing without its binaries");
     }
 
     /// The settle reads `top`'s second sample, its first counting since boot.

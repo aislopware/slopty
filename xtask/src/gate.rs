@@ -2490,7 +2490,9 @@ let windows = cfg!(windows);
     /// is never retried, and a changed frame is a review, not a red, on a runner's GPU; a job
     /// stops once its run is red, a job past its timeout counting, and a run stands aside once
     /// `gate` moved off it before its e2e, never promoting with cases unchecked. The plan cannot
-    /// pass a change to itself that leaves out a job. Runs on `gate` overlap, and `promote`
+    /// pass a change to itself that leaves out a job. The Mac's job builds the host side once and
+    /// hands it to the simulator's (`--pack`, `--host`), which runs the iPhone alone; the iPad's
+    /// light check is `e2e.yml`'s. Runs on `gate` overlap, and `promote`
     /// takes a commit main already holds for a green, never one `gate` withdrew; it pushes with
     /// the deploy key of an environment only `gate` reaches, through an action pinned by commit,
     /// and what it starts after main moved is best-effort.
@@ -2515,14 +2517,19 @@ let windows = cfg!(windows);
             "--head \"$GITHUB_SHA\" \\\n            --stand-aside",
             "superseded: ${{ steps.plan.outputs.superseded }}",
             "&& needs.smoke-plan.outputs.superseded != 'true'",
-            "args=(\"$CASE\" --review --stop-on-red -E \"$FILTER\")",
+            "args=(\"$CASE\" --review -E \"$FILTER\")",
             "select(.conclusion != null and .conclusion != \"success\" and .conclusion != \"skipped\")",
             "gh api \"repos/$GITHUB_REPOSITORY/git/ref/heads/gate\" --jq .object.sha",
             "elif [ -n \"$tip\" ] && [ \"$tip\" != \"$GITHUB_SHA\" ]; then",
             "if gh run cancel \"$GITHUB_RUN_ID\" --repo \"$GITHUB_REPOSITORY\"; then\n            sleep 300",
             "jq -e --arg case \"$case\" 'any(.[]; .case == $case)'",
             "-- xtask/src/gate/impact.rs \\\n            xtask/src/gate/order.rs xtask/src/lib.rs .github/workflows/ci.yml)",
-            "args+=(--sim iphone --sim ipad)",
+            "args+=(--stop-on-red --sim iphone --host \"$HOST\")",
+            "args=(\"$CASE\" --build-only --stop-on-red)",
+            "[ \"$PACK\" = true ] && args+=(--pack target/e2e/pack/host.tar)",
+            "name: host-build-${{ github.run_attempt }}\n          path: target/e2e/pack/host.tar",
+            "HOST: host-build-${{ github.run_attempt }}",
+            "args+=(--no-build --test-threads 3)",
             "NEXTEST_RETRIES: \"0\"",
             "&& (needs.e2e.result == 'success'\n      \
              || (needs.e2e.result == 'skipped' && needs.smoke-plan.outputs.matrix == '[]'))",
@@ -2559,8 +2566,13 @@ let windows = cfg!(windows);
             "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"",
             "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$sha\"",
             "if: github.event_name == 'workflow_dispatch'",
-            "case: ${{ fromJSON(inputs.cases || '[\"mac\", \"ios\"]') }}",
-            "args=(\"$CASE\" \"--$GOLDENS\")",
+            "CASES: ${{ inputs.cases || '[\"mac\", \"ios\", \"ipad\"]' }}",
+            "include: ${{ fromJSON(needs.plan.outputs.matrix) }}",
+            "[ \"$PACK\" = true ] && args+=(--pack target/e2e/pack/host.tar)",
+            "ios) args=(ios \"${args[@]}\" --sim iphone --host \"$HOST\") ;;",
+            "ipad) args=(ios \"${args[@]}\" --sim ipad --host \"$HOST\") ;;",
+            "mac) args=(mac \"${args[@]}\" --no-build --test-threads 3) ;;",
+            "args=(\"--$GOLDENS\")",
             "GOLDENS: ${{ inputs.goldens || 'review' }}",
             "group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.id || github.ref }}",
             "git diff --binary -- \"${accepted[@]}\" > target/e2e/artifacts/changes.patch",

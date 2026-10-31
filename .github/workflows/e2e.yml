@@ -6,10 +6,11 @@ run-name: >-
 # The live tests (`cargo xtask e2e`): the real app with ptyd and the worker, the server with the
 # CLI and MCP, and the iOS app in the simulator on the iPhone and the iPad, each driven through
 # its test socket, every case on one commit (docs/decisions/testing.md, "Goldens render in the
-# test process; e2e is a smoke set chosen by what a change reaches"), in two jobs that build once
-# each: `mac` runs the app's and the server's, `ios` the simulator's on the iPhone and the iPad's
-# one launch-and-layout test. The gate
-# runs the cases a push reaches in the same two jobs (ci.yml's `e2e`). Two ways in, both
+# test process; e2e is a smoke set chosen by what a change reaches"). The Mac's job builds the
+# host side once and runs the app's and the server's suites; the iPhone's and the iPad's jobs,
+# each on a runner of its own, boot their simulator and build the iOS app meanwhile, then take the
+# host side from it (the `plan` job). The gate runs the cases a push reaches the same way, the
+# iPhone alone (ci.yml's `e2e`). Two ways in, both
 # dispatched on `gate`, so the run reads the compile cache the test shards fill there (a cache is
 # read by its own branch alone, and a run on main built the app for 600 s,
 # .research/ci-speed-2026-10-11.md item 10):
@@ -39,8 +40,8 @@ on:
       cases:
         description: >-
           The cases, a JSON list: "mac" (the app's and the server's suites), "ios" (the
-          simulator's, on the iPhone, and the iPad's launch and layout)
-        default: '["mac", "ios"]'
+          simulator's, on the iPhone), "ipad" (the iPad's launch and layout)
+        default: '["mac", "ios", "ipad"]'
       filter:
         description: A nextest filterset narrowing every case; empty for all of each
         default: ""
@@ -102,16 +103,47 @@ jobs:
           gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$sha"
           echo "every e2e case started on main's head, $sha, on gate" >> "$GITHUB_STEP_SUMMARY"
 
-  e2e:
+  # The jobs the cases make: the Mac's builds the host side once for all of them, runs the app's
+  # and the server's suites when `mac` is asked for, and packs the build for the simulators'
+  # jobs when `ios` or `ipad` is (`--pack`); `ios` runs the simulator's suite on the iPhone and
+  # `ipad` the iPad's launch-and-layout check, each on a runner of its own that boots and builds
+  # the iOS app while the Mac's job builds, then takes the host side from it (`--host`;
+  # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). The iPad's first
+  # boot after the iPhone's tests on one runner took 16 of the case's 46 minutes.
+  plan:
     if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          CASES: ${{ inputs.cases || '["mac", "ios", "ipad"]' }}
+        run: |
+          matrix=$(jq -c '
+            any(.[]; . == "ios" or . == "ipad") as $sims
+            | [{case: "mac", tests: any(.[]; . == "mac"), pack: $sims}]
+              + [.[] | select(. == "ios" or . == "ipad") | {case: ., tests: true, pack: false}]
+            | map(select(.tests or .pack))' <<<"$CASES")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "jobs: $matrix" >> "$GITHUB_STEP_SUMMARY"
+
+  e2e:
+    needs: plan
     name: e2e (${{ matrix.case }})
     runs-on: xcode-27
     # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
     timeout-minutes: 90
+    # `actions: read`: a simulator's job lists the run's artifacts and jobs while it waits for
+    # the host build.
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
-        case: ${{ fromJSON(inputs.cases || '["mac", "ios"]') }}
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       # Spotlight off: it indexes every file a build and its tests write, and on a three-core
       # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
@@ -133,7 +165,7 @@ jobs:
         with:
           toolchain: 1.99.1
           targets: >-
-            ${{ matrix.case == 'ios' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            ${{ matrix.case != 'mac' && 'aarch64-apple-darwin, aarch64-apple-ios,
             aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
       - id: cargo-home
@@ -164,33 +196,32 @@ jobs:
       # Ghostty's zig packages only for a build of libghostty-vt: with the prebuilt for these
       # exact inputs restored, nothing builds it, and the fetch was 51-74 s of every run
       # (.research/e2e-reduction-2026-10-31/B-anatomy.md), as ci.yml's lanes already skip it.
-      # An entry a test shard saved, restored by its prefix, is for these inputs when its key
-      # ends in theirs.
-      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+      # On `cache-hit`, the one output `actions/cache` sets (ci.yml's e2e job says more).
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
       # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
-      - if: matrix.case == 'ios'
+      - if: matrix.case != 'mac'
         id: xcodegen
         uses: actions/cache@v6
         with:
           path: ~/.local/xcodegen
           key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
-      - if: matrix.case == 'ios' && steps.xcodegen.outputs.cache-hit != 'true'
+      - if: matrix.case != 'mac' && steps.xcodegen.outputs.cache-hit != 'true'
         run: |
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
             https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
           echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
             | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
-      - if: matrix.case == 'ios'
+      - if: matrix.case != 'mac'
         run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
@@ -223,25 +254,43 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # The host side, built once and handed on (the `plan` job's comment).
+      - if: matrix.case == 'mac'
+        env:
+          PACK: ${{ matrix.pack }}
+        run: |
+          args=(mac --build-only)
+          [ "$PACK" = true ] && args+=(--pack target/e2e/pack/host.tar)
+          xtask e2e "${args[@]}"
+      - if: matrix.pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-build-${{ github.run_attempt }}
+          path: target/e2e/pack/host.tar
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
       # A red is the behaviour's: no test is retried, the named overrides' retries included.
-      - env:
+      - if: matrix.tests
+        env:
           CASE: ${{ matrix.case }}
           FILTER: ${{ inputs.filter }}
           GOLDENS: ${{ inputs.goldens || 'review' }}
           SLOPTY_E2E_A11Y: ${{ inputs.a11y }}
           NEXTEST_RETRIES: "0"
+          HOST: host-build-${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          args=("$CASE" "--$GOLDENS")
+          args=("--$GOLDENS")
           [ -n "$FILTER" ] && args+=(-E "$FILTER")
-          if [ "$CASE" = ios ]; then
-            # The iPhone, then the iPad, from one build: the iPad boots once the iPhone's tests
-            # are done, and runs its launch-and-layout test alone (`IPAD_LIGHT`).
-            args+=(--sim iphone --sim ipad)
-          else
+          case "$CASE" in
             # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
-            # "An e2e case runs in a guest here").
-            args+=(--test-threads 3)
-          fi
+            # "An e2e case runs in a guest here"), from the build above.
+            mac) args=(mac "${args[@]}" --no-build --test-threads 3) ;;
+            ios) args=(ios "${args[@]}" --sim iphone --host "$HOST") ;;
+            # Its launch-and-layout test alone, whatever the filter (`IPAD_LIGHT`).
+            ipad) args=(ios "${args[@]}" --sim ipad --host "$HOST") ;;
+          esac
           xtask e2e "${args[@]}"
       # The goldens and snapshots an accept wrote, as a patch on the commit, which who
       # dispatched the run applies to their tree; nothing else of the runner's tree.

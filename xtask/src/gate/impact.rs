@@ -1700,22 +1700,32 @@ pub fn run(sh: &Shell, cmd: &SmokeCmd) -> Result<()> {
 }
 
 /// The gate's `e2e` jobs for `reach`, as its matrix: `mac` (`xtask e2e mac`) for the app's and
-/// the server's cases, or `server` when it reaches the server's alone, which builds no app; `ios`
-/// for the simulator's; each with the filterset of its reached tests; `[]` when it reaches none.
+/// the server's cases, or `server` when it reaches the server's alone; `ios` for the simulator's;
+/// each with the filterset of its reached tests; `[]` when it reaches none. The Mac's job builds
+/// the host side once for both (`pack`): the simulator's runner takes it (`xtask e2e ios
+/// --host`) and only boots and builds the iOS app, so a change that reaches the simulator alone
+/// still has a `mac` job, which builds and runs nothing (an empty filter;
+/// `docs/decisions/testing.md`, "The simulator's runner builds no Mac side").
 fn plan_matrix(reach: &Reach) -> String {
-    let mac: (&str, &[Runs]) = if reach.filterset(Runs::App).is_some() {
+    let (case, runs): (&str, &[Runs]) = if reach.filterset(Runs::App).is_some() {
         ("mac", &[Runs::App, Runs::Server])
     } else {
         ("server", &[Runs::Server])
     };
-    let jobs: Vec<serde_json::Value> = [mac, ("ios", &[Runs::Ios])]
-        .into_iter()
-        .filter_map(|(case, runs)| {
-            reach
-                .filterset_of(runs)
-                .map(|filter| serde_json::json!({ "case": case, "filter": filter }))
-        })
-        .collect();
+    let ios = reach.filterset_of(&[Runs::Ios]);
+    let mut jobs = Vec::new();
+    match reach.filterset_of(runs) {
+        Some(filter) => {
+            jobs.push(serde_json::json!({ "case": case, "filter": filter, "pack": ios.is_some() }));
+        }
+        None if ios.is_some() => {
+            jobs.push(serde_json::json!({ "case": "mac", "filter": "", "pack": true }));
+        }
+        None => {}
+    }
+    if let Some(filter) = ios {
+        jobs.push(serde_json::json!({ "case": "ios", "filter": filter, "pack": false }));
+    }
     serde_json::Value::Array(jobs).to_string()
 }
 
@@ -2334,7 +2344,25 @@ fn shared() {}
         let mut server = super::Reach::default();
         server.add(["S4"], "apps/slopty-server/src/main.rs");
         let matrix: serde_json::Value = serde_json::from_str(&super::plan_matrix(&server)).unwrap();
-        assert_eq!(matrix[0]["case"], "server", "the server's cases alone build no app: {matrix}");
+        assert_eq!(matrix[0]["case"], "server", "the server's cases alone: {matrix}");
+        assert_eq!(matrix[0]["pack"], false, "no simulator to hand the build to");
+    }
+
+    /// The simulator's job builds no Mac side: the Mac's job packs it for it, and a change that
+    /// reaches the simulator alone gets a Mac job that only builds.
+    #[test]
+    fn the_mac_job_builds_the_simulator_s_host_side() {
+        let mut reach = super::Reach::default();
+        reach.add(["S1", "S5"], "crates/slopty-ui/src/lib.rs");
+        let matrix: serde_json::Value = serde_json::from_str(&super::plan_matrix(&reach)).unwrap();
+        assert_eq!(matrix.as_array().map(Vec::len), Some(2), "{matrix}");
+        assert_eq!((&matrix[0]["case"], &matrix[0]["pack"]), (&"mac".into(), &true.into()));
+        assert_eq!((&matrix[1]["case"], &matrix[1]["pack"]), (&"ios".into(), &false.into()));
+        let mut alone = super::Reach::default();
+        alone.add(["S5"], "apps/slopty-ios/src/lib.rs");
+        let matrix: serde_json::Value = serde_json::from_str(&super::plan_matrix(&alone)).unwrap();
+        assert_eq!(matrix[0], serde_json::json!({ "case": "mac", "filter": "", "pack": true }));
+        assert_eq!(matrix[1]["case"], "ios", "{matrix}");
     }
 
     /// Every smoke test is a test of its target: a renamed or merged one is renamed here too.

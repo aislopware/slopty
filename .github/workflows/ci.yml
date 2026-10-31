@@ -676,9 +676,11 @@ jobs:
       # As the gate's lanes compile them, so the compile cache's entries are theirs
       # (xtask/src/ci_profile.rs).
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      # The worker's libghostty-vt, from the prebuilt the e2e and the worker shard keep: zig
-      # for the entry's key, and its packages only to build it. An entry restored by its prefix
-      # whose key ends in these inputs' is theirs, so nothing builds it then either.
+      # The worker's libghostty-vt, from the prebuilt the e2e keeps: zig for the entry's key,
+      # and its packages only to build it, on a miss of the entry for these exact inputs.
+      # `actions/cache` says only `cache-hit`: a condition on the `cache-matched-key` that only
+      # `actions/cache/restore` sets read empty, and the fetch ran on every hit, 70 s of every
+      # job (run 41218759169).
       - uses: ./.github/actions/zig
       - id: ghostty
         run: >-
@@ -690,12 +692,12 @@ jobs:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
-      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
@@ -736,18 +738,49 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - env:
+      # The Mac's job builds the host side once: its cases' test binaries and, when the plan has
+      # the simulator's job (`pack`), the simulator suite's too, packed into a tar it hands on as
+      # an artifact before its own tests. The simulator's runner takes it (`--host`) and only
+      # boots and builds the iOS app: building the Mac's side beside a first boot on three cores
+      # took 883 s against 182 s here, and starved the boot (run 41218759169;
+      # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). A plan that
+      # reaches the simulator alone gives this job an empty filter: it builds and packs, and runs
+      # nothing.
+      - if: matrix.case != 'ios'
+        env:
+          CASE: ${{ matrix.case }}
+          PACK: ${{ matrix.pack }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=("$CASE" --build-only --stop-on-red)
+          [ "$PACK" = true ] && args+=(--pack target/e2e/pack/host.tar)
+          xtask e2e "${args[@]}"
+      - if: matrix.pack
+        uses: actions/upload-artifact@v7
+        with:
+          name: host-build-${{ github.run_attempt }}
+          path: target/e2e/pack/host.tar
+          compression-level: 1
+          retention-days: 1
+          if-no-files-found: error
+      - if: matrix.case == 'ios' || matrix.filter != ''
+        env:
           CASE: ${{ matrix.case }}
           FILTER: ${{ matrix.filter }}
+          HOST: host-build-${{ github.run_attempt }}
           NEXTEST_RETRIES: "0"
           GH_TOKEN: ${{ github.token }}
         run: |
-          args=("$CASE" --review --stop-on-red -E "$FILTER")
+          args=("$CASE" --review -E "$FILTER")
           if [ "$CASE" = ios ]; then
-            args+=(--sim iphone --sim ipad)
+            # The iPhone alone: the iPad's one light check runs in every e2e.yml run, nightly
+            # and at a round's end, where its first boot costs no push 16 minutes.
+            args+=(--stop-on-red --sim iphone --host "$HOST")
           else
-            # Three tests at a time on the runner's three cores.
-            args+=(--test-threads 3)
+            # Three tests at a time on the runner's three cores, from the build above. Without
+            # `--stop-on-red`, whose first look would set the run aside for a push that came
+            # after this job built: a run whose jobs all began to build runs on.
+            args+=(--no-build --test-threads 3)
           fi
           xtask e2e "${args[@]}"
       - if: always()

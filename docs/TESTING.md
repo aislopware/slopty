@@ -259,8 +259,9 @@ none, since its goldens and unit tests run in the test process, unless an e2e dr
 app's accessibility tree, `slopty_kit::a11y`). `cargo xtask smoke reach` says what a change reaches
 and why. The gate runs the reached cases before main moves: its `smoke plan` job chooses them, and
 hosted Macs run them, each job from one build (`docs/DEV.md`, "Gate"): `e2e (mac)` S1 to S4, or `e2e
-(server)` S4 alone when a push reaches no other, with no app built; `e2e (ios)` S5 on the iPhone,
-then the app's launch and layout alone on the iPad. A run whose commit `gate` moved off before its
+(server)` S4 alone when a push reaches no other; `e2e (ios)` S5 on the iPhone, from the host side
+the Mac's job built and handed on while the simulator booted (the iPad's launch and layout runs in
+`e2e.yml`, beside the iPhone, nightly and at a round's end). A run whose commit `gate` moved off before its
 e2e started stands aside, cancelled whole, and the newer run carries the commit; no concurrency
 group holds the e2e jobs, so nothing sets aside the newest run (`xtask/src/gate/order.rs`, whose
 model test runs every order the jobs can end in). A change to the plan's own code must plan both

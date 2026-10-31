@@ -6,8 +6,9 @@
 //! leaves (`changes.patch` in each case's artifact).
 //!
 //! Dispatched on `gate`, a run reads the compile cache the gate's test shards fill there, as the
-//! nightly does. Each case is one job that builds once: `mac` runs the app's and the server's
-//! suites, `ios` the simulator's on the iPhone and then the iPad's one test.
+//! nightly does. The Mac's job builds the host side once and runs the app's and the server's
+//! suites; `ios` is two jobs beside it, the simulator's suite on the iPhone and the iPad's one
+//! test, each taking the host side from the Mac's job.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -35,17 +36,26 @@ const FIND: Duration = Duration::from_secs(120);
 /// own timeout is 90.
 const FINISH: Duration = Duration::from_hours(2);
 
-/// A kind of hosted run, one job of `e2e.yml` each.
+/// A kind of hosted run, the cases of `e2e.yml` it asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// The app's suites and the server's, from one build.
     Mac,
-    /// The simulator's suite on the iPhone, then the iPad's launch and layout, from one build.
+    /// The simulator's suite on the iPhone and the iPad's launch and layout, each a job of its
+    /// own from the Mac's job's build.
     Ios,
 }
 
 impl Kind {
-    /// Its name in the workflow's matrix and its job's name (`e2e (mac)`).
+    /// Its cases in the workflow's input, each a job's name too (`e2e (ipad)`).
+    pub const fn cases(self) -> &'static [&'static str] {
+        match self {
+            Self::Mac => &["mac"],
+            Self::Ios => &["ios", "ipad"],
+        }
+    }
+
+    /// Its name, as `xtask e2e` takes it.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Mac => "mac",
@@ -53,6 +63,10 @@ impl Kind {
         }
     }
 }
+
+/// The artifacts a run's cases leave, by name: the host build the Mac's job hands the
+/// simulators' (`host-build-<attempt>`) stays on GitHub.
+const CASE_ARTIFACTS: &str = "e2e-*";
 
 /// What a hosted run does with the goldens.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -261,7 +275,10 @@ pub fn follow(sh: &Shell, run: &Run, into: &Utf8Path) -> Result<Verdict> {
     std::fs::create_dir_all(into).with_context(|| format!("create {into}"))?;
     // A run that changed no frame and accepted nothing uploads no artifact, which `gh` calls an
     // error: the directory then stays empty.
-    let downloaded = cmd!(sh, "gh run download {id} --dir {into}").quiet().ignore_stderr().run();
+    let downloaded = cmd!(sh, "gh run download {id} --dir {into} --pattern {CASE_ARTIFACTS}")
+        .quiet()
+        .ignore_stderr()
+        .run();
     if downloaded.is_err() {
         println!("  no artifacts from run {id}");
     }
@@ -272,7 +289,8 @@ pub fn follow(sh: &Shell, run: &Run, into: &Utf8Path) -> Result<Verdict> {
 fn inputs(request: &Request<'_>, mark: &str, a11y: &str) -> Vec<(&'static str, String)> {
     let kinds: &[Kind] =
         if request.kinds.is_empty() { &[Kind::Mac, Kind::Ios] } else { request.kinds };
-    let names: Vec<String> = kinds.iter().map(|kind| format!("\"{}\"", kind.name())).collect();
+    let names: Vec<String> =
+        kinds.iter().flat_map(|kind| kind.cases()).map(|case| format!("\"{case}\"")).collect();
     let mut fields = vec![
         ("sha", request.sha.to_owned()),
         ("cases", format!("[{}]", names.join(", "))),
@@ -366,7 +384,7 @@ mod tests {
             inputs(&request, "7-1", ""),
             [
                 ("sha", "abc".to_owned()),
-                ("cases", r#"["ios"]"#.to_owned()),
+                ("cases", r#"["ios", "ipad"]"#.to_owned()),
                 ("filter", "test(=a::b)".to_owned()),
                 ("goldens", "accept-all".to_owned()),
                 ("id", "7-1".to_owned()),
@@ -374,7 +392,7 @@ mod tests {
         );
         let every = Request { sha: "abc", kinds: &[], filter: None, goldens: Goldens::Review };
         let fields = inputs(&every, "m", "always");
-        assert!(fields.contains(&("cases", r#"["mac", "ios"]"#.to_owned())));
+        assert!(fields.contains(&("cases", r#"["mac", "ios", "ipad"]"#.to_owned())));
         assert!(fields.contains(&("a11y", "always".to_owned())));
         // Every input a dispatch can name is one e2e.yml takes, and the variable reaches the run.
         let root = crate::tools::repo_root().expect("repo root");

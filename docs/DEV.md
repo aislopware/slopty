@@ -81,7 +81,8 @@ zed itself so it is never behind zed while longbridge lags.
   never dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the
   failed log's end and keeps every runner log under `target/remote/<name>/`. `--e2e mac|ios -E
   '<filterset>'` adds an e2e case on GitHub's hosted Macs: `mac` runs the app's and the server's
-  suites, `ios` the simulator's on the iPhone, then the iPad's one test; `-E failed` takes only the
+  suites, `ios` the simulator's on the iPhone and the iPad's one test, each a job of its own that
+  takes the host side the Mac's job builds; `-E failed` takes only the
   tests the last run of that name failed, read from `target/remote/<name>/e2e.log`. `--e2e auto`
   runs the smoke cases the check's commit reaches from `HEAD` (with `--head`, from `origin/main`: a
   round's commits), as `cargo xtask smoke reach` lists them (`xtask/src/gate/impact.rs`), in one
@@ -327,12 +328,16 @@ The e2e smoke cases a push reaches run beside the lanes (`docs/TESTING.md`, "The
 set"). The `smoke plan` job, on Linux in the first minute, runs `cargo xtask smoke plan` from
 where the push left main and emits one job per kind of Mac run with the filterset of its reached
 tests; a push that reaches none skips them. `e2e (mac)` builds the daemons, the app and the test
-binaries once, in the check's one feature set, and runs the app's cases (S1 to S3) and the
-server's (S4) on that runner, or `e2e (server)` the server's alone, with no app, when the push
-reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
-and the iPad only once the iPhone's tests are done, waits for each simulator to settle (the
-runner's CPU half idle on two `top` samples in a row, at most 10 minutes), and runs S5 on the iPhone
-and one test on the iPad, the app's launch and layout. Both read the gate's compile cache, retry
+binaries once, in the check's one feature set (`--build-only`), and runs the app's cases (S1 to S3)
+and the server's (S4) on that runner from that build (`--no-build`), or `e2e (server)` the server's
+alone when the push reaches no other. When the plan has `e2e (ios)` too, the Mac's job also builds
+the simulator suite's test binary and hands the host side on as the artifact `host-build-<attempt>`
+before its own tests (`--pack`); a push that reaches the simulator alone gets a `mac` job that only
+builds and packs. `e2e (ios)` boots the iPhone and builds the iOS app meanwhile, installs it, waits
+for the simulator to settle (the runner's CPU half idle on two `top` samples in a row, at most 10
+minutes), takes the host side (`--host`) and runs S5 on the iPhone; the iPad's launch-and-layout
+check runs in `e2e.yml` only (`docs/decisions/testing.md`, "The simulator's runner builds no Mac
+side"). Both read the gate's compile cache, retry
 nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once
 any other job of the run ended other than green (`--stop-on-red`, a look at the run's jobs each
 minute, conditional on its `ETag`, and a first one before any setup), since that run never promotes;
@@ -351,7 +356,8 @@ plan job is red. With both, a run takes all five of the plan's macOS jobs, and a
 runner jobs queue for the same five Macs, first come. `e2e.yml` runs every case (the app, the
 server, the iPhone, and the iPad's launch and layout) nightly on main's head and by hand on a commit
 named, dispatched on `gate` to read the test shards' compile cache, and from `promote` when none ran
-for 26 hours. A dispatch may name the kinds of run (`cases`, `["mac", "ios"]` by default), a
+for 26 hours. A dispatch may name the kinds of run (`cases`, `["mac", "ios", "ipad"]` by default:
+a `mac` job that builds once and packs for the simulators' jobs, each on a runner of its own), a
 filterset (`filter`), what the goldens do (`goldens`: `review`, `accept` or `accept-all`, whose
 accepted frames come back as `changes.patch` among the artifacts) and `a11y` (`SLOPTY_E2E_A11Y`,
 passed on when set where the dispatch is made); its `id`, in the run's name, is how `xtask e2e
