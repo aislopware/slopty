@@ -477,16 +477,21 @@ mod tests {
         Faults::over(Link { delay: ms(10), jitter: ms(2), loss: 0.05, rate, queue: rate / 10 })
     }
 
-    /// Keys typed beside a terminal that writes half again the link's rate: the round trips'
-    /// median and 99th percentile, and the digest.
-    async fn flooded(seed: u64) -> (Duration, Duration, u64) {
+    /// Keys typed beside a terminal that writes half again the link's rate: the round trips,
+    /// sorted, and the digest.
+    async fn flooded_trips(seed: u64) -> (Vec<Duration>, u64) {
         let mut pair = link(capped(), seed).await.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
         let keys = 200;
         let typed = type_through(&mut pair, keys, ms(30), Some(3_000), ms(0), |_| {}).await;
         assert_once_in_order(&typed, keys, seed);
         assert_one_connection(&pair, seed).await;
-        let trips = sorted(typed.round_trips);
-        (percentile(&trips, 50), percentile(&trips, 99), pair.net.digest())
+        (sorted(typed.round_trips), pair.net.digest())
+    }
+
+    /// [`flooded_trips`]' median and 99th percentile, and the digest.
+    async fn flooded(seed: u64) -> (Duration, Duration, u64) {
+        let (trips, digest) = flooded_trips(seed).await;
+        (percentile(&trips, 50), percentile(&trips, 99), digest)
     }
 
     /// Keys and their echoes stay exactly once and in order through a rate cap and loss while
@@ -498,6 +503,49 @@ mod tests {
             assert!(p50 < ms(150), "seed {seed}: echo p50 {p50:?}");
             assert!(p99 < ms(600), "seed {seed}: echo p99 {p99:?}");
         }
+    }
+
+    /// The echoes beside a flood ([`flooded_trips`]) per seed and all together, for
+    /// `docs/MEASUREMENTS.md`: whether a transport change costs the slow echoes or only moves a
+    /// few seeds. Each seed's line lets two builds be compared seed by seed.
+    #[test]
+    #[ignore = "diagnostic: SLOPTY_SIM_SEEDS=1200 cargo nextest run -p slopty-net --release --test sim --run-ignored only -E 'test(flood_report)' --no-capture"]
+    fn flood_report() {
+        let seeds: u64 =
+            std::env::var("SLOPTY_SIM_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+        let (mut all, mut p99s) = (Vec::new(), Vec::new());
+        for seed in 1..=seeds {
+            let (trips, _) = simulate(seed, flooded_trips);
+            let p99 = percentile(&trips, 99);
+            println!(
+                "seed {seed}: echo p50 {:?} p99 {p99:?} max {:?}",
+                percentile(&trips, 50),
+                trips.last()
+            );
+            p99s.push(p99);
+            all.extend(trips);
+        }
+        let (all, p99s) = (sorted(all), sorted(p99s));
+        let over = |limit: u64| all.iter().filter(|trip| **trip > ms(limit)).count();
+        println!(
+            "all {} echoes: p50 {:?} p90 {:?} p99 {:?} p99.9 {:?} max {:?} · over 150 ms {} · over 250 ms {}",
+            all.len(),
+            percentile(&all, 50),
+            percentile(&all, 90),
+            percentile(&all, 99),
+            all.get(all.len().saturating_mul(999) / 1000),
+            all.last(),
+            over(150),
+            over(250),
+        );
+        println!(
+            "p99 per seed: p50 {:?} p75 {:?} p95 {:?} p99 {:?} max {:?}",
+            percentile(&p99s, 50),
+            percentile(&p99s, 75),
+            percentile(&p99s, 95),
+            percentile(&p99s, 99),
+            p99s.last(),
+        );
     }
 
     // (f) Video beside keys on a 20 Mbit/s hop.
@@ -1025,7 +1073,7 @@ mod tests {
         Ok(())
     }
 
-    /// The seed of [`split_ids`] that failed before patch 33 (`vendor/noq-proto/SLOPTY.md`), the
+    /// The seed of [`split_ids`] that failed before patch 21 (`vendor/noq-proto/SLOPTY.md`), the
     /// only one of the first 3000. The client issues its four connection IDs at once, and a batch
     /// that resends them after a loss is cut to its short first datagram's size, so a
     /// `NEW_CONNECTION_ID` can leave as the last frame of its packet. The worker takes the first

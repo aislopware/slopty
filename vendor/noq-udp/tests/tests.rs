@@ -1,10 +1,18 @@
-use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket};
+#[cfg(apple)]
+use std::io::IoSlice;
 #[cfg(not(any(target_os = "openbsd", target_os = "netbsd", solarish)))]
 use std::net::{SocketAddr, SocketAddrV6};
-use std::slice;
+#[cfg(apple)]
+use std::os::fd::AsRawFd;
+use std::{
+    io::{self, IoSliceMut},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket},
+    slice,
+};
 
 use noq_udp::{EcnCodepoint, RecvMeta, Transmit, UdpSocketState};
+#[cfg(apple)]
+use socket2::MsgHdr;
 use socket2::Socket;
 
 /// Detect if running under Wine (test helper)
@@ -125,13 +133,19 @@ fn ecn_v6_dualstack() {
         eprintln!("Skipping ECN test on Wine (ECN not supported)");
         return;
     }
-    let recv =
-        Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-            .unwrap();
+    let recv = Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .unwrap();
     recv.set_only_v6(false).unwrap();
     // We must use the unspecified address here, rather than a local address, to support dual-stack
     // mode
-    recv.bind(&socket2::SockAddr::from("[::]:0".parse::<SocketAddr>().unwrap())).unwrap();
+    recv.bind(&socket2::SockAddr::from(
+        "[::]:0".parse::<SocketAddr>().unwrap(),
+    ))
+    .unwrap();
     let recv_v6 = SocketAddr::V6(SocketAddrV6::new(
         Ipv6Addr::LOCALHOST,
         recv.local_addr().unwrap().as_socket().unwrap().port(),
@@ -169,11 +183,17 @@ fn ecn_v4_mapped_v6() {
         eprintln!("Skipping ECN test on Wine (ECN not supported)");
         return;
     }
-    let send =
-        Socket::new(socket2::Domain::IPV6, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-            .unwrap();
+    let send = Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .unwrap();
     send.set_only_v6(false).unwrap();
-    send.bind(&socket2::SockAddr::from("[::]:0".parse::<SocketAddr>().unwrap())).unwrap();
+    send.bind(&socket2::SockAddr::from(
+        "[::]:0".parse::<SocketAddr>().unwrap(),
+    ))
+    .unwrap();
 
     let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let recv = Socket::from(recv);
@@ -200,7 +220,10 @@ fn ecn_v4_mapped_v6() {
 }
 
 #[test]
-#[cfg_attr(not(any(target_os = "linux", target_os = "windows", target_os = "android")), ignore)]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", target_os = "android")),
+    ignore
+)]
 fn gso() {
     let send = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
         .or_else(|_| UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)))
@@ -208,10 +231,12 @@ fn gso() {
     let recv = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
         .or_else(|_| UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)))
         .unwrap();
-    let max_segments = UdpSocketState::new((&send).into()).unwrap().max_gso_segments();
+    let max_segments = UdpSocketState::new((&send).into())
+        .unwrap()
+        .max_gso_segments();
     let dst_addr = recv.local_addr().unwrap();
     const SEGMENT_SIZE: usize = 128;
-    let msg = vec![0xab; SEGMENT_SIZE * max_segments.get()];
+    let msg = vec![0xAB; SEGMENT_SIZE * max_segments.get()];
     test_send_recv(
         &send.into(),
         &recv.into(),
@@ -234,14 +259,24 @@ fn socket_buffers() {
         1 // Everyone else is sane.
     };
 
-    let send =
-        Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-            .unwrap();
-    let recv =
-        Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))
-            .unwrap();
+    let send = Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .unwrap();
+    let recv = Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .unwrap();
     for sock in [&send, &recv] {
-        sock.bind(&socket2::SockAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))).unwrap();
+        sock.bind(&socket2::SockAddr::from(SocketAddrV4::new(
+            Ipv4Addr::LOCALHOST,
+            0,
+        )))
+        .unwrap();
 
         let socket_state = UdpSocketState::new(sock.into()).expect("created socket state");
 
@@ -304,8 +339,7 @@ fn socket_buffers() {
 /// passes whether or not the fix is present.
 #[test]
 fn recv_survives_icmp_unreachable_from_prior_send() {
-    use std::thread;
-    use std::time::Duration;
+    use std::{thread, time::Duration};
 
     // The socket under test, plus a legitimate peer to deliver a real datagram.
     let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -324,7 +358,9 @@ fn recv_survives_icmp_unreachable_from_prior_send() {
     // until a datagram is ready, keeping the test non-racy. The read timeout is a
     // safety net so a regression surfaces as a failure rather than a hang.
     receiver.set_nonblocking(false).unwrap();
-    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     // The receiver pokes the closed port. On Windows the ICMP port-unreachable that
     // comes back arms WSAECONNRESET against the receiver's next recv.
@@ -341,7 +377,11 @@ fn recv_survives_icmp_unreachable_from_prior_send() {
     let mut buf = [0u8; 16];
     let mut meta = RecvMeta::default();
     let n = receiver_state
-        .recv((&receiver).into(), &mut [IoSliceMut::new(&mut buf)], slice::from_mut(&mut meta))
+        .recv(
+            (&receiver).into(),
+            &mut [IoSliceMut::new(&mut buf)],
+            slice::from_mut(&mut meta),
+        )
         .expect("recv must not surface the ICMP error");
 
     assert_eq!(n, 1);
@@ -373,7 +413,11 @@ fn test_send_recv(send: &Socket, recv: &Socket, transmit: Transmit<'_>) {
     let mut datagrams = 0;
     while datagrams < expected_datagrams {
         let n = recv_state
-            .recv(recv.into(), &mut [IoSliceMut::new(&mut buf)], slice::from_mut(&mut meta))
+            .recv(
+                recv.into(),
+                &mut [IoSliceMut::new(&mut buf)],
+                slice::from_mut(&mut meta),
+            )
             .unwrap();
         assert_eq!(n, 1);
         let segments = meta.len / meta.stride;
@@ -386,7 +430,10 @@ fn test_send_recv(send: &Socket, recv: &Socket, transmit: Transmit<'_>) {
         }
         datagrams += segments;
 
-        assert_eq!(meta.addr.port(), send.local_addr().unwrap().as_socket().unwrap().port());
+        assert_eq!(
+            meta.addr.port(),
+            send.local_addr().unwrap().as_socket().unwrap().port()
+        );
         let send_v6 = send.local_addr().unwrap().as_socket().unwrap().is_ipv6();
         let recv_v6 = recv.local_addr().unwrap().as_socket().unwrap().is_ipv6();
         let mut addresses = vec![meta.addr.ip()];
@@ -481,7 +528,10 @@ fn apple_fast_datapath() {
     let recv_state = UdpSocketState::new((&recv).into()).unwrap();
 
     // Initially, fast path should be disabled and max_gso_segments should be 1
-    assert!(!send_state.is_apple_fast_path_enabled(), "fast path should be disabled initially");
+    assert!(
+        !send_state.is_apple_fast_path_enabled(),
+        "fast path should be disabled initially"
+    );
     assert_eq!(
         send_state.max_gso_segments().get(),
         1,
@@ -511,7 +561,7 @@ fn apple_fast_datapath() {
 
     const SEGMENT_SIZE: usize = 128;
     let segments = send_state.max_gso_segments().get();
-    let msg = vec![0xab; SEGMENT_SIZE * segments];
+    let msg = vec![0xAB; SEGMENT_SIZE * segments];
 
     send_state
         .try_send(
@@ -532,7 +582,11 @@ fn apple_fast_datapath() {
     while total_received < segments {
         let mut meta = RecvMeta::default();
         let n = recv_state
-            .recv((&recv).into(), &mut [IoSliceMut::new(&mut buf)], slice::from_mut(&mut meta))
+            .recv(
+                (&recv).into(),
+                &mut [IoSliceMut::new(&mut buf)],
+                slice::from_mut(&mut meta),
+            )
             .unwrap();
         assert_eq!(n, 1);
         let received_segments = meta.len / meta.stride;
@@ -549,6 +603,125 @@ fn apple_fast_datapath() {
     assert_eq!(total_received, segments, "should receive all segments");
 }
 
+#[test]
+#[cfg(apple)]
+fn sndbuf_cmsg_boundary() {
+    let send = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
+    let recv = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let dst = recv.local_addr().unwrap();
+    send.set_nonblocking(true).unwrap();
+
+    let _ = send.set_send_buffer_size(9216);
+    let sndbuf = send.send_buffer_size().unwrap();
+    let cmsg_len = tclass_cmsg_space();
+
+    let payload = vec![0u8; sndbuf];
+    for attempt in 1..=3 {
+        match raw_send_with_tclass_cmsg(&send, dst, &payload) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => wait_writable(&send),
+            other => panic!(
+                "expected macOS SO_SNDBUF/cmsg kernel bug to reproduce on attempt {attempt}, got {other:?}"
+            ),
+        }
+    }
+
+    let state = UdpSocketState::new((&send).into()).unwrap();
+    assert_min_sndbuf_enforced(&state, &send, dst, cmsg_len);
+}
+
+/// Asserts `UdpSocketState`'s `SO_SNDBUF` floor holds on `sendmsg_x`.
+#[test]
+#[cfg(apple_fast)]
+fn sndbuf_cmsg_boundary_fast_path() {
+    let send = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
+    let recv = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let dst = recv.local_addr().unwrap();
+    send.set_nonblocking(true).unwrap();
+
+    let state = UdpSocketState::new((&send).into()).unwrap();
+    // SAFETY: assumes sendmsg_x is available on the macOS test host.
+    unsafe { state.set_apple_fast_path() };
+    assert_min_sndbuf_enforced(&state, &send, dst, tclass_cmsg_space());
+}
+
+/// Asserts `UdpSocketState`'s `SO_SNDBUF` floor holds on `send`.
+#[cfg(apple)]
+fn assert_min_sndbuf_enforced(
+    state: &UdpSocketState,
+    send: &Socket,
+    dst: SocketAddr,
+    cmsg_len: usize,
+) {
+    let _ = state.set_send_buffer_size(send.into(), 1);
+    let sndbuf = state.send_buffer_size(send.into()).unwrap();
+    assert!(sndbuf >= 65535 + cmsg_len);
+
+    let transmit = Transmit {
+        destination: dst,
+        ecn: Some(EcnCodepoint::Ect0),
+        contents: &vec![0u8; 60_000],
+        segment_size: None,
+        src_ip: None,
+    };
+    match state.try_send(send.into(), &transmit) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EMSGSIZE) => {}
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            panic!("regressed: permanently stuck EWOULDBLOCK sending a large datagram")
+        }
+        Err(e) => panic!("unexpected error: {e}"),
+    }
+}
+
+/// Sends `payload` with an `IPV6_TCLASS` cmsg attached via `Socket::sendmsg`.
+#[cfg(apple)]
+fn raw_send_with_tclass_cmsg(sock: &Socket, dst: SocketAddr, payload: &[u8]) -> io::Result<()> {
+    let addr = socket2::SockAddr::from(dst);
+    let iov = [IoSlice::new(payload)];
+
+    let mut cbuf = AlignedCmsgBuf([0u8; 32]); // room for one aligned c_int cmsg
+    let mut scratch: libc::msghdr = unsafe { std::mem::zeroed() };
+    scratch.msg_control = cbuf.0.as_mut_ptr() as *mut _;
+    scratch.msg_controllen = tclass_cmsg_space() as _;
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&scratch);
+        (*cmsg).cmsg_level = libc::IPPROTO_IPV6;
+        (*cmsg).cmsg_type = libc::IPV6_TCLASS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as _) as _;
+        std::ptr::write(
+            libc::CMSG_DATA(cmsg) as *mut libc::c_int,
+            EcnCodepoint::Ect0 as libc::c_int,
+        );
+    }
+
+    let msg = MsgHdr::new()
+        .with_addr(&addr)
+        .with_buffers(&iov)
+        .with_control(&cbuf.0[..tclass_cmsg_space()]);
+    sock.sendmsg(&msg, 0).map(|_| ())
+}
+
+/// Blocks (via `poll()`) until `sock` reports `POLLOUT`, or panics after 2s.
+#[cfg(apple)]
+fn wait_writable(sock: &Socket) {
+    let mut pfd = libc::pollfd {
+        fd: sock.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    let n = unsafe { libc::poll(&mut pfd, 1, 2000) };
+    assert!(n != 0, "poll() itself timed out waiting for POLLOUT");
+}
+
+#[cfg(apple)]
+fn tclass_cmsg_space() -> usize {
+    unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as _) as usize }
+}
+
+#[cfg(apple)]
+#[repr(align(8))]
+struct AlignedCmsgBuf([u8; 32]);
+
 /// A transmit longer than one `sendmsg_x` batch goes out a batch at a time: each call reports
 /// how many datagrams it sent, and [`Transmit::advance`] leaves the rest, so nothing is dropped
 /// that the socket did not refuse (quinn-rs/quinn#2748).
@@ -558,10 +731,15 @@ fn apple_fast_datapath_reports_a_partial_send() {
     let send = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let send_state = UdpSocketState::new((&send).into()).unwrap();
-    assert!(send_state.try_enable_apple_fast_path(), "no sendmsg_x on this OS");
+    assert!(
+        send_state.try_enable_apple_fast_path(),
+        "no sendmsg_x on this OS"
+    );
     const SEGMENT_SIZE: usize = 128;
     let segments = noq_udp::BATCH_SIZE + 5;
-    let msg: Vec<u8> = (0..segments).flat_map(|i| [i as u8; SEGMENT_SIZE]).collect();
+    let msg: Vec<u8> = (0..segments)
+        .flat_map(|i| [i as u8; SEGMENT_SIZE])
+        .collect();
     let transmit = Transmit {
         destination: recv.local_addr().unwrap(),
         ecn: None,
@@ -570,11 +748,16 @@ fn apple_fast_datapath_reports_a_partial_send() {
         src_ip: None,
     };
     assert_eq!(transmit.datagram_count(), segments);
-    let first = send_state.try_send_partial((&send).into(), &transmit).unwrap();
+    let first = send_state
+        .try_send_partial((&send).into(), &transmit)
+        .unwrap();
     assert_eq!(first, noq_udp::BATCH_SIZE);
     let rest = transmit.advance(first);
     assert_eq!(rest.datagram_count(), 5);
-    assert_eq!(send_state.try_send_partial((&send).into(), &rest).unwrap(), 5);
+    assert_eq!(
+        send_state.try_send_partial((&send).into(), &rest).unwrap(),
+        5
+    );
     recv.set_nonblocking(false).unwrap();
     let mut buf = [0u8; SEGMENT_SIZE];
     for i in 0..segments {
@@ -596,7 +779,10 @@ fn a_whole_send_reports_every_datagram() {
         segment_size: None,
         src_ip: None,
     };
-    assert_eq!(state.try_send_partial((&send).into(), &transmit).unwrap(), 1);
+    assert_eq!(
+        state.try_send_partial((&send).into(), &transmit).unwrap(),
+        1
+    );
     let mut buf = [0u8; 400];
     recv.set_nonblocking(false).unwrap();
     assert_eq!(recv.recv(&mut buf).unwrap(), 300);
@@ -616,7 +802,10 @@ fn no_datagram_size_blocks_for_good_at_the_send_buffer_edge() {
         let state = UdpSocketState::new((&send).into()).unwrap();
         #[cfg(apple_fast)]
         if fast {
-            assert!(state.try_enable_apple_fast_path(), "no sendmsg_x on this OS");
+            assert!(
+                state.try_enable_apple_fast_path(),
+                "no sendmsg_x on this OS"
+            );
         }
         #[cfg(not(apple_fast))]
         if fast {
@@ -644,6 +833,9 @@ fn no_datagram_size_blocks_for_good_at_the_send_buffer_edge() {
                 }
             }
         }
-        assert!(refused > 0, "fast path {fast}: nothing past SO_SNDBUF {sndbuf} was refused");
+        assert!(
+            refused > 0,
+            "fast path {fast}: nothing past SO_SNDBUF {sndbuf} was refused"
+        );
     }
 }

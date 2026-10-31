@@ -1847,12 +1847,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   times were equal. The bound costs video nothing and keeps a key's echo out of video's queue.
 
 - ✅ **An ACK waiting on the delayed-ACK timer rides the next packet that leaves on its path**
-  (2026-09-30). Port of quinn#2747 (open) as noq-proto patch 15. An echo now carries the ACK of
-  the key it answers, so the worker sends 1.06 packets per key instead of 2.02
-  (`an_echo_carries_the_ack_of_its_key`, sim section (g)). The ACK goes only on its own path
-  and only when it fits, so a packet never grows. noq's `is_ack_only` did not count
-  OBSERVED_ADDRESS, so a debug assertion took such a packet with a bundled ACK for an ACK-only
-  one; that is fixed in the same patch.
+  (2026-09-30). Port of quinn#2747 (merged into quinn on 2026-09-02; noq's own, #853, is a draft) as
+  noq-proto patch 15. An echo now carries the ACK of the key it answers, so the worker sends 1.06
+  packets per key instead of 2.02 (`an_echo_carries_the_ack_of_its_key`, sim section (g)). The ACK
+  goes only on its own path and only when it fits, so a packet never grows. noq's `is_ack_only` did
+  not count OBSERVED_ADDRESS, so a debug assertion took such a packet with a bundled ACK for an
+  ACK-only one; that is fixed in the same patch.
 
 - ✅ **The batched Apple datapath is on** (2026-09-30, supersedes the 2026-09-04 ban). The ban
   rested on a 53 ms loopback round trip measured through iroh. Without iroh, over noq with
@@ -2028,12 +2028,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     no frame writes. It would cost bytes and hashing on every packet of the input and frame
     paths to guard a check that belongs to noq.
   - **Taken since: skipping the check for a datagram one of the connection's own IDs routed**
-    (2026-10-30, patch 33). This entry left it out on the reckoning that the worker compares
-    the token of the client's sequence-1 ID, written first of the client's
-    `NEW_CONNECTION_ID` frames (`PendingNewCids::pop`), so its frame ends a packet only when
-    sent alone, and no run or seed had sent it so. The worker in fact takes the first of the
-    client's IDs it reads, and a batched send can leave any of them alone: "A lone
-    `NEW_CONNECTION_ID` is no stateless reset", below.
+    (2026-10-30, patch 33, 21 since noq 1.4.0). This entry left it out on the reckoning that the
+    worker compares the token of the client's sequence-1 ID, written first of the client's
+    `NEW_CONNECTION_ID` frames (`PendingNewCids::pop`), so its frame ends a packet only when sent
+    alone, and no run or seed had sent it so. The worker in fact takes the first of the client's IDs
+    it reads, and a batched send can leave any of them alone: "A lone `NEW_CONNECTION_ID` is no
+    stateless reset", below.
   - Tests: `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
     `a_short_header_packet_ending_in_the_token_is_a_stateless_reset` (noq-proto,
     `packet_crypto.rs`). `a_path_that_delivers_every_datagram_twice_still_connects`
@@ -2058,6 +2058,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     refused.
   - Tests: quinn's assembler tests, in `assembler.rs` (noq-proto, 453 of its tests pass with
     the patch).
+  - *Since noq 1.4.0* (2026-10-31) the bound is upstream's: 1.4.0 has quinn#2694 and #2789 on a
+    sorted deque, but not #2814, without which a reader about 2 048 packets behind on a stream
+    with no gap is refused. noq `main` ports #2814 (#866) and fixes compaction in unordered mode
+    (#867), and patch 18 is now those two, cherry-picked until a release has them.
 
 - ✅ **A Linux socket's receive buffer** (2026-10-03). The endpoint asks for a 4 MiB
   `SO_RCVBUF` ("Every packet is 1232 bytes" above). Linux caps that at `net.core.rmem_max`,
@@ -2211,13 +2215,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a send: the dial at a fifth lost reads p99 831 ms and max 949 ms (780 ms and 1.832 s), and
     the flooded echo's per-seed p99 reads 243 ms at its p99 (235 ms) and its per-seed p50
     49/62/64 ms (48/62/63). The outages, the dial after one and the rebinding read the same.
-  - **The fix is noq-proto patch 33** (`vendor/noq-proto/SLOPTY.md`), the skip the 10-01 entry
-    did not take. The endpoint tells the connection whether one of the connection's own
-    non-empty IDs routed the datagram, and the connection does not compare such a datagram
-    with the token. A genuine reset's ID is unpredictable bits, so the endpoint finds its
-    connection by the token, and it is still taken. RFC 9000 §10.3.1 lets an endpoint skip the
-    check for a datagram whose packet it processes, and under the null crypto every packet
-    decrypts, so no real packet reads as a reset any more.
+  - **The fix is noq-proto patch 21** (33 before noq 1.4.0; `vendor/noq-proto/SLOPTY.md`), the skip
+    the 10-01 entry did not take. The endpoint tells the connection whether one of the connection's
+    own non-empty IDs routed the datagram, and the connection does not compare such a datagram with
+    the token. A genuine reset's ID is unpredictable bits, so the endpoint finds its connection by
+    the token, and it is still taken. RFC 9000 §10.3.1 lets an endpoint skip the check for a
+    datagram whose packet it processes, and under the null crypto every packet decrypts, so no real
+    packet reads as a reset any more.
   - **Rejected: a tag on the null crypto**, as on 10-01: bytes and hashing on every packet to
     guard a check that belongs to noq.
   - **Rejected: padding after a `NEW_CONNECTION_ID` that ends a packet.** It spends bytes on
@@ -2242,3 +2246,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     with a real program, its input copies racing the streams on both ends, and the client's
     terminal state, over real sockets through the relay, and checks each key lands once, in
     order, with no resync. Nothing else covers that path end to end.
+
+- ❌ **A packet that fills the congestion window to the byte** (2026-10-31, noq 1.4.0; MEASUREMENTS
+  "noq 1.4.0 on the simulated network"). RFC 9002 lets a sender go on while the bytes in flight stay
+  within the window, and 1.4.0 takes it (`9612584d`, noq#823): the packet that fills the window
+  exactly now goes, where noq held it. Slopty holds it (noq-proto patch 22). BBR3's window is often
+  whole packets (it grows by the packets acknowledged, and its floor is four), so beside a flood one
+  congestion check in twenty turns on it, and each send it lets through is one more packet in the
+  bottleneck's queue. On the simulated 2 Mbit/s link losing 5 % each way, over 1 200 seeds, the slow
+  echoes, the ones a loss sends round the queue again, waited about a packet's time longer: each
+  seed's p99 3 ms at the median, 12 % more echoes over 150 ms. The median echo did not move, nor did
+  anything else the simulation measures. 2026-10-17 left the change out on 200 seeds whose worst two
+  moved by 58 and 64 ms; those were the two seeds, and the steady cost is the smaller one. Slopty's
+  16-packet floor (`slopty_net::congestion`) so holds 15 full packets in flight and BBR3's
+  four-packet floor three, as before.

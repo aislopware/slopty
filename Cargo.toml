@@ -176,8 +176,8 @@ libc = "0.2.191"
 # `SLOPTY_BATCHED_UDP=0` (docs/decisions/transport.md, "The batched Apple datapath").
 # `noq` is the release of the vendored `noq-proto` and `noq-udp` (below, `[patch.crates-io]`):
 # it moves with them, never past them alone.
-noq = { version = "~1.3.0", default-features = false, features = [ "runtime-tokio" ] }
-noq-proto = { version = "1.3.0", default-features = false }
+noq = { version = "~1.4.0", default-features = false, features = [ "runtime-tokio" ] }
+noq-proto = { version = "1.4.0", default-features = false }
 socket2 = "0.6.5"
 data-encoding = "2.11.1"
 
@@ -444,17 +444,16 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 pretty_assertions = "1.4.1"
 
-# noq-proto 1.3.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
+# noq-proto 1.4.0 with `TransportConfig::stream_priority_before_datagrams`, so a keystroke's
 # echo is not written behind a keyframe's datagrams, `stream_priority_unpaced`, so it does not
 # wait for the pacer either, BBR3 fixes for app-limited video, a pacer that lets BBR3's send
-# quantum out together, and ACKs bundled into packets that leave anyway
-# (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists the
-# patches and how to move them.
+# quantum out together, ACKs bundled into packets that leave anyway, and the last packet of the
+# congestion window kept free (docs/decisions/transport.md). `vendor/noq-proto/SLOPTY.md` lists
+# the patches and how to move them.
 [patch.crates-io]
 noq-proto = { path = "vendor/noq-proto" }
-# noq-udp 1.3.0 with quinn's fixes for Apple's batched datapath: a send that goes out in part is
-# reported, not dropped (quinn#2748), and `SO_SNDBUF` keeps clear of macOS's `EWOULDBLOCK`
-# (quinn#2727). `vendor/noq-udp/SLOPTY.md` lists them.
+# noq-udp 1.4.0 with quinn's partial sends for Apple's batched datapath: a send that goes out in
+# part is reported, not dropped (quinn#2748). `vendor/noq-udp/SLOPTY.md` lists the patches.
 noq-udp = { path = "vendor/noq-udp" }
 # gpui-kit keeps upstream's gpui-pre requirements; the gpui-fast fork's `compat/` crates stand in
 # for them under their names (longbridge/gpui-fast#23), so the graph holds one GPUI. `xtask

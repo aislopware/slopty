@@ -1,20 +1,17 @@
-use std::io;
-use std::os::fd::AsRawFd;
+use std::{io, os::fd::AsRawFd};
 
-use crate::cmsg;
-use crate::imp::set_socket_option;
+use crate::{cmsg, imp::set_socket_option};
 
 pub(super) mod gso {
-    use std::ffi::CStr;
-    use std::mem;
-    use std::str::FromStr;
-    use std::sync::OnceLock;
-
     use super::*;
+    use std::{ffi::CStr, mem, str::FromStr, sync::OnceLock};
 
     // Support for UDP GSO has been added to linux kernel in version 4.18
     // https://github.com/torvalds/linux/commit/cb586c63e3fc5b227c51fd8c4cb40b34d3750645
-    const SUPPORTED_SINCE: KernelVersion = KernelVersion { version: 4, major_revision: 18 };
+    const SUPPORTED_SINCE: KernelVersion = KernelVersion {
+        version: 4,
+        major_revision: 18,
+    };
 
     /// Checks whether GSO support is available.
     ///
@@ -88,7 +85,11 @@ pub(super) mod gso {
         if r != 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(unsafe { CStr::from_ptr(n.release[..].as_ptr()).to_string_lossy().into_owned() })
+        Ok(unsafe {
+            CStr::from_ptr(n.release[..].as_ptr())
+                .to_string_lossy()
+                .into_owned()
+        })
     }
 
     // https://www.linfo.org/kernel_version_numbering.html
@@ -100,13 +101,19 @@ pub(super) mod gso {
 
     impl KernelVersion {
         fn from_str(release: &str) -> Option<Self> {
-            let mut split =
-                release.split_once('-').map(|pair| pair.0).unwrap_or(release).split('.');
+            let mut split = release
+                .split_once('-')
+                .map(|pair| pair.0)
+                .unwrap_or(release)
+                .split('.');
 
             let version = u8::from_str(split.next()?).ok()?;
             let major_revision = u8::from_str(split.next()?).ok()?;
 
-            Some(Self { version, major_revision })
+            Some(Self {
+                version,
+                major_revision,
+            })
         }
     }
 
@@ -125,20 +132,32 @@ pub(super) mod gso {
             // These are made up for the test
             assert_eq!(
                 KernelVersion::from_str("4.14"),
-                Some(KernelVersion { version: 4, major_revision: 14 })
+                Some(KernelVersion {
+                    version: 4,
+                    major_revision: 14
+                })
             );
             assert_eq!(
                 KernelVersion::from_str("4.18"),
-                Some(KernelVersion { version: 4, major_revision: 18 })
+                Some(KernelVersion {
+                    version: 4,
+                    major_revision: 18
+                })
             );
             // These were seen in the wild
             assert_eq!(
                 KernelVersion::from_str("4.14.186-27095505"),
-                Some(KernelVersion { version: 4, major_revision: 14 })
+                Some(KernelVersion {
+                    version: 4,
+                    major_revision: 14
+                })
             );
             assert_eq!(
                 KernelVersion::from_str("6.8.0-59-generic"),
-                Some(KernelVersion { version: 6, major_revision: 8 })
+                Some(KernelVersion {
+                    version: 6,
+                    major_revision: 8
+                })
             );
         }
     }

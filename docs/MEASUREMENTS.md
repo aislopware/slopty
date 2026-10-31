@@ -18650,3 +18650,68 @@ cargo xtask remote --name G2-ab --only Cargo.lock --only crates/slopty-visual-gp
 #   build again (before); then three rounds of
 #   <binary> what_an_animating_frame_costs --ignored --nocapture --test-threads 1
 ```
+
+## 2026-10-31 — noq 1.4.0 on the simulated network
+
+Three trees, on this Mac (Mac Studio, M1 Max): noq 1.3.0 with its 33 + 5 patches (`b4638fb8`),
+noq 1.4.0 with the patches carried and its exact window fill as published (patches 1–21), and
+1.4.0 with patch 22 holding that fill back, which ships (`vendor/noq-proto/SLOPTY.md`). The
+nightly sweep, 200 seeds of each scenario and 50 of the video report, in simulated time on
+tokio's paused clock, so the machine does not move it:
+
+| scenario | 1.3.0 | 1.4.0, the fill | 1.4.0 + patch 22 |
+| --- | --- | --- | --- |
+| dial, hop, 20 % lost each way: p50 / p99 / max | 54 / 831 / 949 ms | same | same |
+| dial with every datagram twice | 20 / 20 / 20 ms | same | same |
+| echo after a 30 s outage: p50 / p99 / max | 138 ms / 1.673 s / 3.697 s | same | same |
+| end of a 60 s outage; dial after it | 45.512 s; 20 / 51 / 140 ms | same | same |
+| 150 keys through a jittery fifth lost (split IDs) | held | held | held |
+| slowest key across a NAT rebinding: p50 / p99 / max | 33 / 110 / 140 ms | same | same |
+| echo beside a flood, p50 per seed: p50 / p99 / max | 49 / 62 / 64 ms | 49 / 61 / 64 ms | 49 / 62 / 64 ms |
+| echo beside a flood, p99 per seed: p50 / p99 / max | 160 / 243 / 251 ms | 163 / 293 / 315 ms | 160 / 243 / 251 ms |
+| 256 kB over a path narrower than the packets (seeds 1–8) | 136 ms, MTU 1200, 1 black hole | 135 ms, same | 136 ms, same |
+| video beside keys: keyframe p99 · P-frame p50 / p99 · echo p50 / p99 / max | 55 · 12 / 32 · 9 / 10 / 18 ms, none missing or lost | same | same |
+
+`flood_report` keeps every echo of that flood over 1 200 seeds:
+
+| 1 200 seeds beside a flood | 1.3.0, and 1.4.0 + patch 22 | 1.4.0, the fill |
+| --- | --- | --- |
+| all 240 000 echoes: p50 / p90 / p99 / p99.9 / max | 49 / 91 / 161 / 224 / 356 ms | 49 / 92 / 162 / 224 / 367 ms |
+| echoes over 150 ms; over 250 ms | 3 500; 84 | 3 924; 89 |
+| p99 per seed: p50 / p75 / p95 / p99 / max | 161 / 178 / 224 / 251 / 326 ms | 162 / 181 / 230 / 256 / 337 ms |
+| seeds whose p99 the fill moved: slower / faster / same | | 657 / 499 / 44; median +3 ms, mean +1.8 ms (± 1.0) |
+
+- **With patch 22, 1.4.0 is 1.3.0 here**: the flooded echo's p50, p99 and worst are the same on each
+  of 1 200 seeds (every key on the first 200), and so is every per-seed line of the video report.
+  1.4.0's other changes (#842's flow-control credit, one receive buffer a batch, the `no_std`
+  imports, the assembler now upstream's with #866 and #867) move no simulated time.
+- **The fill is the one change that moved anything**, and the 200-seed sweep overstates it: its
+  "p99 per seed at its p99" is the second-worst seed of 200, and the 293 and 315 ms are seeds 88
+  and 155. Over 1 200 seeds that percentile moves from 251 to 256 ms, and 657 seeds' p99 got
+  slower against 499 faster (a sign test's z is 4.65): the cost is real and steady, but about a
+  packet at the link's rate (4.9 ms), at the slow end only.
+- Where the fill decides a send: instrumenting `path_congestion_check` over the 200 seeds, 5.2 %
+  of the worker's 1.09 million congestion checks (half of them blocked) met a window the next
+  packet filled exactly: 51 097 on BBR3's own window when it was whole packets, 5 635 on its
+  four-packet floor, 125 otherwise, and none on Slopty's bound or its 16-packet floor (BBR3's
+  window sat below it).
+- Shaped links, in real time on this Mac while other lanes built (`echo_beside_flood`,
+  `echo_beside_session_floods` and `pacer_wait`'s `an_echo_behind_paced_video`, 1.3.0 and the
+  shipped tree interleaved, two rounds each): the arms' medians agree within 3 ms in each round but
+  one (the first round's halving link, 29.6 against 23.9 ms), and the tails follow the machine's
+  load, not the tree (1.3.0's laned arm reads p99 87.8 ms in one round and 20.3 in the next). In the
+  quieter second round, echo p99 1.3.0 against shipped: no video 4.81 / 5.80 ms, video in bursts
+  12.05 / 12.07, laned 20.30 / 9.95, metered 9.77 / 9.89, a link halving under it 17.91 / 18.86;
+  beside session floods, lifted 11.23 / 9.33, flat 14.77 / 12.90. Behind paced video at 20 Mbit/s an
+  echo waits p90 about 1.5 ms paced and 0.2 to 0.5 ms unpaced in both.
+
+```sh
+SLOPTY_SIM_SEEDS=50 cargo test --release -p slopty-net --test sim -- --include-ignored \
+  --nocapture --test-threads 1 every_scenario narrower video_report
+SLOPTY_SIM_SEEDS=1200 cargo test --release -p slopty-net --test sim -- --ignored --nocapture \
+  --exact tests::flood_report
+cargo nextest run -p slopty-net --release --test echo_beside_flood --run-ignored only --no-capture
+cargo nextest run -p slopty-net --release --test echo_beside_sessions --run-ignored only \
+  --no-capture
+cargo nextest run -p slopty-net --release --test pacer_wait --run-ignored only --no-capture
+```

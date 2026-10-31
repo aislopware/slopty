@@ -1,23 +1,30 @@
-use std::{
-    cmp,
+use alloc::{
+    borrow::ToOwned,
+    boxed::Box,
     collections::{BTreeMap, VecDeque, btree_map},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
+use core::{
+    cmp,
     convert::TryFrom,
-    fmt, io, mem,
+    fmt, mem,
     net::SocketAddr,
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
 };
+use std::io;
 
 use bytes::{Bytes, BytesMut};
 use frame::StreamMetaVec;
 
 use rand::{RngExt, SeedableRng, rngs::StdRng};
-use rustc_hash::FxHashMap;
 use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, FourTuple, Frame, INITIAL_MTU, Instant, MAX_CID_SIZE,
+    Dir, Duration, EndpointConfig, FourTuple, Frame, FxHashMap, INITIAL_MTU, Instant, MAX_CID_SIZE,
     MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit,
     TransportError, TransportErrorCode, VarInt,
     cid_queue::CidQueue,
@@ -102,7 +109,7 @@ pub use streams::{
     ShouldTransmit, StreamEvent, Streams, WriteError,
 };
 
-mod timer;
+pub(crate) mod timer;
 use timer::{Timer, TimerTable};
 
 mod transmit_buf;
@@ -360,9 +367,13 @@ impl Connection {
             ),
         )]);
 
+        let crypto_state = CryptoState::new(crypto, init_cid, side, &mut rng);
+        #[cfg(test)]
+        let crypto_state = crypto_state.with_key_phase_size(config.initial_key_phase_size);
+
         let mut this = Self {
             endpoint_config,
-            crypto_state: CryptoState::new(crypto, init_cid, side, &mut rng),
+            crypto_state,
             handshake_cid: local_cid,
             remote_handshake_cid: remote_cid,
             local_cid_state,
@@ -453,6 +464,15 @@ impl Connection {
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         self.timers.peek()
+    }
+
+    /// Returns the instant at which `timer` is armed to fire, or `None` if it is not.
+    ///
+    /// `None` covers the timer never having been armed, having fired, and having been
+    /// cancelled.
+    #[cfg(test)]
+    pub(crate) fn timer_pending(&self, timer: Timer) -> Option<Instant> {
+        self.timers.get(timer)
     }
 
     /// Returns application-facing events
@@ -1861,8 +1881,6 @@ impl Connection {
 
         builder.finish_and_track(now, self, path_id, PadDatagram::ToSize(probe_size));
 
-        self.path_stats.get_mut(path_id).sent_plpmtud_probes += 1;
-
         Some(self.build_transmit(path_id, transmit))
     }
 
@@ -1964,6 +1982,9 @@ impl Connection {
 
         if can_send.other && !need_loss_probe && !can_send.close {
             let path = self.path_data(path_id);
+            // A packet never fills the window to the byte: of a window that is whole packets,
+            // as BBR3's often is (it grows by the packets acknowledged, its floor is four), the
+            // last one's room stays free, a packet less queued at the bottleneck.
             if path.in_flight.bytes + bytes_to_send >= path.congestion.window() {
                 trace!(
                     ?space_id,
@@ -1986,8 +2007,7 @@ impl Connection {
                 .is_some_and(|priority| self.streams.has_pending_at(priority));
         if unpaced {
             trace!(?space_id, %path_id, "unpaced stream data pending");
-        } else if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now)
-        {
+        } else if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now) {
             let resume_time = now + delay;
             self.timers.set(
                 Timer::PerPath(path_id, PathTimer::Pacing),
@@ -2698,6 +2718,7 @@ impl Connection {
         let mut stats = self.path_stats.get(path_id).unwrap_or_default();
         stats.rtt = path.data.rtt.get();
         stats.cwnd = path.data.congestion.window();
+        stats.bandwidth_estimate = path.data.congestion.metrics().bandwidth_estimate;
         stats.current_mtu = path.data.mtud.current_mtu();
         Some(stats)
     }
@@ -3358,8 +3379,10 @@ impl Connection {
             if packet_too_old || largest_acked_packet_pn >= packet + packet_threshold {
                 // The packet should be declared lost.
                 if Some(packet) == in_flight_mtu_probe {
-                    // Lost MTU probes are not included in `lost_packets`, because they
-                    // should not trigger a congestion control response
+                    // MTU probes are handled separately: they should not trigger
+                    // retransmission or a congestion control response. They are still
+                    // counted in the `lost_packets`/`lost_bytes` stats (in
+                    // `handle_lost_packets`), consistent with `sent_packets`.
                     lost_mtu_probe = in_flight_mtu_probe;
                 } else {
                     lost_packets.push(packet);
@@ -3563,7 +3586,12 @@ impl Connection {
                 .unwrap()
                 .remove_in_flight(&info);
             self.path_data_mut(path_id).mtud.on_probe_lost();
-            self.path_stats.get_mut(path_id).lost_plpmtud_probes += 1;
+            let path_stats = self.path_stats.get_mut(path_id);
+            path_stats.lost_plpmtud_probes += 1;
+            // MTUD probes are also counted in the general lost_packets/lost_bytes
+            // counters, consistent with sent_packets/sent_bytes counting all packets.
+            path_stats.lost_packets += 1;
+            path_stats.lost_bytes += info.size as u64;
         }
     }
 
@@ -4086,7 +4114,6 @@ impl Connection {
             .crypto_stream
             .insert(crypto.offset, crypto.data.clone(), payload_len)
             .map_err(|_| TransportError::INTERNAL_ERROR("too many gaps in crypto stream buffer"))?;
-
         while let Some(chunk) = crypto_space.crypto_stream.read(usize::MAX, true) {
             trace!("consumed {} CRYPTO bytes", chunk.bytes.len());
             if self.crypto_state.session.read_handshake(&chunk.bytes)? {
@@ -4253,7 +4280,10 @@ impl Connection {
     ) {
         let qlog = QlogRecvPacket::new(partial_decode.len());
         let reset_token = self.peer_params.stateless_reset_token.filter(|_| may_reset);
-        if let Some(decoded) = self.crypto_state.unprotect_header(partial_decode, reset_token) {
+        if let Some(decoded) = self
+            .crypto_state
+            .unprotect_header(partial_decode, reset_token)
+        {
             self.handle_packet(
                 now,
                 network_path,
@@ -6894,6 +6924,12 @@ impl Connection {
             .ok()?;
 
         Some(packet.payload.to_vec())
+    }
+
+    /// How many 1-RTT packets may still be sent before the keys are updated
+    #[cfg(test)]
+    pub(crate) fn key_phase_size(&self) -> u64 {
+        self.crypto_state.key_phase_size
     }
 
     /// The number of bytes of packets containing retransmittable frames that have not been

@@ -1,23 +1,28 @@
-use std::io::{self, IoSliceMut};
-use std::mem::{self, MaybeUninit};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::num::NonZeroUsize;
-use std::os::fd::AsRawFd;
 #[cfg(not(any(apple, target_os = "openbsd", solarish)))]
 use std::ptr;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    io::{self, IoSliceMut},
+    mem::{self, MaybeUninit},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    num::NonZeroUsize,
+    os::fd::AsRawFd,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use socket2::SockRef;
+
+use super::{
+    EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef, cmsg, log_sendmsg_error,
+};
 
 #[cfg(apple_fast)]
 use super::apple_fast::{msghdr_x, recv_via_recvmsg_x, send_partial};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 use super::linux::gso;
-use super::{
-    EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef, cmsg, log_sendmsg_error,
-};
 
 /// Tokio-compatible UDP socket with some useful specializations.
 ///
@@ -50,12 +55,6 @@ pub struct UdpSocketState {
 }
 
 impl UdpSocketState {
-    /// Smallest `SO_SNDBUF` that mitigates <https://feedbackassistant.apple.com/feedback/23671230>:
-    /// On macOS, a non-blocking SOCK_DGRAM `sendmsg`/`sendmsg_x` call with ancillary data returns
-    /// `EWOULDBLOCK` when the payload length is at or just under `SO_SNDBUF`.
-    #[cfg(apple)]
-    const MIN_SAFE_SNDBUF: usize = 65535 + cmsg::LEN;
-
     pub fn new(sock: UdpSockRef<'_>) -> io::Result<Self> {
         let io = sock.0;
         let mut cmsg_platform_space = 0;
@@ -101,7 +100,10 @@ impl UdpSocketState {
         }
 
         let mut may_fragment = false;
-        #[cfg_attr(not(any(target_os = "linux", target_os = "android")), expect(unused_mut))]
+        #[cfg_attr(
+            not(any(target_os = "linux", target_os = "android")),
+            expect(unused_mut)
+        )]
         let mut gro_segments = NonZeroUsize::MIN;
 
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -187,7 +189,10 @@ impl UdpSocketState {
 
         // Enlarge SO_SNDBUF to a safe minimum.
         #[cfg(apple)]
-        if io.send_buffer_size().is_ok_and(|cur| cur < Self::MIN_SAFE_SNDBUF) {
+        if io
+            .send_buffer_size()
+            .is_ok_and(|cur| cur < Self::MIN_SAFE_SNDBUF)
+        {
             let _ = io.set_send_buffer_size(Self::MIN_SAFE_SNDBUF);
         }
 
@@ -216,6 +221,7 @@ impl UdpSocketState {
     ///
     /// If you would like to handle these errors yourself, use [`UdpSocketState::try_send`]
     /// instead.
+    #[deprecated(note = "silences I/O errors; use `UdpSocketState::try_send()` instead")]
     pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         match send_whole(self, socket.0, transmit) {
             Ok(()) => Ok(()),
@@ -338,8 +344,10 @@ impl UdpSocketState {
         };
         socket.0.set_send_buffer_size(bytes)?;
         #[cfg(apple)]
-        self.send_buffer_size
-            .store(socket.0.send_buffer_size().unwrap_or(bytes), Ordering::Relaxed);
+        self.send_buffer_size.store(
+            socket.0.send_buffer_size().unwrap_or(bytes),
+            Ordering::Relaxed,
+        );
         Ok(())
     }
 
@@ -436,6 +444,12 @@ impl UdpSocketState {
         }
         f
     }
+
+    /// Smallest `SO_SNDBUF` that mitigates <https://feedbackassistant.apple.com/feedback/23671230>:
+    /// On macOS, a non-blocking SOCK_DGRAM `sendmsg`/`sendmsg_x` call with ancillary data returns
+    /// `EWOULDBLOCK` when the payload length is at or just under `SO_SNDBUF`.
+    #[cfg(apple)]
+    const MIN_SAFE_SNDBUF: usize = 65535 + cmsg::LEN;
 
     /// Safety net returning `EMSGSIZE` for payload sizes in the bug's region.
     #[cfg(apple)]
@@ -618,7 +632,12 @@ fn recv_via_recvmmsg(
     let mut hdrs = unsafe { mem::zeroed::<[libc::mmsghdr; BATCH_SIZE]>() };
     let max_msg_count = bufs.len().min(BATCH_SIZE);
     for i in 0..max_msg_count {
-        prepare_recv(&mut bufs[i], &mut names[i], &mut ctrls[i], &mut hdrs[i].msg_hdr);
+        prepare_recv(
+            &mut bufs[i],
+            &mut names[i],
+            &mut ctrls[i],
+            &mut hdrs[i].msg_hdr,
+        );
     }
     let msg_count = retry_if_interrupted(|| unsafe {
         libc::recvmmsg(
@@ -735,7 +754,9 @@ fn prepare_msg(
                 {
                     let pktinfo = libc::in_pktinfo {
                         ipi_ifindex: 0,
-                        ipi_spec_dst: libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) },
+                        ipi_spec_dst: libc::in_addr {
+                            s_addr: u32::from_ne_bytes(v4.octets()),
+                        },
                         ipi_addr: libc::in_addr { s_addr: 0 },
                     };
                     encoder.push(libc::IPPROTO_IP, libc::IP_PKTINFO, pktinfo);
@@ -743,7 +764,9 @@ fn prepare_msg(
                 #[cfg(any(bsd, apple, solarish))]
                 {
                     if encode_src_ip {
-                        let addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) };
+                        let addr = libc::in_addr {
+                            s_addr: u32::from_ne_bytes(v4.octets()),
+                        };
                         encoder.push(libc::IPPROTO_IP, libc::IP_RECVDSTADDR, addr);
                     }
                 }
@@ -754,7 +777,9 @@ fn prepare_msg(
             IpAddr::V6(v6) => {
                 let pktinfo = libc::in6_pktinfo {
                     ipi6_ifindex: 0,
-                    ipi6_addr: libc::in6_addr { s6_addr: v6.octets() },
+                    ipi6_addr: libc::in6_addr {
+                        s6_addr: v6.octets(),
+                    },
                 };
                 encoder.push(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, pktinfo);
             }
@@ -852,8 +877,9 @@ impl ControlMetadata {
             #[cfg(any(target_os = "linux", target_os = "android"))]
             (libc::IPPROTO_IP, libc::IP_PKTINFO) => {
                 let pktinfo = unsafe { cmsg::decode::<libc::in_pktinfo, libc::cmsghdr>(cmsg) };
-                self.dst_ip =
-                    Some(IpAddr::V4(Ipv4Addr::from(pktinfo.ipi_addr.s_addr.to_ne_bytes())));
+                self.dst_ip = Some(IpAddr::V4(Ipv4Addr::from(
+                    pktinfo.ipi_addr.s_addr.to_ne_bytes(),
+                )));
                 self.interface_index = Some(pktinfo.ipi_ifindex as u32);
             }
             #[cfg(any(bsd, apple))]
@@ -909,7 +935,9 @@ pub(crate) fn decode_socket_addr(name: &libc::sockaddr_storage) -> io::Result<So
                 addr.sin6_scope_id,
             )))
         }
-        f => Err(io::Error::other(format!("expected AF_INET or AF_INET6, got {f}"))),
+        f => Err(io::Error::other(format!(
+            "expected AF_INET or AF_INET6, got {f}"
+        ))),
     }
 }
 

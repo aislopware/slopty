@@ -1,7 +1,9 @@
-use std::io::{self, IoSliceMut};
-use std::num::NonZeroUsize;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::{
+    io::{self, IoSliceMut},
+    num::NonZeroUsize,
+    sync::Mutex,
+    time::Instant,
+};
 #[cfg(target_os = "wasi")]
 use std::{
     mem::{ManuallyDrop, MaybeUninit},
@@ -50,6 +52,7 @@ impl UdpSocketState {
     ///
     /// If you would like to handle these errors yourself, use [`UdpSocketState::try_send`]
     /// instead.
+    #[deprecated(note = "silences I/O errors; use `UdpSocketState::try_send()` instead")]
     pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         match send(socket, transmit) {
             Ok(()) => Ok(()),
@@ -146,7 +149,10 @@ impl UdpSocketState {
 }
 
 fn send(socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
-    socket.0.send_to(transmit.contents, &socket2::SockAddr::from(transmit.destination))?;
+    socket.0.send_to(
+        transmit.contents,
+        &socket2::SockAddr::from(transmit.destination),
+    )?;
     Ok(())
 }
 

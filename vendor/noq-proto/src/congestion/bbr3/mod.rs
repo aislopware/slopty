@@ -1,8 +1,7 @@
 mod max_filter;
 
-use std::any::Any;
-use std::collections::VecDeque;
-use std::sync::Arc;
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc};
+use core::any::Any;
 
 use rand::{RngExt, SeedableRng};
 use rand_pcg::Pcg32;
@@ -1162,9 +1161,9 @@ impl Bbr3 {
             let quiet = rate_sample.tx_in_flight <= self.quiet_inflight();
             // A flow quiet within the last ProbeRTT's length will be again soon: the refresh
             // waits for that moment rather than dipping for one.
-            let quiet_lately = self.quiet_sample_stamp.is_some_and(|at| {
-                now.saturating_duration_since(at) <= self.probe_rtt_duration
-            });
+            let quiet_lately = self
+                .quiet_sample_stamp
+                .is_some_and(|at| now.saturating_duration_since(at) <= self.probe_rtt_duration);
             if quiet {
                 self.quiet_sample_stamp = Some(now);
             }
@@ -1966,6 +1965,7 @@ impl Bbr3 {
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
             send_quantum: Some(self.send_quantum),
+            bandwidth_estimate: (self.max_bw > 0.0).then_some((self.max_bw * 8.0).round() as u64),
         }
     }
 
@@ -2163,9 +2163,12 @@ impl ControllerFactory for Bbr3Config {
 
 #[cfg(test)]
 mod test {
+    use alloc::{vec, vec::Vec};
+    use std::println;
+
     use super::*;
-    use std::cell::Cell;
-    use std::ops::ControlFlow;
+    use core::cell::Cell;
+    use core::ops::ControlFlow;
 
     /// PROBE_UP undo snapshot taken before a (possibly spurious) loss:
     /// (state, bw_shortterm, inflight_shortterm, inflight_longterm).
@@ -4123,8 +4126,7 @@ mod test {
                     // and that packet, sent with nothing else in flight, is itself the
                     // measurement ProbeRTT would take (Slopty's quiet-sample refresh), so it
                     // refreshed the filter at this ack.
-                    probe_rtt_expired_at_resume =
-                        Some(bbr.probe_rtt_min_stamp == Some(at(now_ns)));
+                    probe_rtt_expired_at_resume = Some(bbr.probe_rtt_min_stamp == Some(at(now_ns)));
                 }
                 acks_after_resume += 1;
 
@@ -7332,7 +7334,7 @@ mod test {
 
         fn send_ack(&mut self) {
             self.ack_timer_ns = None;
-            let packets = std::mem::take(&mut self.unacked);
+            let packets = core::mem::take(&mut self.unacked);
             self.acks
                 .push_back((self.now_ns + Self::RTT_NS / 2, packets));
         }
@@ -7404,7 +7406,10 @@ mod test {
             bbr.on_ack(now, sent, MSS, pn, SpaceKind::Data, false, &rtt);
         }
         bbr.on_end_acks(now, 0, false, Some(9), SpaceKind::Data);
-        assert_eq!(bbr.min_rtt, path_rtt, "not the initial RTT of {initial_rtt:?}");
+        assert_eq!(
+            bbr.min_rtt, path_rtt,
+            "not the initial RTT of {initial_rtt:?}"
+        );
         assert_eq!(bbr.rs.map(|rs| rs.rtt), Some(path_rtt));
     }
 
@@ -7571,7 +7576,11 @@ mod test {
         assert_eq!(bbr.max_inflight, 2 * bdp + 250_000);
         bbr.extra_acked = 3_000;
         bbr.update_max_inflight();
-        assert_eq!(bbr.max_inflight, 2 * bdp + 3_000, "a small allowance is taken whole");
+        assert_eq!(
+            bbr.max_inflight,
+            2 * bdp + 3_000,
+            "a small allowance is taken whole"
+        );
     }
 
     /// Video goes idle between frames, and the first packet of each frame leaves with nothing
@@ -7586,7 +7595,10 @@ mod test {
         assert_eq!(sim.probe_rtt_entries, 0, "ProbeRTT entered");
         let stamp = sim.bbr.probe_rtt_min_stamp.unwrap();
         let age = sim.at(sim.now_ns).saturating_duration_since(stamp);
-        assert!(age <= sim.bbr.probe_rtt_interval, "min RTT not refreshed for {age:?}");
+        assert!(
+            age <= sim.bbr.probe_rtt_interval,
+            "min RTT not refreshed for {age:?}"
+        );
         assert!(
             sim.bbr.min_rtt >= Duration::from_nanos(VideoSim::RTT_NS)
                 && sim.bbr.min_rtt <= Duration::from_nanos(VideoSim::RTT_NS + 2_000_000),

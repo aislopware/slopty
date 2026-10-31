@@ -1,7 +1,9 @@
-# noq-proto, vendored with thirty-three patches
+# noq-proto, vendored with twenty-two patches
 
-The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
-`c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
+The published `noq-proto` 1.4.0 (crates.io, upstream tag `noq-proto-v1.4.0`, commit
+`34f75c49f` of <https://github.com/n0-computer/noq>) with these commits on top. Patches 1 to 20
+keep the numbers they had on 1.3.0; 21 was 33 there, 22 undoes one of 1.4.0's changes, and
+1.3.0's 21 to 32 are 1.4.0's own ("The sync to 1.4.0", below).
 
 1. `feat(proto): Add TransportConfig::stream_priority_before_datagrams`
 
@@ -95,17 +97,17 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
 
 10. `fix(proto): Keep a validated path to fall back to when a migration's check fails`
 
-   `Connection::migrate` keeps the path it leaves so that a failed validation of the new one
-   can go back to it. Its comment says it keeps that path only if it was validated, but the
-   test was inverted (`!prev_path_data.validated`), so a migration away from a working path
-   kept nothing. When the one PATH_CHALLENGE to the new address was lost, the retry waited on
-   the anti-amplification budget the padded challenge had spent, `PathValidationFailed` fired
-   first and cleared the challenge, and with nothing to go back to the path stayed unvalidated
-   for good. noq sends no data on an unvalidated path, not even ACKs, while PINGs kept the
-   connection from timing out: after a NAT rebinding the worker never sent the client another
-   byte. With the test the right way round, the failed check goes back to the old path, and the
-   client's next packet from its new address starts the migration again. Upstream `main` still
-   has the inverted test (checked 2026-09-29). Slopty's gate holds it through
+   `Connection::migrate` keeps the path it leaves so that a failed validation of the new one can go
+   back to it. Its comment says it keeps that path only if it was validated, but the test was
+   inverted (`!prev_path_data.validated`), so a migration away from a working path kept nothing.
+   When the one PATH_CHALLENGE to the new address was lost, the retry waited on the
+   anti-amplification budget the padded challenge had spent, `PathValidationFailed` fired first and
+   cleared the challenge, and with nothing to go back to the path stayed unvalidated for good. noq
+   sends no data on an unvalidated path, not even ACKs, while PINGs kept the connection from timing
+   out: after a NAT rebinding the worker never sent the client another byte. With the test the right
+   way round, the failed check goes back to the old path, and the client's next packet from its new
+   address starts the migration again. noq 1.4.0 and `main` still have the inverted test (checked
+   2026-10-31, `main` at `70fdbfa2`). Slopty's gate holds it through
    `a_nat_rebinding_moves_the_connection_without_a_reconnect` (`crates/slopty-net/tests/sim.rs`,
    seed 10 loses the first challenge).
 
@@ -124,9 +126,9 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
 12. `fix(proto): Cap BBR3's ACK-aggregation allowance at 100 ms of bandwidth`
 
    `BBRUpdateMaxInflight` adds `extra_acked` to the window with no bound. Linux caps it at
-   `bbr_extra_acked_max_us`, 100 ms at `BBR.bw`, and so does this. Patch 2 removed the one
-   runaway seen so far; the cap keeps any other (a clumping path, a count that outlives its
-   interval) from growing the window with it. Test: `ack_aggregation_adds_at_most_100_ms_of_bandwidth`.
+   `bbr_extra_acked_max_us`, 100 ms at `BBR.bw`, and so does this. Patch 2 removed the one runaway
+   seen so far; the cap keeps any other (a clumping path, a count that outlives its interval) from
+   growing the window with it. Test: `ack_aggregation_adds_at_most_100_ms_of_bandwidth`.
 
 13. `fix(proto): Refresh BBR3's ProbeRTT filter from a flow's own quiet round trips`
 
@@ -150,29 +152,33 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
 
 15. `feat(proto): Bundle a pending ACK into a packet that leaves anyway`
 
-   Port of quinn-rs/quinn#2747 (open). An ACK the delayed-ACK timer holds went out in a packet
-   of its own when the timer fired, even when an ack-eliciting packet had left on the same
-   path in the meantime. `populate_packet` now adds it, when it fits, to any ack-eliciting
-   packet on its own path that carries no ACK yet (`PendingAcks::can_bundle`). An echo now
-   carries the ACK of the key it answers: in Slopty's simulated network the worker sends 1.06
-   packets per key instead of 2.02. The ACK frame is built by a new `ack_frame`, shared with
-   `populate_acks`, and sized without encoding by `AckEncoder::size` and `PathAckEncoder::size`
-   (3.5 to 10 ns for one to eight ranges, where encoding into a `Vec` to measure it took 27 to
-   99 ns; `ack_size_is_its_encoded_length` holds the two equal). `SentFrames::is_ack_only` now also counts `path_retransmits`, since a
-   packet holding OBSERVED_ADDRESS and a bundled ACK is not ACK-only, and the debug assertion
-   that relies on it fired in the address-discovery tests. Test: `ack_bundled_with_datagrams`.
-   `path_open_challenge_lost` advanced wakeups a fixed number of times to reach the third
-   challenge; bundling moves a probe timeout in between, so it now advances until the
-   challenge count rises.
+   Port of quinn-rs/quinn#2747 (merged into quinn 2026-09-02; noq#853, "wip ack bundling", is noq's
+   own start on it, a draft). An ACK the delayed-ACK timer holds went out in a packet of its own
+   when the timer fired, even when an ack-eliciting packet had left on the same path in the
+   meantime. `populate_packet` now adds it, when it fits, to any ack-eliciting packet on its own
+   path that carries no ACK yet (`PendingAcks::can_bundle`). An echo now carries the ACK of the key
+   it answers: in Slopty's simulated network the worker sends 1.06 packets per key instead of 2.02.
+   The ACK frame is built by a new `ack_frame`, shared with `populate_acks`, and sized without
+   encoding by `AckEncoder::size` and `PathAckEncoder::size` (3.5 to 10 ns for one to eight ranges,
+   where encoding into a `Vec` to measure it took 27 to 99 ns; `ack_size_is_its_encoded_length`
+   holds the two equal). `SentFrames::is_ack_only` now also counts `path_retransmits`, since a
+   packet holding OBSERVED_ADDRESS and a bundled ACK is not ACK-only, and the debug assertion that
+   relies on it fired in the address-discovery tests. Quinn's merged version holds bundling back for
+   a round trip and the peer's `max_ack_delay` after an ACK unless an ack-eliciting packet arrives;
+   `can_bundle` bundles only while one has arrived since the last ACK, so it never bundles more
+   often. Test: `ack_bundled_with_datagrams`. `path_open_challenge_lost` advanced wakeups a fixed
+   number of times to reach the third challenge; bundling moves a probe timeout in between, so it
+   now advances until the challenge count rises.
 
 16. `fix(proto): Keep a queued datagram exactly at the new limit`
 
-   Part of quinn-rs/quinn#2839 (open). When black-hole detection lowers the MTU, queued
-   datagrams that no longer fit are dropped, but the test was `len < max`, so one exactly at
-   the new limit went too, although `send` accepts that size. Slopty's minimum MTU sits below
-   its initial one, so the drop can happen. The rest of #2839 prunes the queue after a path
-   reset or migration; here those only ever raise the MTU back to the initial 1232, so it is not
-   taken. Test: `drop_oversized_keeps_datagrams_at_limit`.
+   Part of quinn-rs/quinn#2839 (merged into quinn 2026-09-10, not in noq). When black-hole detection
+   lowers the MTU, queued datagrams that no longer fit are dropped, but the test was `len < max`, so
+   one exactly at the new limit went too, although `send` accepts that size. Slopty's minimum MTU
+   sits below its initial one, so the drop can happen. The rest of #2839 prunes the queue after a
+   path reset or migration; here those only ever raise the MTU back to the initial 1232, so it is
+   not taken. 1.4.0 moved the queue into `DatagramBuffer` (#823) and kept the `<` in
+   `DatagramState::drop_oversized`. Test: `drop_oversized_keeps_datagrams_at_limit`.
 
 17. `fix(proto): Take only a short-header packet for a stateless reset`
 
@@ -190,17 +196,26 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    `a_long_header_packet_ending_in_the_token_is_no_stateless_reset` and
    `a_short_header_packet_ending_in_the_token_is_a_stateless_reset`.
 
-18. `fix(proto): Bound the assembler's chunk count` (n0-computer/noq#828, open)
+18. `fix(proto): coalesce contiguous chunks during defragment` (noq#866, `3ff2822f`) and
+    `fix(proto): keep unread data when compacting an unordered stream` (noq#867, `b70f1f2e`)
 
-   RUSTSEC-2026-0185 (CVE-2026-25800): a peer that sends small STREAM or CRYPTO frames with gaps
-   between them makes the `Assembler` keep every chunk while the reader waits for the missing
-   prefix, without bound. noq-proto 1.3.0 predates quinn's fix, and `cargo audit` cannot flag
-   it under the crate's new name. The pull request ports quinn-proto 0.11.18's assembler as
-   three commits, one per quinn fix (quinn-rs/quinn#2694, #2789, #2814). `insert` refuses with
-   `TooManyChunks` past 1024 chunks left after defragmenting, which closes the connection with
-   `INTERNAL_ERROR`. The cap is checked whatever the over-allocation, and small contiguous
-   chunks are coalesced while defragmenting, so a slow reader on a large receive window is not
-   refused. Applied as the pull request's diff, unchanged. Tests: quinn's, in `assembler.rs`.
+   noq `main`'s two assembler fixes after 1.4.0, cherry-picked. RUSTSEC-2026-0185
+   (CVE-2026-25800): a peer that sends small STREAM or CRYPTO frames with gaps between them made
+   the `Assembler` keep every chunk while the reader waited for the missing prefix. 1.4.0 has
+   quinn's bound (quinn-rs/quinn#2694, #2789: `insert` refuses with `TooManyChunks` past 1024
+   chunks left after defragmenting, which closes the connection with `INTERNAL_ERROR`) on a
+   sorted `VecDeque` (#2803), but not #2814: a packet-sized chunk, once defragmented, is never
+   merged again, so a reader about 2 048 packets behind on a stream with no gap at all is refused
+   with "too many gaps in stream buffer". #866 ports #2814 onto the deque (contiguous chunks
+   smaller than `buffered / MAX_CHUNKS`, at least 128 bytes, are merged while defragmenting).
+   #867 fixes compaction in unordered mode, which discarded data below `bytes_read`, there a
+   count of delivered bytes rather than an offset (noq#865). With both this file is `main`'s as
+   of `70fdbfa2`. Before 1.4.0 this patch was quinn 0.11.18's assembler on noq's old heap
+   (noq#828, closed for #866). Slopty reads every stream in order, so #867 does not reach it;
+   #866 does: a session stream its reader falls far behind on (a scrollback replayed into a busy
+   client) is not refused. Tests: upstream's, in `assembler.rs`
+   (`ordered_lossless_stream_is_not_rejected`, `unordered_compaction_keeps_unread_data` and
+   quinn's).
 
 19. `fix(proto): Advance BBR3's max_bw filter once per probe`
 
@@ -226,98 +241,7 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    passed only on the filter's decayed `max_bw`. Test:
    `probe_up_goes_on_while_inflight_longterm_holds_it`.
 
-21. `fix(proto): do not coalesce into a too small datagram tail` (upstream #792, `f916a5c5`)
-
-   A CONNECTION_CLOSE during the handshake handed its datagram to the next packet number space
-   without checking that the rest could hold a packet. With an `initial_mtu` above 1200, the
-   Initial close, padded to 1200, left a tail under `MIN_PACKET_SPACE`, and the Handshake close
-   was written past the datagram's end in a release build. Taken before a release has it. Test:
-   `close_during_handshake_does_not_coalesce_into_a_too_small_datagram_tail`.
-
-22. `fix(proto): match unspecified local IP when sending connection close` (upstream #822,
-   `34ec9691`)
-
-   A client's first path has no local IP, while a received packet's has one, so the strict
-   comparison never matched and a client that failed early sent no CONNECTION_CLOSE: the
-   other side waited out its idle timeout. It now compares with `is_probably_same_path`.
-
-Patches 23 to 32 are noq `main`'s ports of quinn fixes (n0-computer/noq#823, through `58869bfb`,
-2026-10-17), cherry-picked onto this tree. The datagram ones touch Slopty's media path; the rest
-are correctness and denial-of-service bounds a peer could reach.
-
-23. `fix(proto): congestion: saturate CUBIC window increment to avoid overflow` (`d7f3a883`)
-
-   `SLOPTY_CC=cubic` is the one way Slopty runs CUBIC; an overflowing increment there wrapped.
-
-24. `fix(proto): pass CID length/lifetime to Connection::new directly` (`9fc7f708`) and
-    `refactor(proto): route locally-created CIDs via RouteDatagramTo` (`fdd40871`)
-
-   No behaviour; patch 25 is written on them.
-
-25. `fix(proto): Check limits when processing already retired CIDs` (`78a4b2ee`)
-
-   A NEW_CONNECTION_ID for a sequence already retired queued its retirement past
-   `MAX_PENDING_RETIRED_CIDS`, so a peer could grow the queue without bound. Both paths now go
-   through one bounded `Retransmits::retire_cids`.
-
-26. `refactor(proto): Factor out DatagramBuffer for queues in either direction` (`1c51be56`)
-
-   Patch 16's rule (a datagram exactly at the new limit stays) is kept in the factored
-   `drop_oversized`; its test reads the buffer's own count.
-
-27. `fix(proto): Limit total memory used to buffer incoming datagrams` (`2ea64e13`) and
-    `fix(proto): Limit total memory used to buffer outgoing datagrams` (`09dd4ee6`)
-
-   Both buffers count each queued datagram's bookkeeping beside its payload, so a flood of tiny
-   datagrams cannot hold many times the configured bytes. At Slopty's 4 MiB
-   (`slopty_net::endpoint::DATAGRAM_BUFFER`) and 1.2 kB video datagrams that is 2.6 % less
-   payload room, well above the keyframe burst the buffer is sized for.
-
-28. `fix(proto): Treat an equal-size delivery as evidence against a preceding loss burst`
-    (`dd77a46b`, quinn#2791)
-
-   Once one full-size packet was acknowledged, the black-hole detector never moved its
-   post-loss mark while every packet stayed full-size, which is a bulk transfer's steady state.
-   One ACK that confirmed newer packets and revealed a few older holes then read ordinary
-   congestion loss as a black hole and dropped the path to `min_mtu`. Slopty runs without MTU
-   discovery but keeps the detector, so on a lossy link a download could fall to 1200-byte
-   packets for no reason.
-
-29. `tests(proto): Test that CONNECTION_CLOSE is sent even when congestion blocked` (`a17c35e5`,
-    `f2683512`)
-
-30. `fix(proto): apply RFC 9000 §12.4 packet-type rules to CONNECTION_CLOSE` (`5fecec88`)
-
-   An Initial or Handshake packet may carry only a transport close (0x1c); an application close
-   there, which anyone who saw the handshake can forge, is a protocol violation now instead of
-   an application error handed up.
-
-31. `fix(proto): yield error on too many gaps in assembler` (`61302fd3`) and `fix(proto): bound
-    assembler chunk count regardless of over-allocation` (`b08b5e1a`)
-
-   Already here as patch 18, which also has quinn#2814 (small contiguous chunks coalesced while
-   defragmenting) that noq's port lacks. Not cherry-picked; patch 18 stays until noq has #2814.
-
-32. `chore(proto): fix typo` (`56a85081`)
-
-Not taken from #823: `fix(proto): Allow the cwnd to be filled exactly` (`9612584d`), which lets
-the packet that fills the window to the byte go (`>=` to `>`). On Slopty's simulated network it
-made the worst echoes beside a flood slower: on a 2 Mbit/s link with 100 ms of queue and 5 % loss,
-the 99th percentile of the 200 seeds' echo p99 went from 235 to 293 ms and the worst from 251 to
-315 ms, the median unchanged (docs/MEASUREMENTS.md, "noq #823 on the simulated network"). One more
-packet a window is worth nothing to Slopty; a keystroke's echo is. `perf(proto): replace the assembler BinaryHeap with a sorted VecDeque`
-(`4523eaa6`, quinn#2803) is written on noq's assembler without #2814's coalescing, which patch
-18 has, so it does not apply here; quinn `main` has both, on a later `RangeSet`. Its gain is an
-in-order frame's 50 to 108 ns down to 31 ns, which a stream holding one or two chunks (Slopty's
-usual) barely sees; it comes with the next noq release or the re-port. `feat(proto): Expose BBR
-bandwidth estimate in path stats` (`dcb8949c`) adds a field nothing in Slopty reads; Slopty's
-congestion snapshot takes BBR3's own state (patches 7 and 14). The `noq` crate's commits
-(surfacing `poll_recv` errors, ignoring the `EMSGSIZE` an ICMP Packet Too Big raises, reusing one
-receive buffer per batch) change noq's runtime and endpoint driver, which come from crates.io;
-Slopty's socket (`slopty_net::udp`) retries a failed receive as noq 1.3.0's runtime does, so the
-`EMSGSIZE` case they guard against does not arise here.
-
-33. `fix(proto): Take a stateless reset only from a datagram its own connection IDs did not route`
+21. `fix(proto): Take a stateless reset only from a datagram its own connection IDs did not route`
 
    After patch 17, `unprotect_header` still compared the last 16 bytes of every short-header
    packet with the peer's reset token, a packet that decrypted included. Behind an AEAD a packet
@@ -344,6 +268,25 @@ Slopty's socket (`slopty_net::udp`) retries a failed receive as noq 1.3.0's runt
    `a_restarted_worker_resets_the_old_connection_within_a_keep_alive` and
    `a_ping_draws_a_restarted_worker_s_reset_at_once` (`crates/slopty-net/tests/loopback.rs`).
 
+22. `fix(proto): Keep the last packet of the congestion window free`
+
+   Reverts `9612584d` (noq#823, in 1.4.0), which lets a packet fill the congestion window to the
+   byte (`>=` to `>` in `path_congestion_check`). RFC 9002 allows that packet, and upstream's
+   `full_initial_window` asks for it. Of a window that is whole packets it sends one more into the
+   bottleneck's queue, and BBR3's window often is: it grows by the packets acknowledged, and its
+   floor is four. Beside a flood on Slopty's simulated network (2 Mbit/s, 100 ms of queue, 5 % lost
+   each way), one congestion check in twenty met a window the next packet filled exactly: BBR3's own
+   in nine of ten, its four-packet floor in the rest, Slopty's bound (`slopty_net::congestion`)
+   never. With the fill, 657 of 1 200 seeds' echo p99 got slower and 499 faster, by 3 ms at the
+   median and 1.8 ms on average (one packet at that rate is 4.9 ms), and 12 % more echoes took over
+   150 ms; the median echo did not move. The slow echoes are the ones a loss sends round the queue
+   again, and the extra packet sits in it each time. One more packet a window is worth nothing to
+   Slopty; a keystroke's echo is. Without the fill every simulated scenario reads as on 1.3.0 to the
+   millisecond (docs/MEASUREMENTS.md, "noq 1.4.0 on the simulated network"). Slopty's 16-packet
+   floor so holds 15 full packets in flight, and BBR3's four-packet floor three. Test:
+   `a_packet_never_fills_the_window_to_the_byte` (upstream's `full_initial_window`, the other way
+   round).
+
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a
 flow in `ProbeBW_UP`, and with patches 11 to 13 the simulated keyframe p99 already matches
@@ -354,17 +297,48 @@ Commits 2, 3 and 13 share `VideoSim` in the `bbr3` tests: a screen encoder's fra
 bottleneck, paced by noq's token bucket. `video_through_one_bottleneck` (ignored) prints what
 BBR3 does with that traffic (docs/MEASUREMENTS.md, "noq's BBR3 against the draft").
 
-Upstream `main` was read through `58869bfb` (2026-10-17, still no release past 1.3.0); what
-#823 brought is above. Before it, through `1fe2a342` (2026-10-15): patches 21
-and 22 are its two fixes that change what a Slopty link does. The rest is not taken: #838 moves
-imports to `core` and `alloc` (no behaviour, and it touches 54 files under the patches), #740 adds
-sent-packet counts nothing here reads, #827 fixes qlog output, which Slopty does not build, and
-#797 and #798 change tests only. `noq` #824 wakes `wait_idle` and `wait_all_draining` when the
-endpoint driver is dropped; the server's only `wait_idle`, at shutdown, runs with the driver alive
-and under a one-second timeout, so it arrives with the next published `noq`.
+## The sync to 1.4.0 (2026-10-31)
 
-`noq-proto` and `noq-udp` (`vendor/noq-udp/SLOPTY.md`) are patched (`[patch.crates-io]` in
-the workspace `Cargo.toml`); `noq` comes from crates.io. The files are the crate as published (its normalised
-`Cargo.toml`, `src`, `benches`, licences) plus the patches. To move to a newer noq: take the
-new published crate and re-apply each commit (the diff is `git diff` of this directory against
-the published files), or drop this directory once upstream has them all.
+1.4.0 (2026-10-20) is 109 commits past 1.3.0. What those in `noq-proto` mean here:
+
+| upstream | before | now |
+| --- | --- | --- |
+| #792 no coalescing into a too small tail (`f916a5c5`); #822 a close matches an unspecified local IP (`34ec9691`) | patches 21, 22, taken ahead of the release | 1.4.0's, the same code; dropped |
+| #823's ports of quinn's fixes: CUBIC's saturating increment, the CID refactors and the bound on retired CIDs, `DatagramBuffer` and its memory limits both ways, the black-hole detector's equal-size evidence, a close while congestion-blocked, §12.4's packet-type rules, a typo | patches 23–30 and 32, cherry-picked 2026-10-17 | 1.4.0's, the same code; dropped |
+| #823's assembler: quinn#2694 and #2789 (`61302fd3`, `b08b5e1a`) on a sorted `VecDeque` (quinn#2803, `4523eaa6`) | patch 18 (all three quinn fixes on the old heap) and 31 | 1.4.0's, with `main`'s #866 and #867 on it (patch 18) |
+| #823's exact window fill (`9612584d`: a packet may fill the congestion window to the byte, `>=` to `>`) | left out on a measurement | 1.4.0's, undone by patch 22 on a measurement of 1 200 seeds. 2026-10-17's reading (the 99th percentile of 200 seeds' echo p99, 235 to 293 ms) was two seeds; over 1 200 it reads 251 to 256 ms, and the cost is the smaller, steady one patch 22 gives |
+| #823's BBR bandwidth estimate (`dcb8949c`) | not taken | in: `PathStats::bandwidth_estimate`, BBR3's `max_bw` in bit/s. Slopty's congestion snapshot reads BBR3's own state (patches 7, 14), and nothing reads the field |
+| #842 unread bytes credited once for a stream both stopped and reset (`13b93f70`) | — | in: the connection's flow-control window grew twice for such a stream's unread bytes, so a peer could send past it. Slopty ends a session stream both ways, so it reaches Slopty |
+| #740 sent packet and byte counts, #827 qlog's time-threshold losses, #838 and #845 (`core` and `alloc` imports, hash map aliases), #797 and #798 (tests) | not taken | in; nothing Slopty does changes. The patches' tests import `Vec` and `println` as the `no_std` crate now asks |
+
+The `noq` crate, which comes from crates.io at the same release, brings what reaches Slopty
+outside `noq-proto`:
+
+- The endpoint driver copies each received batch into one reused buffer and splits the
+  datagrams off it (`941eef95`): one allocation a batch where there was one a datagram, on
+  every datagram a worker or client receives.
+- #824 wakes `wait_idle` and `wait_all_draining` when the driver is dropped, so the server's
+  `wait_idle` at shutdown no longer sits out its one-second timeout when the driver ended first.
+- The driver ignores a receive's `EMSGSIZE`, an ICMP Packet Too Big (`c3cac8af`), and noq's own
+  tokio socket now hands a failed receive up, where it looped on it (`099284e7`). Slopty's socket
+  (`slopty_net::udp`) is its own and still retries a failed receive, as noq 1.3.0's did: handed
+  up, any error but `ConnectionReset` and `EMSGSIZE` ends the endpoint and every connection on
+  it, and the errors an unconnected UDP socket's receive returns here are one-shot (noq-udp asks
+  for no `IP_RECVERR`), so the retry cannot spin.
+- noq's own sender logs a refused send and goes on, as Slopty's (`Shared::refused`) already did.
+
+Not taken from `main` past 1.4.0 (read through `70fdbfa2`, 2026-10-31): #835 deprecates
+`send_fairness` and removes unfair scheduling, which Slopty never asks for; #836 lets a send
+stream prefer a path, and Slopty runs one; #868 bumps tokio in noq's own lock, which Slopty's
+already holds. Open pull requests that would retire patches: #853 (ACK bundling, patch 15) and
+#802 (Startup's pacing rate, half of patch 11).
+
+`noq-proto` and `noq-udp` (`vendor/noq-udp/SLOPTY.md`) are patched (`[patch.crates-io]` in the
+workspace `Cargo.toml`); `noq` comes from crates.io at the same release. The files are the crate as
+published (its normalised `Cargo.toml`, `Cargo.lock`, `src`, `benches`, `proptest-regressions`,
+licences) plus the patches, `[workspace]` at the end of `Cargo.toml`, and `rustfmt.toml`, noq's own
+options (its repository's), so that rustfmt run here formats as upstream does and not by Slopty's
+`rustfmt.toml`. To move to a newer noq: take the new published crate and re-apply each patch (the
+diff is `diff -ru` of this directory against the published files), or drop this directory once
+upstream has them all. The patches are formatted by those options, so the diff holds no
+reformatting. `cargo xtask deep noq` runs this crate's own suite.

@@ -1,18 +1,21 @@
-use std::{
-    cmp,
+use alloc::{
+    boxed::Box,
     collections::{BTreeMap, BTreeSet, VecDeque},
-    mem,
+    vec::Vec,
+};
+use core::{
+    cmp, mem,
     ops::{Bound, Index, IndexMut, Range},
 };
 
 use rand::{CryptoRng, RngExt};
-use rustc_hash::{FxHashMap, FxHashSet};
 use sorted_index_buffer::SortedIndexBuffer;
 use tracing::trace;
 
 use super::{PathId, paths::PathResponses, paths::PathRetransmits};
 use crate::{
-    Dir, Duration, FourTuple, Instant, StreamId, TransportError, TransportErrorCode, VarInt,
+    Dir, Duration, FourTuple, FxHashMap, FxHashSet, Instant, StreamId, TransportError,
+    TransportErrorCode, VarInt,
     cid_queue::CidQueue,
     connection::StreamsState,
     frame::{self, AddAddress, RemoveAddress},
@@ -390,7 +393,7 @@ impl PacketNumberSpace {
     }
 
     /// Checks whether a skipped packet number was ACKed.
-    pub(super) fn check_ack(&self, range: std::ops::Range<u64>) -> Result<(), TransportError> {
+    pub(super) fn check_ack(&self, range: core::ops::Range<u64>) -> Result<(), TransportError> {
         if let Some(ref filter) = self.pn_filter
             && filter
                 .prev_skipped_packet_number
@@ -674,7 +677,7 @@ impl Retransmits {
     }
 }
 
-impl ::std::ops::BitOrAssign for Retransmits {
+impl ::core::ops::BitOrAssign for Retransmits {
     fn bitor_assign(&mut self, rhs: Self) {
         let Self {
             max_data,
@@ -728,7 +731,7 @@ impl ::std::ops::BitOrAssign for Retransmits {
     }
 }
 
-impl ::std::ops::BitOrAssign<ThinRetransmits> for Retransmits {
+impl ::core::ops::BitOrAssign<ThinRetransmits> for Retransmits {
     fn bitor_assign(&mut self, rhs: ThinRetransmits) {
         let ThinRetransmits { retransmits } = rhs;
         if let Some(retransmits) = retransmits {
@@ -737,7 +740,7 @@ impl ::std::ops::BitOrAssign<ThinRetransmits> for Retransmits {
     }
 }
 
-impl ::std::iter::FromIterator<Self> for Retransmits {
+impl ::core::iter::FromIterator<Self> for Retransmits {
     fn from_iter<T>(iter: T) -> Self
     where
         T: IntoIterator<Item = Self>,
@@ -1088,7 +1091,7 @@ impl SendableFrames {
     }
 }
 
-impl ::std::ops::BitOrAssign for SendableFrames {
+impl ::core::ops::BitOrAssign for SendableFrames {
     fn bitor_assign(&mut self, rhs: Self) {
         let Self {
             acks,
@@ -1408,6 +1411,8 @@ const MAX_ACK_BLOCKS: usize = 64;
 
 #[cfg(test)]
 mod test {
+    use alloc::vec;
+
     use rand::Rng;
     use rand::seq::SliceRandom;
 

@@ -1,15 +1,17 @@
-use std::io::{self, IoSliceMut};
-use std::mem::{self, MaybeUninit};
-use std::net::IpAddr;
-use std::os::fd::AsRawFd;
+use std::{
+    io::{self, IoSliceMut},
+    mem::{self, MaybeUninit},
+    net::IpAddr,
+    os::fd::AsRawFd,
+};
 
 use socket2::SockRef;
 
-use crate::cmsg::{self, MsgHdr};
-use crate::imp::{
-    BATCH_SIZE, IpTosTy, decode_recv, recv_single, retry_if_interrupted, send_single,
+use crate::{
+    RecvMeta, Transmit, UdpSocketState,
+    cmsg::{self, MsgHdr},
+    imp::{BATCH_SIZE, IpTosTy, decode_recv, recv_single, retry_if_interrupted, send_single},
 };
-use crate::{RecvMeta, Transmit, UdpSocketState};
 
 /// Sends what the socket takes of `transmit` in one call: how many of its datagrams went.
 pub(crate) fn send_partial(
@@ -37,7 +39,12 @@ fn send_via_sendmsg_x(
     let addr = socket2::SockAddr::from(transmit.destination);
     let segment_size = transmit.segment_size.unwrap_or(transmit.contents.len());
     let mut cnt = 0;
-    for (i, chunk) in transmit.contents.chunks(segment_size).enumerate().take(BATCH_SIZE) {
+    for (i, chunk) in transmit
+        .contents
+        .chunks(segment_size)
+        .enumerate()
+        .take(BATCH_SIZE)
+    {
         prepare_msg_x(
             &Transmit {
                 destination: transmit.destination,
@@ -108,14 +115,18 @@ fn prepare_msg_x(
         match ip {
             IpAddr::V4(v4) => {
                 if encode_src_ip {
-                    let addr = libc::in_addr { s_addr: u32::from_ne_bytes(v4.octets()) };
+                    let addr = libc::in_addr {
+                        s_addr: u32::from_ne_bytes(v4.octets()),
+                    };
                     encoder.push(libc::IPPROTO_IP, libc::IP_RECVDSTADDR, addr);
                 }
             }
             IpAddr::V6(v6) => {
                 let pktinfo = libc::in6_pktinfo {
                     ipi6_ifindex: 0,
-                    ipi6_addr: libc::in6_addr { s6_addr: v6.octets() },
+                    ipi6_addr: libc::in6_addr {
+                        s6_addr: v6.octets(),
+                    },
                 };
                 encoder.push(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, pktinfo);
             }

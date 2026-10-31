@@ -1,13 +1,11 @@
-use std::{
+use alloc::{boxed::Box, format, sync::Arc, vec, vec::Vec};
+use core::{
     any::Any,
     convert::TryInto,
     mem,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     num::NonZeroUsize,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use assert_matches::assert_matches;
@@ -30,8 +28,9 @@ use crate::{
     AckFrequencyConfig, ApplicationClose, ClientConfig, Connection, ConnectionClose,
     ConnectionError, ConnectionEvent, ConnectionHandle, ConnectionId, DEFAULT_SUPPORTED_VERSIONS,
     Datagram, DatagramEvent, Dir, Duration, EcnCodepoint, Endpoint, EndpointConfig, Event,
-    FinishError, FourTuple, HashedConnectionIdGenerator, Instant, MIN_INITIAL_SIZE, PathEvent,
-    PathId, PathStatus, ReadError, ReadableError, RecvStream, SendDatagramError, ServerConfig,
+    FinishError, FourTuple, HashedConnectionIdGenerator, INITIAL_MTU, Instant, MIN_INITIAL_SIZE,
+    PathEvent, PathId, PathStatus, ReadError, ReadableError, RecvStream, SendDatagramError,
+    ServerConfig,
     Side::*,
     StreamEvent, Transmit, TransportConfig, TransportError, TransportErrorCode, VarInt, WriteError,
     cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
@@ -172,6 +171,77 @@ fn lifecycle() {
     assert_eq!(pair.client.known_cids(), 0);
     assert_eq!(pair.server.known_connections(), 0);
     assert_eq!(pair.server.known_cids(), 0);
+}
+
+#[test]
+fn stats_include_congestion_controller_bandwidth_estimate() {
+    const WINDOW: u64 = 12_000;
+    const BANDWIDTH_ESTIMATE: u64 = 4_000_000;
+
+    #[derive(Debug, Clone)]
+    struct TestController;
+
+    impl Controller for TestController {
+        fn on_congestion_event(
+            &mut self,
+            _now: Instant,
+            _sent: Instant,
+            _is_persistent_congestion: bool,
+            _is_ecn: bool,
+            _lost_bytes: u64,
+            _largest_lost_pn: u64,
+        ) {
+        }
+
+        fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+        fn window(&self) -> u64 {
+            WINDOW
+        }
+
+        fn metrics(&self) -> ControllerMetrics {
+            ControllerMetrics {
+                congestion_window: WINDOW,
+                bandwidth_estimate: Some(BANDWIDTH_ESTIMATE),
+                ..Default::default()
+            }
+        }
+
+        fn clone_box(&self) -> Box<dyn Controller> {
+            Box::new(self.clone())
+        }
+
+        fn initial_window(&self) -> u64 {
+            WINDOW
+        }
+
+        fn into_any(self: Box<Self>) -> Box<dyn Any> {
+            self
+        }
+    }
+
+    struct TestControllerFactory;
+
+    impl ControllerFactory for TestControllerFactory {
+        fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+            Box::new(TestController)
+        }
+    }
+
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(TestControllerFactory));
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(config);
+    let stats = pair
+        .client_conn_mut(client_ch)
+        .path_stats(PathId::ZERO)
+        .unwrap();
+
+    assert_eq!(stats.cwnd, WINDOW);
+    assert_eq!(stats.bandwidth_estimate, Some(BANDWIDTH_ESTIMATE));
 }
 
 #[test]
@@ -618,6 +688,36 @@ fn congestion() {
     pair.drive();
     assert!(pair.client_conn_mut(client_ch).congestion_window() >= TARGET);
     pair.client_send(client_ch, s).write(&[42; 1024]).unwrap();
+}
+
+/// A packet never fills the window to the byte: of a window that is whole packets, the last
+/// one's room stays free.
+#[test]
+fn a_packet_never_fills_the_window_to_the_byte() {
+    let _guard = subscribe();
+
+    // Keep `current_mtu` pinned to `INITIAL_MTU`, which the default initial window of 12000 bytes
+    // is an exact multiple of, so that the window could be filled precisely.
+    let mut pair = ConnPair::builder().disable_mtud_discovery().connect();
+    assert_eq!(pair.conn(Client).bytes_in_flight(), 0);
+    let window = pair.conn(Client).congestion_window();
+    let mtu = u64::from(INITIAL_MTU);
+    assert_eq!(window % mtu, 0, "window must be exactly fillable");
+
+    let s = pair.streams(Client).open(Dir::Uni).unwrap();
+    let data = vec![42; 2 * window as usize];
+    assert_eq!(
+        pair.send_stream(Client, s).write(&data),
+        Ok(data.len()),
+        "the test must be limited by congestion control, not by flow control"
+    );
+
+    let span = tracing::info_span!("client");
+    let _guard = span.enter();
+    let now = pair.time;
+    pair.client.drive(now);
+    assert_eq!(pair.conn(Client).bytes_in_flight(), window - mtu);
+    assert_eq!(pair.client.outbound.len() as u64, window / mtu - 1);
 }
 
 #[test]
@@ -1193,6 +1293,25 @@ fn streams_blocked_not_sent_under_limit() {
             .frame_tx
             .streams_blocked_uni,
         0
+    );
+}
+
+/// A built pair holds a connection's initial keys unless the test says otherwise
+///
+/// Production starts a connection with a short key phase (10..1000 packets) so that peers which
+/// mishandle key updates fail early. That puts the first autonomous update at an unpredictable
+/// point, so `ConnPairBuilder` pins it out of reach; see `ConnPairBuilder::with_key_update`.
+#[test]
+fn connpair_initial_key_phase_is_pinned() {
+    let pair = ConnPair::builder().connect();
+    assert_eq!(pair.conn(Client).key_phase_size(), u64::MAX);
+    assert_eq!(pair.conn(Server).key_phase_size(), u64::MAX);
+
+    let pair = ConnPair::builder().with_key_update().connect();
+    let size = pair.conn(Client).key_phase_size();
+    assert!(
+        (10..1000).contains(&size),
+        "opted into key updates, expected a short initial phase, got {size}"
     );
 }
 
@@ -2670,7 +2789,7 @@ fn datagram_batch_send_drop_oldest() {
     assert!(big.len() < max);
     assert_matches!(
         pair.client_datagrams(client_ch)
-            .send_many(std::slice::from_ref(&big), true),
+            .send_many(core::slice::from_ref(&big), true),
         Err(SendDatagramError::TooLarge)
     );
 }
@@ -4942,6 +5061,7 @@ impl Controller for PacingOnlyController {
             // continuously.
             pacing_rate: Some(125_000),
             send_quantum: Some(2 * 1200),
+            bandwidth_estimate: None,
         }
     }
 
@@ -5035,6 +5155,7 @@ impl Controller for FixedQuantumController {
             // 1 GB/s: high enough that the pacer never delays within a single batch.
             pacing_rate: Some(1_000_000_000),
             send_quantum: Some(self.send_quantum),
+            bandwidth_estimate: None,
         }
     }
 
@@ -5409,6 +5530,7 @@ fn regression_initial_coalescing_large_cid() {
     pair.time += Duration::from_secs(5);
     pair.drive_client(); // this used to try to build a packet without enough datagram space
 }
+
 /// A CONNECTION_CLOSE written while more than one packet number space still has keys hands
 /// its datagram to the next space to coalesce into, without checking that what is left of
 /// the datagram can hold another packet.
@@ -5485,5 +5607,131 @@ fn close_during_handshake_does_not_coalesce_into_a_too_small_datagram_tail() {
         transmit.size > segment_size,
         "expected a CONNECTION_CLOSE in a further space, got {} bytes",
         transmit.size
+    );
+}
+
+/// Snapshot test to prevent accidentally skipping code-paths related to `sent_packets` stats.
+#[test]
+fn sent_packets_stats_snapshot_test() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    let client_stats = pair.client_conn_mut(client_ch).stats();
+    let server_stats = pair.server_conn_mut(server_ch).stats();
+    assert_eq!(client_stats.sent_packets, 13);
+    assert_eq!(server_stats.sent_packets, 10);
+
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    const MSG: &[u8] = b"Hello, World!";
+    pair.client_send(client_ch, s).write(MSG).unwrap();
+    pair.drive();
+
+    let client_stats2 = pair.client_conn_mut(client_ch).stats();
+    let server_stats2 = pair.server_conn_mut(server_ch).stats();
+    assert_eq!(client_stats2.sent_packets, 14);
+    assert_eq!(server_stats2.sent_packets, 11);
+}
+
+#[cfg(feature = "qlog")]
+#[test]
+fn qlog_packet_lost_trigger() {
+    use std::{
+        io::{self, Write},
+        sync::Mutex,
+    };
+
+    use qlog::{
+        events::{EventData, quic::PacketLostTrigger},
+        reader::{Event as QlogEvent, QlogSeqReader},
+    };
+
+    use crate::{ConnectionId, QlogConfig, QlogFactory, Side};
+
+    /// Captures the qlog trace of every connection into one buffer
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl QlogFactory for SharedBuffer {
+        fn for_connection(
+            &self,
+            _side: Side,
+            _remote: SocketAddr,
+            _initial_dst_cid: ConnectionId,
+            _now: Instant,
+        ) -> Option<QlogConfig> {
+            Some(QlogConfig::new(Box::new(self.clone())))
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let _guard = subscribe();
+    let qlog = SharedBuffer::default();
+    let mut transport = TransportConfig::default();
+    transport
+        .deterministic_packet_numbers(true)
+        .qlog_factory(Arc::new(qlog.clone()));
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+    let mut pair = Pair::default();
+    let (client_ch, _) = pair.connect_with(config);
+    pair.drive();
+
+    // Drop a packet, then deliver fewer later packets than the packet threshold, so that only the
+    // time threshold can declare it lost
+    pair.client_conn_mut(client_ch).ping();
+    pair.client.drive(pair.time);
+    assert_eq!(pair.client.outbound.len(), 1);
+    pair.client.outbound.clear();
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive();
+
+    // Drop a packet, then deliver as many later packets as the packet threshold without advancing
+    // time, so that only the packet threshold can declare it lost
+    pair.client_conn_mut(client_ch).ping();
+    pair.client.drive(pair.time);
+    assert_eq!(pair.client.outbound.len(), 1);
+    pair.client.outbound.clear();
+    for _ in 0..3 {
+        pair.client_conn_mut(client_ch).ping();
+        pair.client.drive(pair.time);
+    }
+    assert_eq!(pair.client.outbound.len(), 3);
+    pair.drive();
+
+    assert_eq!(
+        pair.client_conn_mut(client_ch)
+            .path_stats(PathId::ZERO)
+            .unwrap()
+            .lost_packets,
+        2
+    );
+    let triggers = QlogSeqReader::new(Box::new(&qlog.0.lock().unwrap()[..]))
+        .unwrap()
+        .filter_map(|event| match event {
+            QlogEvent::Qlog(event) => match event.data {
+                EventData::QuicPacketLost(lost) => lost.trigger,
+                _ => None,
+            },
+            QlogEvent::Json(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        triggers,
+        [
+            PacketLostTrigger::TimeThreshold,
+            PacketLostTrigger::ReorderingThreshold
+        ]
     );
 }

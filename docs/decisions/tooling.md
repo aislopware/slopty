@@ -3315,13 +3315,52 @@ more full-window layer.
     version the graph holds. The hack would then have had to list getrandom 0.3 for every Apple
     target. The lock keeps tempfile on 0.4.3, as before the refresh, and the gate's
     `cargo hakari generate --diff` is what catches such a pick.
-  - **What still holds, and why.** noq 1.4.0: `noq-proto` and `noq-udp` are vendored at 1.3.0
-    with their patches, and `noq` is the same release as them (`~1.3.0`), so 1.4.0 comes when
-    they are rebased onto it (109 upstream commits). resvg and usvg 0.49: gpui-fast and
-    gpui-kit build 0.48, and `slopty-shell` writes an SVG out with usvg for GPUI to parse again,
-    so the three move together, the forks first. Dependencies' pins: `cc ~1.2.1`
-    (tree-sitter-sequel), `taffy =0.15.0` (gpui), `unicode-properties =0.1.3` (gpui_web),
-    `psm =0.1.24` (pest's new pest_stack_guard), `generic-array =0.14.7` (crypto-common), and
-    granit-parser 1 (rust-i18n's serde-saphyr 1, from gpui-kit). syn 3, phf 0.14 and
-    miniz_oxide 0.9 reach the graph only through dependencies. notify 9 and ec4rs 2 are
-    release candidates.
+  - **What still holds, and why.** noq 1.4.0 came the same day, with its vendored crates rebased
+    onto it ("noq 1.4.0 under the transport", below). resvg and usvg 0.49: gpui-fast and gpui-kit
+    build 0.48, and `slopty-shell` writes an SVG out with usvg for GPUI to parse again, so the three
+    move together, the forks first. Dependencies' pins: `cc ~1.2.1` (tree-sitter-sequel), `taffy
+    =0.15.0` (gpui), `unicode-properties =0.1.3` (gpui_web), `psm =0.1.24` (pest's new
+    pest_stack_guard), `generic-array =0.14.7` (crypto-common), and granit-parser 1 (rust-i18n's
+    serde-saphyr 1, from gpui-kit). syn 3, phf 0.14 and miniz_oxide 0.9 reach the graph only through
+    dependencies. notify 9 and ec4rs 2 are release candidates.
+
+- ✅ **noq 1.4.0 under the transport, our patches carried onto it** (2026-10-31). `noq` is
+  `~1.4.0`, and `vendor/noq-proto` and `vendor/noq-udp` are the published 1.4.0 crates (tag
+  `noq-proto-v1.4.0`, `34f75c49f`, 109 commits past 1.3.0) with Slopty's patches replayed, each
+  with its test; `xtask/upstream.toml`'s `[noq]` base is `main` as read that day (`70fdbfa2`). Each
+  `SLOPTY.md` holds the patch list and a table of what 1.4.0 changed against it. Each crate carries
+  noq's own `rustfmt.toml`, as `vendor/gpui_tokio` carries one, so the gate's `cargo fmt --all`,
+  which reaches `noq-udp` through `workspace-hack`'s path dependency, formats it as upstream does:
+  1.3.0's `noq-udp` had been reformatted in Slopty's style, and a diff against the published crate
+  showed every file.
+  - **Carried.** noq-proto 1 to 17, 19 and 20 keep their numbers (BBR3 against the draft and
+    Linux, the stream priorities and the unpaced echo, ACK bundling, the stateless-reset checks,
+    the migration fallback, the datagram kept at the new limit); 33 is now 21. noq-udp's partial
+    sends and the Apple fast path's switch are 1 and 2: quinn#2748 is still open. Upstream's
+    merges were read for each: quinn merged #2747 (patch 15) and #2839 (patch 16), and noq has
+    neither; noq#853 (bundling) and #802 (half of patch 11) are open.
+  - **Dropped, 1.4.0 has them.** noq-proto 21 to 32, which were #792, #822 and #823's ports taken
+    ahead of the release: the replay onto 1.4.0 left them no diff. noq-udp 1 (quinn#2727, the
+    send buffer clear of macOS's permanent `EWOULDBLOCK`, in 1.4.0 as `9c42264c` and `49477cf0`),
+    whose test stays as patch 3, and 4 and 5 (`EIO` in the `cmsg` fallback, `cmsg` payloads read
+    unaligned).
+  - **Replaced.** Patch 18 was quinn's three assembler fixes on noq's old heap; 1.4.0 has quinn's
+    bound on a sorted deque without #2814's coalescing, so 18 is now `main`'s #866 (#2814 ported)
+    and #867 (unordered compaction), cherry-picked.
+  - **Undone.** 1.4.0 lets a packet fill the congestion window to the byte; patch 22 holds it
+    back, on a measurement of 1 200 seeds (transport.md, "A packet that fills the congestion
+    window to the byte").
+  - **What 1.4.0 brings that reaches Slopty.** A stream both stopped and reset is credited its
+    unread bytes once (#842; twice let a peer send past the connection's window). The `noq`
+    crate's endpoint driver copies each received batch into one reused buffer (one allocation a
+    batch, not a datagram), wakes `wait_idle` when the driver drops (#824), and ignores a
+    receive's `EMSGSIZE`. noq-proto is `no_std` with `alloc` (#838), so the patches' tests import
+    `Vec` and `println`. Slopty's socket (`slopty_net::udp`) still retries a failed receive where
+    noq's own now hands it up: handed up it would end the endpoint, and an unconnected socket's
+    receive errors are one-shot here. No public function of `noq` or `noq-proto` changed, so no
+    caller moved.
+  - **Not taken from `main`.** #835 (`send_fairness` deprecated), #836 (a stream's preferred
+    path) and #868 (tokio in noq's own lock): nothing Slopty does reaches them.
+  - **Measured** (MEASUREMENTS.md, "noq 1.4.0 on the simulated network"): with patch 22 every
+    simulated scenario reads as on 1.3.0 to the millisecond, and the shaped-link echo runs stay
+    within their run-to-run spread.

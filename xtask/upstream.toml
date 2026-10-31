@@ -104,14 +104,15 @@ base_date = "2026-10-30"
 checked = "2026-10-31"
 check_every_days = 7
 
-# noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.3.0 (tag
-# `noq-proto-v1.3.0`) with our patches on top (its `SLOPTY.md`). Nothing syncs it;
-# `cargo xtask upstream watch` reports its head and pull requests, and a bump is by hand.
+# noq is vendored, not forked: `vendor/noq-proto` is the published noq-proto 1.4.0 (tag
+# `noq-proto-v1.4.0`) with our patches on top (its `SLOPTY.md`), and `base` is `main` as last
+# read (2026-10-31). Nothing syncs it; `cargo xtask upstream watch` reports its head and pull
+# requests, and a bump is by hand.
 [noq]
 upstream = "https://github.com/n0-computer/noq.git"
 upstream_branch = "main"
 vendored = "vendor/noq-proto"
-base = "1fe2a3424043959909a128e1acbe3697e3082080"
+base = "70fdbfa24ea2a96646572d40d58ea7d3a2e4d7e6"
 
 # Releases Slopty waits for rather than forking: the gate warns once crates.io has one. objc2's
 # framework crates (0.3.2) were generated from Xcode 16.4, so the few 27 calls Slopty makes are

@@ -1,5 +1,7 @@
-use std::ffi::{c_int, c_uchar};
-use std::{mem, ptr};
+use std::{
+    ffi::{c_int, c_uchar},
+    mem, ptr,
+};
 
 use windows_sys::Win32::Networking::WinSock;
 
@@ -27,7 +29,11 @@ impl MsgHdr for WinSock::WSAMSG {
         let next =
             (cmsg as *const _ as usize + cmsghdr_align(cmsg.cmsg_len)) as *mut WinSock::CMSGHDR;
         let max = self.Control.buf as usize + self.Control.len as usize;
-        if unsafe { next.offset(1) } as usize > max { ptr::null_mut() } else { next }
+        if unsafe { next.offset(1) } as usize > max {
+            ptr::null_mut()
+        } else {
+            next
+        }
     }
 
     fn set_control_len(&mut self, len: usize) {

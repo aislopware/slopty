@@ -1,5 +1,7 @@
-use std::ffi::{c_int, c_uchar};
-use std::ptr;
+use std::{
+    ffi::{c_int, c_uchar},
+    ptr,
+};
 
 #[cfg(unix)]
 #[path = "unix.rs"]
@@ -13,6 +15,7 @@ pub(crate) use imp::Aligned;
 
 /// Helper to encode a series of control messages (native "cmsgs") to a buffer for use in `sendmsg`
 //  like API.
+///
 /// The operation must be "finished" for the native msghdr to be usable, either by calling `finish`
 /// explicitly or by dropping the `Encoder`.
 pub(crate) struct Encoder<'a, M: MsgHdr> {
@@ -28,7 +31,11 @@ impl<'a, M: MsgHdr> Encoder<'a, M> {
     /// - The `Encoder` must be dropped before `hdr` is passed to a system call, and must not be
     ///   leaked.
     pub(crate) unsafe fn new(hdr: &'a mut M) -> Self {
-        Self { cmsg: unsafe { hdr.cmsg_first_hdr().as_mut() }, hdr, len: 0 }
+        Self {
+            cmsg: unsafe { hdr.cmsg_first_hdr().as_mut() },
+            hdr,
+            len: 0,
+        }
     }
 
     /// Append a control message to the buffer.
@@ -90,7 +97,10 @@ impl<'a, M: MsgHdr> Iter<'a, M> {
     /// lifetime of the constructed `Iter` and contains a buffer of native cmsgs, i.e. is aligned
     //  for native `cmsghdr`, is fully initialized, and has correct internal links.
     pub(crate) unsafe fn new(hdr: &'a M) -> Self {
-        Self { hdr, cmsg: unsafe { hdr.cmsg_first_hdr().as_ref() } }
+        Self {
+            hdr,
+            cmsg: unsafe { hdr.cmsg_first_hdr().as_ref() },
+        }
     }
 }
 

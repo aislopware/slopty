@@ -1,19 +1,25 @@
-use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, Ipv4Addr};
-use std::num::NonZeroUsize;
-use std::os::windows::io::AsRawSocket;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{LazyLock, Mutex};
-use std::time::Instant;
-use std::{mem, ptr};
+use std::{
+    io::{self, IoSliceMut},
+    mem,
+    net::{IpAddr, Ipv4Addr},
+    num::NonZeroUsize,
+    os::windows::io::AsRawSocket,
+    ptr,
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
 use libc::{c_int, c_uint};
 use windows_sys::Win32::Networking::WinSock;
 
-use crate::cmsg::{self, CMsgHdr};
-use crate::log::debug;
 use crate::{
-    EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef, log_sendmsg_error,
+    EcnCodepoint, IO_ERROR_LOG_INTERVAL, RecvMeta, Transmit, UdpSockRef,
+    cmsg::{self, CMsgHdr},
+    log::debug,
+    log_sendmsg_error,
 };
 
 /// QUIC-friendly UDP socket for Windows
@@ -125,9 +131,12 @@ impl UdpSocketState {
                 }
             }
 
-            if let Err(e) =
-                set_socket_option(&*socket.0, WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, OPTION_ON)
-            {
+            if let Err(e) = set_socket_option(
+                &*socket.0,
+                WinSock::IPPROTO_IP,
+                WinSock::IP_PKTINFO,
+                OPTION_ON,
+            ) {
                 if is_unsupported_error(&e) {
                     // This means we do not have the full 4 tuple, but can still operate
                     crate::log::warn!("IP_PKTINFO not supported, dst_ip will be unavailable");
@@ -137,9 +146,12 @@ impl UdpSocketState {
                 }
             }
 
-            if let Err(e) =
-                set_socket_option(&*socket.0, WinSock::IPPROTO_IP, WinSock::IP_RECVECN, OPTION_ON)
-            {
+            if let Err(e) = set_socket_option(
+                &*socket.0,
+                WinSock::IPPROTO_IP,
+                WinSock::IP_RECVECN,
+                OPTION_ON,
+            ) {
                 if is_unsupported_error(&e) {
                     crate::log::warn!("IP_RECVECN not supported, IPv4 ECN will be disabled");
                     ecn_v4_enabled = false;
@@ -239,6 +251,7 @@ impl UdpSocketState {
     ///
     /// If you would like to handle these errors yourself, use [`UdpSocketState::try_send`]
     /// instead.
+    #[deprecated(note = "silences I/O errors; use `UdpSocketState::try_send()` instead")]
     pub fn send(&self, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
         match send(self, socket, transmit) {
             Ok(()) => Ok(()),
@@ -268,9 +281,15 @@ impl UdpSocketState {
         // the WSAMSG
         let mut ctrl_buf = cmsg::Aligned([0; CMSG_LEN]);
         let mut source: WinSock::SOCKADDR_INET = unsafe { mem::zeroed() };
-        let mut data = WinSock::WSABUF { buf: bufs[0].as_mut_ptr(), len: bufs[0].len() as _ };
+        let mut data = WinSock::WSABUF {
+            buf: bufs[0].as_mut_ptr(),
+            len: bufs[0].len() as _,
+        };
 
-        let ctrl = WinSock::WSABUF { buf: ctrl_buf.0.as_mut_ptr(), len: ctrl_buf.0.len() as _ };
+        let ctrl = WinSock::WSABUF {
+            buf: ctrl_buf.0.as_mut_ptr(),
+            len: ctrl_buf.0.len() as _,
+        };
 
         let mut wsa_msg = WinSock::WSAMSG {
             name: &mut source as *mut _ as *mut _,
@@ -421,8 +440,10 @@ impl UdpSocketState {
 }
 
 fn is_unsupported_error(e: &io::Error) -> bool {
-    matches!(e.raw_os_error(), Some(WinSock::WSAEOPNOTSUPP | WinSock::WSAENOPROTOOPT))
-        || e.kind() == io::ErrorKind::Unsupported
+    matches!(
+        e.raw_os_error(),
+        Some(WinSock::WSAEOPNOTSUPP | WinSock::WSAENOPROTOOPT)
+    ) || e.kind() == io::ErrorKind::Unsupported
 }
 
 fn send(state: &UdpSocketState, socket: UdpSockRef<'_>, transmit: &Transmit<'_>) -> io::Result<()> {
@@ -436,7 +457,10 @@ fn send(state: &UdpSocketState, socket: UdpSockRef<'_>, transmit: &Transmit<'_>)
         len: transmit.contents.len() as _,
     };
 
-    let ctrl = WinSock::WSABUF { buf: ctrl_buf.0.as_mut_ptr(), len: ctrl_buf.0.len() as _ };
+    let ctrl = WinSock::WSABUF {
+        buf: ctrl_buf.0.as_mut_ptr(),
+        len: ctrl_buf.0.len() as _,
+    };
 
     let mut wsa_msg = WinSock::WSAMSG {
         name: daddr.as_ptr() as *mut _,
@@ -459,7 +483,10 @@ fn send(state: &UdpSocketState, socket: UdpSockRef<'_>, transmit: &Transmit<'_>)
         match ip.family() {
             WinSock::AF_INET if state.pktinfo_v4_enabled.load(Ordering::Relaxed) => {
                 let src_ip = unsafe { ptr::read(ip.as_ptr() as *const WinSock::SOCKADDR_IN) };
-                let pktinfo = WinSock::IN_PKTINFO { ipi_addr: src_ip.sin_addr, ipi_ifindex: 0 };
+                let pktinfo = WinSock::IN_PKTINFO {
+                    ipi_addr: src_ip.sin_addr,
+                    ipi_ifindex: 0,
+                };
                 encoder.push(WinSock::IPPROTO_IP, WinSock::IP_PKTINFO, pktinfo);
             }
             WinSock::AF_INET6 if state.pktinfo_v6_enabled.load(Ordering::Relaxed) => {
@@ -490,7 +517,11 @@ fn send(state: &UdpSocketState, socket: UdpSockRef<'_>, transmit: &Transmit<'_>)
 
     // Segment size is a u32 https://learn.microsoft.com/en-us/windows/win32/api/ws2tcpip/nf-ws2tcpip-wsasetudpsendmessagesize
     if let Some(segment_size) = transmit.effective_segment_size() {
-        encoder.push(WinSock::IPPROTO_UDP, WinSock::UDP_SEND_MSG_SIZE, segment_size as u32);
+        encoder.push(
+            WinSock::IPPROTO_UDP,
+            WinSock::UDP_SEND_MSG_SIZE,
+            segment_size as u32,
+        );
     }
 
     encoder.finish();
@@ -682,7 +713,12 @@ static MAX_GSO_SEGMENTS: LazyLock<usize> = LazyLock::new(|| {
         Err(_) => return 1,
     };
     const GSO_SIZE: c_uint = 1500;
-    match set_socket_option(&socket, WinSock::IPPROTO_UDP, WinSock::UDP_SEND_MSG_SIZE, GSO_SIZE) {
+    match set_socket_option(
+        &socket,
+        WinSock::IPPROTO_UDP,
+        WinSock::UDP_SEND_MSG_SIZE,
+        GSO_SIZE,
+    ) {
         // Empirically found on Windows 11 x64
         Ok(()) => 512,
         Err(_) => 1,

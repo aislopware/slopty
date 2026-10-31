@@ -411,17 +411,29 @@ mod tests {
         pacer.on_transmit(330);
         let (wait, sent) = burst_until_blocked(&mut pacer, rtt, mtu, soon, &quantum)
             .expect("past the quantum the rate holds");
-        assert!(sent <= u64::from(mtu), "{sent} bytes let out past the quantum");
-        assert!(wait > Duration::from_millis(10), "paced at 20 kB/s: {wait:?}");
+        assert!(
+            sent <= u64::from(mtu),
+            "{sent} bytes let out past the quantum"
+        );
+        assert!(
+            wait > Duration::from_millis(10),
+            "paced at 20 kB/s: {wait:?}"
+        );
 
         // Without a quantum the budget is one MTU, and the second packet waits for the first
         // packet's bytes to be earned back: 15 ms at this rate.
         let mut pacer = Pacer::new(rtt, window, mtu, None, now);
-        let bare = ControllerMetrics { send_quantum: None, ..quantum };
+        let bare = ControllerMetrics {
+            send_quantum: None,
+            ..quantum
+        };
         assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, at, &bare), None);
         pacer.on_transmit(300);
         let wait = pacer.delay(rtt, u64::from(mtu), mtu, soon, &bare);
-        assert!(wait.is_some_and(|w| w > Duration::from_millis(10)), "{wait:?}");
+        assert!(
+            wait.is_some_and(|w| w > Duration::from_millis(10)),
+            "{wait:?}"
+        );
     }
 
     #[test]

@@ -1,12 +1,14 @@
-use std::cmp::min;
-use std::io::{ErrorKind, IoSliceMut};
-use std::net::{Ipv4Addr, Ipv6Addr, UdpSocket};
-use std::num::NonZeroUsize;
+use std::{
+    cmp::min,
+    io::{ErrorKind, IoSliceMut},
+    net::{Ipv4Addr, Ipv6Addr, UdpSocket},
+    num::NonZeroUsize,
+};
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use tokio::{io::Interest, runtime::Runtime};
+
 use noq_udp::{BATCH_SIZE, RecvMeta, Transmit, UdpSocketState};
-use tokio::io::Interest;
-use tokio::runtime::Runtime;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
     const TOTAL_BYTES: usize = 10 * 1024 * 1024;
@@ -50,9 +52,12 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         ));
         group.throughput(criterion::Throughput::Bytes(TOTAL_BYTES as u64));
 
-        let gso_segments =
-            if gso_enabled { send_state.max_gso_segments() } else { NonZeroUsize::MIN };
-        let msg = vec![0xab; min(MAX_DATAGRAM_SIZE, SEGMENT_SIZE * gso_segments.get())];
+        let gso_segments = if gso_enabled {
+            send_state.max_gso_segments()
+        } else {
+            NonZeroUsize::MIN
+        };
+        let msg = vec![0xAB; min(MAX_DATAGRAM_SIZE, SEGMENT_SIZE * gso_segments.get())];
         let transmit = Transmit {
             destination: dst_addr,
             ecn: None,
@@ -60,15 +65,21 @@ pub fn criterion_benchmark(c: &mut Criterion) {
             segment_size: gso_enabled.then_some(SEGMENT_SIZE),
             src_ip: None,
         };
-        let gro_segments = if gro_enabled { recv_state.gro_segments() } else { NonZeroUsize::MIN };
+        let gro_segments = if gro_enabled {
+            recv_state.gro_segments()
+        } else {
+            NonZeroUsize::MIN
+        };
         let batch_size = if recvmmsg_enabled { BATCH_SIZE } else { 1 };
 
         group.bench_function("throughput", |b| {
             b.to_async(&rt).iter(|| async {
                 let mut receive_buffers =
                     vec![vec![0; SEGMENT_SIZE * gro_segments.get()]; batch_size];
-                let mut receive_slices =
-                    receive_buffers.iter_mut().map(|buf| IoSliceMut::new(buf)).collect::<Vec<_>>();
+                let mut receive_slices = receive_buffers
+                    .iter_mut()
+                    .map(|buf| IoSliceMut::new(buf))
+                    .collect::<Vec<_>>();
                 let mut meta = vec![RecvMeta::default(); batch_size];
 
                 let mut sent: usize = 0;
@@ -77,7 +88,7 @@ pub fn criterion_benchmark(c: &mut Criterion) {
                     send_socket.writable().await.unwrap();
                     send_socket
                         .try_io(Interest::WRITABLE, || {
-                            send_state.send((&send_socket).into(), &transmit)
+                            send_state.try_send((&send_socket).into(), &transmit)
                         })
                         .unwrap();
                     sent += transmit.contents.len();
