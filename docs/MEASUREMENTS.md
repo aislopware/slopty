@@ -19078,7 +19078,10 @@ Settling only until the build comes (`e2e.yml` run 41235899472, every simulator 
 booted in 155.5 s, was still busy when the build came 358 s into the run (204.8 s of settle),
 installed in 10.8 s and passed its five tests in 62.5 s, 433.5 s in all; the iPad booted in
 125.9 s, settled 303.6 s until its build came 425 s in, installed in 12.6 s and passed its light
-check in 23.3 s, 465.4 s in all.
+check in 23.3 s, 465.4 s in all. Again on main's tree (run 41237692067): the iPhone still busy
+124.0 s after a 254.7 s boot when its build came 375 s in, its five tests passed in 145.7 s, 550.3
+s in all; the iPad's download of the build failed on a TLS handshake timeout to the API, and it
+ran nothing (the download now goes again, up to five times).
 
 The same host build took 182 s in 41218759169's `e2e (mac)`, at the same 100 % compile-cache hits
 as the 883 s beside the boot. In 41231747992's `e2e (mac)` the build-only step took 235.5 s for

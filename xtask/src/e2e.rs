@@ -847,6 +847,9 @@ const HOST_WAIT_MOST: std::time::Duration = std::time::Duration::from_mins(40);
 /// 1,000 an hour.
 const HOST_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How many times [`await_host`] downloads the artifact before it gives up.
+const HOST_DOWNLOAD_TRIES: u32 = 5;
+
 /// The wait for the host build on its thread ([`await_host`]): how long from its start it came.
 type HostWait = std::thread::JoinHandle<Result<std::time::Duration>>;
 
@@ -900,9 +903,23 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
         }
         std::thread::sleep(HOST_ASK_EVERY);
     }
+    // The build's transport, not a test, so a failed download goes again: on a runner whose
+    // simulator's boot holds every core a TLS handshake to the API timed out (run 41237692067).
     let into = dir.join("target/e2e/host");
-    let _gone = std::fs::remove_dir_all(&into);
-    cmd!(sh, "gh run download {run} --repo {repo} --name {name} --dir {into}").quiet().run()?;
+    let mut tries = 1;
+    loop {
+        let _gone = std::fs::remove_dir_all(&into);
+        let download = cmd!(sh, "gh run download {run} --repo {repo} --name {name} --dir {into}");
+        match download.quiet().run() {
+            Ok(()) => break,
+            Err(e) if tries < HOST_DOWNLOAD_TRIES => {
+                println!("  the download of {name} failed, again in {HOST_ASK_EVERY:?}: {e}");
+                tries = tries.saturating_add(1);
+                std::thread::sleep(HOST_ASK_EVERY);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
     let tars: Vec<std::path::PathBuf> = std::fs::read_dir(&into)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "tar"))

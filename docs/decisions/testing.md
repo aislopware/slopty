@@ -2408,13 +2408,15 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   - Now the simulator's runner settles only until its build comes, then installs the app and
     runs the suite beside whatever the boot still runs. A run that builds on its own runner
     (`xtask e2e ios` without `--host`) still settles after the install.
-  - The full iPhone suite, all five tests, passed so, 62.5 s beside daemons still busy 205 s
-    after the boot, and the iPad's light check in 23.3 s beside ones busy 304 s on (run
-    41235899472). With the simulator's part packed first, the gate's `e2e (ios)` took 8 minutes
+  - The full iPhone suite, all five tests, passed so twice: 62.5 s beside daemons still busy
+    205 s after the boot (run 41235899472) and 145.7 s beside ones busy 124 s on (run
+    41237692067), and the iPad's light check in 23.3 s beside ones busy 304 s on. With the simulator's part packed first, the gate's `e2e (ios)` took 8 minutes
     and the whole check 9 m 43 s from the push to main (run 41236746342), from 46 m 45 s. The guest's failures the earlier ruling answered (no worker address within
     30 s, no agent started within 30 s) came from four cores held 18-20 minutes, with this Mac's
     lanes building beside; a hosted runner holds only the run.
-  - A red there is the product's or the test's, as every e2e red: it is read, never retried. If
+  - A red there is the product's or the test's, as every e2e red: it is read, never retried.
+    The build's download is transport, not a test: it goes again up to five times, after a TLS
+    handshake to the API timed out on a runner whose boot held every core (run 41237692067). If
     one test proves to need a quiet machine, it says what it waits on (its own deadline, a
     `MEASURE` line) and the settle comes back for it alone, measured.
   - Tests: the workflow needles in `gate::tests`; the settle's sampling is
