@@ -18539,3 +18539,60 @@ each frame, and every other row comes from the cache.
 ```
 cargo xtask remote --name Im --probe 'CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 cargo test -p slopty-shell --release --lib long_trace_frame_cost -- --ignored --nocapture'
 ```
+
+## 2026-10-31 — gpui-fast with longbridge #88: kept path shapes capped by weight
+
+Mac Studio M1 Max, other lanes building (load 4 to 10). `gpui_perf --headless`, release with
+LTO off, three alternating rounds of two builds of the same tree. "Before" is #88's tree
+with `fast/path_cache.rs` back on the two generations of 1,024 shapes, counting the same
+stats. "After" is #88 as taken (aislopware/gpui-fast #77). Medians:
+
+| scenario | | before | after |
+| --- | --- | --- | --- |
+| `paths-moving-holes`, a 1440×900 fill with 200 holes in a new shape each frame, 3,000 frames, retention off | heap growth | 289.7 MiB | 18.8 MiB |
+| | cache at the end | 275.8 MiB, 2,037 shapes | 16.0 MiB, 118 shapes |
+| | instructions a frame | 3.471 M | 3.408 M (−1.8 %) |
+| | CPU a frame | 0.239 ms | 0.228 ms |
+| `paths-still-holes`, the same fill and 400 sparklines unchanged, 401 hits a frame, 2,000 frames | instructions a frame | 10.012 M | 10.015 M (0.0 %) |
+| | CPU a frame | 0.609 ms (0.607–0.609) | 0.620 ms (0.618–0.626) |
+| the terminal strip and workspace scenarios (21), 300 frames, retention on | instructions a frame | | −0.07 % to +0.31 %, median +0.05 % |
+
+- A shape drawn once and never again (138.6 KiB each here) stayed kept until 1,024 to 2,048
+  more had been drawn. Now the 16 MiB cap lets it go. An agent canvas that draws again on
+  every animation frame is that case in Slopty.
+- A hit relinks its shape. That costs no measurable instructions here, but about 11 µs of
+  CPU over 401 hits (+1.9 %, in every round), some 27 ns a hit. A full terminal screen of
+  box-drawing cells drawn afresh is a few hundred hits. Keyed terminal paint draws unchanged
+  stretches again from the last frame, which builds no path at all.
+- In the workspace scenarios, the hits and misses a frame are the same before and after.
+  Their kept shapes come to 16 MiB and 1,500 to 1,700 shapes after, against 10 to 21 MiB
+  before: one process runs the scenarios in turn and shares one cache.
+
+In Slopty, the inspector's trace on a long session (`long_trace_frame_cost`, slopty-shell)
+draws an activity rail as a path in every tool row. Both trees were built on one `xcode-27`
+runner, release with LTO off and 16 codegen units, differing only in the GPUI pin: `c4583d5e`
+before, `2111753d` (with #92 and #88) after. Three alternating rounds, p50 per round, µs:
+
+| arm | before | after |
+| --- | --- | --- |
+| held at the end | 309, 285, 287 | 281, 292, 283 |
+| scrolled through the middle | 294, 286, 285 | 278, 289, 279 |
+| following a streaming answer | 1,314, 1,322, 1,291 | 1,287, 1,320, 1,294 |
+
+The medians move by −1.4 to −2.4 %, inside each arm's spread from round to round: the trace's
+frames neither gain nor lose by the change.
+
+```sh
+# in .research/gpui-fast: the tree of #88 (after), and that tree with the generations back (before)
+CARGO_PROFILE_RELEASE_LTO=off IPHONEOS_DEPLOYMENT_TARGET= cargo build --release -p gpui_perf
+for round in 1 2 3; do for arm in before after; do
+  gpui_perf-$arm --headless --scenario paths-moving-holes --retention off --frames 3000 --warmup 60 --json moving-$arm-$round.json
+  gpui_perf-$arm --headless --scenario paths-still-holes --retention off --frames 2000 --warmup 60 --json still-$arm-$round.json
+  gpui_perf-$arm --headless --scenario workspace --scenario strip --retention on --frames 300 --json suite-$arm-$round.json
+done; done
+# Slopty: one runner builds slopty-shell's test harness at both pins, then runs each in turn
+cargo xtask remote --name G2-ab --only Cargo.lock --probe "$(cat probe-ab.sh)"   # run 41173728883
+#   probe-ab.sh: CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16; build the
+#   harness, sed the lock's pin back to c4583d5e, build again, then three rounds of
+#   <harness> long_trace_frame_cost --ignored --nocapture --test-threads 1
+```

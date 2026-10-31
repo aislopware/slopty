@@ -3217,3 +3217,67 @@ more full-window layer.
     the fork changed since that lock's pin, and keeps `cargo update` for a fork whose manifests
     moved. Tests: xtask `upstream::tests::{a_repin_moves_that_commit_and_nothing_else,
     only_a_changed_manifest_sends_a_pin_through_cargo}`.
+
+- ✅ **Open longbridge PRs of 2026-10-31: #92 and #88 taken, #91's fix already here and its
+  tests taken, #69, #82, #85, #86 and #90 left out** (gpui-fast `2111753d`). The sync of the
+  day left upstream's open PRs out. Each was judged on whether Slopty's platforms and code
+  paths reach it. The ones taken went through aislopware/gpui-fast #76, #77 and #78 on green
+  fork CI, rebased so the upstream authors stay their commits' authors, on top of
+  `c4583d5e` and its #70 to #75. Slopty's GPUI pins move from `c4583d5e` to `2111753d` by
+  revision, since no manifest of the fork moved; `fuzz/Cargo.lock` pins no GPUI.
+  `.research/gpui-fast/SLOPTY.md` records what to keep when longbridge merges them.
+  - **#92, taken: a mouse release and a file drag are mouse input.** While the window's
+    modality is keyboard no hitbox is hovered, and `div`'s `on_mouse_up`, `on_click` and
+    `on_drop` ask that first. Upstream sets mouse modality only on a move or a press, so a
+    release after a key press with the button held was lost, a click or a drop alike.
+    `fast::misc::mouse_up_modality` sets it for a release and for a file drag's enter, move
+    and drop. The fork had the file-drag half inline in `window.rs` since 2026-09-25
+    (`8758f95f`), for Finder drops after typing; Slopty's drop sink still hands the shell its
+    drops as those events (`workspace/remote/drop_in.rs`). That edit gave way to #92's hook,
+    and the match is upstream's again. The terminal is unchanged: it listens for a release
+    both over it and outside it, and exactly one of the two runs, before and after. What
+    moves is focus-visible styling, which a release now clears.
+  - **#88, taken: kept path shapes are capped by weight.** The two generations of 1,024
+    shapes each, bounded by count alone, become one least-recently-drawn list of 2,048 shapes
+    and 16 MiB a thread, with one slot for a heavier shape. Tessellation is unchanged, so the
+    pixels are the same. Slopty draws paths every frame: the terminal's box-drawing,
+    powerline and rounded-corner cells (`sprite::Shape`'s strokes, arcs and polygons), the
+    sessions' status marks and loaders spinning (a new arc each frame), the remote pointer,
+    sparklines, and agent canvases that draw again every animation frame. A canvas whose shapes
+    change every frame kept 2,048 of them until #88, however large. Measured
+    (docs/MEASUREMENTS.md, "gpui-fast with longbridge #88"): with a window-sized shape new
+    each frame, the process holds 18.8 MiB more after 3,000 frames instead of 289.7 MiB, at
+    1.8 % fewer instructions a frame. 401 hits a frame cost the same instructions and 1.9 %
+    more CPU (about 27 ns a hit, the relink). The terminal strip and workspace scenarios
+    moved −0.07 % to +0.31 %. In Slopty, the inspector's long trace, whose tool rows draw
+    their activity rail as a path, takes the same time a frame at both pins on one runner.
+  - **#91, its fix already here; its tests taken.** After a child view is spliced, upstream
+    left the ancestor's update checkpoint stale. The next idle frame then rendered the
+    ancestor again, and the copied prepaint kept element states the rebuilt gap had dropped.
+    The fork fixed both in its #44 and #45: a spliced record's dependencies are `checked_at`
+    the moment before its gaps were built, and `copy_prepaint_segment` leaves out what is
+    inside the gaps. #91's two tests pass on the fork, and each fails with the fork's half of
+    it taken out (the parent renders again without `checked_at`; the removed leaf's layout
+    node and element state stay without the filter). Nothing in the fork's code changed, so
+    there is no number to take.
+  - **#86, left out: dynamic textures for streaming frames.** It uploads CPU BGRA frames to
+    textures of their own outside the sprite atlas, updated in place through a staging blit,
+    behind new public API. Nothing Slopty streams would go through it: remote windows and
+    displays reach the glass as Y′CbCr pictures through `VideoLayer` and
+    `Window::paint_surface`, which sample the decoder's IOSurfaces with no copy and never
+    touch the atlas. The one picture Slopty makes on the CPU every frame is an animating agent
+    visual's (a shader or a 3D scene that wgpu renders offscreen and reads back). For it #86
+    would save each frame's atlas allocation and keep both copies: the readback from the GPU
+    and the upload back to it. The way with no copy at all is the visual rendered
+    into an IOSurface that the fork's surfaces sample, which needs a BGRA layout beside their
+    Y′CbCr ones. That is the visuals' own change, taken if it measures worth it, not a second
+    texture path in GPUI. A Kitty image's new generation, the terminal's only other such
+    picture, comes at the program's pace, not each frame.
+  - **#82, left out: a clickable text's hand by hitboxes.** It changes `InteractiveText`,
+    which neither Slopty nor GPUI Kit draws.
+  - **#69 and #90, left out.** Both change longbridge #30's window composition (input limited
+    to an overlay's hitboxes; presenting plainly once a window holds no extra surface). The fork
+    leaves #30 out for its own composition ("Native views compose through the fork's own
+    mechanism, not longbridge #30"), which has no overlay surface to hold and routes pointer
+    input to a native only where it is the topmost hitbox.
+  - **#85, left out:** a Windows frame request, and Slopty builds GPUI for no Windows.
