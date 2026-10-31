@@ -14702,3 +14702,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the earlier rule, whose reason was the soft keyboard. Tests: `slopty-shell`
   `shell::navigation_focus::tests::a_session_opened_on_a_touch_screen_leaves_the_keyboard_down`,
   `a_split_closed_on_a_touch_screen_leaves_the_keyboard_down`.
+- ✅ **A terminal's pane takes the keyboard as the frame draws (2026-10-31).** An iPad keeps the
+  soft keyboard's band clear only while a field holds the keyboard, an answer GPUI gives from the
+  last frame (`Window::text_input_focused`). ⌘W on a split handed the keyboard to the session's
+  terminal once the frame that laid the session out alone was drawn: that frame found no field,
+  so the band went, and the next found the session's and brought it back. The iPad e2e caught it
+  as a stale frame (red 11): the session's first rows, drawn again for their keys, stood clipped
+  inside a band that a frame from scratch at the same moment no longer kept, two frames running.
+  Ruled: a terminal's pane (the session's, a shell's) takes the keyboard in the frame that lays
+  it out, its panel being drawn in it, so the field changes hands at one frame's end and the
+  platform is never told the keyboard went; a view's pane still takes it once laid out, its
+  handle made by its first draw (`settle_pane_keyboard`). A touch screen without a hardware
+  keyboard hands nothing on at a close at all (the entry above). Left open in GPUI: a tap from
+  one terminal's pane to another's moves the focus between frames, and GPUI answers false until a
+  frame has found the new field, so the band goes for one frame there. Test: `slopty-terminal`
+  `view::paint_oracle::a_split_closed_beside_the_session_paints_its_rows_where_a_frame_from_scratch_does`,
+  which keeps the band through the panel's hand-off, lets it go once when the keyboard stays, and
+  draws red 11's report again for the hand-off after the frame.

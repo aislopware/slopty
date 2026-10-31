@@ -140,7 +140,8 @@ impl Shell {
 
     /// Give `pane` the keyboard: it becomes the view's focused pane, and the keyboard lands in it.
     pub(super) fn focus_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        // A pane a zoom brings on screen is not laid out yet: the keyboard follows as it draws.
+        // A pane a zoom brings on screen is not laid out yet: the keyboard follows as it draws
+        // (`settle_pane_keyboard`).
         if self.panes_mut(cx).focus(pane) {
             self.pane_keyboard_pending = true;
             cx.notify();
@@ -262,14 +263,29 @@ impl Shell {
     }
 
     /// The keyboard follows a click or a Tab into another pane; a change the shell made (a
-    /// switch, a summon, a close) hands it to the pane focused, once this frame lays it out. On
-    /// a phone the keyboard never moves the views: a tap on the terminal over the inspector's
-    /// sheet leaves the sheet up.
+    /// switch, a summon, a close) hands it to the pane focused. A terminal's pane takes it as its
+    /// panel draws, later in this frame than the shell reads the focus: the field changes hands
+    /// at this frame's end, with no frame between without one, which on an iPad would let the
+    /// keyboard's band go and come back a frame later (`docs/decisions/ui.md`, "A terminal's
+    /// pane takes the keyboard as the frame draws"). A view's pane takes it once this frame has
+    /// laid the view out. On a phone the keyboard never moves the views: a tap on the terminal
+    /// over the inspector's sheet leaves the sheet up.
     pub(super) fn settle_pane_keyboard(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.pane_keyboard_pending {
             self.pane_keyboard_pending = false;
-            let focused = self.panes_now(cx).focused();
-            cx.defer_in(window, move |this, window, cx| this.put_keyboard_in(focused, window, cx));
+            match self.panes_now(cx).focused() {
+                Pane::Session => self.focus_composer(cx),
+                Pane::Shell(n) => {
+                    if let Some(shell) = self.pane_shells.get(&n) {
+                        shell.update(cx, TerminalPanel::request_focus);
+                    }
+                }
+                pane @ Pane::View(_) => {
+                    cx.defer_in(window, move |this, window, cx| {
+                        this.put_keyboard_in(pane, window, cx);
+                    });
+                }
+            }
         } else if !self.compact()
             && let Some(holder) = self
                 .panes_now(cx)
