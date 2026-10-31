@@ -256,3 +256,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the monitor's 2 s poll. Tests in the fork:
   `a_hang_in_a_foreground_that_never_drains_is_reported_within_the_deadline` and
   `a_hang_before_the_foreground_goes_quiet_is_reported_at_the_first_poll_past_the_deadline`.
+  One more silent run followed, in a guest left idle for 20 minutes. The guest's own records
+  rule out App Nap and sleep. The system's process manager doesn't manage the app, so nothing
+  can nap it; it holds its visible-app assertion, and its timer leeway stays at 100 ms or
+  less. The guest never slept or blanked its display, and the clock difference that measures
+  sleep stayed at zero. Reading the code finds no step that could lose the hang, so the
+  self-test's app traces each step at debug under `gpui::hang` (gpui-fast's
+  `fast/hang_trace.rs`; other builds keep it off). The trace covers:
+  - the monitor starting;
+  - each task poll of 100 ms or more, as it is journaled or dropped across a sleep;
+  - each poll of the monitor: what it drained (the longest event, any power boundary, entries
+    lost), what it sealed, and what is still open.
+
+  The next silent run then shows which step lost the hang: never timed, dropped, never
+  drained, or never sealed.

@@ -9,10 +9,13 @@ use anyhow::Result;
 pub fn main() -> Result<()> {
     slopty_proto::wire::set_commit(option_env!("SLOPTY_COMMIT"));
     slopty_crash::install(slopty_crash::Process::App, &slopty_platform::dirs::data_dir());
-    let log = tracing_subscriber::fmt().with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-    );
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // The self-test's app traces what GPUI's hang monitor saw, so a hang it never reports says
+    // where it was lost (gpui-fast's `fast/hang_trace.rs`).
+    #[cfg(feature = "e2e")]
+    let filter = filter.add_directive("gpui::hang=debug".parse()?);
+    let log = tracing_subscriber::fmt().with_env_filter(filter);
     match log_file() {
         Some(file) => log.with_ansi(false).with_writer(std::sync::Arc::new(file)).init(),
         None => log.with_writer(std::io::stderr).init(),
