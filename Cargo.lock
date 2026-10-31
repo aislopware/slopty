@@ -9510,8 +9510,14 @@ name = "slopty-visual-gpu"
 version = "0.1.0"
 dependencies = [
  "image",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-io-surface",
+ "objc2-metal 0.3.2",
  "parking_lot",
  "pollster 1.0.1",
+ "slopty-testkit",
  "slopty-visual",
  "tracing",
  "wgpu 30.0.0 (git+https://github.com/gfx-rs/wgpu?rev=3b3506ea31154edc04de64debda0e780cba2639c)",
@@ -12613,6 +12619,7 @@ dependencies = [
  "objc2-core-video",
  "objc2-file-provider",
  "objc2-foundation 0.3.2",
+ "objc2-io-surface",
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-security",

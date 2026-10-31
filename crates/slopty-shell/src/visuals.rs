@@ -102,8 +102,9 @@ struct Local {
 /// render on a background thread; the view shows the newest one meanwhile.
 #[derive(Default)]
 struct ShaderCache {
-    /// The newest frame and the uniforms it was drawn with.
-    shown: Option<(slopty_visual::shader::ShaderUniforms, Arc<gpui::RenderImage>)>,
+    /// The newest frame and the uniforms it was drawn with: a pixel buffer the
+    /// GPU drew, which the window's surface shows as it lies.
+    shown: Option<(slopty_visual::shader::ShaderUniforms, slopty_visual_gpu::Frame)>,
     /// Frames started, and the wall time the last one was started at.
     frame: u32,
     last_time: f64,
@@ -152,15 +153,11 @@ struct RasterKey {
 
 #[derive(Clone)]
 struct SceneImage {
-    image: Arc<gpui::RenderImage>,
+    /// The frame, which the window's surface shows as it lies: the GPU's, or the software
+    /// renderer's copied once into a pixel buffer.
+    frame: slopty_visual_gpu::Frame,
     hints: Arc<[([f32; 2], f32, String)]>,
     labels: Arc<[slopty_visual::RasterLabel]>,
-}
-
-/// A rendered frame as an image GPUI can paint (off the main thread).
-fn render_image(width: u32, height: u32, bgra: Vec<u8>) -> Option<Arc<gpui::RenderImage>> {
-    let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
-    Some(Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])))
 }
 
 #[derive(Clone, Copy)]
@@ -200,12 +197,6 @@ impl VisualFrame {
         target_device_id: Option<String>,
         cx: &Context<Self>,
     ) -> Self {
-        // Its drawings leave every window's sprite atlas with it.
-        cx.on_release(|this, cx| {
-            let images = this.local.borrow_mut().prune(None);
-            free_images(images, cx);
-        })
-        .detach();
         let mut tasks = Vec::new();
         let load = match engine {
             Some(engine) => {
@@ -323,8 +314,7 @@ impl VisualFrame {
                     // Nodes that left the tree take their drawings with them.
                     let mut keep = std::collections::HashSet::new();
                     Self::node_keys(&tree, &self.id, &mut keep);
-                    let images = self.local.borrow_mut().prune(Some(&keep));
-                    free_images(images, cx);
+                    self.local.borrow_mut().prune(&keep);
                 }
                 self.tree = Some(Rc::new(tree));
                 self.generation = self.generation.wrapping_add(1);
@@ -624,40 +614,14 @@ fn status_line(message: SharedString, color: Hsla) -> AnyElement {
 }
 
 impl Local {
-    /// Forget the drawings of nodes not in `keep` (all of them, without
-    /// one), returning their images to free.
-    fn prune(
-        &mut self,
-        keep: Option<&std::collections::HashSet<SharedString>>,
-    ) -> Vec<Arc<gpui::RenderImage>> {
-        let kept = |key: &SharedString| keep.is_some_and(|keep| keep.contains(key));
-        let mut images = Vec::new();
-        self.shaders.retain(|key, cache| {
-            kept(key) || {
-                images.extend(cache.shown.as_ref().map(|(_, image)| Arc::clone(image)));
-                false
-            }
-        });
-        self.scenes.retain(|key, cache| {
-            kept(key) || {
-                images.extend(cache.image.as_ref().map(|(_, image)| Arc::clone(&image.image)));
-                false
-            }
-        });
-        self.canvases.retain(|key, _| kept(key));
-        self.stopped.retain(|key, _| kept(key));
-        self.cameras.retain(|key, _| kept(key));
-        images
-    }
-}
-
-fn free_images(images: Vec<Arc<gpui::RenderImage>>, cx: &mut App) {
-    if !images.is_empty() {
-        cx.defer(move |cx| {
-            for image in images {
-                cx.drop_image(image, None);
-            }
-        });
+    /// Forget the drawings of nodes not in `keep`: their frames go back to their pools once
+    /// the window no longer shows them.
+    fn prune(&mut self, keep: &std::collections::HashSet<SharedString>) {
+        self.shaders.retain(|key, _| keep.contains(key));
+        self.scenes.retain(|key, _| keep.contains(key));
+        self.canvases.retain(|key, _| keep.contains(key));
+        self.stopped.retain(|key, _| keep.contains(key));
+        self.cameras.retain(|key, _| keep.contains(key));
     }
 }
 
@@ -1682,7 +1646,8 @@ impl VisualFrame {
     }
 
     /// A `ui.shader`: the script's GLSL run on the GPU every frame it
-    /// animates, painted as an image like any other.
+    /// animates, each frame drawn into a pixel buffer the window's surface
+    /// shows as it lies.
     fn shader(
         &self,
         node: &slopty_visual::ShaderNode,
@@ -1815,7 +1780,7 @@ impl VisualFrame {
                                 )
                                 && (!animate || p.time[0].to_bits() == uniforms.time[0].to_bits())
                         });
-                    let shown = entry.shown.as_ref().map(|(_, image)| Arc::clone(image));
+                    let shown = entry.shown.as_ref().map(|(_, frame)| frame.clone());
                     // One frame in flight at a time; when it lands the view
                     // paints again and starts the next if anything moved.
                     if !unchanged && !entry.rendering {
@@ -1839,29 +1804,19 @@ impl VisualFrame {
                                 size.0,
                                 size.1,
                                 &mut gpu_state,
-                            )
-                            .and_then(|frame| {
-                                render_image(frame.width, frame.height, frame.bgra)
-                                    .ok_or_else(|| "the shader's frame was malformed".to_owned())
-                            });
+                            );
                             (rendered, gpu_state)
                         });
                         let (local, key, entity) = (Rc::clone(&local), key.clone(), entity.clone());
                         cx.spawn(async move |cx| {
                             let (rendered, gpu_state) = render.await;
                             cx.update(|cx| {
-                                let mut freed = Vec::new();
                                 let mut state = local.borrow_mut();
                                 match (state.shaders.get_mut(&key), rendered) {
-                                    (Some(entry), Ok(image)) => {
+                                    (Some(entry), Ok(frame)) => {
                                         entry.rendering = false;
                                         entry.gpu = gpu_state;
-                                        freed.extend(
-                                            entry
-                                                .shown
-                                                .replace((uniforms, image))
-                                                .map(|(_, old)| old),
-                                        );
+                                        entry.shown = Some((uniforms, frame));
                                         state.draw_error = None;
                                     }
                                     (Some(entry), Err(error)) => {
@@ -1870,11 +1825,9 @@ impl VisualFrame {
                                         state.draw_error = Some(error);
                                     }
                                     // The node left the tree meanwhile.
-                                    (None, Ok(image)) => freed.push(image),
-                                    (None, Err(_)) => {}
+                                    (None, _) => {}
                                 }
                                 drop(state);
-                                free_images(freed, cx);
                                 let _gone = entity.update(cx, |_, cx| cx.notify());
                             });
                         })
@@ -1882,19 +1835,9 @@ impl VisualFrame {
                     }
                     shown
                 },
-                move |bounds, image, window, _| {
-                    // gpui-fast takes the image's bounds too.
-                    if let Some(image) = image
-                        && let Err(error) = window.paint_image(
-                            bounds,
-                            bounds,
-                            gpui::Corners::default(),
-                            image,
-                            0,
-                            false,
-                        )
-                    {
-                        tracing::debug!(%error, "a shader's frame failed to paint");
+                move |bounds, frame, window, _| {
+                    if let Some(frame) = frame {
+                        window.paint_surface(bounds, frame.pixel_buffer());
                     }
                 },
             )
@@ -2030,7 +1973,7 @@ impl VisualFrame {
                             // glass, bloom); the software renderer otherwise.
                             let started = crate::clock::stopwatch();
                             let mut cost = None;
-                            let (width, height, bgra, hints, labels) = if let Some(frame) =
+                            let (frame, hints, labels) = if let Some(frame) =
                                 slopty_visual_gpu::render_scene(
                                     &scene,
                                     camera,
@@ -2041,7 +1984,7 @@ impl VisualFrame {
                                     &mut gpu_state,
                                 ) {
                                 let (hints, labels) = scene.annotations(camera, size.0, size.1);
-                                (frame.width, frame.height, frame.bgra, hints, labels)
+                                (Some(frame), hints, labels)
                             } else {
                                 let raster = scene.render(
                                     camera,
@@ -2055,15 +1998,17 @@ impl VisualFrame {
                                     cost = Some(crate::clock::spent(started));
                                 }
                                 (
-                                    raster.width,
-                                    raster.height,
-                                    raster.bgra,
+                                    slopty_visual_gpu::Frame::from_bgra(
+                                        raster.width,
+                                        raster.height,
+                                        &raster.bgra,
+                                    ),
                                     raster.hints,
                                     raster.labels,
                                 )
                             };
-                            let image = render_image(width, height, bgra).map(|image| SceneImage {
-                                image,
+                            let image = frame.map(|frame| SceneImage {
+                                frame,
                                 hints: Arc::from(hints),
                                 labels: Arc::from(labels),
                             });
@@ -2073,29 +2018,19 @@ impl VisualFrame {
                         cx.spawn(async move |cx| {
                             let (image, gpu_state, cost) = render.await;
                             cx.update(|cx| {
-                                let mut freed = Vec::new();
                                 let mut state = local.borrow_mut();
-                                match state.scenes.get_mut(&key) {
-                                    Some(entry) => {
-                                        entry.rendering = false;
-                                        entry.gpu = gpu_state;
-                                        if cost.is_some() {
-                                            entry.final_cost = cost;
-                                        }
-                                        if let Some(image) = image {
-                                            freed.extend(
-                                                entry
-                                                    .image
-                                                    .replace((raster_key, image))
-                                                    .map(|(_, old)| old.image),
-                                            );
-                                        }
+                                // The node may have left the tree meanwhile.
+                                if let Some(entry) = state.scenes.get_mut(&key) {
+                                    entry.rendering = false;
+                                    entry.gpu = gpu_state;
+                                    if cost.is_some() {
+                                        entry.final_cost = cost;
                                     }
-                                    // The node left the tree meanwhile.
-                                    None => freed.extend(image.map(|image| image.image)),
+                                    if let Some(image) = image {
+                                        entry.image = Some((raster_key, image));
+                                    }
                                 }
                                 drop(state);
-                                free_images(freed, cx);
                                 let _gone = entity.update(cx, |_, cx| cx.notify());
                             });
                         })
@@ -2119,17 +2054,7 @@ impl VisualFrame {
                     let Some((image, hovered)) = rendered else {
                         return;
                     };
-                    // gpui-fast takes the image's bounds too.
-                    if let Err(error) = window.paint_image(
-                        bounds,
-                        bounds,
-                        gpui::Corners::default(),
-                        Arc::clone(&image.image),
-                        0,
-                        false,
-                    ) {
-                        tracing::debug!(%error, "a scene's image failed to paint");
-                    }
+                    window.paint_surface(bounds, image.frame.pixel_buffer());
                     for label in image.labels.iter() {
                         paint_text(
                             &label.text,
@@ -3000,6 +2925,82 @@ end
             free.value_by_key("up").is_some_and(|v| (v - 4.1).abs() < 1e-9),
             "a hundredth of the range"
         );
+    }
+
+    /// An animating shader reaches the window as the pixel buffers the GPU drew its frames
+    /// into: the surface each frame paints samples the very buffer the shader's last pass drew,
+    /// and nothing of it is painted as an image, so no frame is read back to the CPU or
+    /// uploaded again. Frame after frame the pool hands the shader back the `IOSurface`s the
+    /// window let go of, each in a new pixel buffer: at most three for any number of frames.
+    #[gpui::test]
+    fn an_animating_shaders_frames_reach_the_surface_as_drawn(cx: &mut gpui::TestAppContext) {
+        if !slopty_visual_gpu::available() {
+            return;
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let script = "
+return function()
+  return ui.shader { height = 60, animate = true, blend = 'opaque', code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = vec4(fract(iTime), fragCoord.x / iResolution.x, 0.5, 1.0);
+}
+]] }
+end
+";
+        let (frame, cx) =
+            cx.add_window_view(|_, cx| VisualFrame::from_script("entry#shader".into(), script, cx));
+        let shown = |frame: &gpui::Entity<VisualFrame>, cx: &mut gpui::VisualTestContext| {
+            frame.read_with(cx, |frame, _| {
+                let local = frame.local.borrow();
+                let cache = local.shaders.values().next().expect("the shader's cache");
+                cache.shown.as_ref().map(|(_, frame)| frame.clone())
+            })
+        };
+        let (mut surface_ids, mut last, mut frames) =
+            (std::collections::HashSet::new(), None, 0_usize);
+        for _ in 0..20 {
+            cx.run_until_parked();
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            let Some(drawn) = shown(&frame, cx) else { continue };
+            let buffer = drawn.pixel_buffer();
+            surface_ids.insert(drawn.surface_id().expect("an IOSurface-backed buffer"));
+            // Each frame the shader drew is a new pixel buffer, told apart from the last one,
+            // held.
+            if last.as_ref() != Some(&buffer) {
+                frames = frames.saturating_add(1);
+                last = Some(buffer.clone());
+            }
+            let (surfaces, painted) =
+                cx.update(|window, _| (window.painted_surfaces(), window.painted_primitives()));
+            let surfaces: Vec<_> =
+                surfaces.into_iter().map(|surface| surface.image_buffer).collect();
+            assert_eq!(surfaces, [buffer], "the frame paints the buffer the GPU drew");
+            assert!(
+                !painted.iter().any(|line| line.contains("PolychromeSprite")),
+                "and no image: {painted:?}"
+            );
+        }
+        assert!(frames >= 15, "it animated: {frames} frames");
+        assert!(
+            surface_ids.len() <= 3,
+            "from a pool: the surfaces of {frames} frames: {surface_ids:?}"
+        );
+        // The buffer shown holds the shader's picture, straight BGRA: blue at half and opaque,
+        // everywhere.
+        let pixels = shown(&frame, cx).expect("a frame").read_pixels();
+        assert!(
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|&[blue, _, _, alpha]| { blue.abs_diff(128) <= 1 && alpha == 255 }),
+            "the shader's blue, opaque"
+        );
+        frame.read_with(cx, |frame, _| assert!(frame.local.borrow().draw_error.is_none()));
     }
 
     /// The main thread's time for one whole frame of `frame`'s window after `change`: the

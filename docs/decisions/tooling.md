@@ -3265,14 +3265,15 @@ more full-window layer.
     behind new public API. Nothing Slopty streams would go through it: remote windows and
     displays reach the glass as Y′CbCr pictures through `VideoLayer` and
     `Window::paint_surface`, which sample the decoder's IOSurfaces with no copy and never
-    touch the atlas. The one picture Slopty makes on the CPU every frame is an animating agent
-    visual's (a shader or a 3D scene that wgpu renders offscreen and reads back). For it #86
-    would save each frame's atlas allocation and keep both copies: the readback from the GPU
-    and the upload back to it. The way with no copy at all is the visual rendered
-    into an IOSurface that the fork's surfaces sample, which needs a BGRA layout beside their
-    Y′CbCr ones. That is the visuals' own change, taken if it measures worth it, not a second
-    texture path in GPUI. A Kitty image's new generation, the terminal's only other such
-    picture, comes at the program's pace, not each frame.
+    touch the atlas. The one picture Slopty made on the CPU every frame was an animating agent
+    visual's (a shader or a 3D scene that wgpu rendered offscreen and read back). For it #86
+    would have saved each frame's atlas allocation and kept both copies: the readback from the
+    GPU and the upload back to it. The way with no copy at all is taken instead: the fork's
+    surfaces draw BGRA beside their Y′CbCr layouts (aislopware/gpui-fast #79), and a visual
+    renders into the IOSurface the window's surface samples (`ui.md`, "An animating visual
+    renders into the surface GPUI shows"), with no second texture path in GPUI. A Kitty
+    image's new generation, the terminal's only other such picture, comes at the program's
+    pace, not each frame.
   - **#82, left out: a clickable text's hand by hitboxes.** It changes `InteractiveText`,
     which neither Slopty nor GPUI Kit draws.
   - **#69 and #90, left out.** Both change longbridge #30's window composition (input limited

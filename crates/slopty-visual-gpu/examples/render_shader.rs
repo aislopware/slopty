@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         ShaderSpec { image: &code, buffers: &[], inputs: &names, blend, bloom, textures: &[] };
     let frame = render_shader(&spec, &uniforms, width, height, &mut None)?;
     let mut ppm = format!("P6\n{width} {height}\n255\n").into_bytes();
-    for &[blue, green, red, alpha] in frame.bgra.as_chunks().0 {
+    for &[blue, green, red, alpha] in frame.read_pixels().as_chunks().0 {
         let alpha = f32::from(alpha) / 255.0;
         for (ch, bg) in [red, green, blue].into_iter().zip(background) {
             ppm.push(f32::from(ch).mul_add(alpha, bg * 255.0 * (1.0 - alpha)) as u8);

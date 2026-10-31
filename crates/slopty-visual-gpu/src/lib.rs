@@ -1,12 +1,14 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! The GPU behind agent visuals.
 //!
-//! GPUI composites images, not foreign GPU passes, so visuals that need the
-//! GPU (fragment shaders, lit 3D scenes) render offscreen here through wgpu
-//! (Metal, Vulkan, or Direct3D) into a texture that is read back as
-//! straight-alpha BGRA and painted like any other image, clipped, faded, and
-//! layered with the transcript. One device serves every visual; pipelines are
-//! cached by source, so a shader compiles once however many frames it draws.
+//! GPUI composites its own primitives, not foreign GPU passes, so visuals
+//! that need the GPU (fragment shaders, lit 3D scenes) render offscreen here
+//! through wgpu on Metal. A frame's last pass draws straight into an
+//! `IOSurface`-backed pixel buffer ([`Frame`]) that GPUI's surface samples
+//! where it lies, clipped, faded and layered with the transcript: nothing is
+//! read back to the CPU or uploaded again. One device serves every visual;
+//! pipelines are cached by source, so a shader compiles once however many
+//! frames it draws.
 
 #![warn(unreachable_pub)]
 #![allow(
@@ -18,21 +20,12 @@ use std::sync::OnceLock;
 
 mod scene;
 mod shader;
+mod surface;
 mod textures;
 
 pub use scene::{SceneState, render_scene};
 pub use shader::{ShaderSpec, ShaderState, render_shader};
-
-/// One rendered frame: straight-alpha BGRA, top row first.
-#[derive(Debug, Clone)]
-pub struct Frame {
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-    /// Four bytes a pixel, rows packed with no padding.
-    pub bgra: Vec<u8>,
-}
+pub use surface::Frame;
 
 /// The device every visual draws with. Its fields are private to the crate
 /// root, which every module of the crate descends from, so all of them reach
@@ -93,8 +86,8 @@ pub fn available() -> bool {
     gpu().is_some()
 }
 
-/// The target every visual renders into before readback.
-pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The format of every frame: GPUI's surfaces sample BGRA as it lies.
+pub(crate) const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
 /// WGSL for the final passes: how much of a pixel survives near the frame's
 /// edges, so light running off a visual fades out instead of stopping at a
@@ -156,79 +149,12 @@ impl Gpu {
         })
     }
 
-    /// Read a rendered texture back as straight-alpha BGRA, through a
-    /// staging buffer kept in `staging` between frames.
-    pub(crate) fn read_back(
-        &self,
-        mut encoder: wgpu::CommandEncoder,
-        texture: &wgpu::Texture,
-        staging: &mut Option<wgpu::Buffer>,
-    ) -> Frame {
-        let (width, height) = (texture.width(), texture.height());
-        // A texture is far narrower than `u32` overflows at: the device caps it.
-        let row = width.saturating_mul(4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let size = u64::from(row).saturating_mul(u64::from(height));
-        let buffer: &wgpu::Buffer = match staging {
-            Some(buffer) if buffer.size() == size => buffer,
-            _ => staging.insert(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("visual readback"),
-                size,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            })),
-        };
-        encoder.copy_texture_to_buffer(
-            texture.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: None,
-                },
-            },
-            texture.size(),
-        );
+    /// Run `encoder`'s passes and wait until the GPU finished them: a frame's buffer goes to
+    /// GPUI only once it is drawn.
+    pub(crate) fn finish(&self, encoder: wgpu::CommandEncoder) {
         self.queue.submit([encoder.finish()]);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let _gone = tx.send(result);
-        });
-        // A wait that fails shows below, as a map that never succeeded.
+        // A wait that fails leaves the frame as far as the GPU got; the next one tries again.
         let _waited = self.device.poll(wgpu::PollType::wait_indefinitely());
-        let width_bytes = (width as usize).saturating_mul(4);
-        let mut bgra = vec![0_u8; width_bytes.saturating_mul(height as usize)];
-        if rx.recv() == Ok(Ok(())) {
-            if let Ok(mapped) = buffer.slice(..).get_mapped_range() {
-                // `max(1)`: a zero-width frame has no rows to copy, and
-                // `chunks` takes no zero.
-                let rows = mapped.chunks((row as usize).max(1));
-                for (src, dst) in rows.zip(bgra.chunks_exact_mut(width_bytes.max(1))) {
-                    let src = src.get(..width_bytes).unwrap_or_default();
-                    for (d, &[r, g, b, a]) in
-                        dst.as_chunks_mut().0.iter_mut().zip(src.as_chunks().0)
-                    {
-                        *d = [b, g, r, a];
-                    }
-                }
-                drop(mapped);
-            }
-            buffer.unmap();
-        }
-        Frame { width, height, bgra }
-    }
-
-    pub(crate) fn target(&self, width: u32, height: u32, label: &str) -> wgpu::Texture {
-        self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        })
     }
 }
 
@@ -239,8 +165,8 @@ impl Gpu {
     reason = "a blend of two bytes stays in 0..=255"
 )]
 pub(crate) fn dump_ppm(frame: &Frame, path: &str) {
-    let mut out = format!("P6\n{} {}\n255\n", frame.width, frame.height).into_bytes();
-    for &[b, g, r, a] in frame.bgra.as_chunks().0 {
+    let mut out = format!("P6\n{} {}\n255\n", frame.width(), frame.height()).into_bytes();
+    for &[b, g, r, a] in frame.read_pixels().as_chunks().0 {
         // Over a mid grey, so transparency reads.
         let a = f32::from(a) / 255.0;
         for ch in [r, g, b] {

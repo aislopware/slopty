@@ -12,8 +12,9 @@ workspace = true
 
 [dependencies]
 slopty-visual = { path = "../slopty-visual" }
-# Already GPUI's renderer on Linux; here it draws offscreen on every desktop. The
-# workspace's, at the revision GPUI builds (one wgpu in the graph).
+# Already GPUI's renderer on Linux; here it draws offscreen on Metal. The workspace's, at the
+# revision GPUI builds (one wgpu in the graph), whose Metal internals wrap a frame's pixel
+# buffer as a render target (`surface`).
 wgpu = { workspace = true, features = [ "glsl" ] }
 pollster = "1.0"
 # The pipeline and texture caches, shared by every visual's render.
@@ -23,3 +24,43 @@ tracing.workspace = true
 [dev-dependencies]
 # Test textures and environment maps.
 image = { version = "0.25.10", default-features = false, features = [ "png" ] }
+# The frame cost measurement (`tests/animated_frames.rs`): the thread's CPU clock, the process's
+# instructions and footprint, and the Metal device GPUI's renderer wraps a surface with.
+libc.workspace = true
+slopty-testkit.workspace = true
+
+# Metal and CoreVideo: the crate draws on Apple's GPUs only, for the shell, which builds there.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# A frame's pixel buffer (`surface`): an `IOSurface`-backed BGRA one from a pool, shown to the
+# GPU through a Metal texture cache, which GPUI's surface samples as it lies, and the
+# `IOSurface` under it, which the pool hands back. The versions wgpu and GPUI build.
+objc2-core-foundation = { workspace = true, features = [ "CFNumber" ] }
+objc2-core-video = { workspace = true, features = [
+    "CVMetalTexture",
+    "CVMetalTextureCache",
+    "CVPixelBufferPool",
+    "objc2",
+    "objc2-io-surface",
+    "objc2-metal",
+] }
+# With the CoreFoundation type `CVPixelBufferGetIOSurface` returns, which objc2-core-video's
+# `objc2-io-surface` feature leaves out.
+objc2-io-surface = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "IOSurfaceTypes",
+    "objc2-core-foundation",
+] }
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "MTLPixelFormat",
+    "MTLTexture",
+] }
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+objc2-metal = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLTexture",
+] }

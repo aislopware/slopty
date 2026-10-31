@@ -18596,3 +18596,57 @@ cargo xtask remote --name G2-ab --only Cargo.lock --probe "$(cat probe-ab.sh)"  
 #   harness, sed the lock's pin back to c4583d5e, build again, then three rounds of
 #   <harness> long_trace_frame_cost --ignored --nocapture --test-threads 1
 ```
+
+## 2026-10-31 — an animating visual renders into the surface GPUI shows
+
+An animating `ui.shader` at 1600 × 900 px (an 800 × 450 pt visual at 2x: a plasma with bloom),
+320 frames, the first 20 untimed, the two newest held as the window holds them
+(`slopty-visual-gpu` `tests/animated_frames.rs`). "Before" is the tree before the change: the
+last pass drew into a wgpu texture, the GPU copied it into a staging buffer, the CPU swizzled
+it into a new buffer, and the window's side made GPUI's image of it and uploaded it into the
+sprite atlas as `MetalAtlas` does (a texture of its own past 1024 px a side, 1600 × 1024, shared
+storage, `replaceRegion`). "After" is the change (`docs/decisions/ui.md`, "An animating visual
+renders into the surface GPUI shows"): the last pass draws into an `IOSurface` buffer from a
+pool, and the window's side wraps it as a texture through a CoreVideo cache, as gpui-fast's
+renderer does to draw a surface. Both arms built on one `xcode-27` runner (a GitHub macOS guest,
+"Apple M1 (Virtual)", 3 cores, paravirtual GPU), release with LTO off, three alternating rounds;
+p50 per round, two runs on two runners:
+
+| per frame | run | before | after |
+| --- | --- | --- | --- |
+| thread CPU | 41180972598 | 1.48, 1.45, 1.78 ms | 0.62, 0.42, 0.42 ms |
+| | 41180497364 | 2.09, 2.20, 2.04 ms | 0.69, 0.71, 0.57 ms |
+| of it the window's side (the main thread's in the app) | 41180972598 | 707, 693, 823 µs | 23, 12, 12 µs |
+| | 41180497364 | 914, 1,069, 1,060 µs | 25, 25, 20 µs |
+| wall, the GPU's wait included | 41180972598 | 3.67, 3.64, 4.19 ms | 2.79, 2.35, 2.35 ms |
+| | 41180497364 | 5.22, 4.81, 4.38 ms | 3.30, 3.06, 2.66 ms |
+
+| | before | after |
+| --- | --- | --- |
+| copies of a frame | the GPU's into the staging buffer, then two by the CPU (the swizzle, the upload) | none |
+| pixel memory made a frame | 5.5 MiB for the bytes and a 6.25 MiB atlas texture | none: a pooled `IOSurface`, in a new pixel buffer object |
+| footprint over the GPU's own, after 320 frames | +60.6 to +60.8 MiB | +38.7 to +38.9 MiB |
+| its peak | +66.1 to +66.4 MiB | +38.8 to +39.1 MiB |
+
+- The CPU's share of a frame falls by 58 to 76 %, and the window's side by 97 to 98 %: the main
+  thread no longer copies 5.5 MiB into a texture it has just made. The wall time falls by a
+  quarter to two fifths, the GPU's copy and the wait on the read-back with it.
+- The animation holds about 22 MiB less: the render target, the staging buffer, the bytes of
+  the two frames held and their two atlas textures (some 34 MiB) give way to the pool's three
+  `IOSurface`s (16.5 MiB). The peak no longer rises past the steady state, as it did while a
+  new frame's buffers were made before the old ones went.
+- A guest's PMU counts no instructions (`proc_pid_rusage` reads 0 there), so this entry has
+  none; on a Mac itself the measurement prints them too. The first run measured the same code
+  under an earlier name (`frame_cost`, `animated_frame_cost`).
+
+```sh
+cargo xtask remote --name G2-ab --only Cargo.lock --only crates/slopty-visual-gpu \
+  --probe "$(cat probe-frame.sh)"   # run 41180972598
+#   probe-frame.sh: CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16; build
+#   `cargo test -p slopty-visual-gpu --release --test animated_frames --no-run` (after); fetch the
+#   parent commit and check out its slopty-visual-gpu sources and manifest, with libc,
+#   slopty-testkit, objc2 and objc2-metal as dev-dependencies, and the same measurement whose
+#   window's side is `image::Frame` and an atlas texture (MetalAtlas's descriptor and upload);
+#   build again (before); then three rounds of
+#   <binary> what_an_animating_frame_costs --ignored --nocapture --test-threads 1
+```

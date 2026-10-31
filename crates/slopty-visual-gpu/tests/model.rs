@@ -107,8 +107,8 @@ mod model {
         match slopty_visual_gpu::unavailable_reason() {
             None => {
                 let frame = frame.expect("a GPU renders the scene");
-                assert_eq!((frame.width, frame.height), (640, 400));
-                assert!(covered(&frame.bgra) > 0, "the readback holds the model");
+                assert_eq!((frame.width(), frame.height()), (640, 400));
+                assert!(covered(&frame.read_pixels()) > 0, "the frame holds the model");
             }
             // A machine without a GPU draws in software (the test above); the GPU path says so.
             Some(reason) => {

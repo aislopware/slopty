@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! `ui.scene` on the GPU: physically based shading, soft shadows, glass that
-//! refracts and splits light, and bloom, rendered offscreen and read back.
+//! refracts and splits light, and bloom, rendered offscreen into the pixel
+//! buffer GPUI shows (`surface`).
 //!
 //! Passes, per frame:
 //! 1. shadow: the key light's depth over the geometry (orthographic);
@@ -1009,13 +1010,13 @@ pub struct SceneState {
     lit: wgpu::Texture,
     bloom_a: wgpu::Texture,
     bloom_b: wgpu::Texture,
-    output: wgpu::Texture,
     dummy_depth: wgpu::Texture,
-    staging: Option<wgpu::Buffer>,
+    /// The pixel buffers its frames are drawn into.
+    surfaces: crate::surface::Surfaces,
 }
 
 impl SceneState {
-    fn new(gpu: &crate::Gpu, (w, h): (u32, u32)) -> Self {
+    fn new(gpu: &crate::Gpu, (w, h): (u32, u32)) -> Result<Self, String> {
         use wgpu::TextureUsages as U;
         let device = &gpu.device;
         let texture = |label: &str, size: (u32, u32), format, samples, usage| {
@@ -1032,7 +1033,7 @@ impl SceneState {
         };
         let sampled = U::RENDER_ATTACHMENT | U::TEXTURE_BINDING;
         let half = ((w / 2).max(1), (h / 2).max(1));
-        Self {
+        Ok(Self {
             size: (w, h),
             shadow_map: texture("scene shadow map", (SHADOW_SIZE, SHADOW_SIZE), DEPTH, 1, sampled),
             msaa_color: texture("scene color", (w, h), HDR, SAMPLES, U::RENDER_ATTACHMENT),
@@ -1041,10 +1042,9 @@ impl SceneState {
             lit: texture("scene lit", (w, h), HDR, 1, sampled),
             bloom_a: texture("scene bloom", half, HDR, 1, sampled),
             bloom_b: texture("scene bloom", half, HDR, 1, sampled),
-            output: gpu.target(w, h, "scene output"),
             dummy_depth: lit_dummy_depth(device),
-            staging: None,
-        }
+            surfaces: crate::surface::Surfaces::new(device, (w, h))?,
+        })
     }
 }
 
@@ -1169,7 +1169,21 @@ pub fn render_scene(
     // Targets, kept between frames.
     let targets = match state {
         Some(targets) if targets.size == (w, h) => targets,
-        _ => state.insert(SceneState::new(gpu, (w, h))),
+        _ => match SceneState::new(gpu, (w, h)) {
+            Ok(targets) => state.insert(targets),
+            Err(error) => {
+                tracing::warn!(%error, "a scene's frames have nowhere to go");
+                return None;
+            }
+        },
+    };
+    // The buffer this frame is drawn into, which GPUI shows as it lies.
+    let target = match targets.surfaces.next(device) {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::warn!(%error, "a scene's frame has nowhere to go");
+            return None;
+        }
     };
     let SceneState {
         shadow_map,
@@ -1179,9 +1193,8 @@ pub fn render_scene(
         lit,
         bloom_a,
         bloom_b,
-        output,
         dummy_depth,
-        staging,
+        surfaces,
         ..
     } = targets;
     let half = ((w / 2).max(1), (h / 2).max(1));
@@ -1488,8 +1501,14 @@ pub fn render_scene(
         );
     }
     let strength = post_uniform([0.9, 0.0, 0.0, 0.0]);
-    fullscreen(&mut encoder, output, &pipelines.composite, &post_bind(shaded, &strength, bloom_a));
-    Some(gpu.read_back(encoder, output, staging))
+    fullscreen(
+        &mut encoder,
+        target.texture(),
+        &pipelines.composite,
+        &post_bind(shaded, &strength, bloom_a),
+    );
+    gpu.finish(encoder);
+    Some(surfaces.finish(target))
 }
 
 /// A 1×1 texture for bind slots a pass doesn't read (a texture can't be both
@@ -1637,17 +1656,17 @@ mod tests {
         }
         // The environment stands behind everything: no clear pixels inside
         // the edge fade (15% of the 720 px height), and a faded frame edge.
-        let (w, h) = (frame.width as usize, frame.height as usize);
+        let (w, h) = (frame.width() as usize, frame.height() as usize);
         let band = 110;
-        let mut inside = frame.bgra.as_chunks::<4>().0.iter().enumerate().filter(|(i, _)| {
+        let bgra = frame.read_pixels();
+        let mut inside = bgra.as_chunks::<4>().0.iter().enumerate().filter(|(i, _)| {
             let (x, y) = (i % w, i / w);
             (band..w - band).contains(&x) && (band..h - band).contains(&y)
         });
         assert!(inside.all(|(_, p)| p[3] == 255));
-        assert!(frame.bgra[3] < 3, "the corner fades out");
+        assert!(bgra[3] < 3, "the corner fades out");
         // The checker shows both of its colors somewhere.
-        let blueish = frame
-            .bgra
+        let blueish = bgra
             .as_chunks::<4>()
             .0
             .iter()
@@ -1670,13 +1689,13 @@ mod tests {
         render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
         let start = std::time::Instant::now();
         let frame = render_scene(&scene, camera, 720.0, 360.0, 2.0, &palette, &mut state).unwrap();
-        eprintln!("gpu scene {}x{} in {:?}", frame.width, frame.height, start.elapsed());
+        eprintln!("gpu scene {}x{} in {:?}", frame.width(), frame.height(), start.elapsed());
         if let Ok(path) = std::env::var("SLOPTY_VISUAL_DUMP") {
             crate::dump_ppm(&frame, &path);
         }
-        assert_eq!((frame.width, frame.height), (1440, 720));
-        let drawn = frame.bgra.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
-        let total = (frame.width * frame.height) as usize;
+        assert_eq!((frame.width(), frame.height()), (1440, 720));
+        let drawn = frame.read_pixels().as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        let total = (frame.width() * frame.height()) as usize;
         assert!(drawn > total / 8, "geometry fills the frame: {drawn}");
         assert!(drawn < total, "and the background stays clear");
     }
@@ -1685,10 +1704,10 @@ mod tests {
     #[expect(clippy::cast_precision_loss, reason = "pixel columns and counts are far below 2^52")]
     fn red_center(frame: &Frame) -> f64 {
         let columns: Vec<usize> = frame
-            .bgra
+            .read_pixels()
             .as_chunks::<4>()
             .0
-            .chunks(frame.width as usize)
+            .chunks(frame.width() as usize)
             .flat_map(|row| row.iter().enumerate())
             .filter(|(_, p)| p[2] > 120 && p[2].saturating_sub(p[0]) > 50)
             .map(|(x, _)| x)

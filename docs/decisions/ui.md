@@ -14741,3 +14741,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `an_agents_markdown_file_leaves_the_keyboard_when_its_text_comes_late`,
   `a_file_the_person_opens_at_a_line_takes_the_keyboard_when_its_text_comes`,
   `a_markdown_file_the_person_opens_takes_the_keyboard_when_its_text_comes`.
+- ✅ **An animating visual renders into the surface GPUI shows (2026-10-31).** An agent visual
+  that needs the GPU (a `ui.shader`, a lit `ui.scene`) is drawn offscreen by wgpu. Each frame was
+  copied by the GPU into a staging buffer, read back and swizzled by the CPU into a new buffer,
+  made a GPUI image and copied again into the sprite atlas, a texture of its own for a frame past
+  1024 px a side, made and freed every frame; the main thread paid that upload. Ruled: a frame's
+  last pass draws straight into an `IOSurface`-backed BGRA pixel buffer from a CoreVideo pool,
+  which a CoreVideo Metal texture cache shows to wgpu as a render target (`wgpu-hal`'s
+  `texture_from_raw`), and the window paints that buffer with `Window::paint_surface`, which
+  samples it where it lies (`slopty_visual_gpu::Frame`). Nothing of a frame is copied after the
+  GPU draws it. gpui-fast's surfaces drew video's Y′CbCr layouts only; aislopware/gpui-fast #79
+  adds BGRA with straight alpha.
+  - *Reuse.* What the pool keeps is the `IOSurface`s; each frame gets a new pixel buffer around
+    one of them, so a frame's identity is its surface (`Frame::surface_id`), never its pixel
+    buffer's address, which the allocator hands out again. The pool hands a surface out again
+    only once nothing holds the last buffer it lay in: the visual holds its newest frame, and
+    GPUI holds the buffer it draws until that frame has left the GPU (`SurfacesInFlight`), so a
+    frame never draws over the picture on screen. A frame reaches the window only once the GPU
+    finished it (`Gpu::finish` waits, as the read-back did). An animating shader so keeps the
+    surfaces held at once and the one being drawn: three while the window holds two frames, for
+    any number of frames (the pool lets an unused one go after a second); one that changes size
+    starts a new pool.
+  - *iOS* takes the same path: `IOSurface`, `CVPixelBufferPool` and `CVMetalTextureCache` are
+    public on iOS and its simulator, and the fork's renderer, shared by both, already drew
+    surfaces there.
+  - *A still visual* takes it too: a still shader, or a scene whose camera stands, draws one
+    frame, whose buffer the window keeps showing. The atlas images and the freeing they needed
+    (on a node leaving the tree and on the visual's release) are gone: a frame's buffer goes
+    back to its pool when the last holder lets go.
+  - *The software scene*, drawn by the CPU where no GPU serves, is copied once into a new
+    `IOSurface` buffer (`Frame::from_bgra`), in place of the image and its atlas upload: one copy
+    of each such frame, as before.
+  - *Fades, opacity and scrolling.* The surface takes what the image took: the element's
+    opacity, the transcript's edge fade at its top, and the content mask (the fork's
+    surfaces gained the first two with #79). In a composited scroll layer a surface is drawn in
+    the overlay with the paths, never rasterized into the layer's tiles, which would keep the
+    picture they were rasterized with after the visual hands over the next frame.
+  - *What it saves* (`docs/MEASUREMENTS.md`, "an animating visual renders into the surface GPUI
+    shows"): at 1600 × 900 px a frame's CPU time fell by 58 to 76 % (1.5 to 2.2 ms to 0.4 to
+    0.7 ms on a runner), the window's side of it (the main thread's) from 0.7 to 1.1 ms to 12 to
+    25 µs, its wall time by a quarter to two fifths, and an animating visual holds about 22 MiB
+    less.
+  - Tests: `slopty-shell` `visuals::tests::an_animating_shaders_frames_reach_the_surface_as_drawn`
+    (every frame paints the very buffer the shader's last pass drew, as a surface and never as an
+    image, from at most three surfaces for twenty frames, and the buffer shown holds the
+    shader's picture); `slopty-visual-gpu`
+    `shader::tests::an_animating_shader_draws_each_frame_into_a_pooled_pixel_buffer` (each
+    frame's pixels in its BGRA buffer, from exactly three surfaces while two frames are held)
+    and the crates' pixel checks, which read a frame through `Frame::read_pixels`; the fork's
+    BGRA, opacity, fade and scroll-layer tests.

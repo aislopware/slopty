@@ -1,6 +1,7 @@
 // Derived from zeron (MIT, github.com/zeronsh/zeron @ 3b2f780), see THIRD_PARTY_NOTICES.md
 //! `ui.shader` on the GPU: buffer passes with feedback, the image pass, then
-//! optional bloom and compositing by blend mode, read back as an image.
+//! optional bloom and compositing by blend mode into the pixel buffer GPUI
+//! shows (`surface`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,8 +34,10 @@ pub struct ShaderSpec<'a> {
     pub textures: &'a [slopty_visual::TextureData],
 }
 
-/// One shader's textures between frames: each buffer's previous and
-/// current frame, the image, and the post targets. Recreated when the size
+/// One shader's textures between frames.
+///
+/// Each buffer's previous and current frame, the image, the post targets,
+/// and the pixel buffers its frames are drawn into. Recreated when the size
 /// or the number of buffers changes.
 #[derive(Debug)]
 pub struct ShaderState {
@@ -44,8 +47,7 @@ pub struct ShaderState {
     latest: usize,
     image: wgpu::Texture,
     bloom: [wgpu::Texture; 2],
-    output: wgpu::Texture,
-    staging: Option<wgpu::Buffer>,
+    surfaces: crate::surface::Surfaces,
 }
 
 pub(crate) struct Pipelines {
@@ -370,17 +372,15 @@ fn texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
 
 impl ShaderState {
-    fn new(device: &wgpu::Device, size: (u32, u32), buffers: usize) -> Self {
+    fn new(device: &wgpu::Device, size: (u32, u32), buffers: usize) -> Result<Self, String> {
         let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
-        Self {
+        Ok(Self {
             size,
             buffers: std::iter::repeat_with(|| {
                 [
@@ -396,9 +396,8 @@ impl ShaderState {
                 texture(device, "shader bloom", half, HDR),
                 texture(device, "shader bloom", half, HDR),
             ],
-            output: texture(device, "shader output", size, FORMAT),
-            staging: None,
-        }
+            surfaces: crate::surface::Surfaces::new(device, size)?,
+        })
     }
 }
 
@@ -434,8 +433,10 @@ pub fn render_shader(
     }
     let state = match state {
         Some(state) if state.size == (width, height) && state.buffers.len() == buffers => state,
-        _ => state.insert(ShaderState::new(device, (width, height), buffers)),
+        _ => state.insert(ShaderState::new(device, (width, height), buffers)?),
     };
+    // The buffer this frame is drawn into, which GPUI shows as it lies.
+    let target = state.surfaces.next(device)?;
     // Write to the other of each pair.
     let (read, write) = (state.latest, usize::from(state.latest == 0));
 
@@ -636,13 +637,13 @@ pub fn render_shader(
     let composite = post_uniform([spec.bloom, mode, 0.0, 0.0]);
     fullscreen(
         &mut encoder,
-        &state.output,
+        target.texture(),
         &pipelines.composite,
         &post_bind(&state.image, &composite, &glow),
     );
-    let frame = gpu.read_back(encoder, &state.output, &mut state.staging);
+    gpu.finish(encoder);
     state.latest = write;
-    Ok(frame)
+    Ok(state.surfaces.finish(target))
 }
 
 /// A `vec4<f32>` uniform's bytes.
@@ -663,9 +664,51 @@ mod tests {
     }
 
     fn px(frame: &Frame, x: u32, y: u32) -> [u8; 4] {
-        let [blue, green, red, alpha] =
-            frame.bgra.as_chunks().0[y.saturating_mul(frame.width).saturating_add(x) as usize];
+        let [blue, green, red, alpha] = frame.read_pixels().as_chunks().0
+            [y.saturating_mul(frame.width()).saturating_add(x) as usize];
         [red, green, blue, alpha]
+    }
+
+    /// An animating shader draws each frame on the GPU straight into a BGRA pixel buffer from
+    /// its pool, the buffer GPUI's surface then shows: the frame's pixels are there with no
+    /// read-back, and while the window holds the two newest frames (the one it shows, the one
+    /// its last draw still samples), the pool hands back the surface of the frame let go for the
+    /// next: three surfaces in all however many frames, each time in a new pixel buffer.
+    #[test]
+    fn an_animating_shader_draws_each_frame_into_a_pooled_pixel_buffer() {
+        if !crate::available() {
+            return;
+        }
+        let code = "void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n\
+            fragColor = vec4(fract(iTime), 0.0, 1.0, 1.0);\n\
+        }";
+        let mut uniforms =
+            ShaderUniforms { resolution: [64.0, 32.0, 1.0, 0.0], ..Default::default() };
+        let mut state = None;
+        let mut held = std::collections::VecDeque::new();
+        let mut surfaces = std::collections::HashSet::new();
+        for step in 0..24_u8 {
+            let time = f32::from(step) * 0.07;
+            uniforms.time[0] = time;
+            let frame =
+                render_shader(&spec(code, &[], Blend::Opaque), &uniforms, 64, 32, &mut state)
+                    .unwrap();
+            let buffer = frame.pixel_buffer();
+            assert_eq!(
+                objc2_core_video::CVPixelBufferGetPixelFormatType(&buffer),
+                objc2_core_video::kCVPixelFormatType_32BGRA
+            );
+            surfaces.insert(frame.surface_id().expect("an IOSurface-backed buffer"));
+            let [red, _, blue, _] = px(&frame, 10, 10);
+            let expected = time.fract() * 255.0;
+            assert!((f32::from(red) - expected).abs() < 2.0, "step {step}: {red}, not {expected}");
+            assert_eq!(blue, 255, "this frame's pixels, drawn into its buffer");
+            held.push_back(frame);
+            if held.len() > 2 {
+                held.pop_front();
+            }
+        }
+        assert_eq!(surfaces.len(), 3, "the surfaces of 24 frames: {surfaces:?}");
     }
 
     #[test]
@@ -822,7 +865,7 @@ mod tests {
         };
         let frame =
             render_shader(&spec(code, &[], Blend::Alpha), &uniforms, 96, 96, &mut None).unwrap();
-        let lit = frame.bgra.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        let lit = frame.read_pixels().as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
         assert!(lit > 96 * 96 / 10, "the fractal covers the middle: {lit}");
         assert!(lit < 96 * 96, "and the sky stays clear");
     }
