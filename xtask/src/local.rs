@@ -83,7 +83,7 @@ pub fn check(
     // against a check at 10, as much as at 10 (2026-10-31), so it gives way by stopping when a
     // check wants its directory instead.
     rustix::process::setpriority_process(None, 10).context("lower the check's priority")?;
-    room_for_build(root)?;
+    room_for_build(root, held.name(), depth)?;
     let dir = dir(root, held.name());
     let tree = sync_tree(root, &dir, sha)?;
     let warmed: Vec<String>;
@@ -257,34 +257,72 @@ fn build_tests(sh: &Shell, crates: &[&str]) -> Result<()> {
     crate::tools::quiet_step("tests built", cmd!(sh, "cargo test --no-run {built...} {target...}"))
 }
 
-/// Before a build, under the volume's floor and its headroom: the idle lane directories go whole
-/// first, which frees exactly what they hold, then a prune pass; still under the floor itself,
-/// the check is refused, as the gate's is (`prune::ensure_room`), since a lane's cold app check
-/// writes about 30 GB. With the floor at 50 the pass ran before most checks, about 5 s of each,
+/// Before a build in lane directory `own`, under the volume's floor and its headroom: the idle
+/// lane directories go whole first, which frees exactly what they hold, then a prune pass; still
+/// under the floor itself, other lane directories go whole whatever their age until it holds
+/// ([`evict_to_floor`]), and only then is a check refused, as the gate's is
+/// (`prune::ensure_room`), since a lane's cold app check writes about 30 GB. A warm is refused
+/// without that. With the floor at 50 the pass ran before most checks, about 5 s of each,
 /// and evicted units idle for an hour, so 17-23 % of steps recompiled dependencies
 /// (`.research/check-speed-2026-10-31/A-anatomy.md` §3.2); at 30 and its headroom it runs only
 /// when the volume is short. The pass after a check runs once its verdict is out (`remote`'s
 /// after-pass).
-fn room_for_build(root: &Utf8Path) -> Result<()> {
+fn room_for_build(root: &Utf8Path, own: &str, depth: Depth) -> Result<()> {
     let limits = crate::prune::Limits::from_env()?;
     let roomy = limits.with_headroom()?.floor;
-    if crate::prune::free_space(root)? >= roomy {
+    let free = || crate::prune::free_space(root);
+    if free()? >= roomy {
         return Ok(());
     }
     evict_idle(root, EVICTED_SHORT);
-    if crate::prune::free_space(root)? < roomy {
+    if free()? < roomy {
         crate::prune::auto();
     }
-    let free = crate::prune::free_space(root)?;
+    // A warm builds for a check that may never come: it takes no lane's directory for that.
+    let free =
+        if depth == Depth::Warm { free()? } else { evict_to_floor(root, own, limits.floor, free)? };
     ensure!(
         free >= limits.floor,
-        "{} GB free, under the volume's floor of {} GB with the idle lane directories evicted and \
-         a prune pass run: a build here could fill it (`cargo xtask prune --dry-run` says where \
-         the space went)",
+        "{} GB free, under the volume's floor of {} GB with a prune pass run and every other lane \
+         directory no check holds evicted but the one used last: a build here could fill it \
+         (`cargo xtask prune --dry-run` says where the space went)",
         free / 1_000_000_000,
         limits.floor / 1_000_000_000
     );
     Ok(())
+}
+
+/// Evict lane directories whole, whatever their age, until `free` reads the volume's free space
+/// at `floor` or more, and return what it read last. A block that two clones share counts in
+/// neither's prune sizing, since deleting it from one frees nothing, so a volume short of space
+/// in such blocks can only gain it this way. Lock-moving checks' directories go first, being
+/// clones, then the least recently used; one a check holds or waits for stays ([`evict`]), as
+/// do `own`, the check's, and the one used last besides it with a finished target dir, the next
+/// clone's source.
+fn evict_to_floor(
+    root: &Utf8Path,
+    own: &str,
+    floor: u64,
+    mut free: impl FnMut() -> Result<u64>,
+) -> Result<u64> {
+    let mut now = free()?;
+    if now >= floor {
+        return Ok(now);
+    }
+    let mut dirs = by_use(root);
+    let source = dirs.iter().find(|(_, name, dir)| name != own && seeded(dir)).map(|d| d.1.clone());
+    dirs.retain(|(_, name, _)| name != own && Some(name) != source.as_ref());
+    dirs.sort_by_key(|(used, name, _)| (!name.ends_with(LOCK_SUFFIX), *used));
+    let why = format!("the volume is under its floor of {} GB", floor / 1_000_000_000);
+    for (_, name, _) in dirs {
+        if evict(root, &name, &why) {
+            now = free()?;
+            if now >= floor {
+                break;
+            }
+        }
+    }
+    Ok(now)
 }
 
 /// What a lane directory's checks left for the next ones, in `<dir>/state.json`: the crates
@@ -626,6 +664,21 @@ fn last_used(dir: &Utf8Path) -> Option<SystemTime> {
     std::fs::metadata(dir.join(".lock")).and_then(|m| m.modified()).ok()
 }
 
+/// Every lane directory under `target/local/`, with when it was last used, the one used last
+/// first.
+fn by_use(root: &Utf8Path) -> Vec<(Option<SystemTime>, String, Utf8PathBuf)> {
+    let mut dirs: Vec<_> =
+        lane_dirs(root).into_iter().map(|(name, dir)| (last_used(&dir), name, dir)).collect();
+    dirs.sort_by_key(|&(used, ..)| std::cmp::Reverse(used));
+    dirs
+}
+
+/// Whether lane directory `dir` holds a finished build to clone from: a target dir, and no clone
+/// into it stopped halfway, which would hold another tree's units still.
+fn seeded(dir: &Utf8Path) -> bool {
+    dir.join("target").is_dir() && !dir.join(SEEDING).exists()
+}
+
 /// Every lane directory under `target/local/`, by name.
 fn lane_dirs(root: &Utf8Path) -> Vec<(String, Utf8PathBuf)> {
     let Ok(entries) = std::fs::read_dir(root.join("target").join("local")) else {
@@ -753,10 +806,7 @@ fn sources(root: &Utf8Path, name: &str, lock: &[u8], crates: &[String]) -> Vec<(
     let needed = needed(lock, crates);
     let mut found: Vec<(usize, Option<SystemTime>, String)> = lane_dirs(root)
         .into_iter()
-        // A clone stopped halfway holds another tree's units still.
-        .filter(|(other, dir)| {
-            other != name && dir.join("target").is_dir() && !dir.join(SEEDING).exists()
-        })
+        .filter(|(other, dir)| other != name && seeded(dir))
         .map(|(other, dir)| {
             let locked: HashSet<(String, String, String)> =
                 std::fs::read_to_string(dir.join("tree/Cargo.lock"))
@@ -905,16 +955,13 @@ const EVICTED: Duration = Duration::from_hours(24);
 pub const EVICTED_SHORT: Duration = Duration::from_hours(3);
 
 /// Delete every lane directory unused for `idle` (and every one unused for [`EVICTED`]) that no
-/// check holds, the one used last that has a target dir kept as the next clone's source, and say
-/// how many went. A directory goes whole, which frees exactly the blocks it does not share with
-/// a clone: a prune pass sizes units by their files and so counts a clone's shared blocks as
-/// freed when they are not.
+/// check holds, the one used last with a finished build ([`seeded`]) kept as the next clone's
+/// source, and say how many went. A directory goes whole, which frees exactly the blocks it does
+/// not share with a clone.
 pub fn evict_idle(root: &Utf8Path, idle: Duration) -> usize {
     let now = SystemTime::now();
-    let mut dirs: Vec<(Option<SystemTime>, String, Utf8PathBuf)> =
-        lane_dirs(root).into_iter().map(|(name, dir)| (last_used(&dir), name, dir)).collect();
-    dirs.sort_by_key(|&(used, ..)| std::cmp::Reverse(used));
-    let kept = dirs.iter().position(|(_, _, dir)| dir.join("target").is_dir());
+    let dirs = by_use(root);
+    let kept = dirs.iter().position(|(_, _, dir)| seeded(dir));
     // What an earlier pass moved aside and could not delete.
     for left in std::fs::read_dir(graveyard(root)).into_iter().flatten().filter_map(Result::ok) {
         if let Ok(left) = Utf8PathBuf::from_path_buf(left.path()) {
@@ -1467,6 +1514,43 @@ dependencies = ["serde 1.0.0"]
             "N and O; M-h-lock, used last, stays"
         );
         assert!(dir(&root, "M").exists() && dir(&root, "M-h-lock").exists());
+        let _gone = std::fs::remove_dir_all(&root);
+    }
+
+    /// Under the floor with every lane directory used lately, directories go whole whatever their
+    /// age until the floor holds: the lock-moving checks' clones first, then the least recently
+    /// used. The check's own stays, as do the one used last besides it with a finished build (not
+    /// a clone stopped halfway) and one a check holds.
+    #[test]
+    fn under_the_floor_directories_go_whole_until_it_holds() {
+        const GB: u64 = 1_000_000_000;
+        let root = scratch("floor");
+        let names = ["L", "M", "N", "O", "P", "Q", "L-h-lock"];
+        lane(&root, "L", "old", &["slopty-shell"], Duration::from_mins(50));
+        lane(&root, "M", "old", &["xtask"], Duration::from_mins(1));
+        lane(&root, "N", "old", &["slopty-net"], Duration::from_mins(20));
+        lane(&root, "O", "old", &["slopty-ui"], Duration::from_mins(90));
+        lane(&root, "P", "old", &["slopty-ui"], Duration::from_mins(120));
+        lane(&root, "Q", "old", &["slopty-ui"], Duration::from_mins(5));
+        lane(&root, "L-h-lock", "old", &["slopty-shell"], Duration::from_mins(30));
+        std::fs::write(dir(&root, "Q").join(SEEDING), "").expect("a clone stopped halfway");
+        let p = std::fs::File::open(dir(&root, "P").join(".lock")).expect("P's lock");
+        p.lock().expect("P's check");
+        // Each directory that goes frees 12 GB of a volume with 10 GB free.
+        let free = || {
+            let gone = names.iter().filter(|name| !dir(&root, name).exists()).count();
+            Ok(10 * GB + 12 * GB * u64::try_from(gone).expect("a count"))
+        };
+        let left = |root: &Utf8Path| -> Vec<&str> {
+            names.iter().copied().filter(|name| dir(root, name).exists()).collect()
+        };
+        assert_eq!(evict_to_floor(&root, "M", 5 * GB, free).expect("read"), 10 * GB, "above it");
+        assert_eq!(left(&root), names, "nothing goes above the floor");
+        assert_eq!(evict_to_floor(&root, "M", 30 * GB, free).expect("read"), 34 * GB);
+        assert_eq!(left(&root), ["L", "M", "N", "P", "Q"], "L-h-lock, then O; P is held");
+        assert_eq!(evict_to_floor(&root, "M", 100 * GB, free).expect("read"), 58 * GB);
+        assert_eq!(left(&root), ["M", "N", "P"], "the check's, the source and the held one");
+        drop(p);
         let _gone = std::fs::remove_dir_all(&root);
     }
 

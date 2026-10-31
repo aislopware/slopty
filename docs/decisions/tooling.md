@@ -3447,7 +3447,12 @@ more full-window layer.
   - **Per-lane clones are not taken.** Four GUI clones would take 30-50 GB more, and the shared
     directories queue no one now that a check holds one only while it works there. A lane
     directory is evicted whole after a day idle (3 hours when the volume is short), the most
-    recently used one kept; a `-lock` directory goes once `HEAD` holds its lock.
+    recently used one kept; a `-lock` directory goes once `HEAD` holds its lock. A check still
+    under the floor after that and a prune pass evicts lane directories whole at any age before
+    it is refused, `-lock` ones first and then the least recently used, until the floor holds,
+    sparing its own and the one used last. A block two clones share counts in neither's prune
+    sizing, so only a whole directory frees it, and with every directory used in the last 3
+    hours each check would otherwise be refused.
   - **Warms run at nice 10.** Against a group at nice 10, nice 15 and nice 20 took the same half
     of the CPU. Only Darwin's background policy yields, and it reaches exec'd children in part
     and keeps work to the efficiency cores, so it is not taken.
