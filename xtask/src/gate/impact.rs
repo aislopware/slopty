@@ -116,8 +116,8 @@ pub const SMOKE: [Smoke; 7] = [
     },
     Smoke {
         id: "S5",
-        holds: "iOS: one session with its inspector, and one shader frame, on the iPhone and the \
-                iPad",
+        holds: "iOS: one session with its inspector, and one shader frame, on the iPhone; the \
+                app's launch and layout on the iPad",
         runs: Runs::Ios,
         tests: &[
             "screens::a_session_is_its_terminal_and_shows_its_inspector",

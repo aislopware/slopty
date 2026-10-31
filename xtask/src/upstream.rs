@@ -1013,7 +1013,6 @@ fn check_on_runner(
         e2e: None,
         filter: None,
         goldens: crate::remote::Goldens::default(),
-        sim: "iphone".to_owned(),
         only: Vec::new(),
         full: false,
         accept_snapshots: false,
@@ -1027,8 +1026,6 @@ fn check_on_runner(
         tests_on: None,
         linux_only: false,
         no_wait: false,
-        repeat: None,
-        until_fail: None,
         after: false,
     };
     let checkout = Shell::new()?;

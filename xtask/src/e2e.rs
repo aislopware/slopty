@@ -22,6 +22,8 @@ use xshell::{Shell, cmd};
 
 use crate::tools::{WORKSPACE_HACK, step};
 
+pub mod hosted;
+
 /// The feature that builds `slopty-e2e`'s live test targets, which every build that runs or
 /// lints them names (`crates/slopty-e2e/Cargo.toml`).
 pub const LIVE: &str = "slopty-e2e/live";
@@ -153,8 +155,9 @@ pub struct E2eOpts {
     #[arg(long, default_value = "info")]
     log: String,
     /// The simulators the `ios` case runs on, one after the other (`--sim iphone --sim ipad`),
-    /// from one build: the first boots while it builds, the next while the one before tests. The
-    /// iPhone when none is named.
+    /// from one build: the first boots while it builds, the next once the one before tested. The
+    /// iPhone when none is named. The iPad runs one test alone, whatever `-E` says
+    /// ([`IPAD_LIGHT`]).
     #[arg(long, value_enum)]
     sim: Vec<crate::ios::SimKind>,
     /// A nextest filterset narrowing the case, such as
@@ -181,6 +184,19 @@ pub struct E2eOpts {
     /// back (`ci.yml`'s `e2e (mac)` and `e2e (ios)`).
     #[arg(long)]
     stop_on_red: bool,
+    /// On GitHub's hosted Macs, not here: `e2e.yml` dispatched on `gate` for `--sha`, followed to
+    /// its end, its artifacts brought to `target/e2e/hosted/` ([`hosted`]). `mac` runs the app's
+    /// and the server's suites, `ios` the simulator's on the iPhone and the iPad's one test; `-E`
+    /// narrows either, and `--accept` or `--accept-all` leaves a patch of the accepted goldens
+    /// there.
+    #[arg(
+        long,
+        conflicts_with_all = ["no_build", "data_dir", "test_threads", "stop_on_red", "sim", "screen_recording"]
+    )]
+    hosted: bool,
+    /// With `--hosted`: the commit, which must be on GitHub (`HEAD` when left out).
+    #[arg(long, requires = "hosted")]
+    sha: Option<String>,
 }
 
 /// How a suite's tests stay out of `cargo gate`.
@@ -294,9 +310,18 @@ const INPUT: &[Suite] = &[Suite::env("SLOPTY_INPUT_E2E", "slopty-input", "inject
 
 const IOS: [Suite; 1] = [Suite::live("slopty-e2e", "ios")];
 
+/// What the iPad's pass of the simulator case runs, whatever the filter: the app launches there
+/// and draws its layout, the sidebar beside the session, against its goldens. The person does
+/// not use the iPad, so it gets this light smoke check, and the iPhone the whole case
+/// (`docs/decisions/testing.md`, "The gate runs the smoke cases a push reaches").
+const IPAD_LIGHT: &str = "test(=compact::a_phone_opens_on_its_chats_and_one_takes_the_screen)";
+
 const SERVER: [Suite; 1] = [Suite::live("slopty-e2e", "server")];
 
 pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
+    if opts.hosted {
+        return run_hosted(sh, opts);
+    }
     // The simulator cases' tools, before a minute of compiling.
     if matches!(opts.case, Case::Ios) {
         crate::ios::preflight(sh, true)?;
@@ -479,7 +504,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                 unbuilt.push(binaries);
                 continue;
             }
-            let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
+            let caller = if *sim == Some(crate::ios::SimKind::Ipad) {
+                Some(IPAD_LIGHT)
+            } else {
+                opts.filter.as_deref()
+            };
+            let expr = filterset(suite, caller, opts.screen_recording);
             let ignored: &[&str] =
                 if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
             let output: Vec<String> = match opts.test_threads {
@@ -582,6 +612,38 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     }
 }
 
+/// `xtask e2e <mac|ios> --hosted`: the case on a hosted Mac, its verdict and its patches.
+fn run_hosted(sh: &Shell, opts: &E2eOpts) -> Result<()> {
+    let kinds: &[hosted::Kind] = match opts.case {
+        Case::Mac => &[hosted::Kind::Mac],
+        Case::Ios => &[hosted::Kind::Ios],
+        other => bail!(
+            "--hosted runs `mac` (the app's and the server's suites) or `ios` (the simulator's), \
+             each narrowed by -E; not `{other:?}`"
+        ),
+    };
+    let wanted = format!("{}^{{commit}}", opts.sha.as_deref().unwrap_or("HEAD"));
+    let sha = cmd!(sh, "git rev-parse --verify {wanted}").quiet().read()?;
+    let goldens = if opts.accept_all {
+        hosted::Goldens::AcceptAll
+    } else if opts.accept {
+        hosted::Goldens::Accept
+    } else {
+        hosted::Goldens::Review
+    };
+    let request = hosted::Request { sha: &sha, kinds, filter: opts.filter.as_deref(), goldens };
+    let into = camino::Utf8PathBuf::try_from(sh.current_dir().join("target/e2e/hosted"))?;
+    let verdict = hosted::run(sh, &request, &into)?;
+    for (job, done) in &verdict.jobs {
+        println!("  {} {job} {done}", if done == "success" { "✓" } else { "✘" });
+    }
+    for patch in verdict.patches() {
+        println!("  accepted goldens: {patch} (`git apply --binary {patch}`)");
+    }
+    println!("  artifacts: {}", verdict.artifacts);
+    hosted::passed(&verdict)
+}
+
 /// A simulator booting in the background ([`boot_in_background`]): one the run ends before it
 /// uses is shut down once booted, as every simulator a run boots is.
 struct Booting(Option<std::thread::JoinHandle<Result<(String, std::time::Duration)>>>);
@@ -614,15 +676,16 @@ fn boot_in_background(
     })
 }
 
-/// The longest a run waits for its simulator to settle ([`settle`]): in the e2e guest a clone
-/// of a settled simulator took 132-138 s, and a first boot's work 18-20 minutes
-/// (`docs/decisions/testing.md`, "An iOS run starts once its simulator has settled").
+/// The longest a run waits for its simulator to settle ([`settle`]): in a guest on this Mac
+/// (2026-10, since removed) a clone of a settled simulator took 132-138 s, and a first boot's
+/// work 18-20 minutes (`docs/decisions/testing.md`, "An iOS run starts once its simulator has
+/// settled").
 const SETTLE_MOST: std::time::Duration = std::time::Duration::from_mins(10);
 
 /// How long the machine took to settle once a simulator booted and took the app: until its CPU
-/// is half idle or more on two 4 s samples of `top` in a row, as the e2e guest's run waits. A
-/// booted simulator's daemons (`SetStoreUpdateService`, `MTLCompilerService`, `photolibraryd`)
-/// held every core of the guest for minutes after `bootstatus`, and tests run beside them
+/// is half idle or more on two 4 s samples of `top` in a row. A booted simulator's daemons
+/// (`SetStoreUpdateService`, `MTLCompilerService`, `photolibraryd`) held every core of a guest
+/// on this Mac (2026-10, since removed) for minutes after `bootstatus`, and tests run beside them
 /// failed on time. `None` when [`SETTLE_MOST`] passed first, or `top` could not run.
 fn settle(sh: &Shell) -> Option<std::time::Duration> {
     let started = std::time::Instant::now();
@@ -1007,79 +1070,6 @@ pub fn build(sh: &Shell, packages: &[&str], tests: &[&str], args: &[&str]) -> Re
     )
 }
 
-/// The filtersets the app case runs with `filter`, in turn, as [`run`] composes them: first the
-/// tests that code no video, then (`true`) those that do, behind the encoder probe; neither
-/// captures the screen (that needs the Screen Recording grant).
-pub fn app_filtersets(filter: Option<&str>) -> Vec<(String, bool)> {
-    APP.iter().map(|suite| (filterset(suite, filter, false), suite.codes)).collect()
-}
-
-/// The filterset the simulator case runs with `filter`, as [`run`] composes it.
-pub fn ios_filterset(filter: Option<&str>) -> String {
-    let [suite] = &IOS;
-    filterset(suite, filter, false)
-}
-
-/// The filterset the server case runs with `filter`, as [`run`] composes it.
-pub fn server_filterset(filter: Option<&str>) -> String {
-    let [suite] = &SERVER;
-    filterset(suite, filter, false)
-}
-
-/// The environment the server case's suite runs in: the app's, but for the `VideoToolbox`
-/// refusal, which its suite does not take.
-pub fn server_env(data_dir: &str, bin_dir: &str, accept: Option<&str>) -> Vec<(String, String)> {
-    app_env(data_dir, bin_dir, accept).into_iter().filter(|(k, _)| k != NO_VIDEOTOOLBOX).collect()
-}
-
-/// The environment the simulator case's suite runs in: the app's, but for the `VideoToolbox`
-/// refusal, which its suite does not take, and with the booted simulator `udid` the app runs in.
-pub fn ios_env(
-    data_dir: &str,
-    bin_dir: &str,
-    accept: Option<&str>,
-    udid: &str,
-) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = app_env(data_dir, bin_dir, accept)
-        .into_iter()
-        .filter(|(k, _)| k != NO_VIDEOTOOLBOX)
-        .collect();
-    env.push(("SLOPTY_SIM_UDID".to_owned(), udid.to_owned()));
-    env.push(("SLOPTY_SIM_BUNDLE_ID".to_owned(), crate::ios::BUNDLE_ID.to_owned()));
-    env
-}
-
-/// The environment the app's suites run in, with the data dir `data_dir` and the binaries in
-/// `bin_dir`: what [`run`] sets for them.
-pub fn app_env(data_dir: &str, bin_dir: &str, accept: Option<&str>) -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = [
-        ("SLOPTY_DATA_DIR", data_dir.to_owned()),
-        ("SLOPTY_PTYD_SOCKET", format!("{data_dir}/run/ptyd.sock")),
-        ("SLOPTY_WORKER_SOCKET", format!("{data_dir}/run/worker.sock")),
-        ("SLOPTY_E2E_BIN_DIR", bin_dir.to_owned()),
-        ("SLOPTY_E2E_ARTIFACTS", format!("{data_dir}/artifacts")),
-        ("RUST_LOG", "info".to_owned()),
-        (crate::gate::BINS_FRESH, "1".to_owned()),
-        (NO_VIDEOTOOLBOX, "1".to_owned()),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_owned(), v))
-    .collect();
-    if let Some(accept) = accept {
-        env.push(("SLOPTY_E2E_ACCEPT".to_owned(), accept.to_owned()));
-    }
-    // `SLOPTY_E2E_A11Y=always` keeps the app's accessibility tree on for the whole run, as an
-    // assistive app does, and `GPUI_VIEW_RETENTION=0` builds every view in every frame: the two
-    // sort a view acting on its last build from a fault of its own (`docs/TESTING.md`, "Retained
-    // frames").
-    for key in ["SLOPTY_E2E_A11Y", "GPUI_VIEW_RETENTION"] {
-        if let Ok(mode) = std::env::var(key) {
-            env.push((key.to_owned(), mode));
-        }
-    }
-    env
-}
-
 /// Nextest's exit code when the filters leave no test to run.
 pub const NO_TESTS_RUN: i32 = 4;
 
@@ -1295,6 +1285,18 @@ mod tests {
         filterset, idle_share,
     };
 
+    /// The iPad's one test is one of the simulator case's, so a rename cannot leave the iPad
+    /// running none.
+    #[test]
+    fn the_ipad_s_light_check_names_a_test_of_the_simulator_case() {
+        let name = super::IPAD_LIGHT.strip_prefix("test(=").and_then(|t| t.strip_suffix(')'));
+        let (module, test) = name.and_then(|n| n.split_once("::")).expect("a module's test");
+        let root = crate::tools::repo_root().expect("repo root");
+        let path = root.join(format!("crates/slopty-e2e/tests/ios/{module}.rs"));
+        let source = std::fs::read_to_string(&path).expect("its module");
+        assert!(source.contains(&format!("async fn {test}()")), "{test} in {path}");
+    }
+
     /// The binaries of [`PACKAGES`] an e2e build leaves out, and why (`BINS`).
     const LEFT_OUT: [(&str, &str); 3] = [
         ("slopty-app", "the harness starts `slopty-app-e2e`"),
@@ -1383,7 +1385,7 @@ mod tests {
         };
         let green = [
             ("gate (ui)", Some("success")),
-            ("gate (warm)", Some("skipped")),
+            ("release v1", Some("skipped")),
             ("e2e (ios)", None),
             ("promote", None),
         ];
@@ -1432,20 +1434,6 @@ mod tests {
                    Processes: 513 total\nCPU usage: 20.5% user, 12.25% sys, 67.25% idle \n";
         assert_eq!(idle_share(top), Some(67.25));
         assert_eq!(idle_share("CPU usage: 1.0% user, 1.0% sys, 98.0% idle\n"), None);
-    }
-
-    /// The guest runs both of the app's groups, the one that codes last and on its own, each
-    /// in the app's own binary.
-    #[test]
-    fn the_guest_runs_the_tests_that_code_after_the_rest() {
-        let groups = super::app_filtersets(Some("test(a)"));
-        let [(rest, false), (coding, true)] = groups.as_slice() else { panic!("{groups:?}") };
-        assert!(
-            rest.starts_with("(binary_id(slopty-e2e::app)) & (not ")
-                && rest.ends_with("& (test(a)) & (not test(~screen_recording::))"),
-            "{rest}"
-        );
-        assert!(coding.contains("test(~stream::)") && !coding.contains("(not (test"), "{coding}");
     }
 
     /// The app's tests run in two groups that split the target between them on the same list of

@@ -34,6 +34,25 @@ const FIND: Duration = Duration::from_secs(120);
 /// The longest `--wait` waits for the run to finish: a cold gate takes about an hour.
 const FINISH: Duration = Duration::from_hours(3);
 
+/// What GitHub reads in a pushed commit's message as "start no workflow" (its "Skipping workflow
+/// runs"), compared without case. A land saying one would leave `gate` on a commit no run
+/// gates, older runs standing aside for it, and main never moving.
+const SKIPS: [&str; 7] = [
+    "[skip ci]",
+    "[ci skip]",
+    "[no ci]",
+    "[skip actions]",
+    "[actions skip]",
+    "skip-checks:true",
+    "skip-checks: true",
+];
+
+/// The first of [`SKIPS`] that `messages` say.
+fn skips_ci(messages: &str) -> Option<&'static str> {
+    let messages = messages.to_lowercase();
+    SKIPS.into_iter().find(|skip| messages.contains(skip))
+}
+
 /// `cargo xtask land` options.
 #[derive(clap::Args, Debug)]
 pub struct LandOpts {
@@ -74,6 +93,13 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
     cmd!(sh, "committed origin/main..HEAD --no-merge-commit")
         .run()
         .context("a commit to land breaks Conventional Commits: reword it, then land")?;
+    let messages = cmd!(sh, "git log --format=%B origin/main..HEAD").read()?;
+    if let Some(skip) = skips_ci(&messages) {
+        bail!(
+            "a commit to land says `{skip}`, so GitHub would start no gate on it and main would \
+             never take it: reword it, then land"
+        );
+    }
     let leased = cmd!(sh, "git rev-parse --verify --quiet refs/remotes/origin/{BRANCH}")
         .quiet()
         .read()
@@ -317,7 +343,15 @@ pub fn decide(gate: Gate, sha: &str) -> Next {
 
 #[cfg(test)]
 mod tests {
-    use super::{Gate, Next, decide, red_jobs};
+    use super::{Gate, Next, decide, red_jobs, skips_ci};
+
+    /// A message GitHub would start no workflow for is refused, in any case, and only that.
+    #[test]
+    fn a_commit_that_skips_ci_is_refused() {
+        assert_eq!(skips_ci("fix(ci): a thing [Skip CI]"), Some("[skip ci]"));
+        assert_eq!(skips_ci("docs: x\n\n\nskip-checks: true"), Some("skip-checks: true"));
+        assert_eq!(skips_ci("ci: skip the cache when it is cold"), None);
+    }
 
     /// A run's red jobs are those that failed or ran past their timeout, which GitHub lists as
     /// cancelled; a job cancelled with its run is not one.

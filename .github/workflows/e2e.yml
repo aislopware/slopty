@@ -1,12 +1,14 @@
 name: E2E
 run-name: >-
-  ${{ github.event_name == 'schedule' && 'E2E nightly' || format('E2E: {0}', inputs.sha || github.sha) }}
+  ${{ github.event_name == 'schedule' && 'E2E nightly' || format('E2E: {0}{1}', inputs.sha || github.sha,
+  inputs.id && format(' ({0})', inputs.id) || '') }}
 
 # The live tests (`cargo xtask e2e`): the real app with ptyd and the worker, the server with the
 # CLI and MCP, and the iOS app in the simulator on the iPhone and the iPad, each driven through
 # its test socket, every case on one commit (docs/decisions/testing.md, "Goldens render in the
 # test process; e2e is a smoke set chosen by what a change reaches"), in two jobs that build once
-# each: `mac` runs the app's and the server's, `ios` the simulator's on both devices. The gate
+# each: `mac` runs the app's and the server's, `ios` the simulator's on the iPhone and the iPad's
+# one launch-and-layout test. The gate
 # runs the cases a push reaches in the same two jobs (ci.yml's `e2e`). Two ways in, both
 # dispatched on `gate`, so the run reads the compile cache the test shards fill there (a cache is
 # read by its own branch alone, and a run on main built the app for 600 s,
@@ -17,7 +19,10 @@ run-name: >-
 #   schedule late or not at all under load, so `promote` starts one when none started for 26
 #   hours. At 19:47 UTC, 02:47 in the person's time zone (UTC+7), so it holds no Mac the working
 #   day's gate wants.
-# - By hand, on the commit named (`gh workflow run e2e.yml --ref gate -f sha=<commit>`).
+# - By hand or from a lane, on the commit named, its cases, a filterset and what to do with the
+#   goldens (`cargo xtask e2e mac|ios --hosted`, xtask/src/e2e/hosted.rs, which marks its run
+#   with `id` to find it, follows it and brings its artifacts back). Such a run has a concurrency
+#   group of its own; the nightly's share one.
 # `--review`: a changed frame fails nothing here and leaves its render and diff in the
 # `e2e-<case>` artifact, since a runner's GPU draws apart from the Macs the goldens were drawn
 # on; a red here is the behaviour's, and is never retried (`NEXTEST_RETRIES=0`). Each job's
@@ -31,9 +36,29 @@ on:
       sha:
         description: The commit to test; empty for the ref's head
         default: ""
+      cases:
+        description: >-
+          The cases, a JSON list: "mac" (the app's and the server's suites), "ios" (the
+          simulator's, on the iPhone, and the iPad's launch and layout)
+        default: '["mac", "ios"]'
+      filter:
+        description: A nextest filterset narrowing every case; empty for all of each
+        default: ""
+      goldens:
+        description: "What the run does with the goldens: review, accept or accept-all"
+        default: review
+      a11y:
+        description: >-
+          "always" keeps the app's accessibility tree on from its first frame
+          (`SLOPTY_E2E_A11Y`), as `xtask e2e --hosted` and `remote --e2e` pass it on when it is
+          set where they run; empty leaves it to the app
+        default: ""
+      id:
+        description: A mark in the run's name, by which who dispatched it finds it
+        default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.id || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -86,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [mac, ios]
+        case: ${{ fromJSON(inputs.cases || '["mac", "ios"]') }}
     steps:
       # Spotlight off: it indexes every file a build and its tests write, and on a three-core
       # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
@@ -201,11 +226,16 @@ jobs:
       # A red is the behaviour's: no test is retried, the named overrides' retries included.
       - env:
           CASE: ${{ matrix.case }}
+          FILTER: ${{ inputs.filter }}
+          GOLDENS: ${{ inputs.goldens || 'review' }}
+          SLOPTY_E2E_A11Y: ${{ inputs.a11y }}
           NEXTEST_RETRIES: "0"
         run: |
-          args=("$CASE" --review)
+          args=("$CASE" "--$GOLDENS")
+          [ -n "$FILTER" ] && args+=(-E "$FILTER")
           if [ "$CASE" = ios ]; then
-            # The iPhone, then the iPad, from one build: the iPad boots while the iPhone tests.
+            # The iPhone, then the iPad, from one build: the iPad boots once the iPhone's tests
+            # are done, and runs its launch-and-layout test alone (`IPAD_LIGHT`).
             args+=(--sim iphone --sim ipad)
           else
             # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
@@ -213,11 +243,20 @@ jobs:
             args+=(--test-threads 3)
           fi
           xtask e2e "${args[@]}"
+      # The goldens and snapshots an accept wrote, as a patch on the commit, which who
+      # dispatched the run applies to their tree; nothing else of the runner's tree.
+      - if: always() && inputs.goldens != 'review' && inputs.goldens != ''
+        run: |
+          mkdir -p target/e2e/artifacts
+          accepted=(crates/slopty-e2e/golden ':(glob)**/*.snap')
+          git add --intent-to-add -- "${accepted[@]}"
+          git diff --binary -- "${accepted[@]}" > target/e2e/artifacts/changes.patch
+          [ -s target/e2e/artifacts/changes.patch ] || rm target/e2e/artifacts/changes.patch
       - if: always()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-${{ matrix.case }}
           path: target/e2e/artifacts
           if-no-files-found: ignore
-      - if: always()
+      - if: always() && env.SCCACHE_PATH != '' && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats

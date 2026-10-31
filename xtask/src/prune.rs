@@ -378,18 +378,6 @@ pub fn auto() {
     }
 }
 
-/// Before a build: when the volume has less than the floor and its headroom free, the pass after
-/// a check runs first, so the build's own output cannot take the volume under the floor.
-pub fn before_build() {
-    let room = || -> Result<bool> {
-        let limits = Limits::from_env()?.with_headroom()?;
-        Ok(free_space(&repo_root()?)? >= limits.floor)
-    };
-    if !room().unwrap_or(false) {
-        auto();
-    }
-}
-
 /// Before a gate: its volume must have the floor free. Below it, prune every build directory to
 /// the floor and its headroom; still below the floor, refuse with where the space went.
 pub fn ensure_room(target: &Utf8Path) -> Result<()> {

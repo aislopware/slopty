@@ -49,14 +49,11 @@ jobs:
   # arm runner with zig compiling the C build scripts compile (`tools::apple_cargo`;
   # docs/decisions/tooling.md, "Apple targets are linted on Linux").
   gate:
-    # The hosted matrix gates a pull request always, and a push unless the warm runners take it.
-    if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'
     name: gate (${{ matrix.lane }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
-    # The longest lane takes about 20 min; a hung one held the queue for an hour (run
-    # 37134085979), and runs on `gate` wait for each other.
+    # The longest lane takes about 20 min; a hung one held a Mac for an hour (run 37134085979).
     timeout-minutes: 45
-    # `actions: write` lets a red lane cancel its run once a newer push waits (the last step).
+    # `actions: write` lets a red lane cancel its run once a newer push runs (the last step).
     permissions:
       contents: read
       actions: write
@@ -305,14 +302,14 @@ jobs:
             --json id,ref,createdAt \
             --jq 'group_by(.ref)[] | sort_by(.createdAt) | reverse | .[2:][] | .id' \
             | while read -r id; do gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true; done
-      - if: always() && matrix.lane != 'tools'
+      - if: always() && matrix.lane != 'tools' && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       - if: always() && runner.os == 'macOS'
         run: sysctl vm.swapusage vm.loadavg && vm_stat | grep -E 'Pageouts|Swapouts|Compressions'
-      # A red run never promotes, so once a newer push to `gate` waits behind it, its lanes
-      # still running only hold the queue: in two days 13 red runs held a newer push a median
-      # 12 minutes that way (.research/dev-speed-2026-10-06.md item 6). The newer run, which
-      # holds this commit, reports what those lanes would have.
+      # A red run never promotes, so once a newer push to `gate` runs, its lanes still running
+      # only hold runners the newer run wants: in two days 13 red runs held a newer push a
+      # median 12 minutes that way when runs queued (.research/dev-speed-2026-10-06.md item 6).
+      # The newer run, which holds this commit, reports what those lanes would have.
       - if: failure() && github.ref == 'refs/heads/gate'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -327,7 +324,6 @@ jobs:
   # a free Linux runner, so the run takes no longer. `promote` needs it as it needs the gate. Its
   # compile cache is on R2 with the others' (docs/decisions/tooling.md, "sccache lives on R2").
   linux:
-    if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'
     name: gate (linux)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -439,7 +435,7 @@ jobs:
           path: ~/.cache/slopty-xtask
           key: ${{ steps.xtask.outputs.cache-primary-key }}
       - run: xtask gate --ci --lane linux
-      - if: always()
+      - if: always() && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v7
@@ -449,77 +445,10 @@ jobs:
             target/**/nextest/ci/junit.xml
             target/**/cargo-timings/cargo-timing.html
           if-no-files-found: ignore
-      # A red run never promotes, so once a newer push to `gate` waits behind it, its lanes
-      # still running only hold the queue: in two days 13 red runs held a newer push a median
-      # 12 minutes that way (.research/dev-speed-2026-10-06.md item 6). The newer run, which
-      # holds this commit, reports what those lanes would have.
-      - if: failure() && github.ref == 'refs/heads/gate'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          newest=$(git ls-remote origin refs/heads/gate | cut -f1)
-          if [ -n "$newest" ] && [ "$newest" != "$GITHUB_SHA" ]; then
-            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
-          fi
-
-  # The gate on the two warm runners on the Mac Studio, once the repository variable
-  # `SLOPTY_RUNNERS` is `warm` (`cargo xtask warm`; docs/decisions/tooling.md, "The gate runs on
-  # warm runners here"): each keeps its checkout, toolchains, tools and target dir between runs
-  # and builds incrementally, so a push compiles what it changed. The Mac runs the tools, clippy
-  # for the Apple triples, rustdoc and every Mac test in one job; the Linux VM clippy for the
-  # Linux triples and the Linux tests. Only pushes come here, and each runner's job-started hook
-  # refuses any job but the gate's (`xtask warm guard`), so a pull request that names these
-  # runners still never runs on them. Any other value of the variable sends every job back to the
-  # hosted matrix above at once.
-  warm:
-    if: vars.SLOPTY_RUNNERS == 'warm' && github.event_name == 'push'
-    name: gate (warm ${{ matrix.host }})
-    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
-    timeout-minutes: 45
-    permissions:
-      contents: read
-      actions: write
-    strategy:
-      fail-fast: false
-      matrix:
-        host: [mac, linux]
-    # Incremental builds on the target dir the last run left, which is the compile cache: no
-    # sccache (an empty `RUSTC_WRAPPER` is cargo's none; the runner's `.env` drops an empty
-    # value). The Mac's own Xcode, the one it selects (27.1, as on GitHub's image): an empty
-    # `DEVELOPER_DIR` is xcrun's unset, and the image's path is missing here.
-    env:
-      CARGO_INCREMENTAL: 1
-      DEVELOPER_DIR: ""
-      RUSTC_WRAPPER: ""
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # The tree updated in place: unchanged files keep their times, so cargo's fingerprints of
-      # them hold. The whole history, for `committed`, fetched as what is new.
-      - uses: actions/checkout@v7
-        with:
-          clean: false
-          submodules: recursive
-          fetch-depth: 0
-      # The toolchain, unless the runner has it; the gate adds the targets its lanes need.
-      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-      # The zig the vendored ghostty names, as the hosted jobs have it; the runner keeps it in
-      # its tool cache.
-      - uses: ./.github/actions/zig
-      - working-directory: vendor/ghostty
-        timeout-minutes: 15
-        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      - run: cargo xtask gate --warm
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: timings-warm-${{ matrix.host }}
-          path: |
-            target/nextest/warm/junit.xml
-            target/nextest/warm/ptys.log
-          if-no-files-found: ignore
-      # As the hosted jobs: a red run cancels itself once a newer push waits behind it.
+      # A red run never promotes, so once a newer push to `gate` runs, its lanes still running
+      # only hold runners the newer run wants: in two days 13 red runs held a newer push a
+      # median 12 minutes that way when runs queued (.research/dev-speed-2026-10-06.md item 6).
+      # The newer run, which holds this commit, reports what those lanes would have.
       - if: failure() && github.ref == 'refs/heads/gate'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -530,7 +459,7 @@ jobs:
           fi
 
   # What a push reaches of the e2e smoke set (`cargo xtask smoke plan`; docs/decisions/testing.md,
-  # "A change's smoke cases follow from its paths"): the cases its changes since main reach
+  # "The gate runs the smoke cases a push reaches"): the cases its changes since main reach
   # through the packages' dependency graph and their lines' `cfg`, as one job of `e2e` per kind
   # of Mac run, each with the filterset of its reached tests. A push it reaches none with skips
   # `e2e`. On Linux, beside the gate's first minute. As it ends it reads `gate`'s tip: once a
@@ -629,14 +558,16 @@ jobs:
   # daemons, the app and the test binaries once, in the check's one feature set, and runs the app's
   # cases (S1-S3) and the server's (S4), or `e2e (server)` the server's alone when the change
   # reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
-  # and the iPad once the iPhone's tests are done, waits for each to settle, and runs S5 on both.
+  # and the iPad once the iPhone's tests are done, waits for each to settle, and runs S5 on the
+  # iPhone and the app's launch and layout on the iPad.
   # Only the reached tests run, none retried (`NEXTEST_RETRIES=0`); a changed frame is a review, not
   # a red, on a runner's GPU (`--review`, as in e2e.yml). A job stops once any other job of its run
   # ended other than green (failed, past its timeout, or cancelled), since the run then never
   # promotes: before its setup, and through the run (`--stop-on-red`). It stands aside once a newer
   # push moved `gate` before it set up or built, its run cancelled whole, and the newer run carries
-  # its commit; one already building runs on, and may still promote. `promote` needs it; a job the
-  # plan leaves out never starts.
+  # its commit; a run whose jobs had all begun to build runs on, and may still promote, while one
+  # job of two still to build stands aside and so cancels its building sibling with the run.
+  # `promote` needs it; a job the plan leaves out never starts.
   e2e:
     needs: smoke-plan
     if: >-
@@ -691,7 +622,7 @@ jobs:
             [ -n "$id" ] || continue
             if [ "$conclusion" != cancelled ]; then
               red+="${red:+, }$name $conclusion"
-            elif notes=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$id/annotations" --jq '.[].message') \
+            elif notes=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$id/annotations?per_page=100" --jq '.[].message') \
               && grep -q 'has exceeded the maximum execution time' <<<"$notes"; then
               red+="${red:+, }$name past its timeout"
             else
@@ -825,7 +756,7 @@ jobs:
           name: e2e-${{ matrix.case }}
           path: target/e2e/artifacts
           if-no-files-found: ignore
-      - if: always() && env.SCCACHE_PATH != ''
+      - if: always() && env.SCCACHE_PATH != '' && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       # As the gate's lanes: a red run cancels itself once a newer push runs.
       - if: failure() && github.ref == 'refs/heads/gate'
@@ -840,14 +771,12 @@ jobs:
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
   promote:
-    needs: [gate, linux, warm, smoke-plan, e2e]
-    # Every lane passed: on the hosted matrix and the linux job, or on both warm runners; and the
-    # smoke cases the plan chose passed, or it chose none. An e2e skipped for a run that stood
-    # aside, with cases chosen, never promotes it unchecked.
+    needs: [gate, linux, smoke-plan, e2e]
+    # Every lane passed, and the smoke cases the plan chose, or it chose none. An e2e skipped for
+    # a run that stood aside, with cases chosen, never promotes it unchecked.
     if: >-
       github.ref == 'refs/heads/gate' && !cancelled()
-      && (needs.warm.result == 'success'
-      || (needs.gate.result == 'success' && needs.linux.result == 'success'))
+      && needs.gate.result == 'success' && needs.linux.result == 'success'
       && needs.smoke-plan.result == 'success'
       && (needs.e2e.result == 'success'
       || (needs.e2e.result == 'skipped' && needs.smoke-plan.outputs.matrix == '[]'))
@@ -970,10 +899,8 @@ jobs:
   # docs/decisions/tooling.md, "A release signs and notarises from the Better Update vault").
   release:
     name: release ${{ github.ref_name }}
-    needs: [gate, warm]
-    if: >-
-      github.ref_type == 'tag' && !cancelled()
-      && (needs.warm.result == 'success' || needs.gate.result == 'success')
+    needs: [gate]
+    if: github.ref_type == 'tag' && !cancelled() && needs.gate.result == 'success'
     runs-on: xcode-27
     # `bash` named, so a step runs with pipefail: GitHub's default shell runs without it, and
     # `dist … | tee` or `curl … | sh` would pass with the command before the pipe failed.

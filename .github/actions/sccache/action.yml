@@ -56,3 +56,35 @@ runs:
           echo "SCCACHE_GHA_ENABLED=$ACTIONS_CACHE" >> "$GITHUB_ENV"
           echo "sccache: no R2 credentials; Actions cache: $ACTIONS_CACHE"
         fi
+        # A start waits for the server, which reads and writes the bucket before it answers
+        # (`storage.check()` in sccache 0.19's `start_server`), 10 s unless a config file says
+        # otherwise: on a Mac booting a simulator beside the first compile, the start took longer
+        # and `e2e (ios)` failed on `sccache rustc -vV` (run 41212022782). A minute, in the one
+        # setting only a file holds.
+        conf="$RUNNER_TEMP/sccache.toml"
+        echo 'server_startup_timeout_ms = 60000' > "$conf"
+        echo "SCCACHE_CONF=$conf" >> "$GITHUB_ENV"
+    # The server, started now, before the job's work takes the cores, and kept up to the job's
+    # end (`SCCACHE_IDLE_TIMEOUT=0`), so no compile waits on a start; a second try follows a
+    # failed first. Should both fail, the job compiles without the wrapper (an empty
+    # `RUSTC_WRAPPER` is cargo's none), cold rather than red, says so in its summary, and skips
+    # its statistics (`SLOPTY_SCCACHE=off`). `gate.rs` runs this step against stand-ins.
+    - id: sccache-start
+      shell: bash
+      run: |
+        for try in 1 2; do
+          if SCCACHE_IDLE_TIMEOUT=0 "$SCCACHE_PATH" --start-server; then
+            echo "sccache: server up, try $try"
+            exit 0
+          fi
+          # A start that timed out may still come up: stopped, so the next one can bind.
+          "$SCCACHE_PATH" --stop-server > /dev/null 2>&1 || true
+          [ "$try" = 2 ] || sleep 10
+        done
+        {
+          echo "RUSTC_WRAPPER="
+          echo "SLOPTY_SCCACHE=off"
+        } >> "$GITHUB_ENV"
+        echo "### ⚠ sccache's server did not start, twice: this job compiles without its cache" \
+          >> "$GITHUB_STEP_SUMMARY"
+        echo "::warning::sccache's server did not start; the job compiles without its cache"

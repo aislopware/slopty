@@ -4,9 +4,9 @@
 //! `cargo xtask remote -p <crate>…` checks the commit it made of the tree (`HEAD` and the lane's
 //! own paths). Its crates' fmt, host clippy, rustdoc, shear, typos and tests run here, with clippy
 //! for both iOS triples in a full check, where an incremental build returns in a minute or two and
-//! no queue stands in front of it; what needs Linux (its clippy and tests) and the e2e cases and
-//! probes run on a runner, side by side (`docs/decisions/tooling.md`, "Checks run where they
-//! return soonest" and "A lane's check returns in minutes").
+//! no queue stands in front of it; what needs Linux (its clippy and tests) and the probes run on
+//! a runner, and the e2e cases on GitHub's hosted Macs, side by side (`docs/decisions/tooling.md`,
+//! "Checks run where they return soonest" and "A lane's check returns in minutes").
 //!
 //! Each check works in a lane directory, `target/local/<dir>/`: the commit's tree, synced as the
 //! gate syncs its snapshot so that unchanged files keep their times and cargo rebuilds only what
@@ -145,34 +145,19 @@ pub fn check(
     Ok(Outcome { passed, took: started.elapsed(), thermal, load, failed })
 }
 
-/// Sync lane directory `dir`'s tree to commit `sha` (`gate::snapshot_commit`), safe against a
-/// sync stopped halfway. The sync takes the tree's manifest (`tree.index`) for each file's
-/// content and writes a file only where the commit's blob differs from the manifest's, so a sync
-/// stopped after writing files and before the manifest left files no manifest names. A marker,
-/// `tree.syncing`, stands while a sync runs; one that finds it left behind first drops from the
-/// manifest every file whose content is not the blob the manifest names, and those are written
-/// again. `Cargo.lock` is verified every time, since a check's cargo rewrites it in the tree
-/// when a member's manifest moved the resolution.
+/// Sync lane directory `dir`'s tree to commit `sha` (`gate::snapshot_commit`). The sync vouches
+/// in the tree's manifest (`tree.index`) only for what it finished writing, so a sync stopped
+/// halfway (a warm's) leaves the next one each path it was writing to write again. `Cargo.lock`
+/// is verified first every time: a check's cargo rewrites it in the tree, outside any sync, when
+/// a member's manifest moved the resolution, and the manifest still vouches for the commit's.
 pub fn sync_tree(root: &Utf8Path, dir: &Utf8Path, sha: &str) -> Result<Utf8PathBuf> {
-    let marker = dir.join("tree.syncing");
-    if marker.exists() {
-        let dropped = verify_manifest(root, dir, None)?;
-        println!(
-            "  an earlier sync of {dir} stopped halfway: {dropped} of its files written again"
-        );
-    } else {
-        verify_manifest(root, dir, Some("Cargo.lock"))?;
-    }
-    std::fs::create_dir_all(dir).with_context(|| format!("create {dir}"))?;
-    std::fs::write(&marker, "").with_context(|| format!("write {marker}"))?;
-    let tree = crate::gate::snapshot_commit(root, dir, sha)?;
-    std::fs::remove_file(&marker).with_context(|| format!("remove {marker}"))?;
-    Ok(tree)
+    verify_manifest(root, dir, "Cargo.lock")?;
+    crate::gate::snapshot_commit(root, dir, sha)
 }
 
-/// Drop from lane directory `dir`'s tree manifest each entry (only `only`'s, when named) whose
-/// file is gone or holds another blob than the entry names, or is a link; how many went.
-fn verify_manifest(root: &Utf8Path, dir: &Utf8Path, only: Option<&str>) -> Result<usize> {
+/// Drop from lane directory `dir`'s tree manifest the entry of path `only` when its file is
+/// gone, holds another blob than the entry names, or is a link; how many went.
+fn verify_manifest(root: &Utf8Path, dir: &Utf8Path, only: &str) -> Result<usize> {
     use std::io::Write as _;
     let path = dir.join("tree.index");
     let Ok(text) = std::fs::read_to_string(&path) else { return Ok(0) };
@@ -181,7 +166,7 @@ fn verify_manifest(root: &Utf8Path, dir: &Utf8Path, only: Option<&str>) -> Resul
     let checked: Vec<(&str, &str)> = entries
         .iter()
         .copied()
-        .filter(|(_, rel)| only.is_none_or(|only| *rel == only))
+        .filter(|(_, rel)| *rel == only)
         .filter(|(key, rel)| {
             !key.starts_with("120000:")
                 && std::fs::symlink_metadata(tree.join(rel)).is_ok_and(|m| m.is_file())
@@ -216,7 +201,7 @@ fn verify_manifest(root: &Utf8Path, dir: &Utf8Path, only: Option<&str>) -> Resul
         .iter()
         .copied()
         .filter(|(key, rel)| {
-            only.is_some_and(|only| *rel != only)
+            *rel != only
                 || hashed
                     .get(rel)
                     .is_some_and(|blob| key.split_once(':').is_some_and(|(_, sha)| sha == *blob))
@@ -696,12 +681,12 @@ fn lane_dirs(root: &Utf8Path) -> Vec<(String, Utf8PathBuf)> {
         .collect()
 }
 
-/// The parts of a lane directory a clone takes: the tree, the manifest its sync reads and the
-/// mark of a sync stopped halfway, and the target dir. Not the submodules' checkouts: each is a
-/// git worktree whose `.git` names the source's git dir, so the two lanes moved each other's
-/// `HEAD` and index (lane X, 2026-10-31), and the sync makes the clone its own. Not the state:
-/// the clone's check says its own ([`State::at`]).
-const CLONED: [&str; 4] = ["tree", "tree.index", "tree.syncing", "target"];
+/// The parts of a lane directory a clone takes: the tree, the manifest its sync reads, and the
+/// target dir. Not the submodules' checkouts: each is a git worktree whose `.git` names the
+/// source's git dir, so the two lanes moved each other's `HEAD` and index (lane X, 2026-10-31),
+/// and the sync makes the clone its own. Not the state: the clone's check says its own
+/// ([`State::at`]).
+const CLONED: [&str; 3] = ["tree", "tree.index", "target"];
 
 /// Stands in a lane directory from before a clone into it until its tree's units are dropped
 /// ([`seed_dir`]).
@@ -1015,8 +1000,8 @@ pub fn lock_dirs(root: &Utf8Path) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Delete directory `path` and all it holds, write-protected entries too (a guest's extracted
-/// archive), saying why when it cannot; whether it went.
+/// Delete directory `path` and all it holds, write-protected entries too, saying why when it
+/// cannot; whether it went.
 fn delete(path: &Utf8Path) -> bool {
     if std::fs::remove_dir_all(path).is_ok() {
         return true;
@@ -1027,46 +1012,6 @@ fn delete(path: &Utf8Path) -> bool {
         Err(e) => {
             println!("  {path} not deleted: {e:#}");
             false
-        }
-    }
-}
-
-/// Give lane `dir` a warm `sub` target dir where it has none: a copy-on-write clone (APFS
-/// `clonefile`, near instant and no space until either side writes) of the one another lane
-/// used last, its tree's units dropped ([`forget_tree_units`]). The e2e guest's build dir only;
-/// a lane directory's own is cloned with its tree ([`seed_dir`]).
-pub fn seed(dir: &Utf8Path, sub: &str) {
-    let target = dir.join(sub);
-    if target.exists() {
-        return;
-    }
-    let Some(lanes) = dir.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(lanes) else { return };
-    let warmest = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join(sub))
-        .filter(|path| path.join("debug").exists() || has_triple(path))
-        .filter_map(|path| Some((path.metadata().ok()?.modified().ok()?, path)))
-        .max_by_key(|(at, _)| *at);
-    let Some((_, from)) = warmest else { return };
-    let started = Instant::now();
-    let cloned = std::process::Command::new("/bin/cp")
-        .args(["-c", "-R"])
-        .arg(&from)
-        .arg(target.as_std_path())
-        .status();
-    match cloned {
-        Ok(status) if status.success() => {
-            let forgot = forget_tree_units(&target, &dir.join("tree"));
-            println!(
-                "  {sub} seeded from {} by a clone, {forgot} of its tree's units dropped ({:.1}s)",
-                from.display(),
-                started.elapsed().as_secs_f64()
-            );
-        }
-        outcome => {
-            println!("  {sub} not seeded from {} ({outcome:?}): built cold", from.display());
-            let _gone = std::fs::remove_dir_all(target.as_std_path());
         }
     }
 }
@@ -1110,13 +1055,6 @@ fn forget_tree_units(target: &Utf8Path, tree: &Utf8Path) -> usize {
         })
         .filter(|unit| std::fs::remove_dir_all(unit.path()).is_ok())
         .count()
-}
-
-/// Whether `target` holds a build for a target triple (`<triple>/debug`).
-fn has_triple(target: &std::path::Path) -> bool {
-    std::fs::read_dir(target).is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| entry.path().join("debug").exists())
-    })
 }
 
 /// Point cargo at `<dir>/target` through `<dir>/.cargo/config.toml`, which cargo finds above the
@@ -1554,11 +1492,11 @@ dependencies = ["serde 1.0.0"]
         let _gone = std::fs::remove_dir_all(&root);
     }
 
-    /// A sync stopped halfway (a warm stopped after writing a file and before its manifest)
-    /// leaves a file the manifest does not name; the next sync finds its marker, verifies every
-    /// file and writes again the one that is not its commit's, leaving the others' times alone.
+    /// A sync stopped halfway (a warm stopped while it wrote a file) left that file unvouched
+    /// for; the next sync writes it again and leaves the others' times alone. A lock a check's
+    /// cargo rewrote in the tree is put back.
     #[test]
-    fn a_sync_stopped_halfway_is_verified_by_the_next() {
+    fn a_sync_stopped_halfway_is_written_again_by_the_next() {
         let root = scratch("sync");
         let sh = Shell::new().expect("a shell");
         sh.change_dir(&root);
@@ -1570,7 +1508,6 @@ dependencies = ["serde 1.0.0"]
         let sha = cmd!(sh, "git rev-parse HEAD").read().expect("a commit");
         let lane = dir(&root, "L");
         let tree = sync_tree(&root, &lane, &sha).expect("synced");
-        assert!(!lane.join("tree.syncing").exists(), "a finished sync leaves no marker");
         let old =
             SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(1_000_000)).expect("a time");
         std::fs::File::options()
@@ -1578,9 +1515,19 @@ dependencies = ["serde 1.0.0"]
             .open(tree.join("b.rs"))
             .and_then(|f| f.set_modified(old))
             .expect("aged");
-        // A warm at another commit wrote a.rs and was stopped before the manifest.
+        // A warm at another commit took a.rs out of the manifest, wrote it and was stopped.
+        let manifest = std::fs::read_to_string(lane.join("tree.index")).expect("a manifest");
+        let left = manifest.lines().filter(|l| !l.ends_with(" a.rs")).fold(
+            String::new(),
+            |mut left, line| {
+                left.push_str(line);
+                left.push('\n');
+                left
+            },
+        );
+        assert_ne!(left, manifest, "a.rs was vouched for");
+        std::fs::write(lane.join("tree.index"), left).expect("unvouched");
         std::fs::write(tree.join("a.rs"), "// another commit's\n").expect("written");
-        std::fs::write(lane.join("tree.syncing"), "").expect("the marker it left");
         sync_tree(&root, &lane, &sha).expect("synced again");
         let a = std::fs::read_to_string(tree.join("a.rs")).expect("a.rs");
         assert_eq!(a, "// the lane's edit\n", "the check compiles its own commit's file");

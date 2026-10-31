@@ -18802,6 +18802,15 @@ SLOPTY_REPO_ROOT=$PWD <xtask before|after> smoke reach --base <commit>~1 --head 
 gh cache list --repo aislopware/slopty --limit 500 --json key,ref,sizeInBytes
 ```
 
+## 2026-10-31 — the warm runners removed: what this Mac got back
+
+The hosted ruling's item 6 (`docs/decisions/tooling.md`, "The gate and e2e run on free hosted
+runners; this Mac runs none"): `cargo xtask warm uninstall` ran, both runner registrations were
+deleted on GitHub, and the runners' sparse image (`slopty-ci.sparsebundle`) was deleted once its
+contents were checked. It freed 99 GB on the checkout's volume: the Linux runner's VM 54 GB, the
+Mac runner's work tree 7.8 GB, and the rest their target dirs and caches. No gate run had used
+them.
+
 ## 2026-10-31 — what a push reaching the app costs on hosted runners, and the e2e jobs' bounds
 
 From the GitHub API in the review of the smoke gate (`docs/decisions/testing.md`, "The gate runs

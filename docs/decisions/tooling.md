@@ -1846,6 +1846,17 @@ more full-window layer.
   - Freed of sccache, the Actions cache keys the registry and git checkouts by the manifests
     and the lock again (`add-rust-environment-hash-key`): its single entry had stayed nine days
     stale, and every Mac job downloaded what came since.
+  - A hiccup of the cache never reddens a job, and a job never loses the cache unsaid
+    (2026-10-31). The gate's `e2e (ios)` failed on `sccache rustc -vV`, "Timed out waiting for
+    server startup", its first compile racing a simulator's boot on three cores (run
+    41212022782): a server reads and writes the bucket before it answers (`storage.check()` in
+    0.19's `start_server`), and a start waits 10 s for it. The action now starts the server as
+    a job sets up, before anything takes the cores, keeps it up to the job's end
+    (`SCCACHE_IDLE_TIMEOUT=0`), waits a minute for it (`server_startup_timeout_ms`, which only
+    a config file sets, named in `SCCACHE_CONF`), and tries twice. Should both tries fail, the
+    job compiles without the wrapper (an empty `RUSTC_WRAPPER`, cargo's none), cold rather
+    than red, with a ⚠ in its summary and no statistics read. A test runs the step against a
+    stand-in `sccache` failing none, one and both of its starts.
 
 - ✅ **The icon test keeps its verdict** (2026-10-11). Alone on a Mac runner the icon test
   takes 9 s (run 38123807675); beside the rest shard's other tests, six threads on three
@@ -2781,7 +2792,8 @@ more full-window layer.
   code generation ends, and writes dep-info locally. Its first run (a check of `slopty-proto`,
   three jobs) missed 926 of the 1,026 units it compiled and stored them in R2; the rerun of the
   same commit hit 629 of 657 (96 %), and its lint job took 150 s where the first took 338 s.
-  The warm runners use no sccache: their incremental target dirs are the cache.
+  The warm runners (gone since 2026-10-31) used no sccache: their incremental target dirs
+  were the cache.
 
 - ✅ **One triple for every cargo call on a Mac** (2026-10-29). Clippy and rustdoc named
   `--target aarch64-apple-darwin` while the tests and the binaries they spawn did not, so a
@@ -2863,7 +2875,9 @@ more full-window layer.
   - **`vt_write_until(data, boundaries)`** replaces `vt_write_until_ground`, after ghostty's
     `ghostty_terminal_vt_write_until`. Slopty calls only `vt_write`.
 
-- ✅ **The gate runs on warm runners here** (2026-10-30). Build and lint, with the setup that
+- ✅ **The gate runs on warm runners here** (2026-10-30; superseded on 2026-10-31 by "The gate
+  and e2e run on free hosted runners; this Mac runs none": no run used them, and the code, the
+  `warm` jobs, the registrations and the VM bundle went). Build and lint, with the setup that
   only serves them, took about 85 % of a hosted gate: a median 9.8 minutes of wall time and
   50.6 runner-minutes, because every job starts cold (`.research/build-speed-2026-10-29.md`).
   Two self-hosted runners on this Mac keep their checkout, toolchains, tools and one incremental
@@ -3559,6 +3573,15 @@ more full-window layer.
      three VMs go after one green hosted run each of the app, the iPhone and the iPad, with the
      accept done from an artifact. `vm.rs` and tart go after the nightly VM case is green
      hosted. The Docker parts of `xtask linux` go after S6 is green on a Linux runner.
+     - Shed on 2026-10-31, once the hosted e2e run 41208528626 ran the app, the server and the
+       iPhone on hosted Macs (its three reds were faults fixed in 961f80e8e and f781d2220):
+       - the guest path, along with `SLOPTY_E2E_GUEST`, `Slot::guest` in `vm.rs`, a lane's
+         `e2e-target` clone (6 GB on disk), `e2e-history.jsonl`, and the `--repeat`,
+         `--until-fail` and `--sim` flags;
+       - `check.yml`'s e2e case.
+     - `remote --e2e mac|ios|auto` now dispatches `e2e.yml` (`e2e::hosted`) beside the checks.
+       It pushes its own `check/<name>-e2e` branch and is cancelled when the check fails here.
+     - A flake's rate no longer has a repeat tool; it comes from the gate's FLAKY counts.
   7. **Measured before taken:** a probe on `xcode-27` (`csrutil status`, a TCC row written, a
      launchd agent's capture) decides how the VM case asserts its grants; a per-shard
      dependency target dir restored from R2; why cargo-zigbuild's C never hits sccache; e2e at

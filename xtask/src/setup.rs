@@ -244,9 +244,9 @@ mod tests {
         }
     }
 
-    /// taplo comes from its release for every host that runs the tools (this Mac, CI's Linux
-    /// runners of both architectures and the warm runners), each build pinned by a SHA-256 of 64
-    /// hex digits, and the version fetched is the one the list pins.
+    /// taplo comes from its release for every host that runs the tools (this Mac and CI's Linux
+    /// runners of both architectures), each build pinned by a SHA-256 of 64 hex digits, and the
+    /// version fetched is the one the list pins.
     #[test]
     fn taplo_s_release_build_is_pinned_for_every_host_of_the_tools() {
         for host in [("macos", "aarch64"), ("linux", "x86_64"), ("linux", "aarch64")] {

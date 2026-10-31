@@ -308,14 +308,10 @@ pub fn preflight(sh: &Shell, simulator: bool) -> Result<()> {
     Ok(())
 }
 
-/// An app built for the simulator or a device: its bundle, and how long each part of its build
-/// took.
+/// An app built for the simulator or a device: its bundle.
 pub struct Built {
     /// The `.app`.
     pub app: Utf8PathBuf,
-    /// Each part's time, in order: the app's static library, the extension's, and Xcode's build
-    /// (none when nothing it builds from changed).
-    pub phases: Vec<(&'static str, std::time::Duration)>,
 }
 
 /// The file beside the generated project that holds [`xcode_inputs`] of the last bundle Xcode
@@ -324,7 +320,6 @@ const XCODE_STAMP: &str = "xcodebuild.inputs";
 
 /// Build the static library and the app bundle.
 fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
-    let mut phases = Vec::new();
     // Wherever cargo builds for `sh` (the checkout's `target`, or a lane's own dir), so a tree
     // built elsewhere finds its libraries where cargo put them.
     let target = crate::tools::target_dir(sh)?;
@@ -343,13 +338,9 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
     let (links, notify_links) = {
         let _env = sh.push_env("IPHONEOS_DEPLOYMENT_TARGET", IOS_VERSION);
         let what = format!("{triple}, {profile}");
-        let started = std::time::Instant::now();
         let links = build_static_lib(sh, "slopty-ios", &what, triple, &cargo_flags)?;
-        phases.push(("ios lib", started.elapsed()));
         let release: &[&str] = if opts.release { &["--release"] } else { &[] };
-        let started = std::time::Instant::now();
         let notify_links = build_static_lib(sh, "slopty-notify", &what, triple, release)?;
-        phases.push(("notify lib", started.elapsed()));
         // Xcode links a target only when it has an object file of its own, and every line of
         // the app is in the static library: an empty crate compiled to an object is that file.
         step(
@@ -394,7 +385,6 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
         .join(format!("{PRODUCT}.app"));
     // Xcode took 13–17 s to find nothing to do: what it builds from is read here instead, and an
     // unchanged set leaves the bundle it built last as it is.
-    let started = std::time::Instant::now();
     let version = cmd!(sh, "xcodebuild -version").quiet().read()?;
     let inputs = xcode_inputs(
         &[&spec, &version, team.as_deref().unwrap_or("")],
@@ -421,9 +411,8 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
         }
         std::fs::write(&stamp, &inputs).with_context(|| format!("write {stamp}"))?;
     }
-    phases.push(("xcodebuild", started.elapsed()));
     println!("✔ {app}");
-    Ok(Built { app, phases })
+    Ok(Built { app })
 }
 
 /// What an Xcode build of the app reads, as one line to compare with the last build's: the

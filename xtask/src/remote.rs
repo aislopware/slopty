@@ -4,10 +4,11 @@
 //! that commit: its crates here, in a lane directory held only while the work here runs
 //! (`crate::local`), and what this Mac cannot check on a runner, where it pushes the commit to
 //! `check/<name>` and starts `.github/workflows/check.yml` on it: Linux's clippy and tests of
-//! the crates named, an `xtask e2e` case, a probe. It waits for the run, prints what failed, and
-//! after an e2e case that accepts goldens, or a check that accepts snapshots, applies what the
-//! run wrote to the tree. The real index, `HEAD` and the tree are never touched, so lanes editing
-//! this checkout keep working meanwhile. Once the verdict is out, an after-pass in the
+//! the crates named, a probe. An e2e case runs on GitHub's hosted Macs, `e2e.yml` dispatched for
+//! the commit ([`on_hosted`]). It waits for the runs, prints what failed, and after an e2e case
+//! that accepts goldens, or a check that accepts snapshots, applies what the run wrote to the
+//! tree. The real index, `HEAD` and the tree are never touched, so lanes editing this checkout
+//! keep working meanwhile. Once the verdict is out, an after-pass in the
 //! background prunes and warms the lane directories (`docs/decisions/tooling.md`, "A lane's
 //! check returns in minutes").
 //!
@@ -21,7 +22,6 @@ use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path as Path, Utf8PathBuf as PathBuf};
 use xshell::{Shell, cmd};
 
-mod guest;
 pub mod stage;
 
 /// The workflow that runs the checks.
@@ -69,8 +69,8 @@ fn pause(period: Duration, abandon: Option<&Abandon>) -> bool {
 const ABANDONED: &str = "cancelled: the check failed here first";
 
 /// The artifacts `check.yml`'s jobs leave their logs in, one a job: the lints, the tests, and
-/// the probe or e2e case. Each holds that job's `*.log`, and the tests' and the run's a
-/// `changes.patch` of what they accepted.
+/// the probe. Each holds that job's `*.log`, and the tests' a `changes.patch` of the snapshots
+/// they accepted.
 const LOG_ARTIFACTS: [&str; 3] = ["logs-lint", "logs-test", "logs-run"];
 
 /// The runner a check's tests take: Linux when every crate named tests there, as CI's linux lane
@@ -101,10 +101,10 @@ const CHECK_MACS: usize = 2;
 const MAC_POLL: Duration = Duration::from_secs(60);
 
 /// How many macOS jobs the check asked for takes: the tests when they need a Mac, and a probe
-/// or an e2e case on a Mac. Linux's never wait.
+/// on a Mac. Linux's never wait.
 fn mac_jobs(opts: &RemoteOpts) -> usize {
     let tests = !opts.packages.is_empty() && a_mac(tests_on(opts));
-    let run = (opts.probe.is_some() || opts.e2e.is_some()) && a_mac(&opts.runner);
+    let run = opts.probe.is_some() && a_mac(&opts.runner);
     usize::from(tests).saturating_add(usize::from(run))
 }
 
@@ -273,28 +273,49 @@ fn wait_for_mac(sh: &Shell, name: &str, mine: usize, abandon: Option<&Abandon>) 
     }
 }
 
-/// What a run does with the goldens of its e2e case.
+/// An e2e case a check runs on GitHub's hosted Macs ([`on_hosted`]).
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum E2e {
+    /// The app's suite and the server's, from one build.
+    Mac,
+    /// The simulator's suite, on the iPhone and then the iPad.
+    Ios,
+    /// The smoke cases the check's change reaches (`gate::impact`), each with its tests alone.
+    Auto,
+}
+
+impl E2e {
+    /// Its name on the command line.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Mac => "mac",
+            Self::Ios => "ios",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// What a check's e2e case does with the goldens.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Goldens {
-    /// Compare every frame with its golden.
+    /// Fail on no golden and write none: every changed frame's render and diff come back, since
+    /// a hosted Mac's GPU draws apart from the Macs the goldens were drawn on.
     #[default]
-    Compare,
-    /// Write every golden its frame differs from by a pixel or a word, and bring them back into
-    /// the tree.
-    Accept,
-    /// Rewrite every golden, and bring them back into the tree.
-    AcceptAll,
-    /// Fail on no golden and write none: every changed frame's render and diff come back.
     Review,
+    /// Write every golden its frame differs from in the tests that passed, and bring them back
+    /// into the tree.
+    Accept,
+    /// Rewrite every changed golden, and bring them back into the tree.
+    AcceptAll,
 }
 
 impl Goldens {
-    const fn input(self) -> &'static str {
+    /// The same for a hosted run.
+    const fn hosted(self) -> crate::e2e::hosted::Goldens {
         match self {
-            Self::Compare => "compare",
-            Self::Accept => "accept",
-            Self::AcceptAll => "accept-all",
-            Self::Review => "review",
+            Self::Review => crate::e2e::hosted::Goldens::Review,
+            Self::Accept => crate::e2e::hosted::Goldens::Accept,
+            Self::AcceptAll => crate::e2e::hosted::Goldens::AcceptAll,
         }
     }
 }
@@ -311,10 +332,12 @@ pub struct RemoteOpts {
     /// clippy with `--full`); repeat for several.
     #[arg(short = 'p', long = "package")]
     pub packages: Vec<String>,
-    /// An `xtask e2e` case to run after the checks: app, ios, server, worker, …; or `auto`, the
-    /// smoke cases the check's change reaches (`gate::impact`), each where it runs here.
-    #[arg(long)]
-    pub e2e: Option<String>,
+    /// An e2e case on GitHub's hosted Macs, beside the checks: `mac` (the app's and the
+    /// server's suites), `ios` (the simulator's, on the iPhone and the iPad), or `auto`, the
+    /// smoke cases the check's change reaches. Another case runs as a probe (`--probe 'xtask e2e
+    /// <case>'`).
+    #[arg(long, value_enum)]
+    pub e2e: Option<E2e>,
     /// The e2e case's nextest filterset, such as `test(a_folder_tile_browses_the_worker)`;
     /// `failed` runs only the tests the last run of this name failed, read from its log under
     /// `target/remote/<name>/` (the iteration after a red).
@@ -323,19 +346,6 @@ pub struct RemoteOpts {
     /// What the e2e case does with the goldens; an accept applies the run's to the tree.
     #[arg(long, value_enum, default_value_t, requires = "e2e")]
     pub goldens: Goldens,
-    /// The simulator the ios case uses: iphone or ipad.
-    #[arg(long, default_value = "iphone", requires = "e2e")]
-    pub sim: String,
-    /// Run the e2e case (in the guest) N times in one session, each on a fresh app and
-    /// simulator, keeping every failed run's artifacts, then say how often it failed and how many
-    /// clean runs in a row a fix needs at 95 %: the rate of a flake.
-    #[arg(long, value_name = "N", requires = "e2e", conflicts_with = "until_fail",
-          value_parser = clap::value_parser!(u32).range(1..))]
-    pub repeat: Option<u32>,
-    /// Run the e2e case (in the guest) up to N times, stopping at the first failure and keeping
-    /// its artifacts: whether a fix holds (N from `--repeat`'s rate).
-    #[arg(long, value_name = "N", requires = "e2e", value_parser = clap::value_parser!(u32).range(1..))]
-    pub until_fail: Option<u32>,
     /// Take the tree's edits under these paths only (files or directories, repeatable), on top
     /// of `HEAD`: another lane's unfinished edits elsewhere stay out of the check.
     #[arg(long = "only", value_name = "PATH")]
@@ -349,9 +359,11 @@ pub struct RemoteOpts {
     pub accept_snapshots: bool,
     /// Follow run `ID` already started (a wrapper that was stopped, say) instead of starting
     /// one: wait for it, print what failed and apply what it accepted, as the same options say.
+    /// With `--e2e`, the run is the e2e case's.
     #[arg(long = "run", value_name = "ID")]
     pub attach: Option<u64>,
-    /// The runner image: xcode-27, or ubuntu-24.04 / ubuntu-24.04-arm for what needs no Mac.
+    /// The probe's runner image: xcode-27, or ubuntu-24.04 / ubuntu-24.04-arm for what needs no
+    /// Mac.
     #[arg(long, default_value = "xcode-27")]
     pub runner: String,
     /// A shell command to run on the runner after its setup, to try a step there.
@@ -395,7 +407,7 @@ pub struct RemoteOpts {
 pub enum Place {
     /// fmt, host clippy, rustdoc, shear, typos, the Mac's tests and a full check's iOS clippy on
     /// this Mac, in a lane directory (`crate::local`); a full check's Linux clippy and Linux's
-    /// tests, and every e2e case and probe, on runners, side by side.
+    /// tests, and a probe, on runners, side by side.
     #[default]
     Auto,
     /// Everything on runners, as before the router.
@@ -458,28 +470,12 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
 
 /// A check of `opts`, its records in `dir`, which waited `named` for another check of its name.
 fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration) -> Result<()> {
-    // The app's e2e case in this Mac's guest rather than on a runner Mac
-    // (`docs/decisions/tooling.md`, "An e2e case runs in a guest here").
-    let in_guest = opts.attach.is_none()
-        && opts.place == Place::Auto
-        && matches!(opts.e2e.as_deref(), Some("app" | "ios" | "auto"))
-        && opts.probe.is_none()
-        && !opts.accept_snapshots
-        && e2e_in_guest()
-        && guest::available();
-    let auto = opts.e2e.as_deref() == Some("auto");
     ensure!(
-        !auto || (in_guest && opts.filter.is_none()),
-        "--e2e auto runs here, the smoke cases' own tests: --place auto, no --run, --probe or -E, \
-         and the guest there (`SLOPTY_E2E_GUEST` not 0)"
-    );
-    ensure!(
-        in_guest || (opts.repeat.is_none() && opts.until_fail.is_none()),
-        "--repeat and --until-fail run in the e2e guest: the app or ios case, --place auto, no \
-         --run or --probe, and the guest there (`SLOPTY_E2E_GUEST` not 0)"
+        opts.e2e != Some(E2e::Auto) || opts.filter.is_none(),
+        "--e2e auto picks the tests the change reaches: no -E"
     );
     let here = opts.attach.is_none()
-        && (!opts.packages.is_empty() || in_guest)
+        && !opts.packages.is_empty()
         && opts.place == Place::Auto
         && !opts.accept_snapshots
         && cfg!(target_os = "macos");
@@ -499,33 +495,23 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
     stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
     let changed = changed_paths(sh, opts.head, &sha)?;
     let place = Workdir::of(&opts.name, &changed);
-    let there = runners_part(opts, in_guest);
-    let remote = !there.packages.is_empty() || there.e2e.is_some() || there.probe.is_some();
-    let case = opts.e2e.as_deref().unwrap_or("app");
-    let ios = if case == "ios" {
-        let sim = <crate::ios::SimKind as clap::ValueEnum>::from_str(&opts.sim, true)
-            .map_err(|e| anyhow::anyhow!("--sim {}: {e}", opts.sim))?;
-        Some(sim)
-    } else {
-        None
-    };
-    let guest_said = if in_guest {
-        format!("; e2e {case} in an e2e guest, {} here", crate::vm::E2E_GUESTS.join(" or "))
-    } else {
-        String::new()
-    };
+    let there = runners_part(opts);
+    let remote = !there.packages.is_empty() || there.probe.is_some();
+    let hosted = opts.e2e.map(|case| format!("; e2e {} on a hosted Mac", case.name()));
     let ios_said = if opts.full { ", iOS clippy" } else { "" };
     println!(
         "▶ {} checked here in target/local/{} (fmt, host clippy, rustdoc, shear, typos{ios_said}, \
-         the Mac's tests){guest_said}{}",
+         the Mac's tests){}{}",
         opts.packages.join(" "),
         place.name,
-        if remote { format!("; on runners: {}", describe(&there)) } else { String::new() }
+        if remote { format!("; on runners: {}", describe(&there)) } else { String::new() },
+        hosted.unwrap_or_default()
     );
     let depth = if opts.full { crate::local::Depth::Full } else { crate::local::Depth::Quick };
-    // A failure here ends the runners' half at once: its run is cancelled, or never dispatched.
+    // A failure here ends the other halves at once: their runs are cancelled, or never
+    // dispatched.
     let abandon = Abandon::new(false);
-    let (local, runners) = std::thread::scope(|scope| {
+    let (local, runners, e2e) = std::thread::scope(|scope| {
         let local = scope.spawn(|| {
             // The runners' half is dispatched meanwhile: it waits for no lane directory.
             let mut held = match place.hold(root, &sha, opts, true) {
@@ -545,7 +531,6 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
                         ..crate::local::Outcome::nothing()
                     })
                 }
-                Ok(()) if opts.packages.is_empty() => Ok(crate::local::Outcome::nothing()),
                 Ok(()) => crate::local::check(
                     root,
                     &mut held,
@@ -555,26 +540,30 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
                     place.moves_lock,
                 ),
             };
-            let passed = outcome.as_ref().is_ok_and(|o| o.passed);
-            let e2e = if passed && in_guest {
-                e2e_runs(root, opts, &place.name, &sha, ios)
-            } else {
-                Vec::new()
-            };
-            // The work here is done, the guest's e2e runs with it: the directory goes to the
-            // next check while the runners finish. Held through the runners' wait, it sat idle
-            // for 44 % of the time it was held, and 29 % of the checks queued for it over 30 s
-            // (p90 311 s; `.research/check-speed-2026-10-31/A-anatomy.md` §2).
+            // The work here is done: the directory goes to the next check while the runners
+            // finish. Held through the runners' wait, it sat idle for 44 % of the time it was
+            // held, and 29 % of the checks queued for it over 30 s (p90 311 s;
+            // `.research/check-speed-2026-10-31/A-anatomy.md` §2).
             drop(held);
-            if !passed || e2e.iter().any(|ran| !ran.result.as_ref().is_ok_and(|o| o.passed)) {
+            if !outcome.as_ref().is_ok_and(|o| o.passed) {
                 abandon.store(true, Ordering::Release);
             }
-            outcome.map(|o| (o, e2e, queued))
+            outcome.map(|o| (o, queued))
+        });
+        let e2e = opts.e2e.map(|case| {
+            let (sha, abandon) = (&sha, &abandon);
+            scope.spawn(move || {
+                let asked = Instant::now();
+                (on_hosted(opts, case, root, dir, sha, Some(abandon)), asked.elapsed())
+            })
         });
         let runners = remote.then(|| on_runners(sh, &there, root, dir, Some(&sha), Some(&abandon)));
-        (local.join(), runners)
+        let e2e = e2e.map(|e2e| {
+            e2e.join().unwrap_or_else(|_| (Err(anyhow::anyhow!("panicked")), Duration::ZERO))
+        });
+        (local.join(), runners, e2e)
     });
-    let (local, e2e, queued) = match local {
+    let (local, queued) = match local {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => {
             stage::verdict(dir, false);
@@ -585,38 +574,15 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
             bail!("the local check panicked");
         }
     };
-    let said: Vec<String> = e2e
-        .iter()
-        .map(|ran| {
-            let said = match &ran.result {
-                Ok(o) => format!(
-                    "{} in {}: {} ({}; {}m{:02}s in all)",
-                    if o.passed { "passed" } else { "FAILED" },
-                    o.guest,
-                    o.count,
-                    o.phases,
-                    o.wall.as_secs() / 60,
-                    o.wall.as_secs() % 60
-                ),
-                Err(e) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
-            };
-            println!("  e2e {}: {said}", ran.label);
-            format!("e2e {} {said}", ran.label)
-        })
-        .collect();
-    let e2e_said = (!said.is_empty()).then(|| said.join("; "));
-    let e2e_passed = e2e.iter().all(|ran| ran.result.as_ref().is_ok_and(|o| o.passed));
     let took = started.elapsed().as_secs();
     let thermal = local.thermal.map_or_else(|| "unread".to_owned(), |t| t.to_string());
-    if !opts.packages.is_empty() {
-        println!(
-            "  here: {} in {}m{:02}s; thermal pressure at most {thermal}, load at most {:.1}",
-            if local.passed { "passed" } else { "failed" },
-            local.took.as_secs() / 60,
-            local.took.as_secs() % 60,
-            local.load
-        );
-    }
+    println!(
+        "  here: {} in {}m{:02}s; thermal pressure at most {thermal}, load at most {:.1}",
+        if local.passed { "passed" } else { "failed" },
+        local.took.as_secs() / 60,
+        local.took.as_secs() % 60,
+        local.load
+    );
     record(
         root,
         &Record {
@@ -625,6 +591,7 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
             packages: &opts.packages,
             local: &local,
             runners: runners.as_ref().map(Result::is_ok),
+            e2e: e2e.as_ref().map(|(_, took)| *took),
             took,
             queued,
             dir: &place.name,
@@ -632,50 +599,57 @@ fn check(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path, named: Duration
             warm: false,
         },
     );
-    for ran in &e2e {
-        if let Ok(o) = &ran.result {
-            record_e2e(root, opts, ran, o);
-        }
-    }
     // Each half's verdict, last, where the lane reads: the runners' failure came above the
     // local half's lines, which said "passed", and a lane took the check for green.
-    let runners_failed = runners.as_ref().and_then(|r| r.as_ref().err());
-    stage::verdict(dir, local.passed && runners_failed.is_none() && e2e_passed);
-    if !local.passed || runners_failed.is_some() || !e2e_passed {
-        let here = if local.passed { "passed" } else { "FAILED" };
-        let here = match &e2e_said {
-            Some(said) => format!("{here}; {said}"),
-            None => here.to_owned(),
+    let runners = runners.map(|r| r.map_err(|e| first_line(&e)));
+    let e2e = e2e.map(|(e2e, _)| e2e.map_err(|e| first_line(&e)));
+    let passed = local.passed
+        && runners.as_ref().is_none_or(Result::is_ok)
+        && e2e.as_ref().is_none_or(Result::is_ok);
+    stage::verdict(dir, passed);
+    if !passed {
+        let said = |half: &Option<std::result::Result<(), String>>| match half {
+            None => "nothing ran there".to_owned(),
+            Some(Ok(())) => "passed".to_owned(),
+            Some(Err(e)) => format!("FAILED: {e}"),
         };
-        let said = match (&runners, runners_failed) {
-            (None, _) => "nothing ran there".to_owned(),
-            (Some(_), None) => "passed".to_owned(),
-            (Some(_), Some(e)) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
-        };
+        let e2e_said = opts
+            .e2e
+            .map(|case| format!("\n  e2e {} on a hosted Mac: {}", case.name(), said(&e2e)))
+            .unwrap_or_default();
         bail!(
-            "check {} failed\n  here ({}): {here}\n  on runners ({}): {said}",
+            "check {} failed\n  here ({}): {}\n  on runners ({}): {}{e2e_said}",
             opts.name,
             opts.packages.join(" "),
-            if remote { describe(&there) } else { "none".to_owned() }
+            if local.passed { "passed" } else { "FAILED" },
+            if remote { describe(&there) } else { "none".to_owned() },
+            said(&runners)
         );
     }
     let depth = if opts.full { "full" } else { "quick" };
     let and = if remote { " and on runners" } else { "" };
-    let what = if opts.packages.is_empty() {
-        format!("e2e {case} in the guest")
-    } else {
-        format!("{depth} check {}", opts.packages.join(" "))
-    };
-    println!("✔ {what} passed here{and} ({}m{:02}s)", took / 60, took % 60);
+    let hosted = opts.e2e.map(|case| format!(", e2e {} on a hosted Mac", case.name()));
+    println!(
+        "✔ {depth} check {} passed here{and}{} ({}m{:02}s)",
+        opts.packages.join(" "),
+        hosted.unwrap_or_default(),
+        took / 60,
+        took % 60
+    );
     Ok(())
+}
+
+/// The first line of error `e`, for a verdict's summary.
+fn first_line(e: &anyhow::Error) -> String {
+    e.to_string().lines().next().unwrap_or_default().to_owned()
 }
 
 /// What of check `opts` only a runner checks, beside the work here: a full check's Linux clippy
 /// of the crates that build there, with Linux's tests when every crate tests there too; and the
-/// e2e case (unless it runs `in_guest`) or the probe. A full check of crates no Linux builds
-/// dispatches nothing: its iOS clippy runs here, where a runner repeated host clippy and rustdoc
-/// after a cold setup first (`.research/check-speed-2026-10-31/A-anatomy.md` §4).
-fn runners_part(opts: &RemoteOpts, in_guest: bool) -> RemoteOpts {
+/// probe. A full check of crates no Linux builds dispatches nothing: its iOS clippy runs here,
+/// where a runner repeated host clippy and rustdoc after a cold setup first
+/// (`.research/check-speed-2026-10-31/A-anatomy.md` §4).
+fn runners_part(opts: &RemoteOpts) -> RemoteOpts {
     let mut there = opts.clone();
     if opts.full {
         let linux = crate::gate::linux_tested();
@@ -686,46 +660,62 @@ fn runners_part(opts: &RemoteOpts, in_guest: bool) -> RemoteOpts {
     } else {
         there.packages.clear();
     }
-    if in_guest {
-        there.e2e = None;
-        there.filter = None;
-    }
     there
 }
 
-/// A check whose crates are not checked here (`--place runner`, `--run`, an accept): the gate's
-/// tool steps the change reaches here first, in seconds, in its lane directory, then the runners'
-/// part.
+/// A check whose crates are not checked here (none named, `--place runner`, `--run`, an
+/// accept): the gate's tool steps the change reaches here first, in seconds, in its lane
+/// directory, then the runners' part and the e2e case side by side. `--run` follows the run it
+/// names alone: the e2e case's with `--e2e`, else the runners'.
 fn elsewhere(sh: &Shell, opts: &RemoteOpts, root: &Path, dir: &Path) -> Result<()> {
-    let sha = if opts.attach.is_some() {
-        None
+    if let Some(id) = opts.attach {
+        return match opts.e2e {
+            Some(case) => {
+                let run_id = id.to_string();
+                let viewed = cmd!(sh, "gh run view {run_id} --json databaseId,url").read()?;
+                let run = serde_json::from_str(&viewed).context("gh run view's JSON")?;
+                follow_hosted(opts, case, root, dir, &run, None)
+            }
+            None => on_runners(sh, opts, root, dir, None, None),
+        };
+    }
+    let sha = if opts.head {
+        cmd!(sh, "git rev-parse HEAD").read()?
     } else {
-        let sha = if opts.head {
-            cmd!(sh, "git rev-parse HEAD").read()?
-        } else {
-            format_own(sh, &opts.only);
-            snapshot(sh, root, dir, &opts.name, &opts.only)?
-        };
-        stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
-        let changed = changed_paths(sh, opts.head, &sha)?;
-        // The tools' tree in a lane directory, held while they run, and never cloned for them:
-        // nothing builds there. Nothing at all when the commit changes nothing (`--head`).
-        let tools = if changed.is_empty() {
-            Ok(())
-        } else {
-            let place = Workdir::of(&opts.name, &changed);
-            let held = place.hold(root, &sha, opts, false)?;
-            let tools = tools_hold(root, &place.name, &sha, &changed, &opts.packages);
-            drop(held);
-            tools
-        };
+        format_own(sh, &opts.only);
+        snapshot(sh, root, dir, &opts.name, &opts.only)?
+    };
+    stage::started(sh, dir, &sha, if opts.head { &[] } else { &opts.only });
+    let changed = changed_paths(sh, opts.head, &sha)?;
+    // The tools' tree in a lane directory, held while they run, and never cloned for them:
+    // nothing builds there. Nothing at all when the commit changes nothing (`--head`).
+    if !changed.is_empty() {
+        let place = Workdir::of(&opts.name, &changed);
+        let held = place.hold(root, &sha, opts, false)?;
+        let tools = tools_hold(root, &place.name, &sha, &changed, &opts.packages);
+        drop(held);
         if let Err(e) = tools {
             println!("✘ the gate's tools: {e:#}");
             return Err(e.context("the gate's tools"));
         }
-        Some(sha)
-    };
-    on_runners(sh, opts, root, dir, sha.as_deref(), None)
+    }
+    let remote = !opts.packages.is_empty() || opts.probe.is_some();
+    let (runners, e2e) = std::thread::scope(|scope| {
+        let e2e = opts.e2e.map(|case| {
+            let sha = &sha;
+            scope.spawn(move || on_hosted(opts, case, root, dir, sha, None))
+        });
+        let runners = remote.then(|| on_runners(sh, opts, root, dir, Some(&sha), None));
+        let e2e = e2e.map(|e2e| e2e.join().unwrap_or_else(|_| Err(anyhow::anyhow!("panicked"))));
+        (runners, e2e)
+    });
+    match (runners, e2e) {
+        (Some(Err(runners)), Some(Err(e2e))) => {
+            bail!("on runners: {}; e2e on a hosted Mac: {}", first_line(&runners), first_line(&e2e))
+        }
+        (Some(Err(e)), _) | (_, Some(Err(e))) => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// The lane directory a check works in.
@@ -901,138 +891,184 @@ fn reached_tools(changed: &[&str], dirs: &[String]) -> Vec<crate::gate::Tool> {
         .collect()
 }
 
-/// Whether the app's e2e case of a check here goes to this Mac's guest: unless
-/// `SLOPTY_E2E_GUEST=0`, or `--place runner`.
-fn e2e_in_guest() -> bool {
-    std::env::var("SLOPTY_E2E_GUEST").map_or(true, |v| v != "0")
-}
-
-/// One e2e run of a check ([`e2e_runs`]): what ran, with which filterset, and how it went.
-struct Ran {
-    /// The case as the verdict names it: `app`, `ios iphone`, `server`, `linux`, …
-    label: String,
-    /// The target it ran.
-    case: &'static str,
-    /// The simulator, for the simulator's case.
-    sim: Option<&'static str>,
-    /// The filterset it ran with.
-    filter: Option<String>,
-    /// Its outcome.
-    result: Result<guest::Outcome>,
-}
-
-/// The check's e2e runs of commit `sha`: the case `--e2e` names, in an e2e guest; or with `--e2e
-/// auto`, every smoke case the change reaches (`gate::impact`), from `HEAD` to the commit (from
-/// `origin/main` with `--head`): the app's, the server's and, on the iPhone and the iPad, the
-/// simulator's in a guest with their smoke tests alone. S6 and the VM's, which need Docker and
-/// tart, are named when reached and run nowhere here: this Mac runs no VM
-/// (`docs/decisions/tooling.md`, "The gate and e2e run on free hosted runners").
-fn e2e_runs(
-    root: &Path,
+/// The check's e2e `case` on GitHub's hosted Macs (`crate::e2e::hosted`), on its commit `sha`:
+/// `e2e.yml` dispatched once a Mac is free for it, and followed to its end
+/// ([`follow_hosted`]). The commit goes to `check/<name>-e2e` for the run, since the runners'
+/// half deletes `check/<name>` once its own run ends, and the branch goes once the run has.
+/// `abandon` cancels the run once the check fails here.
+fn on_hosted(
     opts: &RemoteOpts,
-    lane: &str,
+    case: E2e,
+    root: &Path,
+    dir: &Path,
     sha: &str,
-    ios: Option<crate::ios::SimKind>,
-) -> Vec<Ran> {
-    use crate::gate::impact::Runs;
-    use crate::ios::SimKind;
-    let repeat = match (opts.repeat, opts.until_fail) {
-        (_, Some(n)) => guest::Repeat::UntilFail(n),
-        (n, None) => guest::Repeat::Times(n.unwrap_or(1)),
-    };
-    let in_guest = |target: guest::Target, filter: Option<&str>| {
-        let run = guest::Run { name: &opts.name, filter, goldens: opts.goldens, target, repeat };
-        let label = match target.sim() {
-            Some(sim) => format!("ios {}", sim.family().to_lowercase()),
-            None => target.case().to_owned(),
-        };
-        Ran {
-            label: format!("{label} in the guest"),
-            case: target.case(),
-            sim: target.sim().map(SimKind::family),
-            filter: filter.map(str::to_owned),
-            result: guest::e2e(root, lane, sha, &run),
+    abandon: Option<&Abandon>,
+) -> Result<()> {
+    use crate::e2e::hosted;
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let (kinds, filter) = match case {
+        E2e::Mac => (vec![hosted::Kind::Mac], opts.filter.clone()),
+        E2e::Ios => (vec![hosted::Kind::Ios], opts.filter.clone()),
+        E2e::Auto => {
+            let base = if opts.head { "origin/main" } else { "HEAD" };
+            let reach =
+                crate::gate::impact::reach(&sh, base, sha).context("what the change reaches")?;
+            println!("▶ e2e auto, from {base}: {reach}");
+            let elsewhere: Vec<&str> =
+                ["S6", "VM"].into_iter().filter(|id| reach.has(id)).collect();
+            if !elsewhere.is_empty() {
+                println!("  reached and not run by a check: {}", elsewhere.join(", "));
+            }
+            let Some((kinds, filter)) = hosted_cases(&reach) else {
+                println!("  no case a hosted Mac runs is reached");
+                return Ok(());
+            };
+            (kinds, Some(filter))
         }
     };
-    if opts.e2e.as_deref() != Some("auto") {
-        let target = match ios {
-            Some(sim) => guest::Target::Ios(sim),
-            None => guest::Target::App,
-        };
-        return vec![in_guest(target, opts.filter.as_deref())];
-    }
-    let base = if opts.head { "origin/main" } else { "HEAD" };
-    let reach = Shell::new().map_err(anyhow::Error::from).and_then(|sh| {
-        sh.change_dir(root);
-        crate::gate::impact::reach(&sh, base, sha)
+    wait_for_mac(&sh, &opts.name, kinds.len(), abandon)?;
+    let branch = format!("{}-e2e", opts.name);
+    cmd!(sh, "git push --quiet --force --no-verify origin {sha}:refs/heads/check/{branch}")
+        .run()
+        .context("pushing the snapshot for the e2e case")?;
+    let request = hosted::Request {
+        sha,
+        kinds: &kinds,
+        filter: filter.as_deref(),
+        goldens: opts.goldens.hosted(),
+    };
+    let followed = hosted::dispatch(&sh, &request).and_then(|run| {
+        println!(
+            "  if this is stopped: cargo xtask remote --name {} --e2e {} --run {}",
+            opts.name,
+            case.name(),
+            run.id
+        );
+        follow_hosted(opts, case, root, dir, &run, abandon)
     });
-    let reach = match reach {
-        Ok(reach) => reach,
-        Err(e) => {
-            let result = Err(e.context("what the change reaches"));
-            return vec![Ran {
-                label: "auto".to_owned(),
-                case: "auto",
-                sim: None,
-                filter: None,
-                result,
-            }];
-        }
-    };
-    println!("▶ e2e auto, from {base}: {reach}");
-    let mut runs = Vec::new();
-    let targets = [
-        (Runs::App, guest::Target::App),
-        (Runs::Server, guest::Target::Server),
-        (Runs::Ios, guest::Target::Ios(SimKind::Iphone)),
-        (Runs::Ios, guest::Target::Ios(SimKind::Ipad)),
-    ];
-    for (runs_as, target) in targets {
-        if let Some(filter) = reach.filterset(runs_as) {
-            runs.push(in_guest(target, Some(&filter)));
-        }
+    if !opts.keep_branch {
+        let _deleted = delete_branch(&sh, &branch, sha);
     }
-    let elsewhere: Vec<&str> = ["S6", "VM"].into_iter().filter(|id| reach.has(id)).collect();
-    if !elsewhere.is_empty() {
-        println!("  reached and not run here (they need Docker or tart): {}", elsewhere.join(", "));
-    }
-    runs
+    followed
 }
 
-/// One e2e run in the guest, appended to `target/remote/e2e-history.jsonl`: the case, every
-/// phase's seconds and the whole run's, and what nextest ran over all of the case's groups.
-fn record_e2e(root: &Path, opts: &RemoteOpts, ran: &Ran, outcome: &guest::Outcome) {
-    let tenths = |d: Duration| (d.as_secs_f64() * 10.0).round() / 10.0;
-    let phases: serde_json::Map<String, serde_json::Value> =
-        outcome.phases.iter().map(|(name, took)| (name.to_owned(), tenths(took).into())).collect();
-    let mut tests = serde_json::Map::new();
-    tests.insert("run".to_owned(), outcome.count.run.into());
-    for (outcome, n) in &outcome.count.outcomes {
-        tests.insert(outcome.clone(), (*n).into());
-    }
-    tests.insert("skipped".to_owned(), outcome.count.skipped.into());
-    tests.insert("groups".to_owned(), outcome.count.groups.into());
-    let line = serde_json::json!({
-        "at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()),
-        "name": opts.name,
-        "case": ran.case,
-        "sim": ran.sim,
-        "auto": opts.e2e.as_deref() == Some("auto"),
-        "guest": outcome.guest,
-        "filter": ran.filter,
-        "passed": outcome.passed,
-        "wall_s": outcome.wall.as_secs(),
-        "phases": phases,
-        "tests": tests,
+/// The kinds of hosted run, and one filterset over them, of the smoke cases `reach` holds that a
+/// hosted Mac runs: the app's and the server's on `mac`, the simulator's on `ios`. `None` when
+/// it holds none. Each kind's suites take only their own binaries' part of the filterset.
+fn hosted_cases(
+    reach: &crate::gate::impact::Reach,
+) -> Option<(Vec<crate::e2e::hosted::Kind>, String)> {
+    use crate::e2e::hosted::Kind;
+    use crate::gate::impact::Runs;
+    let kinds: Vec<Kind> = [(Kind::Mac, &[Runs::App, Runs::Server][..]), (Kind::Ios, &[Runs::Ios])]
+        .into_iter()
+        .filter(|(_, runs)| reach.filterset_of(runs).is_some())
+        .map(|(kind, _)| kind)
+        .collect();
+    let filter = reach.filterset_of(&[Runs::App, Runs::Server, Runs::Ios])?;
+    Some((kinds, filter))
+}
+
+/// Follow the hosted e2e `run` of `case` to its end, cancelling it once `abandon` is set, and
+/// bring its artifacts to `target/remote/<name>/e2e/`. A red's failed jobs' log goes to
+/// `target/remote/<name>/e2e.log`, its tail printed, and is what `-E failed` reads; the goldens
+/// an accept wrote are applied to the tree.
+fn follow_hosted(
+    opts: &RemoteOpts,
+    case: E2e,
+    root: &Path,
+    dir: &Path,
+    run: &crate::e2e::hosted::Run,
+    abandon: Option<&Abandon>,
+) -> Result<()> {
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let started = Instant::now();
+    let id = run.id.to_string();
+    let followed = AtomicBool::new(false);
+    let cancelled = AtomicBool::new(false);
+    let verdict = std::thread::scope(|scope| {
+        if let Some(abandon) = abandon {
+            let (id, followed, cancelled) = (&id, &followed, &cancelled);
+            scope.spawn(move || {
+                while !followed.load(Ordering::Acquire) {
+                    if pause(Duration::from_secs(1), Some(abandon)) {
+                        cancelled.store(true, Ordering::Release);
+                        let cancel = Shell::new().and_then(|sh| {
+                            cmd!(sh, "gh run cancel {id}").quiet().ignore_stdout().run()
+                        });
+                        if let Err(e) = cancel {
+                            println!("  e2e run {id} not cancelled: {e}");
+                        }
+                        return;
+                    }
+                }
+            });
+        }
+        let verdict = crate::e2e::hosted::follow(&sh, run, &dir.join("e2e"));
+        followed.store(true, Ordering::Release);
+        verdict
     });
-    let path = root.join("target").join("remote").join("e2e-history.jsonl");
-    let _written = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()));
+    let verdict = verdict?;
+    if cancelled.load(Ordering::Acquire) {
+        bail!("{ABANDONED}: e2e run {id} cancelled");
+    }
+    let what = match opts.filter.as_deref() {
+        Some(filter) => format!("e2e {} -E '{filter}'", case.name()),
+        None => format!("e2e {}", case.name()),
+    };
+    // The last run's log only: `-E failed` after a green would rerun an older red's tests.
+    let log = dir.join("e2e.log");
+    let _stale = std::fs::remove_file(&log);
+    let mut log_said = String::new();
+    if !verdict.passed() {
+        match cmd!(sh, "gh run view {id} --log-failed").quiet().ignore_stderr().read() {
+            Ok(text) => {
+                std::fs::write(&log, plain_log(&text)).with_context(|| format!("writing {log}"))?;
+                show(&log)?;
+                log_said = format!("; its failed jobs' log: {log}");
+            }
+            Err(e) => println!("  no failed log of run {id}: {e}"),
+        }
+    }
+    if matches!(opts.goldens, Goldens::Accept | Goldens::AcceptAll) {
+        let mut files = 0_usize;
+        for patch in verdict.patches() {
+            if std::fs::metadata(&patch).is_ok_and(|m| m.len() > 0) {
+                files = files.saturating_add(apply_accepted(&sh, &patch)?);
+            }
+        }
+        if files == 0 {
+            println!("  the run accepted nothing new");
+        } else {
+            println!("  {files} accepted goldens applied to the tree");
+        }
+    }
+    if std::fs::read_dir(&verdict.artifacts).is_ok_and(|mut entries| entries.next().is_some()) {
+        println!("  renders and diffs of changed frames: {}", verdict.artifacts);
+    }
+    let took = started.elapsed().as_secs();
+    crate::e2e::hosted::passed(&verdict).with_context(|| {
+        format!("{what} ({}m{:02}s): {}{log_said}", took / 60, took % 60, run.url)
+    })?;
+    println!("✔ {what} passed on a hosted Mac ({}m{:02}s)", took / 60, took % 60);
+    Ok(())
+}
+
+/// The text of `gh run view --log-failed`'s `log`, each line without the job, the step and the
+/// time it starts with (`e2e (mac)\tRun tests\t2026-10-31T12:00:00.0000000Z …`).
+fn plain_log(log: &str) -> String {
+    log.lines()
+        .map(|line| match line.splitn(3, '\t').nth(2) {
+            Some(text) => text.split_once(' ').map_or(text, |(_, rest)| rest),
+            None => line,
+        })
+        .fold(String::new(), |mut out, line| {
+            out.push_str(line);
+            out.push('\n');
+            out
+        })
 }
 
 /// One check's latency, as [`record`] writes it.
@@ -1047,6 +1083,8 @@ struct Record<'a> {
     local: &'a crate::local::Outcome,
     /// Whether the runners' part passed, when there was one.
     runners: Option<bool>,
+    /// How long its e2e case on a hosted Mac took, when it had one.
+    e2e: Option<Duration>,
     /// Seconds from its start to its verdict.
     took: u64,
     /// How long it waited for its lane directory.
@@ -1072,6 +1110,7 @@ fn record(root: &Path, check: &Record<'_>) {
         "local_passed": check.local.passed,
         "local_failed": check.local.failed,
         "runners_passed": check.runners,
+        "e2e_s": check.e2e.map(|e2e| e2e.as_secs()),
         "total_s": check.took,
         "queued_s": check.queued.as_secs(),
         "dir": check.dir,
@@ -1165,6 +1204,7 @@ fn after(sh: &Shell) -> Result<()> {
                     packages: &packages,
                     local: &local,
                     runners: None,
+                    e2e: None,
                     took: started.elapsed().as_secs(),
                     queued: Duration::ZERO,
                     dir: &name,
@@ -1294,7 +1334,7 @@ fn on_runners(
         .collect();
     if conclusion != "success" {
         for job in &jobs {
-            for name in ["lint.log", "test.log", "probe.log", "e2e.log"] {
+            for name in ["lint.log", "test.log", "probe.log"] {
                 let path = job.join(name);
                 if path.exists() {
                     show(&path)?;
@@ -1302,15 +1342,7 @@ fn on_runners(
             }
         }
     }
-    if opts.e2e.is_some() {
-        let renders = root.join("target").join("e2e").join("artifacts");
-        if download(sh, run.id, "renders", &renders).is_some() {
-            println!("  renders and diffs of changed frames: {renders}");
-        }
-    }
-    let accepts =
-        opts.accept_snapshots || matches!(opts.goldens, Goldens::Accept | Goldens::AcceptAll);
-    if accepts {
+    if opts.accept_snapshots {
         let patches: Vec<PathBuf> =
             jobs.iter().map(|j| j.join("changes.patch")).filter(|p| p.exists()).collect();
         ensure!(!patches.is_empty(), "the run left no patch of what it accepted");
@@ -1341,11 +1373,10 @@ fn on_runners(
 /// The `-E` that reruns the e2e tests the last run of a check's name failed.
 const FAILED: &str = "failed";
 
-/// The nextest filterset of the e2e tests the last run of check `name` failed, from the e2e log
-/// it brought back (`target/remote/<name>/logs/logs-run/e2e.log`).
+/// The nextest filterset of the e2e tests the last run of check `name` failed, from the failed
+/// jobs' log it brought back (`target/remote/<name>/e2e.log`, [`follow_hosted`]).
 fn last_failed(name: &str) -> Result<String> {
-    let log =
-        crate::tools::repo_root()?.join("target/remote").join(name).join("logs/logs-run/e2e.log");
+    let log = crate::tools::repo_root()?.join("target/remote").join(name).join("e2e.log");
     let text = std::fs::read_to_string(&log)
         .with_context(|| format!("no e2e log of the last run of {name} at {log}"))?;
     let failed = failed_tests(&text);
@@ -1446,10 +1477,6 @@ fn describe(opts: &RemoteOpts) -> String {
         let on =
             if tests == "none" { "tests here".to_owned() } else { format!("tests on {tests}") };
         parts.push(format!("{depth} check {} ({on}{left})", opts.packages.join(" ")));
-    }
-    if let Some(case) = &opts.e2e {
-        let filter = opts.filter.as_deref().map(|f| format!(" {f}")).unwrap_or_default();
-        parts.push(format!("e2e {case}{filter} ({})", opts.goldens.input()));
     }
     if let Some(probe) = &opts.probe {
         parts.push(format!("probe `{probe}`"));
@@ -1728,14 +1755,10 @@ fn unfit(workflow: &str, opts: &RemoteOpts) -> Option<String> {
 fn dispatched(opts: &RemoteOpts, sha: &str) -> Vec<(&'static str, String)> {
     let snapshots = if opts.accept_snapshots { "accept" } else { "compare" };
     let lint = if opts.linux_only { "linux" } else { "all" };
-    let fields: [(&str, String, &str); 13] = [
+    let fields: [(&str, String, &str); 9] = [
         ("name", opts.name.clone(), ""),
         ("sha", sha.to_owned(), ""),
         ("packages", opts.packages.join(" "), ""),
-        ("e2e", opts.e2e.clone().unwrap_or_default(), ""),
-        ("filter", opts.filter.clone().unwrap_or_default(), ""),
-        ("goldens", opts.goldens.input().to_owned(), "compare"),
-        ("sim", opts.sim.clone(), "iphone"),
         ("snapshots", snapshots.to_owned(), "compare"),
         ("full", (if opts.full { "yes" } else { "no" }).to_owned(), "no"),
         ("lint", lint.to_owned(), "all"),
@@ -2118,27 +2141,6 @@ mod tests {
         <Cli as clap::Parser>::try_parse_from(line).expect("the options parse").opts
     }
 
-    /// `--repeat` and `--until-fail` take an e2e case and at least one run, and not each other.
-    #[test]
-    fn a_repeat_takes_an_e2e_case_and_one_way_of_repeating() {
-        #[derive(clap::Parser)]
-        struct Cli {
-            #[command(flatten)]
-            opts: RemoteOpts,
-        }
-        let parses = |args: &[&str]| {
-            <Cli as clap::Parser>::try_parse_from(
-                std::iter::once("remote").chain(args.iter().copied()),
-            )
-            .is_ok()
-        };
-        assert_eq!(opts(&["--e2e", "ios", "--repeat", "20"]).repeat, Some(20));
-        assert_eq!(opts(&["--e2e", "app", "--until-fail", "14"]).until_fail, Some(14));
-        assert!(!parses(&["--repeat", "20"]));
-        assert!(!parses(&["--e2e", "app", "--repeat", "0"]));
-        assert!(!parses(&["--e2e", "app", "--repeat", "5", "--until-fail", "14"]));
-    }
-
     /// A check asks only what the dispatched `check.yml` can run: this tree's runs a full check
     /// with no Mac tests, and one whose test job does not stand aside for `test_runner: none`, or
     /// that lacks an input sent, is refused before anything is dispatched.
@@ -2158,7 +2160,7 @@ mod tests {
         let without = ours.replace("      probe:\n", "      tried:\n");
         assert_eq!(unfit(&without, &probe).as_deref(), Some("it declares no input probe"));
         // A Linux-only lint goes to a workflow without the input as a whole one, not refused.
-        let linux = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]), false);
+        let linux = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]));
         assert!(super::fit(&ours, "gate", &linux).linux_only);
         let older = ours.replace("      lint:\n", "      linted:\n");
         let fitted = super::fit(&older, "gate", &linux);
@@ -2340,18 +2342,16 @@ mod tests {
     /// tests when Linux tests every crate; none for crates no Linux builds.
     #[test]
     fn a_full_check_asks_a_runner_only_for_linux() {
-        let quick = super::runners_part(&opts(&["-p", "slopty-net"]), false);
+        let quick = super::runners_part(&opts(&["-p", "slopty-net"]));
         assert_eq!(quick.packages, [""; 0], "a quick check's crates are checked here");
-        let mac = super::runners_part(&opts(&["-p", "slopty-shell", "--full"]), false);
+        let mac = super::runners_part(&opts(&["-p", "slopty-shell", "--full"]));
         assert!(mac.packages.is_empty(), "iOS clippy runs here");
-        let net = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]), false);
+        let net = super::runners_part(&opts(&["-p", "slopty-proto", "--full"]));
         assert!(net.linux_only && net.packages == ["slopty-proto"]);
         assert_eq!(super::tests_on(&net), "ubuntu-24.04");
         assert!(super::dispatched(&net, "").contains(&("lint", "linux".to_owned())));
-        let mixed = super::runners_part(
-            &opts(&["-p", "slopty-proto", "-p", "slopty-shell", "--full"]),
-            false,
-        );
+        let mixed =
+            super::runners_part(&opts(&["-p", "slopty-proto", "-p", "slopty-shell", "--full"]));
         assert_eq!(super::tests_on(&mixed), "none");
         assert!(mixed.linux_only && mixed.packages == ["slopty-proto"], "Linux builds the one");
         let placed = opts(&["-p", "slopty-proto", "--full", "--place", "runner"]);
@@ -2532,6 +2532,33 @@ mod tests {
         assert_eq!(super::failed_tests(coloured), ["a::b"]);
         let none: [&str; 0] = [];
         assert_eq!(super::failed_tests("     Summary [ 1s] 3 tests run: 3 passed"), none);
+        // A hosted run's failed log, each line behind its job, step and time.
+        let hosted = "e2e (mac)\tRun the case\t2026-10-31T12:00:00.1234567Z \
+                      \u{1b}[31;1m        FAIL\u{1b}[0m [ 1.0s] (1/9) slopty-e2e::app a::b\n\
+                      e2e (mac)\tRun the case\t2026-10-31T12:00:01.1234567Z   stdout \t───\n";
+        let plain = super::plain_log(hosted);
+        assert_eq!(super::failed_tests(&plain), ["a::b"]);
+        assert!(plain.ends_with("  stdout \t───\n"), "a tab in the text stays: {plain:?}");
+    }
+
+    /// `--e2e auto` runs the reached cases a hosted Mac runs, each kind once, under one filterset
+    /// whose parts name their own binaries; none when only Linux's or the VM's are reached.
+    #[test]
+    fn auto_runs_the_reached_cases_of_each_hosted_kind() {
+        use crate::e2e::hosted::Kind;
+        use crate::gate::impact::Reach;
+        let reach = |ids: &[&'static str]| {
+            Reach(
+                ids.iter().map(|id| (*id, std::iter::once("a.rs".to_owned()).collect())).collect(),
+            )
+        };
+        let (kinds, filter) = super::hosted_cases(&reach(&["S1", "S4"])).expect("reached");
+        assert_eq!(kinds, [Kind::Mac], "the app's and the server's run on one Mac");
+        assert!(filter.contains("::app)") && filter.contains("::server)"), "{filter}");
+        let (kinds, filter) = super::hosted_cases(&reach(&["S2", "S5"])).expect("reached");
+        assert_eq!(kinds, [Kind::Mac, Kind::Ios]);
+        assert!(filter.contains("::ios)") && !filter.contains("::server)"), "{filter}");
+        assert!(super::hosted_cases(&reach(&["S6", "VM"])).is_none());
     }
 
     #[test]

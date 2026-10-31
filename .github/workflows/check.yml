@@ -1,12 +1,13 @@
 name: Check
 
 # What the Mac that asks cannot check of a lane's tree (`cargo xtask remote`): Linux's clippy
-# and tests of its crates, an e2e case, a probe; or, with `--place runner`, the crates' checks
-# whole. The Mac runs the rest itself, iOS clippy included (docs/decisions/tooling.md, "A lane's
-# check returns in minutes"). `remote` commits the tree as it is (staged or not) to a branch
-# `check/<name>` and starts this with that commit. Dispatched on `gate`, so the run reads and
-# fills the compile cache the gate's lanes use: a cache is read by its own branch and main only,
-# and a `check/*` branch of its own would start cold every time.
+# and tests of its crates, a probe; or, with `--place runner`, the crates' checks whole. The Mac
+# runs the rest itself, iOS clippy included, and its e2e case goes to `e2e.yml` on hosted Macs
+# (docs/decisions/tooling.md, "A lane's check returns in minutes"). `remote` commits the tree
+# as it is (staged or not) to a branch `check/<name>` and starts this with that commit.
+# Dispatched on `gate`, so the run reads and fills the compile cache the gate's lanes use: a
+# cache is read by its own branch and main only, and a `check/*` branch of its own would start
+# cold every time.
 on:
   workflow_dispatch:
     inputs:
@@ -19,18 +20,6 @@ on:
       packages:
         description: Crates for `cargo xtask check`, space-separated; empty for none
         default: ""
-      e2e:
-        description: An `xtask e2e` case (app, ios, worker, …); empty for none
-        default: ""
-      filter:
-        description: The e2e case's nextest filterset
-        default: ""
-      goldens:
-        description: "What the e2e case does with the goldens: compare, accept, accept-all, review"
-        default: compare
-      sim:
-        description: The simulator the ios case uses
-        default: iphone
       snapshots:
         description: "What the tests do with insta snapshots: compare, accept"
         default: compare
@@ -41,7 +30,7 @@ on:
         description: "all: the lints `full` names; linux: Linux clippy alone, the Mac that asked ran the rest"
         default: all
       runner:
-        description: The runner image of the probe and the e2e case (xcode-27, ubuntu-24.04, ubuntu-24.04-arm)
+        description: The runner image of the probe (xcode-27, ubuntu-24.04, ubuntu-24.04-arm)
         default: xcode-27
       test_runner:
         description: The runner image of the tests (`remote` picks Linux when every crate tests there), or none
@@ -49,9 +38,6 @@ on:
       probe:
         description: A shell command to run after setup, for trying a step on a runner
         default: ""
-      warm:
-        description: "The gate's warm jobs (ci.yml's `warm`) on the commit: yes (both runners), mac, linux or no"
-        default: "no"
 
 run-name: check ${{ inputs.name }} ${{ inputs.sha }}
 
@@ -207,7 +193,7 @@ jobs:
           for p in $PACKAGES; do args+=(-p "$p"); done
           [ "$FULL" = yes ] || [ "$LINT" = linux ] || args+=(--quick)
           xtask check "${args[@]}" 2>&1 | tee target/remote/lint.log
-      - if: always()
+      - if: always() && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v7
@@ -340,7 +326,7 @@ jobs:
           accepted=(crates/slopty-e2e/golden ':(glob)**/*.snap')
           git add --intent-to-add -- "${accepted[@]}"
           git diff --binary -- "${accepted[@]}" > target/remote/changes.patch
-      - if: always()
+      - if: always() && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v7
@@ -350,72 +336,14 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  # The gate as the warm runners run it on a push to `gate` (ci.yml's `warm`), on the commit
-  # `remote` pushed: every lane, before it lands. The runners' guard lets a dispatch of this
-  # workflow by one of the repository's own actors run there, and nothing else but the gate.
-  warm:
-    if: inputs.warm == 'yes' || inputs.warm == 'mac' || inputs.warm == 'linux'
-    name: warm ${{ matrix.host }} (${{ inputs.name }})
-    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        host: ${{ fromJSON(inputs.warm == 'yes' && '["mac", "linux"]' || format('["{0}"]', inputs.warm)) }}
-    env:
-      CARGO_INCREMENTAL: 1
-      DEVELOPER_DIR: ""
-      RUSTC_WRAPPER: ""
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.sha }}
-          clean: false
-          submodules: recursive
-          fetch-depth: 0
-      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-      - uses: ./.github/actions/zig
-      - working-directory: vendor/ghostty
-        timeout-minutes: 15
-        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      - run: mkdir -p target/remote
-      - run: cargo xtask gate --warm 2>&1 | tee target/remote/warm.log
-      - if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: logs-warm-${{ matrix.host }}
-          path: |
-            target/remote
-            target/nextest/warm/junit.xml
-          if-no-files-found: ignore
-          retention-days: 3
-
-  # A Linux-only warm check's wake: the Linux runner's VM boots when a job starts on the Mac
-  # runner, whose job-started hook wakes it (`xtask warm guard --wake`), so a check that runs no
-  # warm Mac job runs this one, which does nothing else. Its runner is named as the warm job
-  # names its own.
-  wake:
-    if: inputs.warm == 'linux'
-    name: wake the Linux runner (${{ inputs.name }})
-    runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}
-    timeout-minutes: 5
-    strategy:
-      matrix:
-        host: [mac]
-    steps:
-      - run: echo "this job's start woke the Linux runner's VM"
-
-  # A probe (a shell command tried on a runner) or an `xtask e2e` case, on the runner named.
+  # A probe (a shell command tried on a runner), on the runner named.
   run:
-    if: inputs.probe != '' || inputs.e2e != ''
+    if: inputs.probe != ''
     name: run (${{ inputs.name }})
     runs-on: ${{ inputs.runner }}
     # A probe is a step tried once; one that lost its runner held a Mac slot for 79 minutes
-    # (run 38130090331). An e2e case builds the daemons and the app first.
-    timeout-minutes: ${{ inputs.e2e != '' && 90 || 45 }}
+    # (run 38130090331).
+    timeout-minutes: 45
     defaults:
       run:
         shell: bash
@@ -436,19 +364,15 @@ jobs:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
           actions-cache: ${{ !startsWith(inputs.runner, 'ubuntu') && 'true' || 'false' }}
-      # A probe may try any step, so it gets every target, clippy and nightly; an e2e case only
-      # builds and runs for the Mac (the ios case for the simulator too): 25 s less setup.
+      # A probe may try any step, so it gets every target, clippy and nightly.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
-          components: ${{ inputs.probe != '' && 'rustfmt, clippy' || '' }}
+          components: rustfmt, clippy
           targets: >-
-            ${{ inputs.probe != '' && 'aarch64-apple-darwin, aarch64-apple-ios,
-            aarch64-apple-ios-sim, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu,
-            x86_64-unknown-linux-musl' || inputs.e2e == 'ios' && 'aarch64-apple-darwin,
-            aarch64-apple-ios, aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
-      - if: inputs.probe != ''
-        uses: dtolnay/rust-toolchain@nightly
+            aarch64-apple-darwin, aarch64-apple-ios, aarch64-apple-ios-sim,
+            x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
@@ -474,8 +398,8 @@ jobs:
           key: ghostty-prebuilt-${{ runner.os }}-testsui-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-
       # zig's packages every time: the gate's build of libghostty-vt holds the UI shard's
-      # triples, and the simulator's case or a probe builds others, whose lazy fetch inside the
-      # build failed a lane on one 502 (run 37080698786).
+      # triples, and a probe may build others, whose lazy fetch inside the build failed a lane on
+      # one 502 (run 37080698786).
       - uses: actions/cache/restore@v6
         with:
           path: vendor/ghostty/zig-pkg
@@ -483,25 +407,6 @@ jobs:
       - working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
-      # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
-      - if: inputs.e2e == 'ios'
-        id: xcodegen
-        uses: actions/cache@v6
-        with:
-          path: ~/.local/xcodegen
-          key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
-      - if: >-
-          inputs.e2e == 'ios'
-          && steps.xcodegen.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
-            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
-          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
-            | shasum -a 256 -c -
-          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
-      - if: inputs.e2e == 'ios'
-        run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its
       # build (`gate::tests::xtask_s_cache_key_names_every_input`). nextest's setup script runs
@@ -530,53 +435,17 @@ jobs:
       - run: |
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
-      - if: inputs.probe != ''
-        run: >-
+      - run: >-
           xtask setup --lane tools --lane clippy-host --lane clippy-ios --lane clippy-linux
           --lane tests --lane rustdoc
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - if: inputs.probe == ''
-        run: xtask setup --lane tests
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       - run: mkdir -p target/remote
-      - if: inputs.probe != ''
-        env:
+      - env:
           PROBE: ${{ inputs.probe }}
         run: bash -c "$PROBE" 2>&1 | tee target/remote/probe.log
-      - if: ${{ !cancelled() && inputs.e2e != '' }}
-        env:
-          CASE: ${{ inputs.e2e }}
-          FILTER: ${{ inputs.filter }}
-          GOLDENS: ${{ inputs.goldens }}
-          SIM: ${{ inputs.sim }}
-        run: |
-          args=("$CASE")
-          [ -n "$FILTER" ] && args+=(-E "$FILTER")
-          [ "$GOLDENS" != compare ] && args+=("--$GOLDENS")
-          [ "$CASE" = ios ] && args+=(--sim "$SIM")
-          # Three tests at a time on the runner's three cores: the app's suite took 103 s
-          # against 193 s one at a time, the same tests failing (`docs/decisions/tooling.md`,
-          # "An e2e case runs in a guest here").
-          [ "$CASE" = app ] && args+=(--test-threads 3)
-          xtask e2e "${args[@]}" 2>&1 | tee target/remote/e2e.log
-      # The goldens and snapshots the run accepted, as a patch on the commit checked, which
-      # `remote` applies to the tree it came from; nothing else of the runner's tree.
-      - if: always()
-        run: |
-          accepted=(crates/slopty-e2e/golden ':(glob)**/*.snap')
-          git add --intent-to-add -- "${accepted[@]}"
-          git diff --binary -- "${accepted[@]}" > target/remote/changes.patch
-      - if: ${{ always() && inputs.e2e != '' }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: renders
-          path: target/e2e/artifacts
-          if-no-files-found: ignore
-          retention-days: 3
       # How much of the build the compile cache served.
-      - if: always()
+      - if: always() && env.SLOPTY_SCCACHE != 'off'
         run: $SCCACHE_PATH --show-stats
       - if: always()
         uses: actions/upload-artifact@v7

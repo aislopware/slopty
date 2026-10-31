@@ -88,10 +88,11 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    context, a hitbox) never misbehaves under a dump. A Mac with an assistive app running (a
    launcher, a window manager, a screen reader) asks for the tree from the first frame and
    keeps it, and GPUI then keeps view retention but not element retention.
-   `SLOPTY_E2E_A11Y=always` on `cargo xtask remote … --e2e app` runs the app so: the tree is on
-   from the first frame, and a dump or render reads it and the per-frame check's findings
-   without drawing anything from scratch. `walk::*` walks a person's inputs one after another
-   in either mode.
+   `SLOPTY_E2E_A11Y=always` runs the app so, set where `cargo xtask e2e app` runs or where `remote
+   --e2e` and `e2e --hosted` dispatch, which pass it to `e2e.yml` (its `a11y` input): the tree is on
+   from the first frame, and a dump or render reads it and the per-frame check's findings without
+   drawing anything from scratch. `walk::*` walks a person's inputs one after another in either
+   mode.
    **Real pixels, in the test process.** `shell::goldens` opens the shell's window as
    `slopty_shell::start` does (its install, fonts, theme and window options) in a GPUI test
    window that draws real pixels: Core Text (`gpui_platform::text_system`), the app's assets,
@@ -244,31 +245,31 @@ the flags and the workflow.
 Layers 3 and 4 run as a smoke set, each case named by its tests in `xtask/src/gate/impact.rs`
 (`docs/decisions/testing.md`, "Goldens render in the test process; e2e is a smoke set chosen by
 what a change reaches"): S1 a session on the real stack, S2 a VideoToolbox stream, S3 WebKit, S4
-the CLI and MCP through the server, S5 the iOS app on the iPhone and the iPad, S6 a Linux worker,
-and VM a worker in a macOS guest with its grants. A case reaches what its run compiles: the
-binaries it starts and its test target, and everything they depend on in the lock and the
-manifests at the change's head, each for the systems it is built for there. A changed file
-reaches the cases that compile its package on a system its changed lines compile on (their
-`cfg`, evaluated for macOS, iOS and Linux; a removed line's on the old side), a moved package
-the cases that compile it, and a few rules name what the graph cannot see (the toolchain, the
-workspace manifest, cargo's and nextest's configuration, the workflows and actions the smoke
-jobs run, the xtask code an e2e run goes through and the plan's own, `vendor/ghostty`). A test
-target's helper modules reach every case of the target. What only draws or computes reaches
-none, since its goldens and unit tests run in the test process, unless an e2e driver reads it
-(the app's accessibility tree, `slopty_kit::a11y`). `cargo xtask smoke reach` says what a change
-reaches and why. The gate runs the reached cases before main moves: its `smoke plan` job chooses
-them, and hosted Macs run them, each job from one build (`docs/DEV.md`, "Gate"): `e2e (mac)` S1
-to S4, or `e2e (server)` S4 alone when a push reaches no other, with no app built; `e2e (ios)`
-S5 on the iPhone, then the iPad. A run whose commit `gate` moved off before its e2e started
-stands aside, cancelled whole, and the newer run carries the commit; no concurrency group holds
-the e2e jobs, so nothing sets aside the newest run (`xtask/src/gate/order.rs`, whose model test
-runs every order the jobs can end in). A change to the plan's own code must plan both jobs.
-`cargo xtask remote --e2e auto` runs the reached app, server and simulator cases of a lane's
-change, in a guest on this Mac until it moves to hosted runners. `e2e.yml` runs every case
-nightly on main's head (`--review`: a changed frame is shown, not failed, on a runner's GPU). S6
-and the VM's run nowhere automatically yet (`docs/decisions/tooling.md`, "The gate and e2e run
-on free hosted runners; this Mac runs none"). A smoke test that goes red is a bug in the product
-or the test, never retried (nextest's default profile, and `NEXTEST_RETRIES=0` on runners).
+the CLI and MCP through the server, S5 the iOS app on the iPhone (the iPad only launches it and
+draws its layout), S6 a Linux worker, and VM a worker in a macOS guest with its grants. A case
+reaches what its run compiles: the binaries it starts and its test target, and everything they
+depend on in the lock and the manifests at the change's head, each for the systems it is built for
+there. A changed file reaches the cases that compile its package on a system its changed lines
+compile on (their `cfg`, evaluated for macOS, iOS and Linux; a removed line's on the old side), a
+moved package the cases that compile it, and a few rules name what the graph cannot see (the
+toolchain, the workspace manifest, cargo's and nextest's configuration, the workflows and actions
+the smoke jobs run, the xtask code an e2e run goes through and the plan's own, `vendor/ghostty`). A
+test target's helper modules reach every case of the target. What only draws or computes reaches
+none, since its goldens and unit tests run in the test process, unless an e2e driver reads it (the
+app's accessibility tree, `slopty_kit::a11y`). `cargo xtask smoke reach` says what a change reaches
+and why. The gate runs the reached cases before main moves: its `smoke plan` job chooses them, and
+hosted Macs run them, each job from one build (`docs/DEV.md`, "Gate"): `e2e (mac)` S1 to S4, or `e2e
+(server)` S4 alone when a push reaches no other, with no app built; `e2e (ios)` S5 on the iPhone,
+then the app's launch and layout alone on the iPad. A run whose commit `gate` moved off before its
+e2e started stands aside, cancelled whole, and the newer run carries the commit; no concurrency
+group holds the e2e jobs, so nothing sets aside the newest run (`xtask/src/gate/order.rs`, whose
+model test runs every order the jobs can end in). A change to the plan's own code must plan both
+jobs. `cargo xtask remote --e2e auto` runs the reached app, server and simulator cases of a lane's
+change on hosted Macs, as `cargo xtask e2e mac|ios --hosted` runs one case. `e2e.yml` runs every
+case nightly on main's head (`--review`: a changed frame is shown, not failed, on a runner's GPU).
+S6 and the VM's run nowhere automatically yet (`docs/decisions/tooling.md`, "The gate and e2e run on
+free hosted runners; this Mac runs none"). A smoke test that goes red is a bug in the product or the
+test, never retried (nextest's default profile, and `NEXTEST_RETRIES=0` on runners).
 
 ### VideoToolbox
 A runner's virtual Mac shares its host's media engine, and at times its encoder stops ("No real

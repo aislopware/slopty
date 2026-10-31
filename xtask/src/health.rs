@@ -66,7 +66,6 @@ pub fn run(sh: &Shell, since: Option<&str>) -> Result<()> {
 #[derive(serde::Deserialize)]
 struct Check {
     at: u64,
-    name: String,
     full: bool,
     total_s: u64,
     local_s: u64,
@@ -76,36 +75,9 @@ struct Check {
     /// A warm of the after-pass, not a lane's check.
     #[serde(default)]
     warm: bool,
-}
-
-/// One e2e case run in this Mac's guest (`target/remote/e2e-history.jsonl`): when it ended,
-/// for which check, and how long it took from its build to its verdict (`wall_s`; a line written
-/// before 2026-10-31 has its build's and its tests' seconds instead).
-#[derive(serde::Deserialize)]
-struct GuestRun {
-    at: u64,
-    name: String,
+    /// How long its e2e case on a hosted Mac took, when it had one (recorded since 2026-10-31).
     #[serde(default)]
-    wall_s: Option<u64>,
-    #[serde(default)]
-    build_s: u64,
-    #[serde(default)]
-    tests_s: u64,
-}
-
-impl GuestRun {
-    fn seconds(&self) -> u64 {
-        self.wall_s.unwrap_or_else(|| self.build_s.saturating_add(self.tests_s))
-    }
-}
-
-/// The e2e case `check` ran in the guest, in seconds from its build to its verdict: a run of its
-/// name recorded while it ran. `None` for a check of crates alone.
-fn guest_part(check: &Check, runs: &[GuestRun]) -> Option<u64> {
-    let from = check.at.saturating_sub(check.total_s).saturating_sub(5);
-    let to = check.at.saturating_add(5);
-    let ran = runs.iter().filter(|r| r.name == check.name && (from..=to).contains(&r.at));
-    ran.map(GuestRun::seconds).reduce(u64::saturating_add)
+    e2e_s: Option<u64>,
 }
 
 /// `p50 …s, p90 …s` of `samples`, or `-` for none.
@@ -119,18 +91,12 @@ fn spread(mut samples: Vec<u64>) -> String {
 /// The spread of the lanes' checks over the last day, quick and full, from what
 /// `xtask remote` recorded (`target/remote/history.jsonl`): from its start to its verdict, and
 /// how long it waited for its lane directory; the after-pass's warms apart. A
-/// quick check that carried an e2e case waits for it in the guest, which the part here leaves
-/// out: those are shown apart, so the verdict's gap over the part here reads as the e2e case it
-/// is and not as a queue (2026-10-18: 161 of 300 checks; the others' gap p50 1 s, p90 6 s).
+/// check that carried an e2e case waits for it on a hosted Mac, which the part here leaves out:
+/// those are shown apart, so the verdict's gap over the part here reads as the e2e case it is
+/// and not as a queue (2026-10-18: 161 of 300 checks; the others' gap p50 1 s, p90 6 s).
 fn checks() -> Result<()> {
-    let remote = crate::tools::repo_root()?.join("target").join("remote");
-    let path = remote.join("history.jsonl");
+    let path = crate::tools::repo_root()?.join("target").join("remote").join("history.jsonl");
     let text = std::fs::read_to_string(&path).unwrap_or_default();
-    let guest: Vec<GuestRun> = std::fs::read_to_string(remote.join("e2e-history.jsonl"))
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .context("the clock is before 1970")?
@@ -156,13 +122,13 @@ fn checks() -> Result<()> {
             spread(of.iter().map(|c| c.queued_s).collect()),
         );
         let (with_e2e, crates_alone): (Vec<&Check>, Vec<&Check>) =
-            of.iter().partition(|c| guest_part(c, &guest).is_some());
+            of.iter().partition(|c| c.e2e_s.is_some());
         if !with_e2e.is_empty() {
             println!(
-                "  {} with an e2e case in the guest: verdict {}; the e2e case {}",
+                "  {} with an e2e case on a hosted Mac: verdict {}; the e2e case {}",
                 with_e2e.len(),
                 spread(with_e2e.iter().map(|c| c.total_s).collect()),
-                spread(with_e2e.iter().filter_map(|c| guest_part(c, &guest)).collect()),
+                spread(with_e2e.iter().filter_map(|c| c.e2e_s).collect()),
             );
         }
         if !crates_alone.is_empty() {
@@ -393,7 +359,7 @@ fn strip(line: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Check, GuestRun, guest_part, red_cause, says_why, strip};
+    use super::{red_cause, says_why, strip};
 
     /// A red counts against the lane that failed, or the job when it is no lane's.
     #[test]
@@ -401,35 +367,6 @@ mod tests {
         assert_eq!(red_cause("gate (rustdoc)"), "rustdoc");
         assert_eq!(red_cause("gate (tests worker)"), "tests worker");
         assert_eq!(red_cause("promote"), "promote");
-    }
-
-    /// A check's e2e part is the guest run of its name recorded while it ran, and none for a
-    /// check of crates alone or another lane's run.
-    #[test]
-    fn a_check_s_e2e_part_is_its_guest_run() {
-        let check = Check {
-            at: 1_000,
-            name: "A".to_owned(),
-            full: false,
-            total_s: 300,
-            local_s: 40,
-            queued_s: 0,
-            warm: false,
-        };
-        let run = |at, name: &str| GuestRun {
-            at,
-            name: name.to_owned(),
-            wall_s: Some(240),
-            build_s: 0,
-            tests_s: 0,
-        };
-        assert_eq!(guest_part(&check, &[run(990, "A")]), Some(240));
-        let older: GuestRun =
-            serde_json::from_str(r#"{"at":990,"name":"A","build_s":60,"tests_s":180}"#).unwrap();
-        assert_eq!(guest_part(&check, &[older]), Some(240), "a line of the older shape");
-        assert_eq!(guest_part(&check, &[run(990, "B")]), None, "another lane's");
-        assert_eq!(guest_part(&check, &[run(600, "A")]), None, "before it began");
-        assert_eq!(guest_part(&check, &[]), None, "crates alone");
     }
 
     /// A failed job's reason is the error, the failed test or the panic, without its colour;

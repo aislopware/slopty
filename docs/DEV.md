@@ -64,7 +64,7 @@ zed itself so it is never behind zed while longbridge lags.
   directory while a check works there rather than take a worse one. On GitHub runners
   (`check.yml`, pushed to `check/<name>`, deleted when its run ends): with `--full`, Linux
   clippy alone (`lint: linux`) of the crates that build there, and the tests on Linux when every
-  crate tests there (`gate::linux_tested`); and any e2e case or probe. A quick check of crates
+  crate tests there (`gate::linux_tested`); and a probe. A quick check of crates
   alone dispatches nothing, nor does a full check of crates no Linux builds. `--place runner` sends all of it to runners, as before. With `--only` it first
   formats the Rust files changed under those paths (nightly rustfmt), the vendored crates `cargo
   fmt --all` reaches among them, so no check fails on formatting. Before anything compiles, the
@@ -74,51 +74,36 @@ zed itself so it is never behind zed while longbridge lags.
   and the Claude Code mod's checks, side by side in seconds, so the gate never goes red on what
   a check could say. The first red ends the check: a failure here cancels the runners' run (or
   never dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the
-  failed log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
-  '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
-  failed); `--e2e auto` runs the smoke cases the check's commit reaches from `HEAD` (with
-  `--head`, from `origin/main`: a round's commits), as `cargo xtask smoke reach` lists them
-  (`xtask/src/gate/impact.rs`): the app's, the server's and both simulators' in a guest, each
-  with its own verdict line, and nothing when it reaches none; S6 and the VM's, which need
-  Docker or tart, are named when reached and run nowhere here (`docs/decisions/tooling.md`, "The
-  gate and e2e run on free hosted runners"). The `app`, `ios` and `auto` cases run here, in
-  one of two headless macOS guests, `slopty-27-e2e` and `slopty-27-e2e-2`, so two lanes' runs go
-  at once (tart clones of `slopty-27-xcode`, which is made once from the live lane's base with
-  this Mac's Xcode and the runners' iOS simulator runtime, about half an hour; a run takes the
-  guest whose simulator is up for its device, else its lane's last guest when it is free, else a
-  running one, and a third lane waits for whichever frees first). The lane's tree is built once,
-  with the features the check's own build names, in `target/local/<lane>/e2e-target` (the
-  simulator's app too, with this Mac's Xcode, whose build is skipped when nothing it builds from
-  changed), and only the binaries the tests run are copied. While it builds, the guest boots and
-  its simulator gets ready: the device the last run kept (`Slopty iPhone run`, `Slopty iPad
-  run`), reset (the app ended and uninstalled, its privacy grants and the keychain reset), or a
-  fresh clone of the guest's settled one when none was kept. The app's tests run in the guest
-  three at a time (`SLOPTY_E2E_THREADS`), those that code video after the rest and only when the
-  guest's encoder codes a keyframe in time, the simulator's one at a time (`--sim iphone|ipad`),
-  one lane's run at a time in each guest. Each run's line in `target/remote/e2e-history.jsonl`
-  keeps every phase's seconds and the whole suite's count. `--place runner` (or
-  `SLOPTY_E2E_GUEST=0`) sends `app` or `ios` to a runner Mac, and probes always go there;
-  `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
-  `--accept-snapshots` does its insta snapshots (on runners: a patch of anything else, which no
-  accept writes, is refused whole and its paths named), and `--goldens review` brings every
-  changed frame's render and diff to `target/remote/<name>/artifacts/` (from a runner, to
-  `target/e2e/artifacts/`). A flake gets measured, not rerun by hand. `--repeat N` runs the
-  guest's case N times in one session, with one boot and one copy, the app installed afresh on a
-  reset simulator each time, and prints "k of N failed" with the clean runs in a row a fix needs
-  at 95 %. `--until-fail N` stops at the first failure.
-  Each failed run's log, data, frames and kept stack roots go to
-  `target/remote/<name>/repeat/run-<i>/`. A flake counts as fixed only after that many clean
-  runs (`docs/decisions/tooling.md`). `--workflow-ref
-  <branch>` runs that branch's `check.yml`, to try a change to it. Checks of one name run one
-  after another, a newer one waiting for the older. A lane directory is one check's at a time, and
-  only while that check works in it (a lock on `target/local/<dir>/.lock`): it lets go before it
-  waits on the runners, which are dispatched before it takes the directory. A second check waits,
-  saying "waiting for target/local/<dir>: pid N works there (a check)" and then "took
+  failed log's end and keeps every runner log under `target/remote/<name>/`. `--e2e mac|ios -E
+  '<filterset>'` adds an e2e case on GitHub's hosted Macs: `mac` runs the app's and the server's
+  suites, `ios` the simulator's on the iPhone, then the iPad's one test; `-E failed` takes only the
+  tests the last run of that name failed, read from `target/remote/<name>/e2e.log`. `--e2e auto`
+  runs the smoke cases the check's commit reaches from `HEAD` (with `--head`, from `origin/main`: a
+  round's commits), as `cargo xtask smoke reach` lists them (`xtask/src/gate/impact.rs`), in one
+  run: a `mac` job when the app's or the server's cases are reached and an `ios` job when the
+  simulator's are, under one filterset of their tests, and none when nothing is reached; S6 and the
+  VM's are named when reached and run by no check. The case is `e2e.yml` dispatched on `gate` for
+  the check's commit (`e2e::hosted`), pushed to `check/<name>-e2e`, a branch deleted once the run
+  ends; it waits for a Mac as the runners' half does, runs beside the work here and the runners'
+  half, and is cancelled when the check fails here. Its artifacts (each changed frame's render and
+  diff) come to `target/remote/<name>/e2e/`, and a red prints the failed jobs' log and keeps it as
+  `target/remote/<name>/e2e.log`. `--goldens review` is the default, since a hosted Mac's GPU draws
+  apart from the goldens' Macs and a changed frame fails nothing; `--goldens accept` (or
+  `accept-all`) applies the run's goldens to the tree, as `--accept-snapshots` does its insta
+  snapshots, and a patch that touches anything else, which no accept writes, is refused whole and
+  its paths named. `--run <id> --e2e <case>` follows an e2e run already started, as the dispatch
+  prints. Another case (`worker`, …) runs as a probe: `--probe 'xtask e2e <case>'`. A flake gets
+  measured, not rerun by hand: its rate comes from the gate's FLAKY counts. `--workflow-ref
+  <branch>` runs that branch's `check.yml`, to try a change to it. Checks of one name run one after
+  another, a newer one waiting for the older. A lane directory is one check's at a time, and only
+  while that check works in it (a lock on `target/local/<dir>/.lock`): it lets go before it waits on
+  the runners and the hosted e2e run, which are dispatched before it takes the directory. A second
+  check waits, saying "waiting for target/local/<dir>: pid N works there (a check)" and then "took
   target/local/<dir> after Ns", or with `--no-wait` fails at once naming it. A waiting check keeps
   any other hold out of the directory (a clone, an eviction, a warm). Two checks of one name wait
   for each other the same way (`target/remote/<name>/.lock`). Once the verdict is out, `remote`
-  starts an after-pass in the background, logged to `target/remote/after.log`. One pass at a
-  time evicts and prunes:
+  starts an after-pass in the background, logged to `target/remote/after.log`. One pass at a time
+  evicts and prunes:
   - it deletes a `-lock` directory once `HEAD` holds the lock it moved;
   - it deletes the directories unused for a day, or for 3 hours when the volume is under its
     floor and headroom, keeping the one used last;
@@ -163,7 +148,12 @@ zed itself so it is never behind zed while longbridge lags.
   `--filter '<nextest filterset>'` narrows any case to the tests it picks (one golden, one live
   scenario), and `--no-build` reruns the last build as it is, without cargo. Every case
   runs on this Mac alone: `workers` starts its second worker here, behind a relay shaped like
-  the tailnet, so nothing waits on another machine.
+  the tailnet, so nothing waits on another machine. `cargo xtask e2e mac|ios --hosted [--sha
+  <commit>]` runs it on a hosted Mac instead (`mac` is the app's and the server's suites, `ios`
+  both simulators'): it dispatches `e2e.yml` for that commit (HEAD by default, which must be on
+  GitHub), follows the run to its end, brings its artifacts to `target/e2e/hosted/` and passes
+  when every job did; `--filter` narrows it and `--accept`/`--accept-all` bring back the goldens
+  it accepted as a patch to apply (`xtask/src/e2e/hosted.rs`).
 - The UI draws under gpui-fast's view retention: a view is built again only when it was told
   of a change or something it read changed (`docs/ARCHITECTURE.md` §6, "Drawing under
   retention"). A view that shows an old state is a missing notify; `GPUI_VIEW_RETENTION=0` on the
@@ -319,13 +309,14 @@ rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
   about to be made too, and leaves it in `target/gate/COMMIT_MSG` for `git commit -F`. It ends
   by printing the next step.
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
-  makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs as
-  three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
-  `xtask/src/gate.rs`); they and the smoke jobs below alone take Macs. The tools lane and Linux clippy (`clippy-linux`) run
-  on x86_64 Linux, and host clippy, iOS clippy and rustdoc for the Apple triples on arm Linux
-  (`ubuntu-24.04-arm`), each a job of its own: they never link, so zig compiles the C their build
-  scripts compile (`cargo-zigbuild` for macOS, xtask itself for iOS) and libghostty-vt's zig build
-  is skipped (`tools::apple_cargo`).
+  makes: the commits on main not yet on `origin/main`, pushed with a lease, and refused if a message
+  says one of GitHub's words for skipping a run (`[skip ci]` and its kin), which would leave `gate`
+  on a commit no run gates. The tests lane runs as three jobs, one per shard of packages (`--lane
+  tests --shard ui|worker|rest`, the table in `xtask/src/gate.rs`); they and the smoke jobs below
+  alone take Macs. The tools lane and Linux clippy (`clippy-linux`) run on x86_64 Linux, and host
+  clippy, iOS clippy and rustdoc for the Apple triples on arm Linux (`ubuntu-24.04-arm`), each a job
+  of its own: they never link, so zig compiles the C their build scripts compile (`cargo-zigbuild`
+  for macOS, xtask itself for iOS) and libghostty-vt's zig build is skipped (`tools::apple_cargo`).
 
 The e2e smoke cases a push reaches run beside the lanes (`docs/TESTING.md`, "The e2e smoke
 set"). The `smoke plan` job, on Linux in the first minute, runs `cargo xtask smoke plan` from
@@ -335,28 +326,34 @@ binaries once, in the check's one feature set, and runs the app's cases (S1 to S
 server's (S4) on that runner, or `e2e (server)` the server's alone, with no app, when the push
 reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
 and the iPad only once the iPhone's tests are done, waits for each simulator to settle (the
-runner's CPU half idle on two `top` samples in a row, at most 10 minutes), and runs S5 on both.
-Both read the gate's compile cache, retry nothing (`NEXTEST_RETRIES=0`), review rather than
-compare the goldens (`--review`), and stop once any other job of the run ended other than green
-(`--stop-on-red`, a look at the run's jobs each minute, conditional on its `ETag`, and a first
-one before any setup), since that run never promotes; a job past its `timeout-minutes`, which
-GitHub lists as cancelled, counts as red by its annotation. A run stands aside once a newer push
-moved `gate` off its commit before its e2e set up or built: its plan, the e2e job's first step
-and the watch's first look read `gate`'s tip (`xtask/src/gate/order.rs`), and the run is
-cancelled whole, since it can never promote and the newer run carries its commit (its plan diffs
-from a main without it, so it reaches at least the same cases). An e2e that is building runs on
-and may still promote; a run whose plan chose no case runs on too. No concurrency group holds
-the e2e jobs, so nothing cancels a job of the run on `gate`'s tip, and the newest commit reaches
-main or goes red whatever order the jobs end in (`order`'s model test). The plan never judges
-its own change: one that touches `xtask/src/gate/impact.rs` or `order.rs`, `xtask/src/lib.rs` or
-`ci.yml` must plan both jobs, or the plan job is red. With both, a run takes all five of the
-plan's macOS jobs, and a remote check's runner jobs queue for the same five Macs, first come.
-`e2e.yml` runs every case (the app, the server, the iPhone and the iPad) nightly on main's head
-and by hand on a commit named, dispatched on `gate` to read the test shards' compile cache, and
-from `promote` when none ran for 26 hours. `xtask e2e` ends with each phase's seconds (each
-simulator's boot, install and settle apart) and the whole run's tests, also in the job's summary
-with every failed test named, and each suite excused for want of the runner's video encoder
-named as not run.
+runner's CPU half idle on two `top` samples in a row, at most 10 minutes), and runs S5 on the iPhone
+and one test on the iPad, the app's launch and layout. Both read the gate's compile cache, retry
+nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once
+any other job of the run ended other than green (`--stop-on-red`, a look at the run's jobs each
+minute, conditional on its `ETag`, and a first one before any setup), since that run never promotes;
+a job past its `timeout-minutes`, which GitHub lists as cancelled, counts as red by its annotation.
+A run stands aside once a newer push moved `gate` off its commit before its e2e set up or built: its
+plan, the e2e job's first step and the watch's first look read `gate`'s tip
+(`xtask/src/gate/order.rs`), and the run is cancelled whole, since it can never promote and the
+newer run carries its commit (its plan diffs from a main without it, so it reaches at least the same
+cases). A run whose e2e jobs had all begun to build runs on and may still promote; one job of two
+still to build when `gate` moved stands aside, cancelling the run whole, its building sibling too. A
+run whose plan chose no case runs on too. No concurrency group holds the e2e jobs, so nothing
+cancels a job of the run on `gate`'s tip, and the newest commit reaches main or goes red whatever
+order the jobs end in (`order`'s model test). The plan never judges its own change: one that touches
+`xtask/src/gate/impact.rs` or `order.rs`, `xtask/src/lib.rs` or `ci.yml` must plan both jobs, or the
+plan job is red. With both, a run takes all five of the plan's macOS jobs, and a remote check's
+runner jobs queue for the same five Macs, first come. `e2e.yml` runs every case (the app, the
+server, the iPhone, and the iPad's launch and layout) nightly on main's head and by hand on a commit
+named, dispatched on `gate` to read the test shards' compile cache, and from `promote` when none ran
+for 26 hours. A dispatch may name the kinds of run (`cases`, `["mac", "ios"]` by default), a
+filterset (`filter`), what the goldens do (`goldens`: `review`, `accept` or `accept-all`, whose
+accepted frames come back as `changes.patch` among the artifacts) and `a11y` (`SLOPTY_E2E_A11Y`,
+passed on when set where the dispatch is made); its `id`, in the run's name, is how `xtask e2e
+--hosted` finds the run it started, and gives the dispatch a concurrency group of its own. `xtask
+e2e` ends with each phase's seconds (each simulator's boot, install and settle apart) and the whole
+run's tests, also in the job's summary with every failed test named, and each suite excused for want
+of the runner's video encoder named as not run.
 
 Before the push, `land` runs host clippy, rustdoc and iOS clippy of the packages the commits
 change and of their dependents, side by side at a low priority (`gate::land_checks`); `--full`
@@ -448,88 +445,6 @@ the gate gives them and reuses one build of each; a bare `cargo nextest run -p <
 resolves its own and builds its own copies (add `-p workspace-hack` to share).
 `cargo hakari generate` rewrites the hack when a manifest changes its dependencies or the lock
 moves (`cargo gate --fix` runs it; the gate fails on a stale one).
-
-### Warm runners
-With the repository variable `SLOPTY_RUNNERS` at `warm`, a push to `gate` or a `v*` tag runs the
-gate on this Mac's two warm runners instead of the hosted matrix: `ci.yml`'s `warm` job, once per
-host, `cargo xtask gate --warm`. `slopty-warm-mac` runs the tools, host and iOS clippy, rustdoc and
-every Mac test in one nextest run (`warm` profile), the lints building beside the test binaries once
-those are built; `slopty-warm-linux` runs the Linux tests and clippy of the three Linux triples.
-Each keeps its checkout (`clean: false`), toolchains, tools and one incremental target dir between
-runs, which `prune` keeps under its budget after each run. Pull requests keep the hosted matrix
-whatever the variable says; `gh variable set SLOPTY_RUNNERS --body hosted` sends every push back to
-it at once, as suits a night of many lanes: the warm runners share this Mac with them, and under the
-heaviest load the gate slows and its timed tests fail (`docs/decisions/tooling.md`, "The gate runs
-on warm runners here"). A check takes the warm runners with `check.yml`'s `warm` input (`yes`, `mac`
-or `linux`, which also starts an empty job on the Mac runner, whose start wakes the VM): `gh
-workflow run check.yml --ref check/<name> -f name=<name> -f sha=<sha> -f warm=yes -f
-test_runner=none`.
-
-Both runners refuse every other job before its first step: their job-started hook runs `xtask warm
-guard`, which lets through only a push to `gate` or a `v*` tag running `ci.yml` and a `check.yml`
-dispatch, by an actor with push access, from this repository and never a fork or a pull request
-(`xtask/src/warm/guard.rs`); each is registered under its own name alone, without the `self-hosted`
-label any workflow could ask for, and the repository holds every run of an outside contributor's
-pull request for a maintainer's approval. Neither holds a credential of the person's, and the hook
-proves it before every job, by exit codes alone, failing the job otherwise: no `SSH_AUTH_SOCK`, no
-SSH agent answering on any login session's launchd socket, no person's login keychain answering
-`security`, and no person's `~/.ssh`, `~/.config/gh` or `~/Library/Keychains` readable. The Mac
-runner is a launchd daemon under the hidden user `slopty-ci`, started from an environment of its own
-alone (`env -i`, since launchd hands a job its session's SSH agent), inside a sandbox
-(`xtask/src/warm/mac.rs`) that denies it every path under `/Volumes` and `/Users` but its own, the
-person's files and sockets in `/tmp` (the e2e harness's `slopty-e2e-` roots excepted), every socket
-in `/var/run` but the resolver's and the system log's, the Mach names of the data-protection
-keychain and the other credential services (certificate trust and securityd's older service, which
-the .NET runner's TLS needs, stay), and the loopback ports the person served when it was installed;
-no job may change the guard, the profiles or the runner's `.env`. Its home and `TMPDIR` are on the
-startup disk (`/Users/slopty-ci`), whose FSEvents keep the history the file-watching tests replay.
-Its pasteboard is its own, served by a daemon of macOS's `pboard` as `slopty-ci`. A process in the
-sandbox may not apply one of its own, so the three tests that start a real `sshd` skip on the Mac
-runner and run on the Linux one; the hardware tests the hosted Macs skip run there. The Linux runner
-is the actions runner in an arm64 Ubuntu VM under tart, sharing no directory of the Mac's. Both run
-at `Nice 10`, the VM's own process included, and take eight of the ten cores. The VM runs only while
-a gate needs it: the Mac runner's hook wakes it as each job with a Linux half starts
-(`/Volumes/slopty-ci/mac/linux.wanted`), and its supervisor (`xtask warm linux run`, which the VM's
-daemon runs) boots it and stops it two minutes after its last job, so that between gates it holds
-none of this Mac's memory. A run stops before it writes while the disk under the volume is under the
-floor (`SLOPTY_DISK_FLOOR_GB`), since the image grows into it.
-
-Everything they keep is on a volume of their own, `/Volumes/slopty-ci`: a sparse APFS image of
-up to 180 GB at the root of the checkout's volume (`slopty-ci.sparsebundle`, or
-`SLOPTY_WARM_IMAGE`), never in the checkout. A launchd job may not open a file on an external
-disk, but may use an image attached from one; ownership is off on it as on the disk.
-`hdiutil compact` gives back what the runners deleted, with the image detached. Setting them
-up, once:
-- `cargo xtask warm mac install` makes and attaches the volume, unpacks the runner and rustup
-  and writes the sandbox profile, the runner's environment and the guard (a copy of this xtask
-  and `warm.toml`, the repository and its actors), then prints what an administrator runs:
-  `target/warm/admin.sh`, which holds the daemons' property lists itself and makes the user,
-  its home and the log directory (`/Library/Logs/slopty-warm/`), and loads the daemon that
-  attaches the volume at every start, then the user's own pasteboard server (macOS starts one
-  only in a login session, which the user never has) and the two runners'.
-- `cargo xtask warm mac register` registers the Mac runner with a token it asks `gh` for and
-  holds in memory only, again over an earlier registration. `cargo xtask warm mac try` runs it as
-  you, through an agent of your session, until `--stop` or the administrator's script, in the same
-  sandbox less your sockets in your own temporary and cache directories (`try.sb`), with a home
-  and a temporary directory of its own there; the tests that write into your home's own folders
-  (the Trash, WebKit's rule lists) fail there, out of its reach. It shares your pasteboard and may
-  read those directories' files, so it is for trying the runner, and the daemon for keeping it.
-- `cargo xtask warm linux install [--rev <commit>]` clones the VM from the pinned image,
-  provisions it, builds the guard from `rev` in it and registers its runner as a systemd
-  service. `cargo xtask warm linux start` wakes the VM and, unless one runs, starts its
-  supervisor from your session; `cargo xtask warm linux stop` ends that one and the VM, before
-  the VM's daemon takes over.
-- `cargo xtask warm status` lists both runners as GitHub has them, and each one's side here.
-- `cargo xtask warm uninstall [--image]` takes it all away: both registrations on GitHub,
-  `SLOPTY_RUNNERS` when it is `warm` (the gate goes back to the hosted matrix), `try`, the VM,
-  then through `sudo` the administrator's part (`target/warm/uninstall.sh`: the daemons, the log
-  directory, the user and its home), and detaches the volume; `--image` deletes the image too,
-  and `--dry-run` prints the steps and only writes that script.
-Run `install` again when the guard's code changes, when a collaborator is added, or when the
-person starts a new service on a loopback port, then the administrator's script if it says so.
-`cargo xtask warm linux exec <command>` runs a command in the VM. A runner's target dir is
-deleted to start it cold (`/Volumes/slopty-ci/mac/runner/_work/slopty/slopty/target` on the
-Mac, `/home/admin/actions-runner/_work/slopty/slopty/target` in the VM).
 
 ## Disk
 `target/` would grow without end: cargo never deletes a unit, and every `cargo update`, fork

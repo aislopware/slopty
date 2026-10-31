@@ -59,7 +59,7 @@ pub fn end(conclusion: Option<&str>, timed_out: impl FnOnce() -> bool) -> End {
 /// Whether job `job` ran past its timeout, from its check run's annotations under `repo`
 /// (`repos/<owner>/<name>`, or `gh`'s `repos/{owner}/{repo}`); `false` when they cannot be read.
 pub fn timed_out(sh: &Shell, repo: &str, job: u64) -> bool {
-    let path = format!("{repo}/check-runs/{job}/annotations");
+    let path = format!("{repo}/check-runs/{job}/annotations?per_page=100");
     cmd!(sh, "gh api {path} --jq .[].message")
         .quiet()
         .ignore_stderr()

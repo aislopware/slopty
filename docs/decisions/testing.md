@@ -2220,22 +2220,25 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     (ios)` each build once, in the one feature set of the entry above; `ios` boots the iPhone while
     it builds and the iPad only once the iPhone's tests are done, from one build: a boot takes a
     core and about 2 GB for minutes, and beside the timed tests of a three-core runner with no
-    retries it could fail them on time. Each simulator then waits to settle (the runner's CPU half
-    idle on two `top` samples in a row, at most 10 minutes), as the guest's run did, and its boot,
-    install and settle are recorded apart until a hosted run measures them. A job stops once any
-    other job of its run ended other than green: a failed gate lane, one past its `timeout-minutes`,
-    or a sibling e2e job, since that run never promotes. GitHub lists a job past its timeout as
-    cancelled, as it does a job of a cancelled run; its annotation tells it apart ("has exceeded the
-    maximum execution time", jobs 112345159635 and 124521443249), so it is red there and in `land
-    --wait`. A job looks once before its setup and then every minute through the run, conditional on
-    the listing's `ETag`, whose `304` costs none of the token's 1,000 requests an hour, though the
-    listing changes with nearly every step of every job, so few looks come back `304`; it ends its
-    builds and tests with `SIGTERM` before it exits. A run whose jobs were only cancelled is being
-    cancelled whole, and is cancelled whole again, so it ends cancelled rather than red. A suite
-    excused for the runner's video encoder is named in the summary as not run. `promote` needs the
-    plan and the jobs it chose. `e2e.yml` runs every case nightly in the same two jobs, at 19:47
-    UTC, the small hours of the person's day, so it holds no Mac the working day's gate wants. One
-    matrix job named per case, rather than two jobs, so the plan starts only the ones it reached.
+    retries it could fail them on time. The person does not use the iPad, so it gets a light smoke
+    check: `compact`'s launch-and-layout test alone (`IPAD_LIGHT` in `xtask/src/e2e.rs`), in the
+    gate, the nightly and a round's suite alike, while the iPhone runs the whole of S5. Each
+    simulator then waits to settle (the runner's CPU half idle on two `top` samples in a row, at
+    most 10 minutes), as the guest's run did, and its boot, install and settle are recorded apart
+    until a hosted run measures them. A job stops once any other job of its run ended other than
+    green: a failed gate lane, one past its `timeout-minutes`, or a sibling e2e job, since that run
+    never promotes. GitHub lists a job past its timeout as cancelled, as it does a job of a
+    cancelled run; its annotation tells it apart ("has exceeded the maximum execution time", jobs
+    112345159635 and 124521443249), so it is red there and in `land --wait`. A job looks once before
+    its setup and then every minute through the run, conditional on the listing's `ETag`, whose
+    `304` costs none of the token's 1,000 requests an hour, though the listing changes with nearly
+    every step of every job, so few looks come back `304`; it ends its builds and tests with
+    `SIGTERM` before it exits. A run whose jobs were only cancelled is being cancelled whole, and is
+    cancelled whole again, so it ends cancelled rather than red. A suite excused for the runner's
+    video encoder is named in the summary as not run. `promote` needs the plan and the jobs it
+    chose. `e2e.yml` runs every case nightly in the same two jobs, at 19:47 UTC, the small hours of
+    the person's day, so it holds no Mac the working day's gate wants. One matrix job named per
+    case, rather than two jobs, so the plan starts only the ones it reached.
   - **What a push costs, measured.** The gate's three shards take a median 7.6, 6.4 and 6.2
     minutes (the last 23 gate runs), and a hosted nightly `e2e (app)` a median 20.6 minutes
     over 8 runs, 617.7 s of it the build (run 41181641898). So a push that reaches the app takes
@@ -2259,17 +2262,18 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     push moved it, says `superseded`: the e2e jobs skip, a run whose plan chose cases is
     cancelled whole, and `promote` takes a skipped e2e only when the plan chose none, so a run
     never promotes its cases unchecked. The e2e job's first step and the watch's first look,
-    before the build, stand aside the same way; an e2e already building runs on and may still
-    promote, and so does a run whose plan chose no case. The rule lives in one place
-    (`xtask/src/gate/order.rs`), and the newest run never meets it, so nothing cancels a job of
-    the run on `gate`'s tip and the newest commit reaches main or goes red. A model test runs
-    every order in which the plans, the e2e jobs and the shards of two or three pushes can end,
-    with any run re-run by hand, over five histories (one with a push whose plan chose no case,
-    one whose last push withdrew the commit before it): main always ends at `gate`'s tip and
-    `land --wait` hears every commit held or withdrawn; the same model with the groups strands
-    the newer commit, `land --wait` hearing "ended". Without a group two runs' e2e jobs of a
-    kind can run at once when both started while their run was the newest; a third that waited
-    stands aside as it gets its Mac.
+    before the build, stand aside the same way. A run whose e2e jobs had all begun to build runs on
+    and may still promote, and so does a run whose plan chose no case; one job of two still to
+    build when `gate` moved stands aside and cancels its building sibling with the run, which the
+    newer run carries. The rule lives in one place (`xtask/src/gate/order.rs`), and the newest run
+    never meets it, so nothing cancels a job of the run on `gate`'s tip and the newest commit
+    reaches main or goes red. A model test runs every order in which the plans, the e2e jobs and the
+    shards of two or three pushes can end, with any run re-run by hand, over five histories (one
+    with a push whose plan chose no case, one whose last push withdrew the commit before it): main
+    always ends at `gate`'s tip and `land --wait` hears every commit held or withdrawn; the same
+    model with the groups strands the newer commit, `land --wait` hearing "ended". Without a group
+    two runs' e2e jobs of a kind can run at once when both started while their run was the newest; a
+    third that waited stands aside as it gets its Mac.
   - **Runs overlap** (the hosted ruling's item 1). Each push to `gate` runs at once in a group of
     its own; a red run still cancels itself once a newer push runs. `promote` succeeds when main
     already holds its commit and pushes again when another run's promote moved main under it, after

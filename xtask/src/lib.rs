@@ -48,7 +48,6 @@ mod tools;
 mod upstream;
 mod vault;
 mod vm;
-mod warm;
 mod watchdog;
 mod zig_cc;
 
@@ -135,10 +134,6 @@ enum Cmd {
         /// With `--lane tests` alone: only this shard's packages (CI runs a job per shard).
         #[arg(long, value_enum)]
         shard: Option<gate::Shard>,
-        /// On a warm runner (`xtask warm`): every lane of this host's platform in one run, in
-        /// place, on its incremental target dir.
-        #[arg(long, conflicts_with_all = ["fix", "full", "message", "since_pass", "ci", "lanes", "shard"])]
-        warm: bool,
     },
     /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
     /// the smoke cases it reaches, and fast-forwards main to it once all pass.
@@ -366,12 +361,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: tailnet::TailnetCmd,
     },
-    /// The gate's warm runners on this Mac: `guard` (their job-started hook), `mac install` and
-    /// `register`, `linux install`, `start`, `stop` and `exec`, `status`.
-    Warm {
-        #[command(subcommand)]
-        cmd: warm::WarmCmd,
-    },
 }
 
 /// `cargo xtask`: `src/main.rs` is this and nothing else.
@@ -395,12 +384,7 @@ pub fn main() -> Result<()> {
             prune::auto();
             checked
         }
-        Cmd::Gate { warm: true, .. } => {
-            let gated = gate::warm::run();
-            prune::auto();
-            gated
-        }
-        Cmd::Gate { fix, full, message, in_place, since_pass, ci, lanes, shard, warm: false } => {
+        Cmd::Gate { fix, full, message, in_place, since_pass, ci, lanes, shard } => {
             let lanes = if lanes.is_empty() && !full && !ci { gate::QUICK.to_vec() } else { lanes };
             let in_place = in_place || ci;
             let next = gate::next_step(message.is_some());
@@ -483,7 +467,6 @@ pub fn main() -> Result<()> {
         Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
         Cmd::Vm(opts) => vm::run(&sh, &opts),
         Cmd::Tailnet { cmd } => tailnet::run(&cmd),
-        Cmd::Warm { cmd } => warm::run(&sh, &cmd),
         Cmd::Ptys { workspace, log, command } => {
             let root = tools::repo_root()?;
             ptys::watch(

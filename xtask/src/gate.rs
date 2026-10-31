@@ -29,7 +29,6 @@ pub mod impact;
 pub mod order;
 mod pass;
 mod snapshot;
-pub mod warm;
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -1542,7 +1541,7 @@ const NEXTEST_HANG_AFTER: Duration = Duration::from_mins(15);
 fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
     use std::os::unix::process::CommandExt as _;
 
-    if profile != NEXTEST_CI_PROFILE && profile != warm::PROFILE {
+    if profile != NEXTEST_CI_PROFILE {
         return quiet_step("nextest", command);
     }
     println!("▶ nextest");
@@ -2288,6 +2287,82 @@ let windows = cfg!(windows);
         }
     }
 
+    /// The sccache action's start, run as GitHub runs a step, against a stand-in `sccache` that
+    /// fails its first starts and a `sleep` that returns at once: up on the first try or the
+    /// second, the job keeps its wrapper and says nothing; down on both, it compiles without the
+    /// wrapper, says so in its summary and skips its statistics, and the step still passes.
+    #[test]
+    fn sccache_s_server_starts_early_or_the_job_compiles_cold() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = repo_root().expect("repo root");
+        let action = std::fs::read_to_string(root.join(".github/actions/sccache/action.yml"))
+            .expect("the sccache action");
+        let step = action.split("id: sccache-start\n").nth(1).expect("the start step");
+        let body = step.split_once("run: |\n").expect("its script").1;
+        let script: String = body
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("        "))
+            .map(|line| line.get(8..).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sh = xshell::Shell::new().expect("shell");
+        let path = std::env::var("PATH").unwrap_or_default();
+        for fails in 0..=2_u8 {
+            let dir = std::env::temp_dir()
+                .join(format!("xtask-sccache-start-{}-{fails}", std::process::id()));
+            let bin = dir.join("bin");
+            std::fs::create_dir_all(&bin).expect("its directory");
+            let stand_ins = [
+                (
+                    "sccache",
+                    "#!/bin/bash\necho \"$1 idle=${SCCACHE_IDLE_TIMEOUT-unset}\" >> \"$DIR/calls\"\n\
+                     [ \"$1\" = --start-server ] || exit 0\n\
+                     n=$(( $(cat \"$DIR/starts\" 2>/dev/null || echo 0) + 1 ))\n\
+                     echo \"$n\" > \"$DIR/starts\"\n[ \"$n\" -gt \"$FAILS\" ]\n",
+                ),
+                ("sleep", "#!/bin/sh\nexit 0\n"),
+            ];
+            for (name, text) in stand_ins {
+                let file = bin.join(name);
+                std::fs::write(&file, text).expect("a stand-in");
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+                    .expect("executable");
+            }
+            let sccache = bin.join("sccache");
+            let env = dir.join("env");
+            let summary = dir.join("summary");
+            let searched = format!("{}:{path}", bin.display());
+            xshell::cmd!(sh, "bash --noprofile --norc -eo pipefail -c {script}")
+                .env("PATH", &searched)
+                .env("SCCACHE_PATH", &sccache)
+                .env("GITHUB_ENV", &env)
+                .env("GITHUB_STEP_SUMMARY", &summary)
+                .env("DIR", &dir)
+                .env("FAILS", fails.to_string())
+                .env_remove("SCCACHE_IDLE_TIMEOUT")
+                .quiet()
+                .ignore_stdout()
+                .run()
+                .expect("the step passes, the server up or not");
+            let read = |file: &std::path::Path| std::fs::read_to_string(file).unwrap_or_default();
+            let calls = read(&dir.join("calls"));
+            let starts: Vec<&str> =
+                calls.lines().filter(|c| c.starts_with("--start-server")).collect();
+            assert!(starts.iter().all(|c| c.ends_with("idle=0")), "kept up to the end: {calls}");
+            if fails < 2 {
+                assert_eq!(starts.len(), usize::from(fails) + 1, "{calls}");
+                assert_eq!(read(&env), "", "the wrapper stays");
+                assert_eq!(read(&summary), "", "nothing to say");
+            } else {
+                assert_eq!(starts.len(), 2, "one retry: {calls}");
+                assert_eq!(read(&env), "RUSTC_WRAPPER=\nSLOPTY_SCCACHE=off\n");
+                assert!(read(&summary).contains("⚠ sccache's server did not start"), "{summary:?}");
+            }
+            std::fs::remove_dir_all(&dir).expect("cleaned");
+        }
+    }
+
     /// Every job's zig is the one the pinned ghostty names, every sccache setup names its
     /// version, and the deep checks take only some of the macOS runners.
     #[test]
@@ -2297,7 +2372,7 @@ let windows = cfg!(windows);
         assert!(workflow.contains("run: xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("run: xtask setup --lane linux"), "with its tools");
         assert!(
-            workflow.contains("needs: [gate, linux, warm, smoke-plan, e2e]"),
+            workflow.contains("needs: [gate, linux, smoke-plan, e2e]"),
             "and main waits for it"
         );
         assert!(
@@ -2310,6 +2385,10 @@ let windows = cfg!(windows);
         assert!(
             action.contains("sccache-action@v0.0.11\n      with:\n        version: v"),
             "the sccache setup names its version, or asks the API"
+        );
+        assert!(
+            action.contains("server_startup_timeout_ms = 60000"),
+            "a server slow to start under a simulator's boot fails no compile"
         );
         // zig's one pin is the vendored ghostty's manifest, which the zig action reads as
         // `tools::ghostty_zig` does, and then names to setup-zig.
@@ -2327,6 +2406,12 @@ let windows = cfg!(windows);
             assert!(!jobs.contains("sccache-action@"), "{name}: sccache through the one action");
             assert!(!jobs.contains("SCCACHE_GHA_ENABLED"), "{name}: the action picks the backend");
             assert!(jobs.contains("uses: ./.github/actions/sccache"), "{name} caches its units");
+            let stats = "run: $SCCACHE_PATH --show-stats";
+            assert_eq!(
+                jobs.matches(&format!("env.SLOPTY_SCCACHE != 'off'\n        {stats}")).count(),
+                jobs.matches(stats).count(),
+                "{name}: a job whose sccache never started reads no statistics from it"
+            );
         }
         assert!(deep.contains("max-parallel: 1"), "the deep checks leave the gate macOS runners");
         let tested = super::linux_tested();
@@ -2335,58 +2420,6 @@ let windows = cfg!(windows);
         for worker in ["slopty-worker", "slopty-workerd"] {
             assert!(tested.contains(&worker), "{worker}'s tests run on Linux, where it ships too");
         }
-    }
-
-    /// A push to `gate` or a tag runs on the warm runners once `SLOPTY_RUNNERS` is `warm`, as one
-    /// job per runner that updates its tree in place and runs `gate --warm`; a pull request and
-    /// any other value take the hosted matrix; main moves once either passed whole; and a remote
-    /// check can run the warm jobs on its commit, a Linux-only one with a Mac job that wakes the
-    /// VM.
-    #[test]
-    fn the_gate_runs_on_the_warm_runners_when_the_variable_says_so() {
-        let workflows = repo_root().expect("repo root").join(".github/workflows");
-        let ci = std::fs::read_to_string(workflows.join("ci.yml")).expect("ci.yml");
-        let hosted = "if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'";
-        assert_eq!(ci.matches(hosted).count(), 2, "the hosted matrix and its linux job");
-        let warm = ci.split("\n  warm:\n").nth(1).expect("the warm job");
-        let (warm, _) = warm.split_once("\n  smoke-plan:\n").expect("before the smoke plan");
-        for needle in [
-            "if: vars.SLOPTY_RUNNERS == 'warm' && github.event_name == 'push'",
-            "runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}",
-            "host: [mac, linux]",
-            "CARGO_INCREMENTAL: 1",
-            "RUSTC_WRAPPER: \"\"",
-            "DEVELOPER_DIR: \"\"",
-            "clean: false",
-            "fetch-depth: 0",
-            "run: cargo xtask gate --warm",
-        ] {
-            assert!(warm.contains(needle), "the warm job has `{needle}`");
-        }
-        for host in ["mac", "linux"] {
-            let label = format!("slopty-warm-{host}");
-            assert!([crate::warm::MAC_LABEL, crate::warm::LINUX_LABEL].contains(&label.as_str()));
-        }
-        for cache in ["uses: ./.github/actions/sccache", "uses: actions/cache", "rust-toolchain@"] {
-            assert!(!warm.contains(cache), "the runner keeps its own: no `{cache}`");
-        }
-        assert!(
-            ci.contains("needs: [gate, linux, warm, smoke-plan, e2e]")
-                && ci.contains("needs: [gate, warm]")
-        );
-        assert!(
-            ci.contains("(needs.gate.result == 'success' && needs.linux.result == 'success'))")
-        );
-        let check = std::fs::read_to_string(workflows.join("check.yml")).expect("check.yml");
-        assert!(check.contains("run: cargo xtask gate --warm 2>&1 | tee target/remote/warm.log"));
-        let wake = check.split("\n  wake:\n").nth(1).expect("the wake job");
-        let (wake, _) = wake.split_once("\n\n").expect("one block");
-        assert!(
-            wake.contains("if: inputs.warm == 'linux'")
-                && wake.contains("runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}")
-                && wake.contains("host: [mac]"),
-            "a Linux-only check starts a Mac job, whose hook wakes the VM"
-        );
     }
 
     /// Every job that builds, in the gate, the checks, the e2e and the Deep checks, reads the one
@@ -2526,8 +2559,11 @@ let windows = cfg!(windows);
             "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"",
             "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$sha\"",
             "if: github.event_name == 'workflow_dispatch'",
-            "case: [mac, ios]",
-            "args=(\"$CASE\" --review)",
+            "case: ${{ fromJSON(inputs.cases || '[\"mac\", \"ios\"]') }}",
+            "args=(\"$CASE\" \"--$GOLDENS\")",
+            "GOLDENS: ${{ inputs.goldens || 'review' }}",
+            "group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.id || github.ref }}",
+            "git diff --binary -- \"${accepted[@]}\" > target/e2e/artifacts/changes.patch",
             "NEXTEST_RETRIES: \"0\"",
             "shell: bash",
         ] {

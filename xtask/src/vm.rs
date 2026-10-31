@@ -971,14 +971,6 @@ pub const E2E_GUESTS: [&str; 2] = ["slopty-27-e2e", "slopty-27-e2e-2"];
 /// other holds the slot, so no third macOS guest is ever asked for.
 pub struct Slot {
     _file: File,
-    guest: &'static str,
-}
-
-impl Slot {
-    /// The e2e guest at home in this slot.
-    pub const fn guest(&self) -> &'static str {
-        self.guest
-    }
 }
 
 /// The lock file of the slot `guest` is at home in. Its text names who holds it, for one who
@@ -1011,7 +1003,7 @@ pub fn try_slot(home: &Utf8Path, guest: &'static str, holder: &str) -> Result<Op
         if std::fs::metadata(&path).is_ok_and(|now| now.ino() == held) {
             file.set_len(0)?;
             (&file).write_all(holder.as_bytes())?;
-            return Ok(Some(Slot { _file: file, guest }));
+            return Ok(Some(Slot { _file: file }));
         }
     }
 }
@@ -1725,7 +1717,6 @@ mod tests {
         std::fs::create_dir_all(home.join("locks")).expect("mkdir");
         let [one, two] = E2E_GUESTS;
         let first = try_slot(&home, one, "lane A").expect("locks").expect("free");
-        assert_eq!(first.guest(), one);
         assert!(try_slot(&home, one, "lane B").expect("locks").is_none(), "held by A");
         assert_eq!(slot_holder(&home, one), "lane A");
         let second = try_slot(&home, two, "lane B").expect("locks").expect("the other is free");
