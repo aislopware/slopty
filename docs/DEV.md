@@ -336,10 +336,12 @@ the iOS app on the same units) and hands it on as the artifact `host-build-<atte
 then builds its own cases with their tests; a push that reaches the simulator alone gets a `mac`
 job that only builds and packs. `e2e (ios)` compiles nothing: it boots the iPhone meanwhile, lets
 it settle until the build comes and no longer (the runner's CPU half idle on two `top` samples in
-a row), takes the build (`--host`), installs the app and runs S5 on the iPhone beside whatever its
-boot still runs; the iPad's launch-and-layout check runs in `e2e.yml` only
+a row), takes the build (`--host`, through `curl`, with the simulator's processes stopped for the
+seconds of the download and the unpack), installs the app and runs S5 on the iPhone beside
+whatever its boot still runs; the iPad's launch-and-layout check runs in `e2e.yml` only
 (`docs/decisions/testing.md`, "The simulator's runner builds no Mac side", "A hosted simulator
-settles only while its build is on its way"). Both read the gate's compile cache, retry
+settles only while its build is on its way", "A hosted simulator is held still while its build
+comes"). Both read the gate's compile cache, retry
 nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once
 any other job of the run ended other than green (`--stop-on-red`, a look at the run's jobs each
 minute, conditional on its `ETag`, and a first one before any setup), since that run never promotes;

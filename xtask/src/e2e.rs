@@ -850,6 +850,10 @@ const HOST_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 /// How many times [`await_host`] downloads the artifact before it gives up.
 const HOST_DOWNLOAD_TRIES: u32 = 5;
 
+/// The longest one download of the host build may take, its simulators held still the while
+/// ([`Stilled`]): one beside a still simulator takes seconds.
+const HOST_DOWNLOAD_MOST: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// The wait for the host build on its thread ([`await_host`]): how long from its start it came.
 type HostWait = std::thread::JoinHandle<Result<std::time::Duration>>;
 
@@ -867,7 +871,11 @@ fn await_host(sh: &Shell, name: &str) -> HostWait {
     })
 }
 
-/// [`await_host`]'s wait, download and unpack, into the checkout `dir`.
+/// [`await_host`]'s wait, download and unpack, into the checkout `dir`. It talks to GitHub through
+/// the system's `curl`, and fetches with the simulators held still ([`Stilled`]): beside a booting
+/// simulator, at a load average of 350-600 on the runner's three cores, a `gh` call took tens of
+/// seconds, and the download crawled (`docs/decisions/testing.md`, "A hosted simulator is held
+/// still while its build comes").
 #[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
 fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
     let started = std::time::Instant::now();
@@ -875,24 +883,22 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
     else {
         bail!("--host takes an artifact of a GitHub Actions run, and this is none");
     };
+    let api = std::env::var("GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".into());
+    let auth = auth_header()?;
     let sh = Shell::new()?;
     sh.change_dir(dir);
-    let listing = format!("repos/{repo}/actions/runs/{run}/artifacts?name={name}");
-    let jobs = format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100");
+    let listing = format!("{api}/repos/{repo}/actions/runs/{run}/artifacts?name={name}");
+    let jobs = format!("{api}/repos/{repo}/actions/runs/{run}/jobs?per_page=100");
     let mut asked: u32 = 0;
-    loop {
-        let count = cmd!(sh, "gh api {listing} --jq .total_count")
-            .quiet()
-            .ignore_stderr()
-            .read()
-            .unwrap_or_default();
-        if count.trim().parse::<u32>().is_ok_and(|n| n > 0) {
-            break;
+    let id = loop {
+        if let Some(id) = github(&sh, &auth, &listing).ok().and_then(|body| artifact_id(&body)) {
+            println!("  the host build was listed {:.0?} into the wait", started.elapsed());
+            break id;
         }
         // A job that ended other than green, the one that packs among them, means no build is
         // coming: asked once a minute, as GitHub caches the jobs' listing that long.
         if asked.is_multiple_of(6)
-            && let Ok(body) = cmd!(sh, "gh api {jobs}").quiet().ignore_stderr().read()
+            && let Ok(body) = github(&sh, &auth, &jobs)
             && let Some(stop) = ended_jobs(&body, |_job| false)
         {
             bail!("no host build {name} is coming: {stop:?}");
@@ -902,25 +908,59 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
             bail!("no artifact {name} in run {run} within {HOST_WAIT_MOST:?}");
         }
         std::thread::sleep(HOST_ASK_EVERY);
-    }
-    // The build's transport, not a test, so a failed download goes again: on a runner whose
-    // simulator's boot holds every core a TLS handshake to the API timed out (run 41237692067).
+    };
+    // The build's transport, not a test, so a failed download goes again, the simulators running
+    // between tries: on a runner whose simulator's boot holds every core a TLS handshake to the
+    // API timed out (run 41237692067). GitHub answers with a redirect to the zip in its storage,
+    // which curl follows without the token, as it sends a header it was given to the API's host
+    // alone. A download that crawls under 1 MB/s for 15 s is cut and goes again.
     let into = dir.join("target/e2e/host");
+    let zip = into.join("host.zip");
+    let url = format!("{api}/repos/{repo}/actions/artifacts/{id}/zip");
+    let most = HOST_DOWNLOAD_MOST.as_secs().to_string();
     let mut tries = 1;
     loop {
         let _gone = std::fs::remove_dir_all(&into);
-        let download = cmd!(sh, "gh run download {run} --repo {repo} --name {name} --dir {into}");
-        match download.quiet().run() {
-            Ok(()) => break,
-            Err(e) if tries < HOST_DOWNLOAD_TRIES => {
-                println!("  the download of {name} failed, again in {HOST_ASK_EVERY:?}: {e}");
-                tries = tries.saturating_add(1);
-                std::thread::sleep(HOST_ASK_EVERY);
+        std::fs::create_dir_all(&into)?;
+        // The simulators go on as this block ends, before a wait for the next try.
+        let failed = {
+            let still = Stilled::now();
+            let fetching = std::time::Instant::now();
+            let download = cmd!(
+                sh,
+                "curl --fail --silent --show-error --location --max-time {most}
+                    --speed-limit 1000000 --speed-time 15 --header @- --output {zip}
+                    --write-out {CURL_TIMES} {url}"
+            );
+            match download.stdin(&auth).quiet().read() {
+                Ok(took) => {
+                    println!(
+                        "  downloaded it in {:.1?}, {} simulator processes held still: {took}",
+                        fetching.elapsed(),
+                        still.count()
+                    );
+                    let unpacking = std::time::Instant::now();
+                    unpack(&sh, &into, &zip, name)?;
+                    println!("  unpacked it in {:.1?}", unpacking.elapsed());
+                    return Ok(());
+                }
+                Err(e) => e,
             }
-            Err(e) => return Err(e.into()),
+        };
+        if tries >= HOST_DOWNLOAD_TRIES {
+            return Err(failed.into());
         }
+        println!("  the download of {name} failed, again in {HOST_ASK_EVERY:?}: {failed}");
+        tries = tries.saturating_add(1);
+        std::thread::sleep(HOST_ASK_EVERY);
     }
-    let tars: Vec<std::path::PathBuf> = std::fs::read_dir(&into)?
+}
+
+/// The artifact `zip` of the host build `name`, downloaded into `into`: its one tar unzipped
+/// there, then unpacked over the checkout.
+fn unpack(sh: &Shell, into: &std::path::Path, zip: &std::path::Path, name: &str) -> Result<()> {
+    cmd!(sh, "tar -xf {zip} -C {into}").quiet().run()?;
+    let tars: Vec<std::path::PathBuf> = std::fs::read_dir(into)?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "tar"))
         .collect();
@@ -929,6 +969,164 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
     };
     cmd!(sh, "tar -xf {tar}").quiet().run()?;
     Ok(())
+}
+
+/// What curl says of a download: how long its connection, its TLS handshake and its first byte
+/// took from the start (the redirect from the API's host within them), the whole of it, and its
+/// speed.
+const CURL_TIMES: &str = "connect %{time_connect} s, TLS %{time_appconnect} s, first byte \
+                          %{time_starttransfer} s, all %{time_total} s, %{size_download} bytes at \
+                          %{speed_download} B/s";
+
+/// A GET of GitHub's REST API `url` through curl, with the job's token's header `auth`
+/// ([`auth_header`]).
+fn github(sh: &Shell, auth: &str, url: &str) -> Result<String> {
+    let ask = cmd!(
+        sh,
+        "curl --fail --silent --show-error --max-time 60 --header @-
+            --header 'Accept: application/vnd.github+json' {url}"
+    );
+    Ok(ask.stdin(auth).quiet().ignore_stderr().read()?)
+}
+
+/// The `Authorization` header of the job's token, for curl's `--header @-`: on its standard
+/// input, as an argument would show the token to every process on the runner.
+fn auth_header() -> Result<String> {
+    let token = std::env::var("GH_TOKEN").context("the host build is fetched with GH_TOKEN")?;
+    Ok(format!("Authorization: Bearer {token}\n"))
+}
+
+/// The id of the first artifact in GitHub's listing `body` of a run's artifacts, if it lists one.
+fn artifact_id(body: &str) -> Option<u64> {
+    let listed: serde_json::Value = serde_json::from_str(body).ok()?;
+    listed.get("artifacts")?.get(0)?.get("id")?.as_u64()
+}
+
+/// The booted simulators held still ([`fetch_host`]): every `launchd_sim` and each process under
+/// it stopped as this is made, and continued as it drops, on every path out. Beside a booting
+/// simulator a download of the host build's 125 MB ran at 1.3-4 MB/s, once 71 s to connect, and
+/// raising the download's priority changed nothing: the host's daemons a download needs for its
+/// name lookup and its TLS handshake starve too. Still, the simulator's boot work waits those
+/// seconds and goes on. The processes are found and signalled in this process: a spawned `pgrep`,
+/// `ps` and `kill` took 31 s together beside the boot (run 41242744274).
+struct Stilled(Vec<libc::pid_t>);
+
+impl Stilled {
+    /// Stop the simulators' processes now; none when none is found, and none off a Mac.
+    #[cfg(target_os = "macos")]
+    fn now() -> Self {
+        let held = simulators_processes(&processes())
+            .into_iter()
+            .filter_map(|pid| libc::pid_t::try_from(pid).ok())
+            // SAFETY: `kill(2)` takes any pid and signal number and touches no memory of ours.
+            .filter(|&pid| unsafe { libc::kill(pid, libc::SIGSTOP) } == 0)
+            .collect();
+        Self(held)
+    }
+
+    /// Off a Mac there is no simulator to hold.
+    #[cfg(not(target_os = "macos"))]
+    const fn now() -> Self {
+        Self(Vec::new())
+    }
+
+    /// How many processes it holds.
+    const fn count(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Drop for Stilled {
+    fn drop(&mut self) {
+        for &pid in &self.0 {
+            // SAFETY: as in `now`: a signal to a pid, nothing of ours read or written.
+            let _continued = unsafe { libc::kill(pid, libc::SIGCONT) };
+        }
+    }
+}
+
+/// A process as [`processes`] reads it: its pid, its parent's and its name.
+#[cfg(target_os = "macos")]
+struct Process {
+    pid: u32,
+    parent: u32,
+    name: String,
+}
+
+/// Each `launchd_sim` among `processes` and every process under one, each root before its tree.
+#[cfg(target_os = "macos")]
+fn simulators_processes(processes: &[Process]) -> Vec<u32> {
+    let mut held: Vec<u32> =
+        processes.iter().filter(|p| p.name == "launchd_sim").map(|p| p.pid).collect();
+    let mut next = 0;
+    while let Some(&parent) = held.get(next) {
+        next = next.saturating_add(1);
+        for process in processes {
+            if process.parent == parent && !held.contains(&process.pid) {
+                held.push(process.pid);
+            }
+        }
+    }
+    held
+}
+
+/// Every process this user may read, through `libproc` ([`Stilled`]).
+#[cfg(target_os = "macos")]
+fn processes() -> Vec<Process> {
+    use std::mem::MaybeUninit;
+
+    use libc::{PROC_PIDTBSDINFO, c_int, c_void, proc_bsdinfo, proc_listallpids, proc_pidinfo};
+
+    let mut room = 2048_usize;
+    let pids = loop {
+        let mut pids: Vec<c_int> = vec![0; room];
+        let Some(bytes) =
+            room.checked_mul(size_of::<c_int>()).and_then(|b| c_int::try_from(b).ok())
+        else {
+            return Vec::new();
+        };
+        // SAFETY: the buffer holds `room` pids, `bytes` long, which is what
+        // `proc_listallpids` (libproc.h) may write; it returns how many it wrote.
+        let listed = unsafe { proc_listallpids(pids.as_mut_ptr().cast::<c_void>(), bytes) };
+        let Ok(listed) = usize::try_from(listed) else {
+            return Vec::new();
+        };
+        if listed < room {
+            pids.truncate(listed);
+            break pids;
+        }
+        room = room.saturating_mul(4);
+    };
+    let Ok(bytes) = c_int::try_from(size_of::<proc_bsdinfo>()) else {
+        return Vec::new();
+    };
+    pids.into_iter()
+        .filter_map(|pid| {
+            let mut info = MaybeUninit::<proc_bsdinfo>::zeroed();
+            // SAFETY: the buffer is one `proc_bsdinfo`, `bytes` long, which is what
+            // `proc_pidinfo` (libproc.h) writes for `PROC_PIDTBSDINFO`.
+            let wrote = unsafe {
+                proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast::<c_void>(), bytes)
+            };
+            if wrote != bytes {
+                return None;
+            }
+            // SAFETY: zeroed is a valid `proc_bsdinfo` (integers and C chars), and the call
+            // wrote it all.
+            let info = unsafe { info.assume_init() };
+            let name: Vec<u8> = info
+                .pbi_comm
+                .iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| u8::from_ne_bytes(c.to_ne_bytes()))
+                .collect();
+            Some(Process {
+                pid: info.pbi_pid,
+                parent: info.pbi_ppid,
+                name: String::from_utf8_lossy(&name).into_owned(),
+            })
+        })
+        .collect()
 }
 
 /// The longest a run waits for its simulator to settle ([`settle`]): in a guest on this Mac
@@ -1573,8 +1771,8 @@ fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Str
 #[cfg(test)]
 mod tests {
     use super::{
-        APP, Answer, BINS, PACKAGES, Record, Stop, Suite, Tests, descendants, ended_jobs,
-        filterset, idle_share,
+        APP, Answer, BINS, PACKAGES, Record, Stop, Suite, Tests, artifact_id, descendants,
+        ended_jobs, filterset, idle_share,
     };
 
     /// The iPad's one test is one of the simulator case's, so a rename cannot leave the iPad
@@ -1717,6 +1915,47 @@ mod tests {
         under.sort_unstable();
         assert_eq!(under, [200, 201, 202, 300]);
         assert_eq!(descendants(listing, 300), Vec::<u32>::new());
+    }
+
+    /// The processes held still for the host build's download are each simulator's
+    /// `launchd_sim` and its whole tree, and no other: not the host's, nor the run's own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_simulators_held_still_are_each_launchd_sim_s_tree() {
+        use super::{Process, simulators_processes};
+
+        let table = |rows: &[(u32, u32, &str)]| -> Vec<Process> {
+            rows.iter()
+                .map(|&(pid, parent, name)| Process { pid, parent, name: name.to_owned() })
+                .collect()
+        };
+        let processes = table(&[
+            (1, 0, "launchd"),
+            (100, 1, "launchd_sim"),
+            (201, 200, "SpringBoard"),
+            (200, 100, "backboardd"),
+            (500, 1, "launchd_sim"),
+            (501, 500, "diagnosticd"),
+            (999, 1, "xtask"),
+            (998, 999, "curl"),
+        ]);
+        let held = simulators_processes(&processes);
+        assert_eq!(held.first(), Some(&100), "a root before its tree: {held:?}");
+        let mut held = held;
+        held.sort_unstable();
+        assert_eq!(held, [100, 200, 201, 500, 501]);
+        let none = table(&[(1, 0, "launchd"), (999, 1, "xtask")]);
+        assert!(simulators_processes(&none).is_empty(), "no simulator, none held");
+    }
+
+    /// The host build's artifact is the first in GitHub's listing of the run's artifacts by its
+    /// name; an empty listing, or an answer that is no listing, names none.
+    #[test]
+    fn the_host_build_is_the_listing_s_first_artifact() {
+        let listed = r#"{"total_count":1,"artifacts":[{"id":13056749500,"name":"host-build-1"}]}"#;
+        assert_eq!(artifact_id(listed), Some(13_056_749_500));
+        assert_eq!(artifact_id(r#"{"total_count":0,"artifacts":[]}"#), None);
+        assert_eq!(artifact_id(r#"{"message":"Bad credentials"}"#), None);
     }
 
     /// A packed build carries each test binary its suites' records list (`--pack`).

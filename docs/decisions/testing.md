@@ -2410,10 +2410,12 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     (`xtask e2e ios` without `--host`) still settles after the install.
   - The full iPhone suite, all five tests, passed so twice: 62.5 s beside daemons still busy
     205 s after the boot (run 41235899472) and 145.7 s beside ones busy 124 s on (run
-    41237692067), and the iPad's light check in 23.3 s beside ones busy 304 s on. With the simulator's part packed first, the gate's `e2e (ios)` took 8 minutes
-    and the whole check 9 m 43 s from the push to main (run 41236746342), from 46 m 45 s. The guest's failures the earlier ruling answered (no worker address within
-    30 s, no agent started within 30 s) came from four cores held 18-20 minutes, with this Mac's
-    lanes building beside; a hosted runner holds only the run.
+    41237692067), and the iPad's light check in 23.3 s beside ones busy 304 s on. With the
+    simulator's part packed first, the gate's `e2e (ios)` took 8 minutes and the whole check
+    9 m 43 s from the push to main (run 41236746342), from 46 m 45 s. The guest's failures the
+    earlier ruling answered (no worker address within 30 s, no agent started within 30 s) came
+    from four cores held 18-20 minutes, with this Mac's lanes building beside; a hosted runner
+    holds only the run.
   - A red there is the product's or the test's, as every e2e red: it is read, never retried.
     The build's download is transport, not a test: it goes again up to five times, after a TLS
     handshake to the API timed out on a runner whose boot held every core (run 41237692067). If
@@ -2421,3 +2423,29 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     `MEASURE` line) and the settle comes back for it alone, measured.
   - Tests: the workflow needles in `gate::tests`; the settle's sampling is
     `e2e::tests::the_settle_reads_top_s_second_sample` as before.
+- ✅ **A hosted simulator is held still while its build comes** (2026-11-01). With the settle
+  bounded, `e2e (ios)` waited on the build's transfer instead: the gate had it about 81 s and
+  170 s after its upload ended (runs 41236746342, 41238712553). On the simulator's runner, at a load
+  average of 350-600 on three cores and up to 1.4 GB in swap, each `gh` call took tens of seconds
+  and one TLS handshake timed out; curl's ask of the API took 7.3-7.5 s, and the download of the
+  build's 125 MB ran at 4.1 and 1.3 MB/s, once 71 s before its connection to the storage (run
+  41241605487). Raising the download's priority (`renice -n -15`) changed nothing, 39 s (run
+  41240140205): the host's daemons it needs for a name lookup and a TLS handshake starve beside
+  it.
+  - Now the fetch talks to GitHub with the system's curl, the token on its standard input, and
+    stops every simulator process (each `launchd_sim` and its tree, found through `libproc` and
+    signalled with `kill(2)` in the run's own process) for the download and the unpack,
+    continuing them as it ends on every path. A download that crawls under 1 MB/s for 15 s, or
+    takes 120 s, is cut and goes again, the simulator running between tries.
+  - Held still, the download took 4.5 s at 29 MB/s and 13.4 s at 11 MB/s (run 41242744274), but
+    the spawned `pgrep`, `ps` and `kill` that stopped it took 31 s, hence the in-process stop:
+    then the iPhone's runner listed the build 8 s after its upload ended, downloaded it in 9.5 s
+    with 250 processes held (13 MB/s), unpacked it in 1.1 s, and had it 19 s after the upload,
+    the iPad's 23 s (run 41243711881). The full iPhone suite and the iPad's check passed after
+    the hold in both runs.
+  - What it costs: the boot's work waits those seconds, then goes on. Ruled out: a smaller
+    payload (stripping local symbols saves 17 % of the 245 MB debug dylib, zstd 102 MB to
+    deflate's 113 MB) leaves a 1-4 MB/s download slow, and asking for the artifact more often
+    gains little when one ask takes 7 s.
+  - Tests: `e2e::tests::the_simulators_held_still_are_each_launchd_sim_s_tree`,
+    `e2e::tests::the_host_build_is_the_listing_s_first_artifact`.

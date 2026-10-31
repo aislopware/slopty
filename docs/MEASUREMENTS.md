@@ -19116,6 +19116,27 @@ turn, `PosterBoard`'s, Siri's, Health's and Home's. `simctl boot` takes `--disab
 0, but every one of the 30 labels named still ran (183 of 403 jobs running), and the settle
 took as long.
 
+The build's way from the Mac's job to the simulator's runner (`docs/decisions/testing.md`, "A
+hosted simulator is held still while its build comes"), from the end of its upload (the
+artifact listed within a second of it) to the run having it unpacked:
+
+| run | fetch | listed after | download | unpack | in its hands after |
+| --- | --- | --- | --- | --- | --- |
+| 41236746342 (gate) | `gh`, simulator running | — | — | — | about 81 s (seen at the settle's next look) |
+| 41238712553 (gate) | `gh`, simulator running | — | — | — | about 170 s (seen at the settle's next look) |
+| 41240140205 (iPhone) | `gh`, simulator running, load 350 | 11 s | 26.2 s | 3.4 s | 41 s |
+| 41240140205 (iPad) | `gh` at `renice -n -15`, load 600 | 49 s | 39.3 s | 4.0 s | 93 s |
+| 41241605487 (iPhone) | curl, simulator running, load 355-415 | 3 s | 33.7 s, 4.1 MB/s | 2.7 s | 40 s |
+| 41241605487 (iPad) | curl, raised priority, load 470-590, 1.4 GB swapped | 9 s | 119.5 s, 1.3 MB/s, 71 s to connect | 17.2 s | 146 s |
+| 41242744274 (iPhone) | curl, held still by spawned `ps`/`kill` | 11 s | 4.5 s, 29 MB/s, after 31 s to stop | 1.8 s | 49 s |
+| 41242744274 (iPad) | the same | 4 s | 13.4 s, 11 MB/s, after 31 s to stop | 4.8 s | 52 s |
+| 41243711881 (iPhone) | curl, held still in-process (250 processes) | 8 s | 9.5 s, 13 MB/s | 1.1 s | 19 s |
+| 41243711881 (iPad) | the same (290 processes) | 12 s | 5.2 s, 25 MB/s | 1.6 s | 23 s |
+
+The artifact is 125 MB (deflate) of a 392 MB tar, 245 MB of it the iOS app's debug dylib; on
+this Mac the tar inflates in 0.47 s and zstd's level 3 would make it 102 MB, while stripping
+local symbols saves 17 % of the dylib.
+
 ```sh
 # a run's jobs, and the iOS job's phases
 gh run view <run> --json jobs --jq '.jobs[] | "\(.name) \(.startedAt) \(.completedAt)"'
