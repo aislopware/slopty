@@ -525,16 +525,89 @@ fn taken_of<'a>(taken: &'a [(&str, Taken)], name: &str) -> Result<&'a Taken> {
         .with_context(|| format!("{name} was not taken by this sync"))
 }
 
-/// `cargo update` the packages of the forks this sync pushed, then confirm the lock pins each
-/// fork's pushed head.
+/// Move this workspace's `Cargo.lock`, and the fuzz workspace's, to the heads of the forks this
+/// sync pushed, then confirm the lock pins each one. In a lock whose pin of a fork has the
+/// manifests of its new head, only the revision is rewritten ([`repin_in`]); a fork whose
+/// manifests changed is `cargo update`d.
 fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken)]) -> Result<()> {
-    let pinned: Vec<(&str, &Taken)> = taken
-        .iter()
-        .filter_map(|(name, done)| lock_package(name).map(|package| (package, done)))
-        .collect();
-    if pinned.is_empty() {
-        return Ok(());
+    let mut pinned: Vec<(&str, &Taken)> = Vec::new();
+    for (name, done) in taken {
+        let Some(package) = lock_package(name) else {
+            continue;
+        };
+        // `cargo update -p` re-resolves the registry crates around the package as well: moving
+        // gpui-fast alone took windows-sys 0.61 back to 0.60 and 0.52, and windows 0.62 to 0.58,
+        // under crates that accept any of them (2026-10-03, and again 2026-10-31). A fork whose
+        // manifests did not change brings no change to the graph, only a new revision.
+        let url = &config.fork(name)?.url;
+        let mut through_cargo = false;
+        for (path, required) in
+            [(root.join("Cargo.lock"), true), (root.join("fuzz/Cargo.lock"), false)]
+        {
+            let Ok(lock) = std::fs::read_to_string(&path) else {
+                through_cargo |= required;
+                continue;
+            };
+            match lock_pin_in(&lock, url) {
+                Some(old) if old == done.head => {}
+                Some(old) if manifests_unchanged(sh, &done.dir, &old, &done.head) => {
+                    let moved = repin_in(&lock, &old, &done.head)?;
+                    std::fs::write(&path, moved).with_context(|| format!("writing {path}"))?;
+                }
+                Some(_) => through_cargo = true,
+                None => through_cargo |= required,
+            }
+        }
+        if through_cargo {
+            pinned.push((package, done));
+        }
     }
+    if !pinned.is_empty() {
+        update_pins(sh, root, &pinned)?;
+    }
+    for (name, done) in taken {
+        if lock_package(name).is_none() {
+            continue;
+        }
+        let url = &config.fork(name)?.url;
+        let pin = lock_pin(root, url)?;
+        ensure!(
+            pin.as_deref() == Some(done.head.as_str()),
+            "Cargo.lock pins {} for {name}, not the pushed head {}",
+            pin.as_deref().map_or("nothing", short),
+            short(&done.head)
+        );
+    }
+    Ok(())
+}
+
+/// Whether no `Cargo.toml` of the fork checked out at `dir` differs between commits `old` and
+/// `new`; not when the checkout lacks either.
+fn manifests_unchanged(sh: &Shell, dir: &Utf8Path, old: &str, new: &str) -> bool {
+    let _dir = sh.push_dir(dir);
+    cmd!(sh, "git diff --quiet {old} {new} -- :(glob)**/Cargo.toml")
+        .quiet()
+        .ignore_stderr()
+        .run()
+        .is_ok()
+}
+
+/// `lock` with every git source pinned at commit `old`, and every dependency naming it, pinned at
+/// `new`, and nothing else touched. Both must be full commit ids, which no other pin contains.
+fn repin_in(lock: &str, old: &str, new: &str) -> Result<String> {
+    for id in [old, new] {
+        ensure!(
+            id.len() == 40 && id.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{id:?} is not a full commit id"
+        );
+    }
+    Ok(lock.replace(&format!("#{old}"), &format!("#{new}")))
+}
+
+/// `cargo update` the packages of `pinned` (each the lock package of a fork and its take), with
+/// the compat crates gpui-fast stands in with, then regenerate the workspace hack and move the
+/// fuzz workspace's lock with them.
+fn update_pins(sh: &Shell, root: &Utf8Path, pinned: &[(&str, &Taken)]) -> Result<()> {
     let mut packages: Vec<&str> = pinned.iter().flat_map(|(package, _)| ["-p", package]).collect();
     // The root manifest patches gpui-kit's gpui-pre snapshots with gpui-fast's `compat/` crates.
     // Updated with neither fork, they kept the old snapshot's version: when gpui-kit moved to
@@ -576,19 +649,6 @@ fn move_pins(sh: &Shell, root: &Utf8Path, config: &Config, taken: &[(&str, Taken
                 &cmd!(sh, "cargo update --manifest-path fuzz/Cargo.toml {ours...}"),
             )?;
         }
-    }
-    for (name, done) in taken {
-        if lock_package(name).is_none() {
-            continue;
-        }
-        let url = &config.fork(name)?.url;
-        let pin = lock_pin(root, url)?;
-        ensure!(
-            pin.as_deref() == Some(done.head.as_str()),
-            "Cargo.lock pins {} for {name}, not the pushed head {}",
-            pin.as_deref().map_or("nothing", short),
-            short(&done.head)
-        );
     }
     Ok(())
 }
@@ -1859,6 +1919,48 @@ mod tests {
             "longbridge/gpui-fast",
             "slug"
         );
+    }
+
+    #[test]
+    fn a_repin_moves_that_commit_and_nothing_else() {
+        let (old, new, other) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        let lock = format!(
+            "[[package]]\nname = \"gpui\"\n\
+             source = \"git+https://github.com/aislopware/gpui-fast.git#{old}\"\n\
+             dependencies = [\n \"gpui-pre 0.3.10 (git+https://github.com/aislopware/gpui-fast.git#{old})\",\n \
+             \"windows-sys 0.61.2\",\n]\n\
+             [[package]]\nname = \"gpui-kit\"\n\
+             source = \"git+https://github.com/aislopware/gpui-kit.git#{other}\"\n"
+        );
+        let moved = repin_in(&lock, &old, &new).expect("full ids");
+        assert_eq!(moved, lock.replace(&old, &new), "the source and the dependency naming it");
+        assert!(moved.contains(&other), "another fork's pin stays");
+        assert!(moved.contains("\"windows-sys 0.61.2\""), "the registry picks stay");
+        assert!(repin_in(&lock, "aaaa", &new).is_err(), "a short id could match inside another");
+    }
+
+    #[test]
+    fn only_a_changed_manifest_sends_a_pin_through_cargo() {
+        let sh = scratch_repo("manifests");
+        let dir = Utf8PathBuf::try_from(sh.current_dir()).expect("a UTF-8 temporary directory");
+        sh.write_file("crates/gpui/Cargo.toml", "[package]\nname = \"gpui\"\n").expect("write");
+        commit(&sh, "manifest");
+        let pinned = sha(&sh, "HEAD");
+        commit(&sh, "code only");
+        assert!(manifests_unchanged(&sh, &dir, &pinned, &sha(&sh, "HEAD")), "code alone");
+        sh.write_file("Cargo.toml", "[workspace]\n").expect("write");
+        commit(&sh, "root manifest");
+        assert!(!manifests_unchanged(&sh, &dir, &pinned, &sha(&sh, "HEAD")), "the root's");
+        let pinned = sha(&sh, "HEAD");
+        sh.write_file(
+            "crates/gpui/Cargo.toml",
+            "[package]\nname = \"gpui\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write");
+        commit(&sh, "member manifest");
+        assert!(!manifests_unchanged(&sh, &dir, &pinned, &sha(&sh, "HEAD")), "a member's");
+        let missing = "0".repeat(40);
+        assert!(!manifests_unchanged(&sh, &dir, &missing, &pinned), "a pin the checkout lacks");
     }
 
     #[test]
