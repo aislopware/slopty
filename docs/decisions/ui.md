@@ -14713,9 +14713,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   it out, its panel being drawn in it, so the field changes hands at one frame's end and the
   platform is never told the keyboard went; a view's pane still takes it once laid out, its
   handle made by its first draw (`settle_pane_keyboard`). A touch screen without a hardware
-  keyboard hands nothing on at a close at all (the entry above). Left open in GPUI: a tap from
-  one terminal's pane to another's moves the focus between frames, and GPUI answers false until a
-  frame has found the new field, so the band goes for one frame there. Test: `slopty-terminal`
+  keyboard hands nothing on at a close at all (the entry above). A tap from one terminal's pane
+  to another's moves the focus between frames, and GPUI answered false until a frame had found
+  the new field, so the band went for one frame and both programs got two needless resizes. GPUI
+  now answers what the platform was last told, whether its keyboard is up, so a field taking over
+  from another keeps the band (gpui-fast's
+  `the_focus_moved_between_two_fields_keeps_a_text_field_focused`). Test: `slopty-terminal`
   `view::paint_oracle::a_split_closed_beside_the_session_paints_its_rows_where_a_frame_from_scratch_does`,
   which keeps the band through the panel's hand-off, lets it go once when the keyboard stays, and
   draws red 11's report again for the hand-off after the frame.
