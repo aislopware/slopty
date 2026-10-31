@@ -93,8 +93,10 @@ fn serve_api(stream: TcpStream) -> Result<()> {
     Ok(())
 }
 
-/// How long a `scenario:hold` turn's answers wait.
-const HOLD: std::time::Duration = std::time::Duration::from_secs(4);
+/// How long a `scenario:hold` turn's answers wait: well past the acts `fixtures claude-mod` types
+/// behind it (`fixtures::MOD_ACTS`, about 4 s from its submit to the prompt queued again), which
+/// 4 s only just covered: a 2.1.316 recording sent that prompt after the turn had ended.
+const HOLD: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Whether `body` is a `scenario:hold` turn's request (not one of Claude Code's side requests).
 fn held(body: &Value) -> bool {

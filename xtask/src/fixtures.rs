@@ -9,7 +9,8 @@
 //! Slopty's relay hears (`slopty_agent::hooks::EVENTS`), and as the relay is: asynchronously, so
 //! Claude Code never waits on it and its payloads come when the relay's would. With no person at
 //! a dialog in `-p`, the sink stands in for one at a permission request: it allows the call or
-//! refuses it, as the TUI's dialog would, so for those events Claude Code waits on it.
+//! refuses it, as the TUI's dialog would, so for those events Claude Code waits on it. It waits on
+//! the sink for `SessionEnd` too ([`WAITED`]), which a TUI's relay hears as it exits.
 //!
 //! The order the transcript's writes and the hooks reached the run in is kept beside them
 //! (`arrivals.jsonl`): each line says how many of a file's lines came next, and when, in
@@ -279,9 +280,12 @@ const SINK_EVENTS: [&str; 15] = [
     "PostCompact",
 ];
 
-/// Events the sink answers for the person, so Claude Code waits on it as on the TUI's dialog;
-/// for every other event it runs as Slopty's relay does, without Claude Code waiting.
-const ANSWERED: [&str; 2] = ["PermissionRequest", "PermissionDenied"];
+/// Events Claude Code waits on the sink for; every other one it runs as Slopty's relay does,
+/// without Claude Code waiting. The sink answers the first two for the person, as Claude Code waits
+/// on the TUI's dialog. A TUI that exits runs an asynchronous `SessionEnd` (`/exit` ran the relay's
+/// in 2.1.316), but `-p` that ran a turn exits before one reaches the sink: every scenario's came
+/// in the 2.1.314 recording, and none in a run since, on either build. Waited on, it always does.
+const WAITED: [&str; 3] = ["PermissionRequest", "PermissionDenied", "SessionEnd"];
 
 /// How long Claude Code lets the sink run, in seconds: what it lets Slopty's relay run
 /// (`slopty_agent::hooks::TIMEOUT_S`).
@@ -354,7 +358,7 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
             "type": "command",
             "command": exe.to_string_lossy(),
             "args": ["fixtures", "hook-sink", sink.to_string_lossy()],
-            "async": !ANSWERED.contains(&event),
+            "async": !WAITED.contains(&event),
             "timeout": SINK_TIMEOUT_S,
         }] }])
     };
