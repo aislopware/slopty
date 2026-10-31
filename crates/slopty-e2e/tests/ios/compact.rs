@@ -12,15 +12,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use slopty_e2e::harness::{Simulator, Stack, artifacts_dir};
-use slopty_e2e::snapshot::{PixelRect, assert_matches_apart};
+use slopty_e2e::snapshot::{PixelRect, assert_matches_simulator};
 use slopty_e2e::{A11yNode, Command, Driver, Dump, WindowInfo};
 
 /// Per-step wait.
 pub const STEP: Duration = Duration::from_secs(30);
 /// A viewport narrower than this is a phone's (the shell's `PHONE_BELOW`).
 pub const PHONE_BELOW: f32 = 700.0;
-/// As the other simulator goldens: five times the noise between two runs.
-const TOLERANCE: f64 = 0.0005;
 /// Long enough for a page's entrance to come to rest.
 pub const SETTLE: Duration = Duration::from_millis(600);
 
@@ -102,8 +100,7 @@ pub async fn goldens(drv: &mut Driver, dir: &Path, device: &str, state: &str) {
                 .into_iter()
                 .map(|[x, y, w, h]| [px(x), px(y), px(w), px(h)]),
         );
-        assert_matches_apart(&name, &frame, TOLERANCE, &artifacts_dir(), (&pixels, &words))
-            .unwrap();
+        assert_matches_simulator(&name, &frame, &artifacts_dir(), (&pixels, &words)).unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
 }

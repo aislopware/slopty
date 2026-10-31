@@ -72,6 +72,8 @@ use panel_layout::HorizontalPanelFit;
 mod compact;
 #[cfg(test)]
 mod fuzz_tests; // seeded action sequences over the whole shell, shrunk on a failure
+#[cfg(test)]
+mod goldens; // the window drawn in the test process as the app draws it, held to its goldens
 mod inbox; // the inbox behind the titlebar's eye
 mod kept_tabs; // the views beside each session kept across launches
 mod live_surfaces; // remote window and desktop views

@@ -17,6 +17,10 @@
 //!   lane.
 //! - [`relay`]: a link a test can cut and restore, between a daemon and the server it dials, as a
 //!   network loss is met: packets stop, and both ends keep running.
+//! - [`stack`]: what the self-test's stack is (the moment its app's clock reads, its server's
+//!   name), shared with the tests that stand in for it.
+//! - `golden` (feature `golden`): a picture of the interface held to its golden PNG, judged by its
+//!   worst window, laid over the backdrop the app's frosted surfaces show, and its words.
 //!
 //! And three doubles, binaries, so tests start agents without spending anyone's plan and draw
 //! windows of their own:
@@ -38,9 +42,12 @@ pub mod bench;
 pub mod bins;
 pub mod claude_tui;
 pub mod env;
+#[cfg(feature = "golden")]
+pub mod golden;
 pub mod group;
 pub mod live;
 pub mod process;
 pub mod relay;
 pub mod soc;
+pub mod stack;
 pub mod stats;

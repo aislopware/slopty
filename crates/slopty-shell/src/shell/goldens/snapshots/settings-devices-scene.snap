@@ -1,0 +1,31 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
+0 Quad { border_style: Solid, bounds: 0,0 1320×880, content_mask: 0,0 1320×880, background: #f3f3f5ff, corner_radii: 0, border_widths: 0 }
+1 Quad { border_style: Solid, bounds: 448,160 680×61, content_mask: 256,0 1064×880, background: #1a1a1a0b, corner_radii: 12, border_widths: 0 }
+1 Quad { border_style: Solid, bounds: 448,274 680×123, content_mask: 256,0 1064×880, background: #1a1a1a0b, corner_radii: 12, border_widths: 0 }
+1 glyphs ×13 455,251 85×13 MonochromeSprite { content_mask: 256,0 1064×880, color: #62626aff }
+1 glyphs ×6 455,137 41×13 MonochromeSprite { content_mask: 256,0 1064×880, color: #62626aff }
+1 glyphs ×7 456,61 73×18 MonochromeSprite { content_mask: 256,0 1064×880, color: #303035ff }
+1 glyphs ×75 455,92 455×15 MonochromeSprite { content_mask: 256,0 1064×880, color: #62626aff }
+2 Quad { border_style: Solid, bounds: 464,335 648×62, content_mask: 1111,337 1×59, background: #00000000, border_color: #00000013, corner_radii: 0, border_widths: 1/0/0/0 } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 Quad { border_style: Solid, bounds: 464,335 648×62, content_mask: 464,335 648×2, background: #00000000, border_color: #00000013, corner_radii: 0, border_widths: 1/0/0/0 } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 Quad { border_style: Solid, bounds: 464,335 648×62, content_mask: 464,337 1×59, background: #00000000, border_color: #00000013, corner_radii: 0, border_widths: 1/0/0/0 } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 Quad { border_style: Solid, bounds: 464,335 648×62, content_mask: 464,396 648×1, background: #00000000, border_color: #00000013, corner_radii: 0, border_widths: 1/0/0/0 } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×1 468,182 16×16 MonochromeSprite { content_mask: 448,160 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 160.0, 1128.0, 221.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×1 468,296 16×16 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×1 468,358 16×16 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×1 552,313 4×5 MonochromeSprite { content_mask: 448,274 680×123, color: #62626a4d } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×1 602,313 4×5 MonochromeSprite { content_mask: 448,274 680×123, color: #62626a4d } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×10 503,174 68×13 MonochromeSprite { content_mask: 448,160 680×61, color: #303035ff } fade { start: 1.0, clip: [448.0, 160.0, 1128.0, 221.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×12 503,350 78×13 MonochromeSprite { content_mask: 448,274 680×123, color: #303035ff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×14 946,297 88×13 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×23 880,183 142×14 MonochromeSprite { content_mask: 448,160 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 160.0, 1128.0, 221.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×5 503,309 43×12 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×54 503,371 306×13 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×6 1056,183 47×15 MonochromeSprite { content_mask: 448,160 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 160.0, 1128.0, 221.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×6 503,195 38×12 MonochromeSprite { content_mask: 448,160 680×61, color: #1c6c3bff } fade { start: 1.0, clip: [448.0, 160.0, 1128.0, 221.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×6 563,309 33×12 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×6 613,309 38×12 MonochromeSprite { content_mask: 448,274 680×123, color: #1c6c3bff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×7 1056,297 47×14 MonochromeSprite { content_mask: 448,274 680×123, color: #62626aff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×8 503,288 54×13 MonochromeSprite { content_mask: 448,274 680×123, color: #303035ff } fade { start: 1.0, clip: [448.0, 274.0, 1128.0, 397.0], radii: 12.0, radii_y: 12.0 }

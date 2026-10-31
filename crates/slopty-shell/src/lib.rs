@@ -137,23 +137,7 @@ pub fn start(config: UiConfig, cx: &mut App) -> gpui::WindowHandle<shell::Shell>
     {
         let UiConfig { data_dir, default_harness, service, activate } = config;
         let boot = EngineBootConfig { data_dir: data_dir.clone(), default_harness };
-        gpui_base::init(cx);
-        let ui_settings = settings::UiSettings::load(&data_dir);
-        settings::init(ui_settings.clone(), data_dir, cx);
-        let font_availability = typography::register_fonts(cx);
-        // Typography first: theme installation reads the effective family, so
-        // the first frame has the final font and palette without a flash.
-        typography::init(&ui_settings, font_availability, cx);
-        appearance::init(
-            ui_settings.appearance,
-            ui_settings.theme_selection,
-            ui_settings.accent,
-            ui_settings.surface,
-            cx,
-        );
-        motion::init(ui_settings.pause_animations_in_background, cx);
-        composer::init(cx);
-        app_menus::init(cx);
+        install(settings::UiSettings::load(&data_dir), data_dir, cx);
         cx.register_url_scheme("slopty").detach();
 
         let state = cx.new(|cx| {
@@ -214,6 +198,30 @@ pub fn start(config: UiConfig, cx: &mut App) -> gpui::WindowHandle<shell::Shell>
         }
         window
     }
+}
+
+/// What the interface puts in the app before its first window: GPUI's base, the settings at
+/// `data_dir`, the fonts, the theme, motion, the composer's and the menus' actions.
+///
+/// [`start`] calls it, and so do the tests that draw the window in the test process
+/// (`shell::goldens`), so a golden is drawn with the fonts and the theme the app draws with.
+pub(crate) fn install(ui_settings: settings::UiSettings, data_dir: PathBuf, cx: &mut App) {
+    gpui_base::init(cx);
+    settings::init(ui_settings.clone(), data_dir, cx);
+    let font_availability = typography::register_fonts(cx);
+    // Typography first: theme installation reads the effective family, so
+    // the first frame has the final font and palette without a flash.
+    typography::init(&ui_settings, font_availability, cx);
+    appearance::init(
+        ui_settings.appearance,
+        ui_settings.theme_selection,
+        ui_settings.accent,
+        ui_settings.surface,
+        cx,
+    );
+    motion::init(ui_settings.pause_animations_in_background, cx);
+    composer::init(cx);
+    app_menus::init(cx);
 }
 
 /// Bring Slopty forward, reopening the main window first if ⌘W closed it.
@@ -347,56 +355,71 @@ fn reopen_main_window(state: gpui::Entity<state::AppState>, boot: EngineBootConf
     }
 }
 
+/// The main window's options at `bounds` on `display_id`: [`open_main_window`]'s, and the
+/// in-process goldens' window's (`shell::goldens`), which so has the app's background.
+pub(crate) fn main_window_options(
+    bounds: Bounds<gpui::Pixels>,
+    display_id: Option<gpui::DisplayId>,
+    cx: &App,
+) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        display_id,
+        window_min_size: Some(size(px(900.), px(600.))),
+        // `kind` is deliberately left at its default `WindowKind::Normal`
+        // (gpui platform.rs WindowOptions::default), which on macOS maps
+        // to `NSNormalWindowLevel` (gpui_macos window.rs) — same as zed's
+        // main window. Nothing here raises the window level or touches
+        // presentation options; the "menu bar never appears" symptom came
+        // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
+        // from window kind/level, and `appears_transparent` only affects
+        // the titlebar, not the menu bar.
+        // macOS: frameless-inset chrome, the traffic lights at 14,15. The strip is
+        // custom-drawn.
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            // Native lights are 14px tall: top 14 → center 21, matching
+            // the 38px titlebar row with 4px top-only content padding.
+            traffic_light_position: Some(gpui::point(px(14.), px(14.))),
+        }),
+        // Our own titlebar strip drags the window (WindowControlArea::
+        // Drag + start_window_move) — mark the content view app-owned
+        // so AppKit neither dead-zones the strip nor delays clicks.
+        app_owns_titlebar_drag: true,
+        // Frosted shell (macOS): blur the desktop behind the window; the
+        // shell paints its frost surface translucent so the sidebar reads
+        // as glass (shell.rs root). Elsewhere the window stays opaque.
+        // One source of truth with the re-apply loop in `appearance::apply`
+        // — if these two ever disagree, vibrancy dies on the first theme
+        // change and never comes back.
+        window_background: theme::Theme::of(cx).window_background_appearance(),
+        ..Default::default()
+    }
+}
+
+/// What the main window sets as it opens, before its shell is built: its rem, where its
+/// tooltips sit and the theme's appearance.
+pub(crate) fn prepare_main_window(window: &mut gpui::Window, cx: &mut App) {
+    window.set_rem_size(px(typography::font_size(cx).pixels()));
+    // A tooltip sits centred under the control it names, never under the
+    // pointer (`docs/decisions/ui.md`, "Tooltips name the action and its key").
+    window.set_tooltip_placement(gpui::TooltipPlacement::Below);
+    // The theme takes the app's appearance from the window as it opens, which
+    // has it even early in launch; from `appearance::init` on it follows the app,
+    // never a window, which wears its ground's (`window_appearance`).
+    appearance::reconcile(window, cx);
+}
+
 fn open_main_window(
     state: gpui::Entity<state::AppState>,
     boot: EngineBootConfig,
     cx: &mut App,
 ) -> anyhow::Result<gpui::WindowHandle<shell::Shell>> {
     let (bounds, display_id) = restored_main_window_bounds(cx);
-    let handle = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            display_id,
-            window_min_size: Some(size(px(900.), px(600.))),
-            // `kind` is deliberately left at its default `WindowKind::Normal`
-            // (gpui platform.rs WindowOptions::default), which on macOS maps
-            // to `NSNormalWindowLevel` (gpui_macos window.rs) — same as zed's
-            // main window. Nothing here raises the window level or touches
-            // presentation options; the "menu bar never appears" symptom came
-            // from the missing `set_menus` call (nil `NSApp.mainMenu`), not
-            // from window kind/level, and `appears_transparent` only affects
-            // the titlebar, not the menu bar.
-            // macOS: frameless-inset chrome, the traffic lights at 14,15. The strip is
-            // custom-drawn.
-            titlebar: Some(TitlebarOptions {
-                title: None,
-                appears_transparent: true,
-                // Native lights are 14px tall: top 14 → center 21, matching
-                // the 38px titlebar row with 4px top-only content padding.
-                traffic_light_position: Some(gpui::point(px(14.), px(14.))),
-            }),
-            // Our own titlebar strip drags the window (WindowControlArea::
-            // Drag + start_window_move) — mark the content view app-owned
-            // so AppKit neither dead-zones the strip nor delays clicks.
-            app_owns_titlebar_drag: true,
-            // Frosted shell (macOS): blur the desktop behind the window; the
-            // shell paints its frost surface translucent so the sidebar reads
-            // as glass (shell.rs root). Elsewhere the window stays opaque.
-            // One source of truth with the re-apply loop in `appearance::apply`
-            // — if these two ever disagree, vibrancy dies on the first theme
-            // change and never comes back.
-            window_background: theme::Theme::of(cx).window_background_appearance(),
-            ..Default::default()
-        },
-        move |window, cx| {
-            window.set_rem_size(px(typography::font_size(cx).pixels()));
-            // A tooltip sits centred under the control it names, never under the
-            // pointer (`docs/decisions/ui.md`, "Tooltips name the action and its key").
-            window.set_tooltip_placement(gpui::TooltipPlacement::Below);
-            // The theme takes the app's appearance from the window as it opens, which
-            // has it even early in launch; from `appearance::init` on it follows the app,
-            // never a window, which wears its ground's (`window_appearance`).
-            appearance::reconcile(window, cx);
+    let handle =
+        cx.open_window(main_window_options(bounds, display_id, cx), move |window, cx| {
+            prepare_main_window(window, cx);
             let shell = cx.new(|cx| {
                 observe_main_window_geometry(window, cx);
                 shell::Shell::new(state, boot, cx)
@@ -437,8 +460,7 @@ fn open_main_window(
                 should_close
             });
             shell
-        },
-    )?;
+        })?;
     // Belt and braces: assert the blur once the window actually exists. The
     // `WindowOptions` value is applied during creation, before the view is
     // attached; re-pushing it here means a window is never left opaque.

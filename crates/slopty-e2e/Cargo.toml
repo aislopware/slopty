@@ -17,11 +17,11 @@ harness = [
     "dep:tokio",
     "dep:image",
     "dep:anyhow",
-    "dep:similar",
     "dep:tempfile",
     "dep:slopty-pty",
     "dep:slopty-shape",
     "dep:slopty-testkit",
+    "slopty-testkit/golden",
 ]
 # The live test targets below: `cargo xtask e2e` (and `vm e2e`, `linux e2e`) builds them, and
 # host clippy lints them. Every test in them is `#[ignore]`d, so `cargo gate` would build and
@@ -64,13 +64,12 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow = { workspace = true, optional = true }
 image = { workspace = true, optional = true }
-# A golden's text against the frame's, as the lines that changed (`snapshot::text_matches`).
-similar = { workspace = true, optional = true }
 slopty-pty = { workspace = true, optional = true }
 # The link the second worker is reached over (`harness::SecondWorker`).
 slopty-shape = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
-# The clean environment every daemon and CLI the harness starts runs in (`env::scrub`).
+# The clean environment every daemon and CLI the harness starts runs in (`env::scrub`), and the
+# comparator a golden is held to (`slopty_testkit::golden`), which the shell's tests share.
 slopty-testkit = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = [ "process" ] }
 
@@ -98,8 +97,7 @@ slopty-proto.workspace = true
 objc2-core-video = { workspace = true, features = [ "objc2-io-surface" ] }
 # With the CoreFoundation type `CVPixelBufferGetIOSurface` returns, which objc2-core-video's
 # `objc2-io-surface` feature leaves out.
-objc2-io-surface = { version = "=0.3.2", default-features = false, features = [
-    "std",
+objc2-io-surface = { workspace = true, features = [
     "IOSurfaceRef",
     "IOSurfaceTypes",
     "objc2-core-foundation",

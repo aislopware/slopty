@@ -1,3 +1,6 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
 Window
 Group │ Settings
 Button │ Back
@@ -15,11 +18,14 @@ Button │ Connect a phone or iPad
 Button │ Change server
 Button │ Show in Finder surfaces
 Button │ Copy device ID f90c4d49078400a418850c6d7ec25b6b
-Button │ Add a device (focused)
+Button │ Add a device
 Dialog │ Add device
 TabList
 Tab │ This Mac
 Tab │ Over SSH
 Tab │ A server
+TextInput │ Machine's name or address │ nohost.invalid
+Link │ Set up the server there instead
+Alert │ No machine is named nohost.invalid
 Button │ Cancel
-Button │ Use this Mac
+Button │ Try again (focused)

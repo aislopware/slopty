@@ -2,7 +2,7 @@
 //! device and its threads as chats, served from the workspace (`slopty_ui::view_model`).
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches, foreground_fraction};
+use slopty_e2e::snapshot::{assert_matches, assert_matches_shells, foreground_fraction};
 use slopty_e2e::{Command, Stack};
 
 /// The shell's main window as it first opens.
@@ -10,7 +10,9 @@ const WINDOW: (f32, f32) = (1320.0, 880.0);
 
 /// The app comes up as the shell: its sidebar and its new-session canvas, drawn and named for a
 /// screen reader, in light and dark, on its opaque planes and frosted
-/// over the render's fixed backdrop.
+/// over the render's fixed backdrop. The light frames are the ones the shell's in-process test
+/// draws and writes (`slopty_shell::shell::goldens`, `the_interface_draws_as_its_goldens`): here
+/// the app on a real stack is held to them and never writes them, so the two drawing apart fails.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_interface_comes_up_on_the_stack() {
@@ -29,7 +31,11 @@ async fn the_interface_comes_up_on_the_stack() {
         println!("A11Y {golden} {}", slopty_e2e::frame_text(&frame.a11y));
         let fg = foreground_fraction(&frame);
         assert!(fg > 0.002, "{golden}: frame is blank ({fg:.4} foreground)");
-        assert_matches(golden, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        if dark {
+            assert_matches(golden, &frame, &artifacts_dir()).unwrap();
+        } else {
+            assert_matches_shells(golden, &frame, &artifacts_dir()).unwrap();
+        }
     }
 }
 

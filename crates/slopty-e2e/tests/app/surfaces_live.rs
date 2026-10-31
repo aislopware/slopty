@@ -7,9 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::{
-    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches_apart, assert_matches_masked,
-};
+use slopty_e2e::snapshot::{PixelRect, assert_matches_apart, assert_matches_masked};
 use slopty_e2e::{A11yNode, Button, Command, Driver, Dump, Stack};
 
 /// How long a worker round trip may take.
@@ -17,16 +15,18 @@ const STEP: Duration = Duration::from_secs(30);
 /// The shell's main window as it first opens.
 const WINDOW: (f32, f32) = (1320.0, 880.0);
 
-/// Render the window in light and in dark and hold each against `golden/<name>-<appearance>.png`;
-/// the window is light again after.
+/// Render the window in light and in dark and hold each against `golden/<name>-<appearance>.png`,
+/// once the terminal's rail is at rest after what scrolled it ([`slopty_e2e::RAIL_AT_REST`]); the
+/// window is light again after.
 async fn goldens(drv: &mut Driver, renders: &Path, name: &str) {
+    tokio::time::sleep(slopty_e2e::RAIL_AT_REST).await;
     for (dark, appearance) in [(false, "light"), (true, "dark")] {
         drv.ok(&Command::Appearance { dark }).await.unwrap();
         drv.wait_for("the carets at their prompts", STEP, Dump::prompts_settled).await.unwrap();
         let golden = format!("{name}-{appearance}");
         let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
         println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        assert_matches_masked(&golden, &frame, TOLERANCE, &artifacts_dir(), &[]).unwrap();
+        assert_matches_masked(&golden, &frame, &artifacts_dir(), &[]).unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
 }
@@ -350,7 +350,7 @@ mod stream {
             let pixels: Vec<PixelRect> = strained.iter().copied().chain([picture]).collect();
             let words: Vec<PixelRect> = strained.iter().copied().chain([inside]).collect();
             let masks = (pixels.as_slice(), words.as_slice());
-            assert_matches_apart(&golden, &frame, TOLERANCE, &artifacts_dir(), masks).unwrap();
+            assert_matches_apart(&golden, &frame, &artifacts_dir(), masks).unwrap();
         }
         drv.ok(&Command::Appearance { dark: false }).await.unwrap();
     }

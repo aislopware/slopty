@@ -118,14 +118,7 @@ async fn every_state_reads_at_a_glance() {
         let golden = format!("sidebar-states-{appearance}");
         let frame = drv.render(&renders.join(format!("{golden}.png"))).await.unwrap();
         println!("A11Y {golden}\n{}", slopty_e2e::frame_text(&frame.a11y));
-        slopty_e2e::snapshot::assert_matches_masked(
-            &golden,
-            &frame,
-            slopty_e2e::snapshot::MAC_TOLERANCE,
-            &renders,
-            &[],
-        )
-        .unwrap();
+        slopty_e2e::snapshot::assert_matches(&golden, &frame, &renders).unwrap();
     }
     drv.ok(&slopty_e2e::Command::Appearance { dark: false }).await.unwrap();
     // A row's menu: a press of the secondary button opens it with the row's actions; Escape puts

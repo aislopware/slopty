@@ -472,7 +472,7 @@ impl Driver {
         let path_str = path.to_str().context("render path is not UTF-8")?.to_owned();
         match self.call(&Command::Render { path: path_str, scale }).await? {
             Reply::Rendered { width, height, a11y, scale } => {
-                let img = image::open(path)
+                let mut img = image::open(path)
                     .with_context(|| format!("read {}", path.display()))?
                     .into_rgba8();
                 anyhow::ensure!(
@@ -480,6 +480,11 @@ impl Driver {
                     "rendered {width}×{height}, file is {:?}",
                     img.dimensions()
                 );
+                // The app writes the frame as GPUI drew it, premultiplied and clear where a
+                // frosted surface lets the desktop through; laid over the backdrop here, as the
+                // in-process goldens are, and written back for whoever reads the render.
+                slopty_testkit::golden::over_backdrop(&mut img);
+                img.save(path).with_context(|| format!("write {}", path.display()))?;
                 Ok(Frame { image: img, a11y, scale })
             }
             Reply::Error { message } => bail!("render: {message}"),

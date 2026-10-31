@@ -1139,6 +1139,42 @@ pub struct ServerInvite {
     pub note: String,
 }
 
+impl ServerInvite {
+    /// What the note under a code says: how a phone or iPad uses it.
+    pub const HOW: &'static str =
+        "Point the Camera of your iPhone or iPad at the code, then press Connect in Slopty.";
+    /// What a link to a server starts with; the server's address follows, `host:port`, which iOS
+    /// hands to Slopty through its URL scheme.
+    pub const LINK: &'static str = "slopty://connect?server=";
+
+    /// The code a device scans for the server at `address` (`host:port`, an IPv6 host in
+    /// brackets): its link, the address as the person reads it, and how to use it.
+    #[must_use]
+    pub fn reaching(address: &str) -> Self {
+        Self {
+            link: Some(Self::link(address)),
+            address: Some(address.to_owned()),
+            note: Self::HOW.to_owned(),
+        }
+    }
+
+    /// The link to the server at `address`: [`Self::LINK`], then the address with its brackets
+    /// and any `%` escaped.
+    #[must_use]
+    pub fn link(address: &str) -> String {
+        let mut out = String::from(Self::LINK);
+        for c in address.chars() {
+            match c {
+                '[' => out.push_str("%5B"),
+                ']' => out.push_str("%5D"),
+                '%' => out.push_str("%25"),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+}
+
 /// How this client reaches its machines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

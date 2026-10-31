@@ -429,6 +429,14 @@ impl Failure {
     pub const fn new(title: String, hint: Option<String>, lines: Vec<String>) -> Self {
         Self { title, hint, lines, trust: None, password: None, ends_sessions: None }
     }
+
+    /// No machine has the name `target`: what looking it up printed is `lines`. The app says it in
+    /// these words too where it installs nothing, and a test standing in for a run reads them here.
+    #[must_use]
+    pub fn unnamed(target: &str, lines: Vec<String>) -> Self {
+        let hint = "Check the name, and that Tailscale or your VPN is up.";
+        Self::new(format!("No machine is named {target}"), Some(hint.to_owned()), lines)
+    }
 }
 
 /// A machine that asks for a password: whose, and whether one given was refused.
@@ -678,10 +686,7 @@ fn ssh_failure(
             Some("Add your key to your ssh agent, or to its authorized_keys."),
         )
     } else if has("Could not resolve hostname") {
-        (
-            format!("No machine is named {target}"),
-            Some("Check the name, and that Tailscale or your VPN is up."),
-        )
+        return Failure::unnamed(target, lines);
     } else if has("Connection refused") {
         (
             format!("{target} does not accept SSH"),

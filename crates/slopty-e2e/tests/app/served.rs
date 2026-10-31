@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use slopty_e2e::harness::{ServedApp, artifacts_dir};
-use slopty_e2e::snapshot::{MAC_TOLERANCE, PixelRect, assert_matches_masked};
+use slopty_e2e::snapshot::{PixelRect, assert_matches_masked};
 use slopty_e2e::{A11yNode, Command, Driver, Dump};
 
 /// How long a worker round trip may take.
@@ -182,7 +182,7 @@ pub async fn goldens_with(
         });
         let masks: Vec<PixelRect> =
             moving_nodes.cloned().chain(row_nodes).map(|n| mask_of(&n, frame.scale)).collect();
-        assert_matches_masked(&golden, &frame, MAC_TOLERANCE, &artifacts_dir(), &masks).unwrap();
+        assert_matches_masked(&golden, &frame, &artifacts_dir(), &masks).unwrap();
     }
     drv.ok(&Command::Appearance { dark: false }).await.unwrap();
     words

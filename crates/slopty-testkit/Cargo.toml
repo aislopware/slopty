@@ -10,12 +10,22 @@ description = "Test-only measuring and doubles: a counting allocator, percentile
 [lints]
 workspace = true
 
+[features]
+# Golden frames (`golden`): the comparator a picture of the interface is held to, the backdrop it
+# is laid over and the words it says, for the app's self-test and the shell's in-process tests.
+# Off for xtask, which builds this crate too.
+golden = [ "dep:anyhow", "dep:image", "dep:similar" ]
+
 [dependencies]
+anyhow = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
 libc.workspace = true
 # A test's daemons ended as a process group and waited for (`group`).
 rustix.workspace = true
 # The stand-in `claude` (`slopty-stub-claude`) reads its settings and speaks MCP in JSON.
 serde_json.workspace = true
+# A golden's words against the frame's, as the lines that changed (`golden`).
+similar = { workspace = true, optional = true }
 # A link a test cuts and restores (`relay`), on the runtime the tests run on.
 tokio.workspace = true
 

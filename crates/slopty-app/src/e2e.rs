@@ -919,11 +919,12 @@ fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> 
         Some(scale) => window.render_to_image_at(scale, cx),
         None => window.render_to_image(),
     };
-    let mut image = match image {
+    // Written as GPUI drew it, premultiplied, clear where a frosted surface lets the desktop
+    // through: the test lays it over the backdrop (`slopty_testkit::golden::over_backdrop`).
+    let image = match image {
         Ok(image) => image,
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
     };
-    over_backdrop(&mut image);
     let stale = if tree_kept() { kept_stale(window) } else { stale(window, cx) };
     let (width, height) = image.dimensions();
     if let Err(e) = image.save(path) {
@@ -956,25 +957,6 @@ fn render(window: &mut Window, cx: &mut App, path: &str, scale: Option<f32>) -> 
             }
             Reply::Error { message: format!("the frame drawn is stale ({scratch}): {stale}") }
         }
-    }
-}
-
-/// What a render shows behind a window that lets its backdrop through (frosted surfaces): a fixed
-/// slate, where on a Mac the desktop would be, so a frosted frame is the same on every machine.
-#[cfg(feature = "e2e")]
-const BACKDROP: [u8; 3] = [72, 96, 128];
-
-/// Composite `image`, whose colours are premultiplied by their alpha as GPUI draws them, over
-/// [`BACKDROP`]: every pixel comes out opaque, and an opaque one unchanged.
-#[cfg(feature = "e2e")]
-fn over_backdrop(image: &mut image::RgbaImage) {
-    for pixel in image.pixels_mut() {
-        let clear = 255_u16.saturating_sub(u16::from(pixel[3]));
-        for (channel, backdrop) in pixel.0.iter_mut().zip(BACKDROP) {
-            let under = clear.saturating_mul(u16::from(backdrop)).saturating_add(127) / 255;
-            *channel = u8::try_from(u16::from(*channel).saturating_add(under)).unwrap_or(u8::MAX);
-        }
-        pixel[3] = u8::MAX;
     }
 }
 
@@ -1425,5 +1407,22 @@ mod pointer {
         if cx.has_global::<Pointer>() {
             cx.set_global(Pointer(next));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_shell::popover::{MENU_SCROLLBAR_FADE_MS, MENU_SCROLLBAR_LINGER_MS};
+
+    /// The self-test draws a golden once the shell's rails are at rest, and its wait
+    /// ([`slopty_e2e::RAIL_AT_REST`]) holds their linger and fade with a frame or two to spare.
+    #[test]
+    fn the_self_test_waits_out_the_shells_rails() {
+        let rail = u128::from(MENU_SCROLLBAR_LINGER_MS.saturating_add(MENU_SCROLLBAR_FADE_MS));
+        let waited = slopty_e2e::RAIL_AT_REST.as_millis();
+        assert!(
+            rail.saturating_add(32) <= waited,
+            "a rail stays {rail} ms; the self-test waits {waited} ms"
+        );
     }
 }

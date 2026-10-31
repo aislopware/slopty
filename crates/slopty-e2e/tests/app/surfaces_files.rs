@@ -1,8 +1,8 @@
-//! The shell's Changes and Files surfaces and its settings pages on a real stack: a thread of a
-//! stand-in Claude Code (`slopty-stub-claude`) working in a git repository on the stack's
-//! worker, the repository's uncommitted changes and its tree in views summoned beside the
-//! session, and the Agents, Appearance, Shortcuts, Devices and Archived pages. Every state is a
-//! golden in light and in dark.
+//! The shell's Changes and Files surfaces on a real stack: a thread of a stand-in Claude Code
+//! (`slopty-stub-claude`) working in a git repository on the stack's worker, the repository's
+//! uncommitted changes and its tree in views summoned beside the session. Every state is a
+//! golden in light and in dark. The settings pages are the shell's in-process goldens'
+//! (`slopty_shell::shell::goldens`).
 
 use std::path::Path;
 use std::time::Duration;
@@ -79,13 +79,9 @@ async fn click(drv: &mut Driver, role: &str, label: &str) {
 /// A stand-in agent's thread in a repository with changes: ⌘1 selects it, ⌘R summons its
 /// changes beside the session's terminal, the working tree's two changed files with their hunks;
 /// ⌘E summons the files of the thread's folder beside them.
-/// Then ⌘, opens Settings, whose Providers page lists the machine's agents and the autonomy
-/// setting, its Appearance and Shortcuts pages,
-/// Devices with Add device's dialog, and Archived with the thread archived by ⌘⇧A, which Unarchive
-/// brings back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn changes_files_and_settings_show_the_threads_work() {
+async fn changes_and_files_show_the_threads_work() {
     // The stand-in TUI takes its prompt's turn, so its thread has a turn to show.
     let mut stack = ServedApp::launch_rooted(MACHINE, &[], |_root| {
         vec![("STUB_TURNS".to_owned(), serde_json::json!({ PROMPT: [] }).to_string())]
@@ -141,81 +137,6 @@ async fn changes_files_and_settings_show_the_threads_work() {
         .unwrap();
     tokio::time::sleep(SETTLE).await;
     goldens(drv, &renders, "surface-files-tree").await;
-
-    // Settings: the Agents page (Providers, as zeron names it) with the autonomy setting, then
-    // Appearance.
-    drv.keys("cmd-,").await.unwrap();
-    click(drv, "Tab", "Providers").await;
-    drv.wait_for("the autonomy setting", STEP, |d| node(d, "Button", "Autonomy: Auto").is_some())
-        .await
-        .unwrap();
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-agents").await;
-    click(drv, "Tab", "Appearance").await;
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-appearance").await;
-    // The theme menu marks the default theme, and a row off its default (the frame's opaque
-    // glass) offers Reset, and only that row.
-    let page = drv.dump().await.unwrap();
-    assert!(
-        node(&page, "Button", "Reset Glass to default").is_some()
-            && node(&page, "Button", "Reset Conversation width to default").is_none(),
-        "Reset only off the default:\n{}",
-        slopty_e2e::frame_text(&page.a11y)
-    );
-    click(drv, "Button", "Light theme: Slopty Light").await;
-    drv.wait_for("the theme menu", STEP, |d| node(d, "MenuItemRadio", "Slopty Light").is_some())
-        .await
-        .unwrap();
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-appearance-defaults").await;
-    drv.keys("escape").await.unwrap();
-    // The menu fades out; a frame mid-fade is not one a scratch frame draws.
-    tokio::time::sleep(SETTLE).await;
-    drv.wait_for("the theme menu closed", STEP, |d| {
-        node(d, "MenuItemRadio", "Slopty Light").is_none()
-    })
-    .await
-    .unwrap();
-
-    // Shortcuts: every binding by what it does.
-    click(drv, "Tab", "Shortcuts").await;
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-shortcuts").await;
-
-    // Devices: this Mac's worker, then Add device's dialog, which a self-test has no ssh for.
-    click(drv, "Tab", "Devices").await;
-    drv.wait_for("the add row", STEP, |d| node(d, "Button", "Add a device").is_some())
-        .await
-        .unwrap();
-    tokio::time::sleep(SETTLE).await;
-    goldens(drv, &renders, "settings-devices").await;
-    click(drv, "Button", "Add a device").await;
-    drv.wait_for("the dialog", STEP, |d| node(d, "Dialog", "Add device").is_some()).await.unwrap();
-    goldens(drv, &renders, "settings-devices-add").await;
-    drv.keys("escape").await.unwrap();
-    drv.wait_for("the dialog gone", STEP, |d| node(d, "Dialog", "Add device").is_none())
-        .await
-        .unwrap();
-
-    // Archived: the thread archived from the sidebar's shortcut is listed there, and comes
-    // back with Unarchive. Its row says its age by the clock the stack pins before every run
-    // (`harness::PINNED_MS`), so it reads "now" in every run however long the steps before took.
-    drv.keys("escape").await.unwrap();
-    drv.keys("cmd-1").await.unwrap();
-    drv.keys("cmd-shift-a").await.unwrap();
-    drv.keys("cmd-,").await.unwrap();
-    click(drv, "Tab", "Archived sessions").await;
-    drv.wait_for("the archived thread", STEP, |d| node(d, "Button", "Unarchive").is_some())
-        .await
-        .unwrap();
-    tokio::time::sleep(SETTLE).await;
-    // The archive's toast lasts a while of its own: it stays out of the golden.
-    crate::served::goldens(drv, &renders, "settings-archived", &["Archived \u{201c}"]).await;
-    click(drv, "Button", "Unarchive").await;
-    drv.wait_for("the thread back", STEP, |d| node(d, "Button", "Unarchive").is_none())
-        .await
-        .unwrap();
 
     stack.shutdown().await;
 }

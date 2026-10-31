@@ -607,8 +607,12 @@ impl AddDeviceDialog {
                 .debug_selector(|| "add-device-found-label".to_owned()),
         );
         if let Some(words) = words {
+            // What the look found, read out as it changes.
             list = list.child(
                 div()
+                    .id("add-device-found-words")
+                    .role(gpui::Role::Status)
+                    .aria_label(words)
                     .debug_selector(|| "add-device-found-words".to_owned())
                     .text_size(crate::typography::ui_rems(12.5))
                     .text_color(theme.text_muted)

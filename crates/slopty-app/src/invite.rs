@@ -17,33 +17,9 @@ use slopty_net::HostAddr;
 use slopty_view_proto::ServerInvite;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-/// The link's scheme and what it asks.
-const PREFIX: &str = "slopty://connect?";
-/// The query key that holds the server's address.
-const SERVER_KEY: &str = "server";
-
-/// What the dialog says under the code.
-const HOW: &str =
-    "Point the Camera of your iPhone or iPad at the code, then press Connect in Slopty.";
 /// Why there is no code: the server is on this Mac, which no tailnet names.
 const NO_NAME: &str =
     "This Mac is on no tailnet, so your devices need its address on your VPN: type it there.";
-
-/// The link that opens Slopty on a device at Add device with `server` filled in.
-pub(crate) fn link(server: &HostAddr) -> String {
-    let mut out = String::from(PREFIX);
-    out.push_str(SERVER_KEY);
-    out.push('=');
-    for c in server.to_string().chars() {
-        match c {
-            '[' => out.push_str("%5B"),
-            ']' => out.push_str("%5D"),
-            '%' => out.push_str("%25"),
-            c => out.push(c),
-        }
-    }
-    out
-}
 
 /// The address a device reaches `server` by: its own, or for a server on this Mac, this Mac's
 /// tailnet `name`, when one names it.
@@ -64,11 +40,7 @@ pub(crate) fn loopback(host: &str) -> bool {
 /// or why there is none.
 pub(crate) fn invite(server: &HostAddr, name: Option<&str>) -> ServerInvite {
     match reached(server, name) {
-        Ok(address) => ServerInvite {
-            link: Some(link(&address)),
-            address: Some(address.to_string()),
-            note: HOW.to_owned(),
-        },
+        Ok(address) => ServerInvite::reaching(&address.to_string()),
         Err(why) => ServerInvite { link: None, address: None, note: why.to_owned() },
     }
 }
@@ -85,7 +57,7 @@ pub(crate) fn server_in(url: &str) -> Option<HostAddr> {
 }
 
 fn strict(url: &str) -> Option<HostAddr> {
-    let value = url.strip_prefix(PREFIX)?.strip_prefix(SERVER_KEY)?.strip_prefix('=')?;
+    let value = url.strip_prefix(ServerInvite::LINK)?;
     let text = decode(value)?;
     if text.is_empty() || text.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return None;
@@ -185,6 +157,11 @@ pub(crate) fn open_in(url: &str, shell: AnyWindowHandle, cx: &mut App) {
 mod tests {
     use super::*;
 
+    /// The link that opens Slopty on a device at Add device with `server` filled in.
+    fn link(server: &HostAddr) -> String {
+        ServerInvite::link(&server.to_string())
+    }
+
     /// A link names the server, an IPv6 one in brackets, and reads back as it.
     #[test]
     fn a_link_carries_the_server_and_reads_back() {
@@ -212,6 +189,7 @@ mod tests {
         let shown = invite(&here, Some("m"));
         assert_eq!(shown.link.as_deref(), Some("slopty://connect?server=m:45560"));
         assert_eq!(shown.address.as_deref(), Some("m:45560"));
+        assert_eq!(shown.note, ServerInvite::HOW, "how to use it");
         let none = invite(&here, None);
         assert_eq!((none.link, none.note.as_str()), (None, NO_NAME));
     }

@@ -88,6 +88,17 @@ pub const HOLD_UPLOADS_ENV: &str = "SLOPTY_HOLD_UPLOADS";
 /// busy the machine was. The dump's `rtt_us` stays the live one.
 pub const SHOWN_RTT: std::time::Duration = std::time::Duration::from_millis(1);
 
+/// How long the shell's overlay rails (a terminal's, a list's) stay after the last scroll.
+///
+/// Their linger and fade after the last scroll, or the output that moved a thumb
+/// (`slopty_shell::popover`'s `MENU_SCROLLBAR_LINGER_MS` and `MENU_SCROLLBAR_FADE_MS`, which
+/// `slopty-app` holds it to), and a few frames.
+///
+/// A golden drawn after it shows every rail at rest. One drawn as a rail fades shows its thumb or
+/// not as the run's timing falls: the terminal's 3 × 24 pt thumb was in a dark golden, drawn just
+/// after its light twin, and not in the next run's frame.
+pub const RAIL_AT_REST: std::time::Duration = std::time::Duration::from_millis(1_760);
+
 /// A pointer button, as the driver names it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -776,26 +787,21 @@ pub struct A11yNode {
     pub bounds: [f32; 4],
 }
 
-/// What a frame says in words: a line per node of its accessibility tree, in reading order.
+/// What a frame says in words: a line per node of its accessibility tree, in reading order
+/// ([`slopty_testkit::golden::words`], as the shell's in-process goldens say it).
 ///
 /// Each line is the role, the label and the value, and a mark on the node with the keyboard.
 /// Where a node sits is the picture's business, so no bounds: a golden's text changes only
 /// when a word does.
+#[cfg(feature = "harness")]
 #[must_use]
 pub fn frame_text(a11y: &[A11yNode]) -> String {
-    let mut text = String::new();
-    for node in a11y {
-        text.push_str(&node.role);
-        for part in [&node.label, &node.value].into_iter().flatten().filter(|p| !p.is_empty()) {
-            text.push_str(" \u{2502} ");
-            text.push_str(&part.replace('\n', "\u{23ce}"));
-        }
-        if node.focused {
-            text.push_str(" (focused)");
-        }
-        text.push('\n');
-    }
-    text
+    slopty_testkit::golden::words(a11y.iter().map(|node| slopty_testkit::golden::Spoken {
+        role: &node.role,
+        label: node.label.as_deref(),
+        value: node.value.as_deref(),
+        focused: node.focused,
+    }))
 }
 
 /// The window.

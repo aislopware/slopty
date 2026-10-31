@@ -93,3 +93,11 @@ objc2-web-kit = { version = "0.3.2", features = [
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
 tempfile = "3"
+# The window drawn in the test process (`shell::goldens`): Core Text and the headless Metal
+# renderer, the comparator the self-test shares, and the snapshots of what a frame says and paints.
+gpui_platform = { workspace = true, features = [ "font-kit", "test-support" ] }
+insta.workspace = true
+# The words a run that fails says (`shell::goldens`' stand-in machine), from where a deploy says
+# them.
+slopty-deploy.workspace = true
+slopty-testkit = { workspace = true, features = [ "golden" ] }

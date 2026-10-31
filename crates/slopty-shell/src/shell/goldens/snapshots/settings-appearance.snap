@@ -1,3 +1,6 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
 Window
 Group │ Settings
 Button │ Back

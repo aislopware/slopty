@@ -27,7 +27,8 @@ pub fn set_sidebar_width(width: f32, cx: &mut gpui::App) {
     }
 }
 
-fn sidebar_width(cx: &gpui::App) -> f32 {
+/// The section column's width this frame ([`set_sidebar_width`]).
+pub(crate) fn sidebar_width(cx: &gpui::App) -> f32 {
     cx.try_global::<SettingsSidebarWidth>().map_or(crate::settings::SIDEBAR_DEFAULT, |w| w.0)
 }
 

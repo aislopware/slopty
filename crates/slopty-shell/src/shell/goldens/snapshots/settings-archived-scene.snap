@@ -1,0 +1,13 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
+0 Quad { border_style: Solid, bounds: 0,0 1320×880, content_mask: 0,0 1320×880, background: #f3f3f5ff, corner_radii: 0, border_widths: 0 }
+1 Quad { border_style: Solid, bounds: 448,131 680×61, content_mask: 256,0 1064×880, background: #1a1a1a0b, corner_radii: 12, border_widths: 0 }
+1 glyphs ×1 630,66 6×12 MonochromeSprite { content_mask: 256,0 1064×880, color: #62626aff }
+1 glyphs ×17 455,61 166×18 MonochromeSprite { content_mask: 256,0 1064×880, color: #303035ff }
+1 glyphs ×39 456,92 230×13 MonochromeSprite { content_mask: 256,0 1064×880, color: #62626aff }
+2 glyphs ×1 468,153 16×16 MonochromeSprite { content_mask: 448,131 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 131.0, 1128.0, 192.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×15 503,166 91×13 MonochromeSprite { content_mask: 504,164 89×16, color: #62626aff } fade { start: 1.0, clip: [448.0, 131.0, 1128.0, 192.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×17 503,145 102×15 MonochromeSprite { content_mask: 504,143 476×17, color: #303035ff } fade { start: 1.0, clip: [448.0, 131.0, 1128.0, 192.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×3 995,158 24×9 MonochromeSprite { content_mask: 448,131 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 131.0, 1128.0, 192.0], radii: 12.0, radii_y: 12.0 }
+2 glyphs ×9 1043,155 59×12 MonochromeSprite { content_mask: 448,131 680×61, color: #62626aff } fade { start: 1.0, clip: [448.0, 131.0, 1128.0, 192.0], radii: 12.0, radii_y: 12.0 }

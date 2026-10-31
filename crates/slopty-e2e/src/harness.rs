@@ -554,7 +554,7 @@ async fn daemons(
 ) -> Result<Daemons> {
     let server_dir = root.join("server");
     std::fs::create_dir_all(&server_dir)?;
-    let server = ServerDaemon::start(&server_dir, "e2e-server", log).await?;
+    let server = ServerDaemon::start(&server_dir, slopty_testkit::stack::SERVER, log).await?;
     let ptyd = spawn_ptyd(root, log, env).await?;
     let register = if fronted { server.address_v6() } else { server.address().to_owned() };
     let mut worker_env = vec![("SLOPTY_BIND", "127.0.0.1")];
@@ -775,13 +775,7 @@ async fn spawn_app(
 /// answers (a worker of its own, a server) would otherwise land in the first-run goldens.
 const EMPTY_TAILNET: &str = r#"{"BackendState":"Running","Self":null,"Peer":null}"#;
 
-/// The moment an app beside the stand-in `claude` reads as now: 2026-10-13T09:00:00Z.
-///
-/// [`crate::Command::PinClock`] pins it, so a golden that shows an age or a date holds the same
-/// one in every run. It lies before every run, so what the daemons stamp by the system's clock (a
-/// session's lease, a machine's heartbeat) reads as fresh, never stale
-/// (`docs/decisions/testing.md`, "The stand-in's times are a fixture's").
-pub const PINNED_MS: u64 = 1_791_882_000_000;
+pub use slopty_testkit::stack::PINNED_MS;
 
 /// Where the stand-in's fixture clock starts: 2100-01-01T09:00:00Z.
 ///
@@ -2191,7 +2185,7 @@ impl ServerStack {
         let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
-        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let server = ServerDaemon::start(&server_dir, slopty_testkit::stack::SERVER, &log).await?;
         // The stand-in `claude` first on its `PATH`: an agent started there is a thread to drive.
         let path = stand_in_path(root).await?;
         let env = [("BASH_SILENCE_DEPRECATION_WARNING", "1"), ("PATH", path.as_str())];
@@ -2331,7 +2325,7 @@ impl ServerFleet {
         let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
-        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let server = ServerDaemon::start(&server_dir, slopty_testkit::stack::SERVER, &log).await?;
         // On loopback alone, as `far` is: a worker on every interface of this machine would be
         // listed at its tailnet address when Tailscale runs here, and the run would depend on it.
         let bind = [("SLOPTY_BIND", "127.0.0.1")];
@@ -2493,7 +2487,7 @@ impl ServedApp {
         let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
-        let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
+        let server = ServerDaemon::start(&server_dir, slopty_testkit::stack::SERVER, &log).await?;
         let programs = root.join("programs");
         std::fs::create_dir_all(&programs)?;
         std::os::unix::fs::symlink(stub_claude().await?, programs.join("claude"))?;

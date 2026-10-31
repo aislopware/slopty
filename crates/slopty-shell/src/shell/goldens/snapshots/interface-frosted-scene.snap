@@ -1,0 +1,28 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
+0 Quad { border_style: Solid, bounds: 0,0 1320×880, content_mask: 0,0 1320×880, background: #f3f3f5cc, corner_radii: 0, border_widths: 0 }
+1 Quad { border_style: Solid, bounds: 0,0 256×880, content_mask: 0,0 1320×880, background: #1a1a1a0d, corner_radii: 0, border_widths: 0 }
+1 Quad { border_style: Solid, bounds: 736,501 104×33, content_mask: 256,38 1064×842, background: #303035ff, corner_radii: 8, border_widths: 0 }
+1 glyphs ×1 1269,14 14×14 MonochromeSprite { content_mask: 0,0 1320×880, color: #62626aff }
+1 glyphs ×1 1295,14 14×14 MonochromeSprite { content_mask: 0,0 1320×880, color: #62626aff }
+1 glyphs ×1 774,384 28×28 MonochromeSprite { content_mask: 256,38 1064×842, color: #62626a33 }
+1 glyphs ×28 686,434 203×17 MonochromeSprite { content_mask: 256,38 1064×842, color: #303035ff }
+1 glyphs ×45 659,464 258×14 MonochromeSprite { content_mask: 256,38 1064×842, color: #62626ab3 }
+2 Quad { border_style: Solid, bounds: 0,0 256×880, content_mask: 0,0 256×1, background: #00000000, border_color: #0000001f, corner_radii: 0, border_widths: 0/1/0/0 }
+2 Quad { border_style: Solid, bounds: 0,0 256×880, content_mask: 0,1 1×878, background: #00000000, border_color: #0000001f, corner_radii: 0, border_widths: 0/1/0/0 }
+2 Quad { border_style: Solid, bounds: 0,0 256×880, content_mask: 0,879 256×1, background: #00000000, border_color: #0000001f, corner_radii: 0, border_widths: 0/1/0/0 }
+2 Quad { border_style: Solid, bounds: 0,0 256×880, content_mask: 254,1 2×878, background: #00000000, border_color: #0000001f, corner_radii: 0, border_widths: 0/1/0/0 }
+2 Quad { border_style: Solid, bounds: 16,850 16×16, content_mask: 0,0 256×880, background: #303035ff, corner_radii: 8, border_widths: 0 }
+2 Quad { border_style: Solid, bounds: 94,16 12×10, content_mask: 102.16,18 3.84×6, background: #62626a00, border_color: #62626aff, corner_radii: 2.84, border_widths: 1 }
+2 Quad { border_style: Solid, bounds: 94,16 12×10, content_mask: 94,16 12×2, background: #62626a00, border_color: #62626aff, corner_radii: 2.84, border_widths: 1 }
+2 Quad { border_style: Solid, bounds: 94,16 12×10, content_mask: 94,18 3.84×6, background: #62626a00, border_color: #62626aff, corner_radii: 2.84, border_widths: 1 }
+2 Quad { border_style: Solid, bounds: 94,16 12×10, content_mask: 94,24 12×2, background: #62626a00, border_color: #62626aff, corner_radii: 2.84, border_widths: 1 }
+2 glyphs ×1 226,850 15×15 MonochromeSprite { content_mask: 0,0 256×880, color: #616169ff }
+2 glyphs ×10 39,851 68×13 MonochromeSprite { content_mask: 40,849 66×17, color: #303035cc }
+2 glyphs ×13 747,511 81×14 MonochromeSprite { content_mask: 256,38 1064×842, color: #ffffffff }
+2 glyphs ×15 16,50 85×13 MonochromeSprite { content_mask: 0,42 256×794, color: #797981ff }
+3 Quad { border_style: Solid, bounds: 27,861 7×7, content_mask: 0,0 256×880, background: #15803dff, corner_radii: 3.5, border_widths: 0 }
+3 Quad { border_style: Solid, bounds: 97,18 3×5, content_mask: 0,0 1320×880, background: #62626aff, corner_radii: 0.51, border_widths: 0 }
+4 glyphs ×1 20,853 8×10 MonochromeSprite { content_mask: 0,0 256×880, color: #ffffffff }
+5 Quad { border_style: Solid, bounds: 27,861 7×7, content_mask: 0,0 256×880, background: #ffffff00, border_color: #ffffffff, corner_radii: 3.5, border_widths: 1 }

@@ -144,12 +144,7 @@ fn undeployed(frames: &mpsc::UnboundedSender<AddProgress>, to: &Target, cx: &gpu
 fn unnamed_or_undeployed(host: &str, found: Result<(), String>) -> AddProgress {
     match found {
         Err(why) => AddProgress {
-            failure: Some(AddFailure {
-                title: format!("No machine is named {host}"),
-                hint: Some("Check the name, and that Tailscale or your VPN is up.".to_owned()),
-                lines: vec![why],
-                ..AddFailure::default()
-            }),
+            failure: Some(failure(&Failure::unnamed(host, vec![why]))),
             ..AddProgress::default()
         },
         Ok(()) => stopped(INSTALLS_NOTHING),

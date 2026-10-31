@@ -1,3 +1,6 @@
+---
+source: crates/slopty-shell/src/shell/goldens.rs
+---
 Window
 Group │ Settings
 Button │ Back
@@ -6,7 +9,7 @@ Tab │ Appearance
 Tab │ Notifications
 Tab │ Shortcuts
 Tab │ Providers
-Tab │ Devices (focused)
+Tab │ Devices
 Tab │ Files
 Tab │ Archived sessions
 Button │ Server: e2e-server, Connected
@@ -15,4 +18,11 @@ Button │ Connect a phone or iPad
 Button │ Change server
 Button │ Show in Finder surfaces
 Button │ Copy device ID f90c4d49078400a418850c6d7ec25b6b
-Button │ Add a device
+Button │ Add a device (focused)
+Dialog │ Add device
+TabList
+Tab │ This Mac
+Tab │ Over SSH
+Tab │ A server
+Button │ Cancel
+Button │ Use this Mac

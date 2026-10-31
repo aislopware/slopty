@@ -21,7 +21,6 @@ e2e = [
     "slopty-kit/e2e",
     "dep:gpui_ios",
     "gpui_ios?/test-support",
-    "dep:image",
     "slopty-platform/e2e",
 ]
 
@@ -58,8 +57,6 @@ slopty-view-proto.workspace = true
 slopty-shell.workspace = true
 # The self-test's surface material (`e2e`, `Command::Surface`).
 slopty-shell-theme.workspace = true
-# A render's frame put over its fixed backdrop (`e2e::over_backdrop`), with the `e2e` feature.
-image = { workspace = true, optional = true }
 
 # The test socket's UIKit-boundary delivery (`gpui_ios::inject`), with the `e2e` feature.
 [target.'cfg(target_os = "ios")'.dependencies]
