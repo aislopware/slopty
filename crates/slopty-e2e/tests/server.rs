@@ -419,11 +419,11 @@ mod tests {
         ensure!(refused.is_err(), "an online worker stays: {refused:?}");
         clock.lap("events, resize");
 
-        // 8b. An agent's thread: its permission prompt held for the person and answered over
-        //     the CLI; and a still picture refused, or asked of a window no worker has, so
-        //     nothing is ever captured.
+        // 8b. An agent's thread: its question waits on the person, whom nothing answers for, and
+        //     is answered in its terminal; an agent told at rest and stopped at work; and a still
+        //     picture asked of a window no worker has, so nothing is ever captured.
         agent_reached(stack, &worker).await?;
-        clock.lap("thread read, answer, still");
+        clock.lap("thread read, tell, stop, still");
 
         // 5. A closed terminal leaves the list. One whose program exited stays, exited with its
         //    status, until it is closed.
@@ -512,31 +512,46 @@ mod tests {
         Ok(())
     }
 
-    /// A Claude Code thread (the stand-in) asked to run a command: its permission prompt is the
-    /// thread's request on the next read, refused when an agent answers it over MCP, answered
-    /// by the person over the CLI under a key (and again, answering the first), and the agent
-    /// hears the denial with its words. Then a still picture of a window no worker has, so
-    /// nothing is captured.
+    /// A Claude Code thread (the stand-in) that asks the person a question: its read says it
+    /// needs them and what it asks. Nothing answers for the person: MCP offers an agent no tool
+    /// to, and a tell or a stop (an Esc would answer the dialog) is refused, naming what it waits
+    /// on. The person answers in its terminal and the agent hears it; at rest it is told again,
+    /// and stopped while that turn runs. Then a still picture of a window no worker has, so
+    /// nothing is captured (`docs/decisions/agents.md`, "TUI-first").
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
         let folder = stack.path("agent-folder");
         std::fs::create_dir_all(&folder)?;
         let folder = folder.to_string_lossy().into_owned();
-        let start = ["agent", "start", worker, "--folder", &folder, "bash", "rm", "-rf", "build"];
+        // The stand-in asks what follows `ask` with `AskUserQuestion` and waits on the person.
+        let question = "Which colour for the build?";
+        let start = ["agent", "start", worker, "--folder", &folder, "ask", question];
         let started = stack.slopty(&start).await?;
         let thread = str_of(&started, "agent")?.to_owned();
-        let request = until("the prompt held as the thread's request", STEP, async || {
-            let read = stack.slopty(&["agent", "read", "--thread", &thread]).await?;
-            Ok(read["requests"].as_array().and_then(|r| r.first()).cloned())
+        let reading = ["agent", "read", "--thread", thread.as_str()];
+        let mut last = String::new();
+        let asked = until("the question waits on the person", STEP, async || {
+            let read = match stack.slopty(&reading).await {
+                Ok(read) => read,
+                Err(e) => {
+                    last = format!("{e:#}");
+                    return Ok(None);
+                }
+            };
+            last = read.to_string();
+            let waits = read["phase"] == "needs_you"
+                && read["wait"].as_str().is_some_and(|w| w.contains(question));
+            Ok(waits.then_some(read))
         })
-        .await?;
-        let ask = str_of(&request, "ask")?.to_owned();
-        let choices = request["choices"].to_string();
-        ensure!(choices.contains("\"deny\""), "{request}");
-        // Only the person answers: MCP offers an agent no tool to answer with, and the prompt
-        // waits.
+        .await
+        .with_context(|| format!("the last read: {last}"))?;
+        let wait = str_of(&asked, "wait")?.to_owned();
+
+        // Only the person answers: MCP offers an agent no tool to answer with, and the CLI
+        // types nothing at the dialog: a tell is refused naming what it waits on, and a stop
+        // leaves it to the person, as no agent at work.
         let params = json!({
             "name": "answer_request",
-            "arguments": { "thread": thread, "ask": ask, "choice": "allow" },
+            "arguments": { "thread": thread, "choice": "Red" },
         });
         let by_agent = stack.mcp(40, "tools/call", params).await;
         let refused = match &by_agent {
@@ -544,34 +559,75 @@ mod tests {
             Ok(said) => said["error"].is_object() || said["result"]["isError"] == json!(true),
         };
         ensure!(refused, "an agent cannot answer a request: {by_agent:?}");
-        let still = stack.slopty(&["agent", "read", "--thread", &thread]).await?;
-        ensure!(still["requests"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
-        let answer = [
-            "--idempotency-key",
-            "e2e-answer",
-            "agent",
-            "answer",
-            "--thread",
-            thread.as_str(),
-            ask.as_str(),
-            "deny",
-            "--message",
-            "not the build folder",
-        ];
-        let done = stack.slopty(&answer).await?;
-        ensure!(done == json!({ "ok": true }), "{done}");
-        // The stand-in's call ends in the denial's words, as an error.
-        until("the agent hears the denial", STEP, async || {
-            let read = stack.slopty(&["agent", "read", "--thread", &thread, "--activity"]).await?;
-            let heard =
-                read["requests"] == json!([]) && read.to_string().contains("not the build folder");
-            Ok(heard.then_some(()))
+        let names_the_wait = |answer: &Result<Value>| {
+            answer.as_ref().err().is_some_and(|e| format!("{e:#}").contains(wait.as_str()))
+        };
+        let told = stack.slopty(&["agent", "tell", &thread, "Red"]).await;
+        ensure!(names_the_wait(&told), "a tell at the question is refused, naming it: {told:?}");
+        let stopped = stack.slopty(&["agent", "stop", &thread]).await;
+        let conflict =
+            stopped.as_ref().err().is_some_and(|e| format!("{e:#}").contains("(Conflict)"));
+        ensure!(conflict, "an Esc would answer it, so a stop is refused: {stopped:?}");
+        let still = stack.slopty(&reading).await?;
+        ensure!(
+            still["phase"] == "needs_you" && still["wait"] == json!(wait),
+            "the question still waits: {still}"
+        );
+
+        // The person answers in its terminal, and the agent hears it and comes to rest.
+        let term = until("the agent's terminal listed", STEP, async || {
+            let terminals = stack.slopty(&["terminals"]).await?;
+            let all = terminals.as_array().context("terminals is a list")?;
+            let found = all.iter().find(|t| t["agent"]["thread"] == thread.as_str());
+            Ok(found.and_then(|t| t["term"].as_str()).map(str::to_owned))
         })
         .await?;
-        let again = stack.slopty(&answer).await?;
-        ensure!(again == json!({ "ok": true }), "the same key answers the first: {again}");
-        let late = stack.slopty(&["agent", "answer", "--thread", &thread, &ask, "allow"]).await;
-        ensure!(late.is_err(), "a second answer finds nothing: {late:?}");
+        let answer = "Teal";
+        send_text(stack, &term, answer).await?;
+        let enter = stack.slopty(&["send", &term, "--keys", "enter"]).await?;
+        ensure!(enter == json!({ "ok": true }), "{enter}");
+        let mut last = String::new();
+        let heard = until("the agent hears the answer and rests", STEP, async || {
+            let read = stack.slopty(&reading).await?;
+            last = read.to_string();
+            let said = read["turns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t["entries"].as_array())
+                .flatten()
+                .any(|e| {
+                    e["type"] == "agent" && e["text"].as_str().is_some_and(|t| t.contains(answer))
+                });
+            Ok((read["phase"] == "done" && said).then_some(read))
+        })
+        .await
+        .with_context(|| format!("the last read: {last}"))?;
+        ensure!(heard.get("wait").is_none(), "nothing waits on the person: {heard}");
+
+        // At rest it is told, and its turn under way is stopped, as Esc stops it in its terminal.
+        let told = stack.slopty(&["agent", "tell", &thread, "hold", "the", "line"]).await?;
+        ensure!(told == json!({ "ok": true }), "{told}");
+        // The server stops what its own board holds at work.
+        until("the told turn runs", STEP, async || {
+            let listed = stack.slopty(&["agents"]).await?;
+            let all = listed["agents"].as_array().context("agents")?;
+            let working = all.iter().any(|a| a["id"] == thread.as_str() && a["phase"] == "working");
+            Ok(working.then_some(()))
+        })
+        .await?;
+        let stopped = stack.slopty(&["agent", "stop", &thread]).await?;
+        ensure!(stopped == json!({ "ok": true }), "{stopped}");
+        let mut last = String::new();
+        until("the turn ends interrupted", STEP, async || {
+            let read = stack.slopty(&reading).await?;
+            last = read.to_string();
+            let turns = read["turns"].as_array().context("turns")?;
+            let ended = turns.last().is_some_and(|t| t["state"] == "interrupted");
+            Ok(ended.then_some(()))
+        })
+        .await
+        .with_context(|| format!("the last read: {last}"))?;
 
         // A window no worker has: whether or not this one may record its screen, it answers
         // without a picture.
@@ -587,8 +643,6 @@ mod tests {
             ])
             .await;
         ensure!(cli.is_err(), "no picture is taken: {cli:?}");
-        let stopped = stack.slopty(&["agent", "stop", &thread]).await?;
-        ensure!(stopped == json!({ "ok": true }), "{stopped}");
         Ok(())
     }
 }
