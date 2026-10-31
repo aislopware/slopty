@@ -557,9 +557,9 @@ jobs:
   # gate and e2e run on free hosted runners; this Mac runs none", item 3). `e2e (mac)` builds the
   # daemons, the app and the test binaries once, in the check's one feature set, and runs the app's
   # cases (S1-S3) and the server's (S4), or `e2e (server)` the server's alone when the change
-  # reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
-  # and the iPad once the iPhone's tests are done, waits for each to settle, and runs S5 on the
-  # iPhone and the app's launch and layout on the iPad.
+  # reaches no other; with `e2e (ios)` in the plan it also builds the iOS app and hands the build
+  # on, and `e2e (ios)` boots the iPhone meanwhile, installs the app, waits for it to settle and
+  # runs S5 there (the iPad's light check is e2e.yml's).
   # Only the reached tests run, none retried (`NEXTEST_RETRIES=0`); a changed frame is a review, not
   # a red, on a runner's GPU (`--review`, as in e2e.yml). A job stops once any other job of its run
   # ended other than green (failed, past its timeout, or cancelled), since the run then never
@@ -655,12 +655,13 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-      # The Mac's triple, and the simulator's for the iOS app.
+      # The Mac's triple, and the simulator's for the job that builds the iOS app (`pack`). The
+      # simulator's job builds nothing but xtask on a miss of its cache entry.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
           targets: >-
-            ${{ matrix.case == 'ios' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            ${{ matrix.pack && 'aarch64-apple-darwin, aarch64-apple-ios,
             aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
       # The cargo cache the tools lane saves, read only (the gate job's comment).
       - uses: actions/cache/restore@v6
@@ -681,41 +682,44 @@ jobs:
       # `actions/cache` says only `cache-hit`: a condition on the `cache-matched-key` that only
       # `actions/cache/restore` sets read empty, and the fetch ran on every hit, 70 s of every
       # job (run 41218759169).
-      - uses: ./.github/actions/zig
-      - id: ghostty
+      - if: matrix.case != 'ios'
+        uses: ./.github/actions/zig
+      - if: matrix.case != 'ios'
+        id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - id: prebuilt
+      - if: matrix.case != 'ios'
+        id: prebuilt
         uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
           restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      - if: matrix.case != 'ios' && steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      - if: matrix.case != 'ios' && steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # xcodegen writes the iOS app's Xcode project (e2e.yml's comment).
-      - if: matrix.case == 'ios'
+      - if: matrix.pack
         id: xcodegen
         uses: actions/cache@v6
         with:
           path: ~/.local/xcodegen
           key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
-      - if: matrix.case == 'ios' && steps.xcodegen.outputs.cache-hit != 'true'
+      - if: matrix.pack && steps.xcodegen.outputs.cache-hit != 'true'
         run: |
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
             https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
           echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
             | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
-      - if: matrix.case == 'ios'
+      - if: matrix.pack
         run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask and nextest from their cache entry, as the gate's lanes take them.
       - id: xtask
@@ -738,11 +742,12 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # The Mac's job builds the host side once: its cases' test binaries and, when the plan has
-      # the simulator's job (`pack`), the simulator suite's too, packed into a tar it hands on as
-      # an artifact before its own tests. The simulator's runner takes it (`--host`) and only
-      # boots and builds the iOS app: building the Mac's side beside a first boot on three cores
-      # took 883 s against 182 s here, and starved the boot (run 41218759169;
+      # The Mac's job builds the e2e once: its cases' test binaries and, when the plan has the
+      # simulator's job (`pack`), the simulator suite's and the iOS app too, on the host build's
+      # own build scripts and proc macros, packed into a tar it hands on as an artifact before its
+      # own tests. The simulator's runner takes it (`--host`) and only boots, installs and tests:
+      # building beside a first boot on three cores took 883 s for the Mac's side against 182 s
+      # here (run 41218759169), and 828 s for the iOS app alone (run 41226170614;
       # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). A plan that
       # reaches the simulator alone gives this job an empty filter: it builds and packs, and runs
       # nothing.

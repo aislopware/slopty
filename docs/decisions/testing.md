@@ -2347,21 +2347,29 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   host build took 182 s in that run's `e2e (mac)` at the same 100 % compile-cache hits: beside
   the iPhone's first boot, a boot that takes a core and minutes of disk, three cores built at a
   fifth of the speed, and the boot itself took 230 s. The tests were never the cost.
-  - **The Mac's job builds the host side once, for both.** With the simulator's job in the plan
-    its matrix entry says `pack`: `xtask e2e mac --build-only --pack` builds the case's test
-    binaries and the simulator suite's in the one feature set, records each, and tars the
-    binaries the suites spawn, the test binaries and the record, which the job uploads as
-    `host-build-<attempt>` before its own tests run from that build (`--no-build`). Every
-    hosted runner checks out to `/Users/runner/work/slopty/slopty`, so the record's absolute
-    paths hold on the other runner unchanged, and the tar keeps the binaries executable, which an
-    artifact's own files do not. A plan that reaches the simulator alone gets a `mac` job with
-    an empty filter, which builds, packs and runs nothing.
-  - **The simulator's runner boots and builds the iOS app meanwhile.** `xtask e2e ios --host
-    <artifact>` starts the boot and a wait for the artifact at once, builds the iOS app, installs
-    it and lets the simulator settle, and joins the wait only then, so the host build costs it
-    only what is left of the Mac's build by then. The wait asks for the artifact every 10 s and
-    reads the run's jobs every minute: a job ended red or cancelled means no build is coming, and
-    it fails at once rather than at its 40-minute limit. The same path serves `e2e.yml`.
+  - **The Mac's job builds the e2e once, for both.** With the simulator's job in the plan its
+    matrix entry says `pack`: `xtask e2e mac --build-only --pack` builds the case's test
+    binaries and the simulator suite's in the one feature set, records each, builds the iOS app,
+    and tars the binaries the suites spawn, the test binaries, the record and the app, which the
+    job uploads as `host-build-<attempt>` before its own tests run from that build
+    (`--no-build`). Every hosted runner checks out to `/Users/runner/work/slopty/slopty`, so the
+    record's absolute paths hold on the other runner unchanged, and the tar keeps the binaries
+    executable, which an artifact's own files do not. A plan that reaches the simulator alone gets
+    a `mac` job with an empty filter, which builds, packs and runs nothing.
+  - **The iOS app is built there too, not on the simulator's runner.** The first cut built it on
+    the simulator's runner beside the boot (run 41226170614): 828 s, against 254 s when the host
+    build ran first on the same runner. The iOS build's build scripts and proc macros are host
+    units, which the compile cache cannot keep, and the host build had made them; alone, it
+    built them again on cores the first boot held at 0 % idle. That run took 23.5 minutes (the
+    `mac` job queued 5 of them behind a probe), of which the iOS app's build was 963 s.
+  - **The simulator's runner only boots, installs and tests.** `xtask e2e ios --host <artifact>`
+    starts the boot and a wait for the artifact at once, joins both, installs the app, waits for
+    the simulator to settle and runs the suite; it compiles nothing, so its job takes neither the
+    iOS targets nor zig nor xcodegen. The wait asks for the artifact every 10 s and reads the
+    run's jobs every minute: a job ended red or cancelled means no build is coming, and it fails
+    at once rather than at its 40-minute limit. The same path serves `e2e.yml`. On an idle
+    runner a first boot holds all three cores for 70 s of boot and 294 s more (probe run
+    41225144069), which the wait now overlaps.
   - **The iPad's light check leaves the gate.** It runs in every `e2e.yml` run, nightly and at a
     round's end, as a job of its own beside the iPhone's from the same host build, where its
     first boot costs no push 16 minutes. The person does not use the iPad (its light check of
@@ -2373,8 +2381,9 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     fetch ran on every hit: 70 s of every e2e job.
   - **What was not taken.** A third macOS job for the iOS app's build would queue: the free
     plan runs five macOS jobs at once, and the gate's three test shards and its two e2e jobs take
-    them all. Building the iOS app in the Mac's job too would put its 2-4 minutes in front of the
-    artifact, after the 3 minutes of host build, while the simulator's runner sits idle. Raising
+    them all. A settled simulator restored from a tar (1.9 GB, 1.0 GB compressed, 12 s to unpack)
+    boots in 39 s but still holds the cores 160 s, against 70 s and 294 s fresh (probe run
+    41225144069): worth about 2.5 minutes the simulator's runner now spends waiting anyway. Raising
     the tests' timeouts so they run beside a busy simulator was ruled out on 2026-10-30 ("An iOS
     run starts once its simulator has settled").
   - Tests: `gate::impact::tests::the_mac_job_builds_the_simulator_s_host_side` (the plan's

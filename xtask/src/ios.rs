@@ -378,11 +378,7 @@ fn build(sh: &Shell, sdk: Sdk, opts: &IosOpts) -> Result<Built> {
                 .context("set SLOPTY_TEAM_ID to your Apple Developer team id for device builds")?,
         ),
     };
-    let app = derived
-        .join("Build")
-        .join("Products")
-        .join(format!("{configuration}-{xcode_sdk}"))
-        .join(format!("{PRODUCT}.app"));
+    let app = bundle(&derived, configuration, xcode_sdk);
     // Xcode took 13–17 s to find nothing to do: what it builds from is read here instead, and an
     // unchanged set leaves the bundle it built last as it is.
     let version = cmd!(sh, "xcodebuild -version").quiet().read()?;
@@ -680,6 +676,27 @@ settings:
 /// The e2e build of the app for the simulator, in `sh`'s directory and target dir; its `.app`.
 pub fn build_for_simulator(sh: &Shell, sim: SimKind, log: &str) -> Result<Built> {
     build(sh, Sdk::Simulator, &IosOpts::for_e2e(sim, log))
+}
+
+/// Where [`build_for_simulator`] leaves the app, built or not: the one bundle for every
+/// simulator, which a packed host build carries to the simulator's runner (`xtask e2e --pack`).
+///
+/// # Errors
+///
+/// When the target directory cannot be read.
+pub fn simulator_app(sh: &Shell) -> Result<Utf8PathBuf> {
+    let derived =
+        crate::tools::target_dir(sh)?.join("ios").join(Sdk::Simulator.dir()).join("derived");
+    Ok(bundle(&derived, "Debug", Sdk::Simulator.xcode_sdk()))
+}
+
+/// The bundle Xcode builds under `derived` in `configuration` for `xcode_sdk`.
+fn bundle(derived: &Utf8Path, configuration: &str, xcode_sdk: &str) -> Utf8PathBuf {
+    derived
+        .join("Build")
+        .join("Products")
+        .join(format!("{configuration}-{xcode_sdk}"))
+        .join(format!("{PRODUCT}.app"))
 }
 
 /// Boot the simulator for `kind` (creating it on first use) and install `app`; its UDID.

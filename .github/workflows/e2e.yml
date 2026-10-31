@@ -7,9 +7,9 @@ run-name: >-
 # CLI and MCP, and the iOS app in the simulator on the iPhone and the iPad, each driven through
 # its test socket, every case on one commit (docs/decisions/testing.md, "Goldens render in the
 # test process; e2e is a smoke set chosen by what a change reaches"). The Mac's job builds the
-# host side once and runs the app's and the server's suites; the iPhone's and the iPad's jobs,
-# each on a runner of its own, boot their simulator and build the iOS app meanwhile, then take the
-# host side from it (the `plan` job). The gate runs the cases a push reaches the same way, the
+# e2e once (the Mac's side and the iOS app) and runs the app's and the server's suites; the
+# iPhone's and the iPad's jobs, each on a runner of its own, boot their simulator meanwhile, then
+# take the build from it (the `plan` job). The gate runs the cases a push reaches the same way, the
 # iPhone alone (ci.yml's `e2e`). Two ways in, both
 # dispatched on `gate`, so the run reads the compile cache the test shards fill there (a cache is
 # read by its own branch alone, and a run on main built the app for 600 s,
@@ -103,11 +103,11 @@ jobs:
           gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$sha"
           echo "every e2e case started on main's head, $sha, on gate" >> "$GITHUB_STEP_SUMMARY"
 
-  # The jobs the cases make: the Mac's builds the host side once for all of them, runs the app's
-  # and the server's suites when `mac` is asked for, and packs the build for the simulators'
-  # jobs when `ios` or `ipad` is (`--pack`); `ios` runs the simulator's suite on the iPhone and
-  # `ipad` the iPad's launch-and-layout check, each on a runner of its own that boots and builds
-  # the iOS app while the Mac's job builds, then takes the host side from it (`--host`;
+  # The jobs the cases make: the Mac's builds the e2e once for all of them, runs the app's and the
+  # server's suites when `mac` is asked for, and builds the iOS app and packs the build for the
+  # simulators' jobs when `ios` or `ipad` is (`--pack`); `ios` runs the simulator's suite on the
+  # iPhone and `ipad` the iPad's launch-and-layout check, each on a runner of its own that boots
+  # its simulator while the Mac's job builds, then takes the build from it (`--host`;
   # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). The iPad's first
   # boot after the iPhone's tests on one runner took 16 of the case's 46 minutes.
   plan:
@@ -160,12 +160,13 @@ jobs:
         with:
           r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
           r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
-      # The Mac's triple, and the simulator's for the ios case.
+      # The Mac's triple, and the simulator's for the job that builds the iOS app (`pack`); the
+      # simulators' jobs build nothing but xtask on a miss of its cache entry.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.1
           targets: >-
-            ${{ matrix.case != 'mac' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            ${{ matrix.pack && 'aarch64-apple-darwin, aarch64-apple-ios,
             aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
       # The cargo cache the gate's tools lane saves (ci.yml), read only.
       - id: cargo-home
@@ -182,12 +183,15 @@ jobs:
       # As the gate's lanes compile them, so the compile cache's entries are theirs
       # (xtask/src/ci_profile.rs).
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
-      - uses: ./.github/actions/zig
-      - id: ghostty
+      - if: matrix.case == 'mac'
+        uses: ./.github/actions/zig
+      - if: matrix.case == 'mac'
+        id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - id: prebuilt
+      - if: matrix.case == 'mac'
+        id: prebuilt
         uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
@@ -197,31 +201,31 @@ jobs:
       # exact inputs restored, nothing builds it, and the fetch was 51-74 s of every run
       # (.research/e2e-reduction-2026-10-31/B-anatomy.md), as ci.yml's lanes already skip it.
       # On `cache-hit`, the one output `actions/cache` sets (ci.yml's e2e job says more).
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      - if: matrix.case == 'mac' && steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      - if: matrix.case == 'mac' && steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
-      # xcodegen writes the iOS app's Xcode project, which the simulator cases build: XcodeGen's
+      # xcodegen writes the iOS app's Xcode project, which the job that packs builds: XcodeGen's
       # release, pinned by version and checksum and kept in the cache; Homebrew took minutes.
-      - if: matrix.case != 'mac'
+      - if: matrix.pack
         id: xcodegen
         uses: actions/cache@v6
         with:
           path: ~/.local/xcodegen
           key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
-      - if: matrix.case != 'mac' && steps.xcodegen.outputs.cache-hit != 'true'
+      - if: matrix.pack && steps.xcodegen.outputs.cache-hit != 'true'
         run: |
           curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
             https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
           echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
             | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
-      - if: matrix.case != 'mac'
+      - if: matrix.pack
         run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
       # a job (.research/ci-speed-2026-10-11.md item 4). The key names every input of its

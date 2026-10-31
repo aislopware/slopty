@@ -174,16 +174,16 @@ pub struct E2eOpts {
     /// in one step, hands the build on (`--pack`), then runs its tests with `--no-build`.
     #[arg(long, conflicts_with_all = ["no_build", "host"])]
     build_only: bool,
-    /// Also build the simulator suite's test binary, and write the host side of the build (the
-    /// binaries the suites spawn, every suite's test binary and the record) to this tar, which
-    /// another runner of the same workflow run takes with `--host`: the gate builds the Mac's
-    /// side of the e2e once, and the simulator's runner only boots and builds the iOS app
+    /// Also build the simulator suite's test binary and the iOS app, and write them with the
+    /// host side of the build (the binaries the suites spawn, every suite's test binary and the
+    /// record) to this tar, which another runner of the same workflow run takes with `--host`:
+    /// the gate builds the e2e once, and the simulator's runner only boots, installs and tests
     /// (`docs/decisions/testing.md`, "The simulator's runner builds no Mac side").
     #[arg(long, value_name = "TAR", conflicts_with_all = ["no_build", "host"])]
     pack: Option<camino::Utf8PathBuf>,
-    /// The `ios` case only: take the host side of the build from this artifact of the GitHub
-    /// Actions run this job is in, once the job that built it (`--pack`) uploaded it, instead of
-    /// building it here. The simulator boots and the iOS app builds meanwhile.
+    /// The `ios` case only: take the host side of the build and the iOS app from this artifact
+    /// of the GitHub Actions run this job is in, once the job that built them (`--pack`)
+    /// uploaded it, instead of building anything here. The simulator boots meanwhile.
     #[arg(long, value_name = "ARTIFACT", conflicts_with = "no_build")]
     host: Option<String>,
     /// Also run the tests that capture the screen (each target's `screen_recording` module), which
@@ -341,9 +341,13 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     if opts.hosted {
         return run_hosted(sh, opts);
     }
-    // The simulator cases' tools, before a minute of compiling.
-    if matches!(opts.case, Case::Ios) {
+    // The simulator cases' tools, before a minute of compiling: a run that builds the iOS app
+    // needs Xcode's, and one that takes it from another runner (`--host`) only the simulator.
+    if matches!(opts.case, Case::Ios) && opts.host.is_none() {
         crate::ios::preflight(sh, true)?;
+    }
+    if opts.pack.is_some() {
+        crate::ios::preflight(sh, false)?;
     }
     let suites: Vec<&Suite> = match opts.case {
         Case::App => APP.iter().collect(),
@@ -461,9 +465,16 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         }
     }
     if let Some(tar) = &opts.pack {
+        // The iOS app too, here, on the build's own host units: its build scripts and proc
+        // macros, which the compile cache cannot keep, are the host build's. Built alone on the
+        // simulator's runner beside its first boot it took 828 s, against 254 s after the host
+        // build there (runs 41226170614 and 41218759169).
+        let started = std::time::Instant::now();
+        let app = crate::ios::build_for_simulator(sh, crate::ios::SimKind::Iphone, &opts.log)?;
+        record.phase("simulator app", started.elapsed(), None);
         let started = std::time::Instant::now();
         let records: Vec<std::path::PathBuf> = built.iter().map(|s| recorded(s)).collect();
-        pack(sh, tar, &bin_dir, &records, &cargo_metadata)?;
+        pack(sh, tar, &bin_dir, &records, &cargo_metadata, &app.app)?;
         record.phase("pack", started.elapsed(), None);
     }
     if opts.build_only {
@@ -474,9 +485,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     // Every binary a suite spawns is built: `slopty_testkit::bins` looks no further.
     let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
 
-    // The iOS case's app, built once for every simulator it runs on.
+    // The iOS case's app, built once for every simulator it runs on, or by the runner that
+    // packed the host build (`--host`), which brings it.
     let app = if sims.is_empty() {
         None
+    } else if opts.host.is_some() {
+        Some(crate::ios::simulator_app(sh)?)
     } else {
         let started = std::time::Instant::now();
         let first = sims.first().copied().unwrap_or_default();
@@ -497,6 +511,20 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         if sims.is_empty() { vec![None] } else { sims.iter().copied().map(Some).collect() };
     for (pass, sim) in passes.iter().enumerate() {
         hold_if_stopping();
+        // The host build and the app with it (`--host`), before the install: the boot and the
+        // wait both ran in the background, so joining one first loses nothing, and the
+        // simulator's first-boot work goes on while it waits.
+        if let Some(waiting) = awaiting.take() {
+            let started = std::time::Instant::now();
+            let came = waiting
+                .join()
+                .map_err(|_panic| anyhow::anyhow!("the wait for the host build panicked"))??;
+            println!("  the host build came {came:.0?} into the run");
+            record.phase("host build", started.elapsed(), None);
+            if let Some(missing) = missing_record(&suites) {
+                bail!("{missing} in the host build {}", opts.host.as_deref().unwrap_or_default());
+            }
+        }
         let device = sim.map(|sim| {
             let family = sim.family();
             (|| -> Result<_> {
@@ -544,19 +572,6 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                 continue;
             }
         };
-        // The host build, once the simulator took the app and settled: what the wait for it
-        // adds to the run is what is left of it then.
-        if let Some(waiting) = awaiting.take() {
-            let started = std::time::Instant::now();
-            let came = waiting
-                .join()
-                .map_err(|_panic| anyhow::anyhow!("the wait for the host build panicked"))??;
-            println!("  the host build came {came:.0?} into the run");
-            record.phase("host build", started.elapsed(), None);
-            if let Some(missing) = missing_record(&suites) {
-                bail!("{missing} in the host build {}", opts.host.as_deref().unwrap_or_default());
-            }
-        }
         let on = sim.map_or_else(String::new, |sim| format!(" ({})", sim.family()));
         for suite in &suites {
             hold_if_stopping();
@@ -754,9 +769,9 @@ fn boot_in_background(
     })
 }
 
-/// Write the host side of an e2e build to the tar `out` for another runner (`--pack`): the
-/// binaries the suites spawn ([`BINS`] in `bin_dir`), each test binary the suites' `records`
-/// list, the records and cargo's metadata, every path relative to the checkout. Every hosted
+/// Write an e2e build to the tar `out` for the simulator's runner (`--pack`): the binaries the
+/// suites spawn ([`BINS`] in `bin_dir`), each test binary the suites' `records` list, the records
+/// and cargo's metadata, and the iOS `app`, every path relative to the checkout. Every hosted
 /// runner checks out to the same directory, so the records' absolute paths hold there as they
 /// are, and `tar` keeps the binaries executable (an artifact's own files lose the bit).
 fn pack(
@@ -765,6 +780,7 @@ fn pack(
     bin_dir: &camino::Utf8Path,
     records: &[std::path::PathBuf],
     cargo_metadata: &std::path::Path,
+    app: &camino::Utf8Path,
 ) -> Result<()> {
     let root = sh.current_dir();
     let relative = |path: &std::path::Path| -> Result<String> {
@@ -786,6 +802,7 @@ fn pack(
         files.push(relative(record)?);
     }
     files.push(relative(cargo_metadata)?);
+    files.push(relative(app.as_std_path())?);
     files.sort();
     files.dedup();
     if let Some(dir) = out.parent() {

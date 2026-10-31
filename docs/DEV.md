@@ -331,11 +331,12 @@ tests; a push that reaches none skips them. `e2e (mac)` builds the daemons, the 
 binaries once, in the check's one feature set (`--build-only`), and runs the app's cases (S1 to S3)
 and the server's (S4) on that runner from that build (`--no-build`), or `e2e (server)` the server's
 alone when the push reaches no other. When the plan has `e2e (ios)` too, the Mac's job also builds
-the simulator suite's test binary and hands the host side on as the artifact `host-build-<attempt>`
-before its own tests (`--pack`); a push that reaches the simulator alone gets a `mac` job that only
-builds and packs. `e2e (ios)` boots the iPhone and builds the iOS app meanwhile, installs it, waits
-for the simulator to settle (the runner's CPU half idle on two `top` samples in a row, at most 10
-minutes), takes the host side (`--host`) and runs S5 on the iPhone; the iPad's launch-and-layout
+the simulator suite's test binary and the iOS app and hands them on as the artifact `host-build-<attempt>`
+before its own tests, with the iOS app built on the host build's units (`--pack`); a push that
+reaches the simulator alone gets a `mac` job that only builds and packs. `e2e (ios)` compiles
+nothing: it boots the iPhone meanwhile, takes the build (`--host`), installs the app, waits for the
+simulator to settle (the runner's CPU half idle on two `top` samples in a row, at most 10 minutes)
+and runs S5 on the iPhone; the iPad's launch-and-layout
 check runs in `e2e.yml` only (`docs/decisions/testing.md`, "The simulator's runner builds no Mac
 side"). Both read the gate's compile cache, retry
 nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once
