@@ -68,9 +68,9 @@ const OWN_SIGNALS: &[&str] = &["slopty-crash"];
 /// is and runs them.
 ///
 /// The tests that wait on a child once stood beside these: `ThreadSanitizer` held the child's
-/// `SIGCHLD` for a minute (`fixtures/sigchld.rs`), and each such test waited that long or timed
-/// out. The `SIGCHLD` pump linked into every sanitized binary ([`sigchld_pump`]) hands it over at
-/// once, so they run.
+/// `SIGCHLD` for a minute (`xtask/fixtures/sigchld.rs`), and each such test waited that long or
+/// timed out. The `SIGCHLD` pump linked into every sanitized binary ([`sigchld_pump`]) hands it
+/// over at once, so they run.
 const TSAN_COUNTS_INSTRUCTIONS: &[(&str, &str)] =
     &[("slopty-testkit", "bench::tests::a_series_reports_per_operation_and_as_json")];
 
@@ -460,13 +460,13 @@ fn sanitized_env(sh: &Shell, which: Sanitizer) -> Result<Vec<PushEnv<'_>>> {
     ])
 }
 
-/// Build `fixtures/sigchld.rs` into the object every `ThreadSanitizer` binary links: before
+/// Build `xtask/fixtures/sigchld.rs` into the object every `ThreadSanitizer` binary links: before
 /// `main` it blocks `SIGCHLD` on every thread but one, which waits for it in `sigsuspend`, so the
 /// runtime runs the handler at once rather than on the main thread's next intercepted call, a
 /// minute later (`docs/decisions/testing.md`, "Red means something", its `SIGCHLD` pump).
 /// `no_std` and on its own, so it needs no build of the standard library.
 fn sigchld_pump(sh: &Shell) -> Result<Utf8PathBuf> {
-    let source = crate::tools::repo_root()?.join("xtask/src/deep/fixtures/sigchld.rs");
+    let source = crate::tools::repo_root()?.join("xtask/fixtures/sigchld.rs");
     let out = deep_dir("thread")?.join("sigchld.o");
     std::fs::create_dir_all(deep_dir("thread")?)?;
     let host = TRIPLES[0];

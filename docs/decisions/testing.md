@@ -1695,7 +1695,7 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     libtest's main thread, which waits in one it does not intercept and wakes for its 60-second
     notice. So a child's exit was heard a minute late, and the tests that wait on one timed out
     or failed. Leaving them out (the old `TSAN_CANNOT_RUN`) hid the cause. Every binary the
-    check builds now links a `no_std` object (`xtask/src/deep/fixtures/sigchld.rs`): its
+    check builds now links a `no_std` object (`xtask/fixtures/sigchld.rs`): its
     constructor blocks `SIGCHLD` on the main thread, which every later thread inherits, and
     starts one thread looping on `sigsuspend`, which the runtime intercepts. The handler runs in
     5 ms instead of 60 s (MEASUREMENTS 2026-10-30, "Deep's reds"). The canary's guard test fails

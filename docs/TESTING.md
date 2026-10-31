@@ -308,7 +308,7 @@ Four deep checks see what the rest cannot:
   intercept and wakes only for its 60-second notice. So every test that waited on a child
   through `SIGCHLD` (`tokio::process`, a PTY's child) waited a minute, and the session actor's and
   the review's tests failed or timed out for that alone. Every binary `sanitize thread` builds
-  links a pump (`xtask/src/deep/fixtures/sigchld.rs`): before `main` it blocks `SIGCHLD` on the
+  links a pump (`xtask/fixtures/sigchld.rs`): before `main` it blocks `SIGCHLD` on the
   main thread, which every later thread inherits, and starts one thread that waits for it in
   `sigsuspend`, whose interceptor runs the handler at once. A child waits 5 ms for it, not 60 s.
 - **Loom models** (`deep loom`). A lock-free structure whose correctness rests on its orderings
