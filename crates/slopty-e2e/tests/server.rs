@@ -323,15 +323,29 @@ mod tests {
         stack.slopty(&["send", &term, "--keys", "ctrl+c"]).await?;
         clock.lap("ports");
 
-        // 7. The agents' tools through `slopty mcp`: the eight listed, and a call the hub answers.
-        //    The screen of a terminal, as an agent reads it with `slopty screen`.
+        // 7. The agents' tools through `slopty mcp`: listed, each once with the schema of its
+        //    input, the orchestration ones among them (the registry's own list is the CLI's tests'
+        //    to hold it to), and a call the hub answers. The screen of a terminal, as an agent
+        //    reads it with `slopty screen`.
         let listed = stack.mcp(1, "tools/list", json!({})).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        ensure!(
-            names.len() == 8 && names.contains(&"agent_start") && names.contains(&"branch_bring"),
-            "{listed}"
-        );
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        ensure!(names.len() == tools.len() && unique.len() == names.len(), "{listed}");
+        ensure!(tools.iter().all(|t| t["inputSchema"]["type"] == "object"), "{listed}");
+        let orchestration = [
+            "machines",
+            "agent_start",
+            "agent_tell",
+            "agent_read",
+            "agent_wait",
+            "agent_stop",
+            "agents",
+            "branch_bring",
+        ];
+        for tool in orchestration {
+            ensure!(unique.contains(tool), "{tool} listed: {names:?}");
+        }
         let nobody = "0199a1b1-c3d4-7000-8000-00000000beef";
         let params = json!({ "name": "agent_read", "arguments": { "agent": nobody } });
         let called = stack.mcp(2, "tools/call", params).await?;

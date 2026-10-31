@@ -309,15 +309,22 @@ async fn a_page_card_is_sandboxed_and_acts_for_the_person() {
 
     // Open in pane: the page in front in a tab of its own, and back from there, in its card
     // again: live, or its picture while the pointer rests on the button that brought it back.
+    // The card and the pane's view are both the page's group, "Page: Probe", the card's first
+    // in reading order whenever the inspector shows it: each is told apart by its value.
+    let pages = |d: &Dump, values: &[&str]| {
+        d.a11y.iter().any(|n| {
+            n.role == "Group"
+                && n.label.as_deref() == Some("Page: Probe")
+                && n.value.as_deref().is_some_and(|v| values.contains(&v))
+        })
+    };
     let back_in_card = |d: &Dump| {
         node(d, "Group", "Shown in the pane").is_none()
-            && node(d, "Group", "Page: Probe")
-                .is_some_and(|n| matches!(n.value.as_deref(), Some("live" | "snapshot")))
+            && !pages(d, &["pane"])
+            && pages(d, &["live", "snapshot"])
     };
-    let in_pane = |d: &Dump| {
-        node(d, "Group", "Page: Probe").is_some_and(|n| n.value.as_deref() == Some("pane"))
-            && node(d, "Button", "Back to the inspector").is_some()
-    };
+    let in_pane =
+        |d: &Dump| pages(d, &["pane"]) && node(d, "Button", "Back to the inspector").is_some();
     let drv = &mut stack.driver;
     hover(drv, &group).await;
     click(drv, "Button", "Open in pane").await;
