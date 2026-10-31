@@ -38,7 +38,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use xshell::{Shell, cmd};
 
-use crate::tools::{has, step};
+use crate::tools::step;
 
 /// What to do.
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -362,14 +362,23 @@ fn smoke(built: &[Built]) -> Result<()> {
     Ok(())
 }
 
-/// zig and cargo-zigbuild, which every Linux build here goes through.
+/// zig, and cargo-zigbuild at the release setup pins or later, which every Linux build here goes
+/// through. An older cargo-zigbuild links all the same, only worse: before 0.24 it handed zig
+/// rustc's `-Wl,-O1`, which zig ignores with a warning on every optimised link.
 fn need_zig(sh: &Shell) -> Result<()> {
     if let Some(problem) = crate::tools::zig_problem(sh) {
         bail!("{problem}");
     }
+    let setup = "`cargo xtask setup --tool cargo-zigbuild`";
+    let pinned = crate::setup::pinned("cargo-zigbuild").context("setup pins cargo-zigbuild")?;
+    let said =
+        cmd!(sh, "cargo-zigbuild --version").quiet().ignore_stderr().read().with_context(|| {
+            format!("cargo-zigbuild is needed to cross-build for Linux: {setup}")
+        })?;
+    let version = said.split_whitespace().last().unwrap_or_default();
     ensure!(
-        has(sh, "cargo-zigbuild"),
-        "cargo-zigbuild is needed to cross-build for Linux: `cargo binstall cargo-zigbuild`"
+        !crate::setup::older(version, pinned),
+        "cargo-zigbuild {version} is older than the {pinned} setup pins: {setup}"
     );
     Ok(())
 }

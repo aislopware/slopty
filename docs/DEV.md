@@ -118,7 +118,8 @@ zed itself so it is never behind zed while longbridge lags.
   pinned version.
 - `cargo xtask linux` cross-builds the terminal-only Linux worker (`slopty-ptyd`,
   `slopty-worker`, `slopty`) for `aarch64-unknown-linux-gnu` under `target/linux`, with
-  `cargo zigbuild` (`cargo binstall cargo-zigbuild`; zig is the one libghostty-vt takes).
+  `cargo zigbuild` (`cargo xtask setup --tool cargo-zigbuild`, which it needs at the pinned
+  release or later; zig is the one libghostty-vt takes).
   `cargo xtask linux run` starts it in a fresh Debian container on Docker Desktop (the
   `desktop-linux` context) and prints the loopback address to dial, such as
   `cargo xtask probe ping --worker 127.0.0.1:<port>`; Ctrl-C removes the container. `cargo xtask linux e2e`

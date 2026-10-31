@@ -608,14 +608,16 @@ jobs:
           restore-keys: cargo-home-
           enableCrossOsArchive: true
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall --no-confirm git-cliff@2.14.2 cargo-zigbuild@0.23.4
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
       # zig builds libghostty-vt and links every Linux binary; its caches keep what it compiled
       # to link them.
       - uses: ./.github/actions/zig
         with:
           use-cache: "true"
+      # The releases `xtask/src/setup.rs` pins, the list the gate's jobs install from, and
+      # ghostty's patches into that zig, as on a Mac that bundles.
+      - run: cargo xtask setup --tool git-cliff --tool cargo-zigbuild
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       # The vault's client, the version `xtask/src/vault.rs` was proven against, by the installer
       # of that release's commit, which checks the download's SHA-256.
       - run: |

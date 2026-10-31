@@ -6,7 +6,9 @@ use xshell::{Shell, cmd};
 use crate::gate::LaneId;
 use crate::tools::{has, has_metal, step};
 
-/// Tools installed with `cargo binstall`. Versions are floors; binstall fetches prebuilt binaries.
+/// Tools installed with `cargo binstall`, prebuilt. Each version is exact: binstall reads a bare
+/// version as `=`, so setup puts the pinned release back over a newer one, and taking a new
+/// release means moving its pin here.
 const TOOLS: &[(&str, &str)] = &[
     ("cargo-nextest", "0.9.148"),
     ("cargo-deny", "0.20.2"),
@@ -24,11 +26,31 @@ const TOOLS: &[(&str, &str)] = &[
     ("git-cliff", "2.14.2"),
     ("committed", "1.1.11"),
     // `cargo xtask linux`: cross-links the Linux worker with zig; Linux clippy compiles each
-    // triple's C with it.
-    ("cargo-zigbuild", "0.23.4"),
+    // triple's C with it. 0.24 is the first to drop rustc's `-Wl,-O1`, which zig 0.12 and later
+    // ignore with a linker warning on every optimised link (`linux::need_zig` holds the floor).
+    ("cargo-zigbuild", "0.24.0"),
     // `cargo xtask fuzz` and `deep fuzz`: libFuzzer builds of `fuzz/` (on nightly).
     ("cargo-fuzz", "0.13.2"),
 ];
+
+/// The release of `tool` (its crate) that setup installs.
+pub fn pinned(tool: &str) -> Option<&'static str> {
+    TOOLS.iter().find(|(name, _)| *name == tool).map(|(_, version)| *version)
+}
+
+/// Whether release `version` comes before `than`, comparing each dotted part as a number (the
+/// digits it starts with: a pre-release's `0-rc` reads as 0).
+pub fn older(version: &str, than: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|part| {
+                let digits = part.find(|c: char| !c.is_ascii_digit()).unwrap_or(part.len());
+                part.get(..digits).and_then(|d| d.parse().ok()).unwrap_or(0)
+            })
+            .collect()
+    };
+    parts(version) < parts(than)
+}
 
 /// taplo's own release builds, gzipped, each with its SHA-256, for the hosts that run the gate's
 /// tools: binstall looks for other names than taplo's release uses, finds none, and compiled
@@ -179,8 +201,9 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
             println!("  ✓ ghostty's patch put into {file}");
         }
     }
-    if lanes.is_empty() {
-        // What only the user can fix; a probe that cannot run is not a failed setup.
+    if everything {
+        // What only the user can fix, for a whole setup, not a job's or a hint's few tools; a
+        // probe that cannot run is not a failed setup.
         if let Err(error) = crate::doctor::run(sh) {
             println!("  doctor skipped: {error:#}");
         }
@@ -217,5 +240,35 @@ mod tests {
         let (_, version) = TOOLS.iter().find(|(tool, _)| *tool == "taplo-cli").expect("pinned");
         assert_eq!(*version, "0.10.0", "a new taplo needs its builds' SHA-256s pinned anew");
         assert!(super::taplo_build().is_some(), "this host has a build");
+    }
+
+    /// setup's list is the one pin: a workflow installs a pinned tool through `xtask setup`,
+    /// never at a version of its own that a bump here leaves behind (the release job held
+    /// cargo-zigbuild at 0.23.4 beside the list, and so every Linux link's warning).
+    #[test]
+    fn no_workflow_pins_a_tool_of_its_own() {
+        let workflows = crate::tools::repo_root().expect("repo root").join(".github/workflows");
+        for entry in std::fs::read_dir(&workflows).expect("the workflows") {
+            let path = entry.expect("a workflow").path();
+            let text = std::fs::read_to_string(&path).expect("its text");
+            for (tool, _) in TOOLS {
+                assert!(!text.contains(&format!("{tool}@")), "{} pins {tool}", path.display());
+            }
+        }
+    }
+
+    /// A release is older by its parts as numbers, not as text, and the pin itself or anything
+    /// after it passes.
+    #[test]
+    fn a_release_is_older_by_its_numbered_parts() {
+        use super::older;
+        assert!(older("0.23.4", "0.24.0"));
+        assert!(older("0.9.148", "0.10.0"), "9 before 10, though '9' sorts after '1'");
+        assert!(older("0.24.0-rc.1", "0.24.1"));
+        assert!(!older("0.24.0", "0.24.0"));
+        assert!(!older("0.24.1", "0.24.0"));
+        assert!(!older("1.0.0", "0.24.0"));
+        assert_eq!(super::pinned("cargo-zigbuild").map(|v| older(v, "0.24.0")), Some(false));
+        assert_eq!(super::pinned("no-such-tool"), None);
     }
 }

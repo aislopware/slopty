@@ -3171,3 +3171,26 @@ more full-window layer.
     end. The streaming delta's text-append check now compares every field of an entry but its
     parts: it missed the turn's duration, so a duration stamped on the tick of the last tokens
     was lost.
+
+- ✅ **The Linux links take cargo-zigbuild 0.24, and setup's list is the one pin of a tool**
+  (2026-10-31). Every Linux binary of a bundle warned `linker stderr: ignoring deprecated linker
+  optimization setting "1"` (rustc's `linker_messages`). rustc hands a GNU-like linker `-Wl,-O1`
+  at opt-level 2 and 3; zig 0.12 and later take no optimisation level for a link and say they
+  ignore it; cargo-zigbuild, which turns rustc's linker arguments into zig's, passed it through
+  until 0.24.0 (rust-cross/cargo-zigbuild#486, and #506 for zig 0.17). The Mac's binaries link
+  with Apple's linker, which rustc hands no `-O1`.
+  - **The pin was exact, not a floor.** cargo-binstall reads a bare version as `=`, so
+    `xtask setup` put 0.23.4 back over a newer cargo-zigbuild (a dry run shows it), though the
+    list's comment called its versions floors. The pin moved to 0.24.0 and the comment says what
+    binstall does: a new release is taken by moving its pin.
+  - **One pin.** The release job installed `cargo-zigbuild@0.23.4` and `git-cliff@2.14.2` with a
+    binstall line of its own, which a bump of the list would have left behind. It runs
+    `xtask setup --tool …` after its zig now, as the gate's jobs do, and a test fails on a
+    workflow that names a pinned tool with a version.
+  - **The floor is held where it links.** `linux::need_zig` refuses a cargo-zigbuild older than
+    the pin and names the setup command, instead of linking with the old one's flaws. A setup
+    of a few tools (a job's, or that hint's) no longer runs the doctor's XProtect probe; a whole
+    setup still does.
+  - **Not taken.** Allowing `linker_messages` hides the cause, and lints are never loosened. No
+    `-C link-arg` removes an argument rustc adds, and a target spec of our own that names no
+    GNU-like linker needs nightly.
