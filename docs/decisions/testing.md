@@ -1951,3 +1951,68 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
       `view::tests::a_frame_before_the_sizes_timer_draws_it_as_one_from_scratch`,
       `overlays::tests::a_resize_shows_only_once_the_layout_has_settled`).
   - Proof: e2e `ios::screens::a_session_is_its_terminal_and_shows_its_inspector` on the iPhone.
+
+- ✅ **Goldens render in the test process; e2e is a smoke set chosen by what a change reaches**
+  (2026-10-31). Refines items 8 to 10 of "Simulation, models and mutants carry the tests"
+  (2026-10-29), which were not built: since then e2e grew from 59 to 61 tests and from 104 to
+  118 PNG goldens. The person found e2e and its goldens still too slow and asked for a thorough
+  study of today's techniques, to move e2e onto others with coverage and quality kept at their
+  best. The studies are `.research/e2e-reduction-2026-10-31/` (A every test and golden, B where
+  a run's time goes, C the field's practice with sources, D GPUI's in-process parts). The facts:
+  - A round's e2e (app, iPhone, iPad) is about 31 min: build 42 %, simulator boot and settle
+    28 %, tests 25 %, guest boot and copies 4 % (B). Lane E spent about 149 min on 25 runs in
+    one day. 20 golden commits in 2.5 days, seven of them touching 83 to 282 files, because
+    every golden is the whole window (A).
+  - Scheduled `e2e.yml` was red 5 of its last 6 runs, every one from UI or fixture drift that
+    landed before the suite ran, none from flakes or infrastructure (A, B).
+  - A golden is not a screen capture: the self-test asks GPUI's Metal renderer for the frame,
+    and gpui-fast's `MetalHeadlessRenderer::render_scene_to_image` calls the same
+    `render_frame` offscreen with no window and no window server (D). 108 of the 118 PNG files
+    can be drawn in the test process; 10 need the real app (WebKit pages and the chart, S1's
+    two frames, iOS session and inspector) (A).
+  - The comparator counts differing pixels over the whole frame (0.2 %, about 2,300 pixels at
+    1320×880), so a changed 40×40 icon passes. GPU noise scatters; a real change is compact
+    (pixelmatch v8's windowed rule, C).
+  - The field agrees: Zed gates on in-process client and server tests and keeps its Metal
+    screenshot tests off CI; Chromium writes a pixel test only where a reftest cannot say it;
+    flakiness grows with test size (C).
+
+  Ruled:
+  1. **The in-process render harness.** A test opens the real shell in a GPUI test window with
+     the real Core Text system, the app's fonts and assets, and gpui-fast's headless Metal
+     renderer, and renders it to the same PNG the e2e did (`over_backdrop` and the comparator
+     move from `slopty-e2e` to test support). gpui-fast gains what that needs: a public test
+     context taking a text system and renderer factory, transparency in the headless renderer,
+     and rendering at a scale. Before any golden moves, three states are drawn here and in the
+     guest and compared, so the host GPU's raster is measured, not assumed.
+  2. **Pixels where only pixels can say it, scoped to the surface.** A golden renders the view
+     it is about at its size; a few compositions keep the whole window. The words of every
+     frame become an insta snapshot of the a11y tree, and a scene-line snapshot holds layout,
+     colour and order. Dark is a relation, not a picture: the dark scene must equal the light
+     one with every colour mapped through the theme, with dark PNG files kept for about six
+     surfaces.
+  3. **The comparator judges a window, not the whole frame.** A golden fails when any small
+     window holds more differing pixels than noise could, whatever the frame's total.
+  4. **e2e is seven smoke tests:** S1 a session on the real stack (boot, inspector, resume,
+     the prompt box's mirror, a split shell, relaunch, the hang watchdog, one shader frame),
+     S2 a VideoToolbox stream, S3 WebKit (page, favicon, chart), S4 the CLI and MCP through the
+     server, S5 iOS (one session with its inspector), S6 Linux, and the VM's TCC grants. The
+     other e2e tests are deleted once their replacement holds what they held: a named headless,
+     in-process or worker-process test, killing at least as many mutants.
+  5. **A change runs the smoke tests it reaches, before it reaches main.** xtask maps changed
+     paths to smoke tests (the app's glue and natives to S1-S3, `cfg(target_os = "ios")` code
+     and `apps/slopty-ios` to S5, the server and CLI to S4, Linux-only code to S6); the gate
+     runs those, and all of them run nightly. A smoke test that goes red is a bug in the
+     product or the test, never retried.
+  6. **What smoke remains is cheap.** One feature set for the e2e build and the check build
+     (no crate built twice), no unused binary linked or copied, `xcodebuild` skipped when
+     nothing changed, the guest and its simulator booted while the host builds, a booted
+     simulator kept across runs with a proof its state was reset, and a run's record keeping
+     its phases and the whole suite's count.
+  7. **The one-process world comes after:** server, workers and clients in one process on one
+     clock (Zed's collab tests run so), for the multi-node flows the smoke set does not hold
+     (pairing, resume, liveness, the server's fleet), as the 10-29 ruling's item 2.
+
+  Lost, said plainly: the real daemons producing the state of screens outside S1 to S3 each
+  round (the worker's own process tests and the view model's fixture tests hold that state),
+  and per-round WebKit process counts and transport timings, which move to nightly.
