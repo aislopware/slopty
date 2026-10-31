@@ -270,3 +270,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
   The next silent run then shows which step lost the hang: never timed, dropped, never
   drained, or never sealed.
+- ✅ **A throttled window waits for its next tick (2026-10-31).** The trace named the step on
+  its first silent run. The hold was journaled, but the monitor's next poll found 56,000 entries
+  written in two seconds into a ring of 19,000. 37,000 of them, the hold among them, had been
+  overwritten before it read them. Nearly all were frame signals, journaled at every frame
+  callback.
+
+  The cause was a spin in gpui-fast's macOS immediate frame. GPUI draws a window that isn't
+  key at most 30 times a second, and when it defers a frame it asks the platform to try again.
+  The immediate frame kept its slot after a run that drew nothing, so the retry ran at once,
+  deferred again, and kept going until the throttle let a frame draw. The self-test's window is
+  never key, so the app ran its frame callback about 28,000 times a second whenever it had
+  frames to draw. A person's Slopty window behind another app would burn a core the same way.
+
+  Now a run that leaves GPUI asking for another frame gives the slot back to the next tick
+  (`fast/frame_park.rs`). A throttled window then runs its callback at most twice per refresh.
+  The fork's tests: `a_deferred_frame_gives_the_immediate_frame_back_to_the_next_tick` and
+  `only_an_idle_run_keeps_the_immediate_frame`. The pass/fail split by the guest's uptime was
+  chance: the first measured run failed on a guest booted a minute before.
