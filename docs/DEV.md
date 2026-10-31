@@ -56,29 +56,46 @@ zed itself so it is never behind zed while longbridge lags.
   Linux runner, and the tests on Linux when every crate tests there
   (`gate::linux_tested`); and any e2e case or probe. A quick check of crates alone dispatches
   nothing. `--place runner` sends all of it to runners, as before. With `--only` it first
-  formats the Rust files changed under those paths (nightly rustfmt), so no check fails on
-  formatting. The first red ends the check: a failure here cancels the runners' run (or never
-  dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the failed
-  log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
+  formats the Rust files changed under those paths (nightly rustfmt), the vendored crates `cargo
+  fmt --all` reaches among them, so no check fails on formatting. Before anything compiles, the
+  gate's own tool steps run over the check's tree, each one the change reaches (`gate::Tool`):
+  fmt of the whole tree for a Rust file outside the checked crates, taplo for a TOML file, the
+  locks, deny, hakari and shear for a manifest or a lock, typos, the repository's invariants
+  and the Claude Code mod's checks, side by side in seconds, so the gate never goes red on what
+  a check could say. The first red ends the check: a failure here cancels the runners' run (or
+  never dispatches it), and a failed lint job cancels its run's other jobs. It waits, prints the
+  failed log's end and keeps every runner log under `target/remote/<name>/`. `--e2e app -E
   '<filterset>'` adds an e2e case (`-E failed`: only the tests the last run of that name
-  failed). The `app` and `ios` cases run here, in one of two headless macOS guests,
-  `slopty-27-e2e` and `slopty-27-e2e-2`, so two lanes' runs go at once (tart clones of
-  `slopty-27-xcode`, which is made once from the live lane's base with this Mac's Xcode and the
-  runners' iOS simulator runtime, about half an hour; a run takes its lane's last guest when it
-  is free, else a running one, and a third lane waits for whichever frees first): the lane's
-  tree is built in `target/local/<lane>/e2e-target` (the simulator's app too, with this Mac's
-  Xcode), the app's tests run in the guest three at a time (`SLOPTY_E2E_THREADS`), those that code
-  video after the rest and only when the guest's encoder codes a keyframe in time, the simulator's
-  one at a time in a fresh clone of the guest's simulator (`--sim iphone|ipad`), one lane's run at a
-  time in each guest; `--place runner` (or `SLOPTY_E2E_GUEST=0`) sends either to a runner Mac, and
-  probes always go there; `--goldens accept` (or `accept-all`) applies the run's goldens to the
-  tree, as `--accept-snapshots` does its insta snapshots (on runners: a patch of anything else,
-  which no accept writes, is refused whole and its paths named), and `--goldens review`
-  brings every changed frame's render and diff to `target/remote/<name>/artifacts/` (from a
-  runner, to `target/e2e/artifacts/`). A flake gets
-  measured, not rerun by hand. `--repeat N` runs the guest's case N times in one session, with
-  one boot and one copy and a fresh app and simulator each time, and prints "k of N failed"
-  with the clean runs in a row a fix needs at 95 %. `--until-fail N` stops at the first failure.
+  failed); `--e2e auto` runs the smoke cases the check's commit reaches from `HEAD` (with
+  `--head`, from `origin/main`: a round's commits), as `cargo xtask smoke reach` lists them
+  (`xtask/src/gate/impact.rs`): the app's, the server's and both simulators' in a guest, each
+  with its own verdict line, and nothing when it reaches none; S6 and the VM's, which need
+  Docker or tart, are named when reached and run nowhere here (`docs/decisions/tooling.md`, "The
+  gate and e2e run on free hosted runners"). The `app`, `ios` and `auto` cases run here, in
+  one of two headless macOS guests, `slopty-27-e2e` and `slopty-27-e2e-2`, so two lanes' runs go
+  at once (tart clones of `slopty-27-xcode`, which is made once from the live lane's base with
+  this Mac's Xcode and the runners' iOS simulator runtime, about half an hour; a run takes the
+  guest whose simulator is up for its device, else its lane's last guest when it is free, else a
+  running one, and a third lane waits for whichever frees first). The lane's tree is built once,
+  with the features the check's own build names, in `target/local/<lane>/e2e-target` (the
+  simulator's app too, with this Mac's Xcode, whose build is skipped when nothing it builds from
+  changed), and only the binaries the tests run are copied. While it builds, the guest boots and
+  its simulator gets ready: the device the last run kept (`Slopty iPhone run`, `Slopty iPad
+  run`), reset (the app ended and uninstalled, its privacy grants and the keychain reset), or a
+  fresh clone of the guest's settled one when none was kept. The app's tests run in the guest
+  three at a time (`SLOPTY_E2E_THREADS`), those that code video after the rest and only when the
+  guest's encoder codes a keyframe in time, the simulator's one at a time (`--sim iphone|ipad`),
+  one lane's run at a time in each guest. Each run's line in `target/remote/e2e-history.jsonl`
+  keeps every phase's seconds and the whole suite's count. `--place runner` (or
+  `SLOPTY_E2E_GUEST=0`) sends `app` or `ios` to a runner Mac, and probes always go there;
+  `--goldens accept` (or `accept-all`) applies the run's goldens to the tree, as
+  `--accept-snapshots` does its insta snapshots (on runners: a patch of anything else, which no
+  accept writes, is refused whole and its paths named), and `--goldens review` brings every
+  changed frame's render and diff to `target/remote/<name>/artifacts/` (from a runner, to
+  `target/e2e/artifacts/`). A flake gets measured, not rerun by hand. `--repeat N` runs the
+  guest's case N times in one session, with one boot and one copy, the app installed afresh on a
+  reset simulator each time, and prints "k of N failed" with the clean runs in a row a fix needs
+  at 95 %. `--until-fail N` stops at the first failure.
   Each failed run's log, data, frames and kept stack roots go to
   `target/remote/<name>/repeat/run-<i>/`. A flake counts as fixed only after that many clean
   runs (`docs/decisions/tooling.md`). `--workflow-ref
@@ -178,8 +195,8 @@ zed itself so it is never behind zed while longbridge lags.
   import that needs a hand: a conflict, a file zed changed that a `#[path = "fast/…"]` redirect
   replaces (port it into our copy), or a crate the workspace manifest must add or drop. It stops
   mid-merge with `UPSTREAM` already staged and prints the list; finish there, `git commit`, and
-  run `sync` again. `--only zed` is `--only gpui-fast`. Then gate, e2e app + ios, and a
-  DECISIONS entry.
+  run `sync` again. `--only zed` is `--only gpui-fast`. Then gate, `remote --head --e2e
+  auto` (a moved lock reaches every smoke case), and a DECISIONS entry.
 - ghostty goes through the same `sync` (`--only ghostty` brings libghostty-rs with it). It never
   rebases in `vendor/ghostty`, which every build compiles: the fork's `main` is checked out in
   the worktree `.research/ghostty` and rebased onto ghostty-org's `main` there, so a conflict
@@ -274,18 +291,22 @@ rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
   (`ubuntu-24.04-arm`), each a job of its own: they never link, so zig compiles the C their build
   scripts compile (`cargo-zigbuild` for macOS, xtask itself for iOS) and libghostty-vt's zig build
   is skipped (`tools::apple_cargo`). That leaves two of the plan's five macOS jobs for remote
-  checks and the e2e. The app's e2e runs every four hours on the main `promote` pushed and by
-  hand, in `e2e.yml`, dispatched on `gate` to read the test shards' compile cache; it is not yet a
-  gate lane. Before the push, `land` runs host clippy, rustdoc and iOS clippy of the packages the
-  commits change and of their dependents, side by side at a low priority (`gate::land_checks`);
-  `--full` adds their tests and Linux clippy. Runs on that branch form one concurrency group. A
-  newer push waits behind the run in progress rather than cancelling it, and GitHub keeps only the
-  newest push pending, whose green covers every commit under it; a pull request's run is still
-  cancelled by its next push. When every lane passed, the `promote` job fast-forwards main to that
-  exact commit (`git push origin <sha>:main`); it refuses one that is not on top of main, and main
-  is never gated a second time. A failed lane writes the run's summary: the lane, the step that
-  failed and, for the tests, each failed test from the JUnit report. `cargo xtask ci-health
-  [--since <time>]` prints how long each push to `gate` took to reach main, and the spread.
+  checks and the e2e. `e2e.yml` runs every case (the app, the server, the iPhone and the iPad)
+  nightly on main's head and by hand on a commit named, dispatched on `gate` to read the test
+  shards' compile cache, and from `promote` when none ran for 26 hours; it is not yet a gate lane.
+  On a runner the goldens are reviewed, not compared (`--review`), and a red is never retried;
+  `xtask e2e` ends with each phase's seconds and the whole run's tests, also in the job's summary
+  with every failed test named. Before the push, `land` runs host clippy, rustdoc and iOS clippy of
+  the packages the commits change and of their dependents, side by side at a low priority
+  (`gate::land_checks`); `--full` adds their tests and Linux clippy. Runs on that branch form one
+  concurrency group. A newer push waits behind the run in progress rather than cancelling it, and
+  GitHub keeps only the newest push pending, whose green covers every commit under it; a pull
+  request's run is still cancelled by its next push. When every lane passed, the `promote` job
+  fast-forwards main to that exact commit (`git push origin <sha>:main`); it refuses one that is not
+  on top of main, and main is never gated a second time. A failed lane writes the run's summary: the
+  lane, the step that failed and, for the tests, each failed test from the JUnit report. `cargo
+  xtask ci-health [--since <time>]` prints how long each push to `gate` took to reach main, and the
+  spread.
 
 `cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
 the quick gate and CI gates its tag in full before it builds anything. The gate checks the

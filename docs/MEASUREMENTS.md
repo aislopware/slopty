@@ -18715,3 +18715,55 @@ cargo nextest run -p slopty-net --release --test echo_beside_sessions --run-igno
   --no-capture
 cargo nextest run -p slopty-net --release --test pacer_wait --run-ignored only --no-capture
 ```
+
+## 2026-10-31 — what an e2e run costs: one build, a kept simulator, the gate's tools in a check
+
+This Mac (M1 Max, ten cores, 32 GB) under the day's lane load, the e2e guests as in "Two e2e
+guests" above, every run through `cargo xtask remote` in one lane's warm directory
+(`docs/decisions/testing.md`, "The gate runs the smoke cases a push reaches"). Seconds.
+
+**Units built twice** (nightly `cargo build --unit-graph`, nothing built): the e2e build and
+its archive resolved features apart, 57 units of the archive's 317 not in the build's 1,005
+(`slopty-platform` without `e2e`, `slopty-e2e`, tokio, objc2 ×6, syn ×2, proc-macro2,
+serde_json, …). With one selection, `workspace-hack` and the test target in the build: 956
+and 384, none apart. The archive after a warm build: 11.5 s before (`slopty-e2e` compiled a
+second time), 2.4–2.9 s after.
+
+| run | build | xcodebuild | archive | guest boot | copy | simulator | settle | install | tests | in all |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| iPhone before (HEAD 741de37a1, warm) | 10.6 | 10.7 | 4.9 | 1.3 | 8.8 | 111.7 (fresh clone) | 156 | — | 82.1 | 402 |
+| iPhone after, first (new layout, cold) | 348.0 | 16.9 | 2.3 | 92.1 | 7.1 | 208.9 (fresh) | 413.8 | 82.6 | 104.0 | 925 |
+| iPhone after, core crates changed | 64.6 | 14.7 | 1.8 | 1.5 | 4.6 | 6.9 (kept, reset) | 28.3 | 10.4 | 50.1 | 186 |
+| iPhone after, nothing changed | 2.8 | 0.1 (skipped) | 1.5 | 1.4 | 1.0 | 3.6 (kept, reset) | 8.8 | 10.7 | 45.2 | 83 |
+| app before (HEAD 741de37a1) | 13.5 | — | 11.5 | 31.3 (stopped) | 7.3 | — | — | — | 211.2 + 10.5 | 261 |
+| app after (guest stopped) | 14.0 | — | 2.4 | 39.8 | 6.3 | — | — | — | 230.3 + 11.8 | 318 |
+
+The kept iPhone's reset (the app terminated and uninstalled, `simctl privacy reset all`, the
+keychain reset) took 3.6–6.9 s against a fresh clone's 111.7–208.9 s and its settle; five of
+five goldens matched across runs on the kept device. The guest booted while the host built:
+"guest after build" 0–48 s, the rest of its boot hidden. The app's two runs failed the same two
+transcript tests, the drift item 5 of the ruling names, and the app's run is no faster here:
+its tests and the stopped guest's boot moved with the Mac's load by more than the archive's 9 s
+saved. The verdict line said "1 test run: 1 passed, 47 skipped" before (the last group's
+`Summary`) and "48 tests run: 46 passed, 2 failed" after.
+
+**The gate's tools in a lane check**, on a throwaway copy of HEAD with each fault planted, by the
+lane's own xtask: every step the change reached ran over the check's tree before anything
+compiled, side by side.
+
+| faults planted | steps the change reached | red | all steps done |
+| --- | --- | --- | --- |
+| `workspace-hack` stale after a manifest edit; `vendor/noq-udp/src/lib.rs` misformatted outside `--only` | fmt, taplo, locks, deny, hakari, shear, typos, invariants | hakari (2.4 s), fmt (5.7 s) | 5.7 |
+| a lock pick that moves the hack (`cargo update -p zbus --precise 5.13.2`, as a lane's tempfile pick did) | locks, deny, hakari, shear, typos, invariants | hakari (2.3 s) | 3.2 (deny) |
+
+A lane's own misformatted vendor file under `--only` is formatted before the check, not red.
+
+```sh
+# the guest runs, in one lane's warm directory
+SLOPTY_LANE=M cargo xtask remote --head --e2e ios
+SLOPTY_LANE=M cargo xtask remote --head --e2e app
+# the planted faults: in a clone of HEAD with the fault made (a manifest's dependency removed
+# without `cargo hakari generate`; a vendored file misformatted; `cargo update -p zbus --precise
+# 5.13.2`), from that clone, by the xtask under test
+SLOPTY_REPO_ROOT=$PWD SLOPTY_LANE=X <xtask> remote -p slopty-net --only <the changed paths>
+```

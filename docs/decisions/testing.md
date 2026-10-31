@@ -2016,3 +2016,51 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   Lost, said plainly: the real daemons producing the state of screens outside S1 to S3 each
   round (the worker's own process tests and the view model's fixture tests hold that state),
   and per-round WebKit process counts and transport timings, which move to nightly.
+
+- ✅ **A change's smoke cases follow from its paths; a lane check runs the gate's tool steps
+  its change reaches; an e2e run builds once** (2026-10-31). Items 5 and 6 of "Goldens render in
+  the test process" above, as far as they stand without the gate's smoke jobs, which come with
+  the hosted runners (`docs/decisions/tooling.md`, "The gate and e2e run on free hosted runners;
+  this Mac runs none", item 3), and a rule for the reds only the gate used to find. Three
+  gate-only reds in one day came from steps a lane check skipped although its change reached
+  them: a stale `workspace-hack` after a manifest edit, an unformatted file under `vendor/` that
+  only `cargo fmt --all` reaches, and a lock pick that moved the hack.
+  - **The impact map** is `xtask/src/gate/impact.rs`: the smoke cases (`SMOKE`, S1 to S6 and
+    VM, each its tests by name) and the rules from changed paths to cases (`RULES`, with each
+    file's `cfg`). `cargo xtask smoke reach` says which cases a change reaches and why; `cargo
+    xtask remote --e2e auto` runs the app's, the server's and both simulators' of them. S6 and
+    the VM's need Docker or tart and run nowhere automatically yet: S6 moves to a Linux runner
+    and the VM case to a hosted Mac under the ruling above.
+  - **Every case runs nightly**, in `e2e.yml` on main's head, dispatched on `gate` so it reads
+    the test shards' compile cache. Nothing is retried there: `NEXTEST_RETRIES` is 0, and a red
+    smoke case is a bug in the product or the test.
+  - **One build.** The e2e build selects the daemons, the CLI, the app, `slopty-e2e`,
+    the test kit and `workspace-hack` with the suites' test targets, so the archive or list
+    after it resolves the same features and compiles nothing: 57 units were built twice before
+    (`slopty-platform` without `e2e`, tokio, objc2, syn, …), none now. The plain `slopty-app`
+    binary, which no test starts, is neither linked nor copied; `xcodebuild` is skipped when
+    nothing it builds from changed; `e2e.yml` skips the zig package fetch on an exact hit of the
+    prebuilt Ghostty.
+  - **The record keeps every phase and the whole suite.** `xtask e2e` ends with each phase's
+    seconds and the whole run's tests from nextest's `JUnit` reports, and on a runner writes it
+    and each failed test to the job's summary. A guest run's line and
+    `target/remote/e2e-history.jsonl` sum every group's `Summary` (the app's 48 tests had read
+    as the last group's one) and list each phase.
+  - **A lane check runs the gate's tool steps it reaches.** The tools lane's steps are one
+    table, `gate::Tool` (rustfmt over the whole tree with its path dependencies, taplo, the
+    locks, deny, hakari, shear, typos, the repository's invariants, the Claude Code mod), each
+    with the paths it reads. `remote` runs, over the check's own tree and before anything
+    compiles or a runner is asked, every step a changed path reaches outside what the check's
+    crates already cover: the gate's own functions, side by side, in seconds. Proven red on the
+    three cases (a stale hack, a misformatted `vendor/noq-*` file, a lock pick that moves the
+    hack).
+  - **The guest's share.** The e2e guest booted while the host built, and a simulator kept
+    booted across runs with its state reset and proven reset (the app uninstalled, privacy and
+    keychain reset; five of five goldens across runs), took the iPhone case from about 400 s to
+    83 s here. Both serve the guest, which goes once a hosted run of each case is green (the
+    ruling above, item 6).
+  - **Rejected.** Opt level 0 for the e2e build: its units would differ from the check's, the
+    double build again, for a build that takes 14 s once warm (the ruling above measures it on
+    a runner before taking it). First-boot daemons off in the guest: the settle they cost was
+    already hidden behind the build or skipped by the kept simulator. The app and iOS cases in
+    the two guests at once: moot on hosted runners, where each case is its own job.
