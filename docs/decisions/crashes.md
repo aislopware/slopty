@@ -239,3 +239,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   files a late frame only once its active window reaches `FRAME_BUDGET` (250 ms), the budget the
   module already meant; a single piece past the threshold, and blocking work, are filed as
   before (`a_late_frame_is_a_hang_only_once_it_is_a_quarter_second_late`).
+
+- ✅ **A hang is filed while the main thread stays busy (2026-10-31).** GPUI's monitor reports
+  a hang only once the journal closes the stretch of work around it: at a measured frame, a
+  frame callback that drew nothing, or a turn after which the main thread is idle, with nothing
+  queued and no frame pending. A pending frame stops holding that last boundary after a second,
+  but a queued task held it for as long as tasks kept arriving, and a covered window's frames
+  (test builds keep drawing it) are no measured frames. A busy, covered app could then hold a
+  hang unreported indefinitely, which is how one e2e run in the loaded guest never got its
+  report although the app kept presenting for seconds after the hold.
+  gpui-fast now closes a stretch at the first turn end once its first recorded work is a second
+  old, whatever is queued (`fast/interval_deadline.rs`), so a hang reaches the crash list
+  within about a second plus the monitor's 2 s poll. Test:
+  `a_hang_in_a_foreground_that_never_drains_is_reported_within_the_deadline` in the fork.
