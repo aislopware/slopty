@@ -1,5 +1,5 @@
-Window
-Group (focused)
+Window (focused)
+Group
 Terminal │ shell │ >
 Group │ Session
 Button │ Back to Sessions

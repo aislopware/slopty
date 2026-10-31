@@ -1,20 +1,20 @@
 Window (focused)
 Group
 Terminal │ shell │ >
-Group │ Navigation
-Heading │ Say hello
+Group │ Session
 Button │ Back to Sessions
-Button │ Show files
-Button │ Hide inspector
+Button │ Say hello
 Dialog │ Inspector
 Button │ Expand inspector
 Heading │ Inspector
 Button │ Close inspector
-Article │ You
-Paragraph │ Say hello
+Button │ Prompts
+Button │ Steps
+Button │ All
 Article │ Claude Code
 Paragraph │ Done: Say hello
 Article │ You
 Paragraph │ Carry on
+Status │ claude-stub · 1 in · 1 out · 2s
 Article │ Claude Code
 Paragraph │ Done: Carry on

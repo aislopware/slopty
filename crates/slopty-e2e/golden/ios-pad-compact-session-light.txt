@@ -1,4 +1,4 @@
-Window
+Window (focused)
 Button │ Filter projects: All projects
 Button │ repo, 1
 Button │ Say hello
@@ -6,7 +6,7 @@ Button │ Server: e2e-server, Connected
 Button │ Settings
 Splitter │ Resize sidebar
 Group │ Say hello
-Group (focused)
+Group
 Terminal │ shell │ >
 Button │ Say hello
 Button │ Inbox
