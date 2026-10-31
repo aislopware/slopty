@@ -820,8 +820,16 @@ pub struct Turn {
     pub started_ms: WallMs,
     /// When the turn ended, at the latest record that ended it: the model's final answer, Claude
     /// Code's end-of-turn record (a Stop hook's summary), an interrupt, the output of a command
-    /// it ran itself, or else the next prompt; `None` while it runs.
+    /// it ran itself, or else the next prompt; `None` while it runs. A record that wakes the
+    /// model after an end (a blocking Stop hook's feedback, a task's notice, the model's next
+    /// request) runs it again, up to its next end.
     pub ended_ms: Option<WallMs>,
+    /// When Claude Code woke the model again after it stopped in this turn (its final answer,
+    /// or the error it gave up on), each time: a blocking Stop hook's feedback, a task's notice,
+    /// the model's next request. Each went on past a stop Claude Code ran its `Stop` hooks at
+    /// (`StopFailure`, after an error).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub woken: Vec<WallMs>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,
     /// Tokens, summed over its requests.

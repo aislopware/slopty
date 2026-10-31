@@ -20,8 +20,13 @@
 //!   the transcript shows that prompt, it waits for it, and heard after a later turn began, it ends
 //!   its own. So a turn ends the same however its hook and its records arrive: as the hook says
 //!   (completed, failed, stopped), at the time the records say, else the hook's. A command Claude
-//!   Code runs itself (`/compact`, `/model`) has no hook; its records end its turn. A branch (a
-//!   rewind, an edited prompt) truncates the thread back to before the dropped prompt.
+//!   Code runs itself (`/compact`, `/model`) has no hook; its records end its turn. A turn the
+//!   records show running again after its end (Claude Code woke the model: a blocking `Stop` hook,
+//!   a task's notice) runs again, and works the session, until its next end. Each such wake went on
+//!   past a stop whose `Stop` the hooks tell, before or after the wake is read, so their end stands
+//!   only once they told of more stops than that. The TUI idle at its prompt (`idle_prompt`) ends
+//!   no turn. A branch (a rewind, an edited prompt) truncates the thread back to before the dropped
+//!   prompt.
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
 //! - **Status.** The phase is told from outside ([`History::status`]): the session's hooks, or its
@@ -216,6 +221,13 @@ struct Mapped {
     by_engine: HashMap<TurnId, (End, WallMs)>,
     /// When the transcript's records end each turn they end.
     closed: HashMap<TurnId, WallMs>,
+    /// When the transcript shows Claude Code woke each turn's model again after it stopped (a
+    /// blocking Stop hook, a task's notice), each time: every wake went on past a stop whose
+    /// `Stop` the hooks tell ([`Mapped::end_of`]).
+    woken: HashMap<TurnId, Vec<WallMs>>,
+    /// How many `Stop`s (or `StopFailure`s) the hooks told of each turn, each once; an end
+    /// that names no prompt (the turn open, or nothing left running it) counts past every wake.
+    heard: HashMap<TurnId, usize>,
     /// Each turn by the prompt id its hooks name it by (`promptId`).
     prompt_ids: HashMap<String, TurnId>,
     /// Each turn as last sent.
@@ -246,6 +258,8 @@ impl Mapped {
             ended: HashSet::new(),
             by_engine: HashMap::new(),
             closed: HashMap::new(),
+            woken: HashMap::new(),
+            heard: HashMap::new(),
             prompt_ids: HashMap::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
@@ -317,8 +331,15 @@ impl Mapped {
     /// How and when `turn` ended, if it did: as its hook said, else as its records do (an
     /// interrupt, the error it stopped on, else complete); at the time its records end it, else
     /// when its hook was heard. A failure says what the transcript said of it, else the hook.
+    ///
+    /// A turn Claude Code woke again after it stopped ([`Self::woken`]) takes its hooks' end only
+    /// once they told of more stops than it went on past: the `Stop` of each stop it went on
+    /// past (one a hook kept from ending, the answer a notice came after) ends nothing, however
+    /// late it is heard, before the wake's records are read or after.
     fn end_of(&self, turn: TurnId) -> Option<(TurnState, WallMs)> {
-        let engine = self.by_engine.get(&turn);
+        let woken = self.woken.get(&turn).map_or(0, Vec::len);
+        let heard = self.heard.get(&turn).copied().unwrap_or_default();
+        let engine = self.by_engine.get(&turn).filter(|_| woken == 0 || heard > woken);
         let at = self.closed.get(&turn).copied().or_else(|| engine.map(|(_, at)| *at))?;
         let stopped = self.stopped.get(&turn).map(|(_, error)| error.clone());
         let state = match engine.map(|(end, _)| end) {
@@ -334,9 +355,21 @@ impl Mapped {
     }
 
     /// `turn` as [`Self::end_of`] says it ended, when that is not what was sent: the action
-    /// that tells it, and its state.
+    /// that tells it, and its state. A turn told ended that no end stands for any more (Claude
+    /// Code woke the model again) runs again, told whole as it now is, whatever ended it before
+    /// (an interrupt, an error, its answer).
     fn settle(&mut self, turn: TurnId) -> Option<(Action, TurnState)> {
-        let (state, ended_ms) = self.end_of(turn)?;
+        let Some((state, ended_ms)) = self.end_of(turn) else {
+            if !self.ended.contains(&turn) {
+                return None;
+            }
+            let held = self.turns.get_mut(&turn)?;
+            self.ended.remove(&turn);
+            self.interrupted.remove(&turn);
+            held.state = TurnState::Active;
+            held.ended_ms = None;
+            return Some((Action::TurnStarted(held.clone()), TurnState::Active));
+        };
         let held = self.turns.get_mut(&turn)?;
         let same = held.state == state && held.ended_ms == Some(ended_ms);
         if !self.ended.insert(turn) && same {
@@ -436,6 +469,14 @@ impl SubagentEnd {
     }
 }
 
+/// How many `Stop`s the hooks told of a turn its prompt ids `prompts` name ([`History::stops`]).
+fn heard<'a>(
+    stops: &HashMap<String, HashSet<WallMs>>,
+    prompts: impl Iterator<Item = &'a String>,
+) -> usize {
+    prompts.filter_map(|p| stops.get(p)).map(HashSet::len).sum()
+}
+
 /// End each of `tasks` still at work at `at`, as `state` says, but one waiting on its own work
 /// (a subagent that reported), which completed; whether any was.
 fn end_tasks(tasks: &mut [BackgroundTask], at: WallMs, state: &str) -> bool {
@@ -464,6 +505,10 @@ pub struct History {
     /// How Claude Code's hooks ended the main thread's turns, by the prompt id they named, and
     /// when: kept for a prompt the transcript has not shown yet, and for the records read again.
     engine: HashMap<String, (End, WallMs)>,
+    /// When the hooks told each prompt's turn ended, by the prompt id they named: each `Stop`
+    /// once, however many times its relay brought it. A turn woken again after it stopped takes
+    /// their end only past the stops it went on past ([`Mapped::end_of`]).
+    stops: HashMap<String, HashSet<WallMs>>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
     /// When the Claude Code that ran the session last went ([`Self::gone`]).
@@ -523,6 +568,7 @@ impl History {
             spawned: HashMap::new(),
             status: None,
             engine: HashMap::new(),
+            stops: HashMap::new(),
             failed: false,
             went: None,
             rested: None,
@@ -622,6 +668,10 @@ impl History {
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
         let status = Status { phase, wait, liveness, since_ms };
         let ends = matches!(phase, Phase::Done | Phase::Failed | Phase::Stopped);
+        // The end of a stop the woken turn went on past: the session still works.
+        if ends && liveness == Liveness::Live && self.outrun() {
+            return self.drain();
+        }
         let same = self.status.as_ref().is_some_and(|had| {
             had.phase == status.phase
                 && had.wait == status.wait
@@ -689,7 +739,9 @@ impl History {
     /// `prompt_id` names it), as `end` says, at `now`; with no prompt named, the turn open.
     /// That turn ends so whenever its records come, before or after: one the transcript has not
     /// shown yet ends once it does, and the records' time of its end stands over `now`. The
-    /// thread rests: stopped after an interruption, failed after an error, else done.
+    /// thread rests: stopped after an interruption, failed after an error, else done. One
+    /// `Stop` per stop the model makes: a turn Claude Code woke again after a stop ends only by
+    /// the `Stop` after it, nor rests the session before.
     pub fn turn_ended(&mut self, prompt: Option<&str>, end: &End, now: WallMs) -> Vec<Out> {
         let phase = match end {
             End::Interrupted => Phase::Stopped,
@@ -702,6 +754,7 @@ impl History {
             // The latest word of a prompt's end stands: a hook that kept the turn going (a
             // `Stop` that blocked) is followed by the one that ended it.
             Some(prompt) => {
+                self.stops.entry(prompt.to_owned()).or_default().insert(now);
                 let held =
                     self.engine.entry(prompt.to_owned()).or_insert_with(|| (end.clone(), now));
                 if held.1 <= now {
@@ -719,12 +772,24 @@ impl History {
                     .filter(|turn| *turn != TurnId::BEFORE && !mapped.ended.contains(turn)),
             };
             if let Some(turn) = turn {
+                // A word naming no prompt ends the turn as it stands now, past every wake.
+                let named = mapped.prompt_ids.iter().filter(|(_, t)| **t == turn);
+                let told_of = match prompt {
+                    Some(_) => heard(&self.stops, named.map(|(p, _)| p)),
+                    None => mapped.woken.get(&turn).map_or(0, Vec::len).saturating_add(1),
+                };
+                let held = mapped.heard.entry(turn).or_default();
+                *held = told_of.max(*held);
                 mapped.by_engine.insert(turn, told);
                 action = mapped.settle(turn).map(|(action, _)| action);
             }
         }
         if let Some(action) = action {
             self.push(id, action);
+        }
+        // The `Stop` of a stop the woken turn went on past ends nothing: the session works.
+        if self.outrun() {
+            return self.drain();
         }
         self.failed = phase == Phase::Failed;
         if let Some(status) = self.status.as_mut()
@@ -1237,6 +1302,8 @@ impl History {
             mapped.stopped.retain(|t, _| *t < turn);
             mapped.by_engine.retain(|t, _| *t < turn);
             mapped.closed.retain(|t, _| *t < turn);
+            mapped.woken.retain(|t, _| *t < turn);
+            mapped.heard.retain(|t, _| *t < turn);
             mapped.prompt_ids.retain(|_, t| *t < turn);
             actions.push(Action::Truncated { after: Some(after) });
         }
@@ -1253,15 +1320,23 @@ impl History {
         for prompt in &record.prompt_ids {
             mapped.prompt_ids.insert(prompt.clone(), turn);
         }
-        // A hook that ended it came first: the latest it heard stands.
-        let told = record.prompt_ids.iter().filter_map(|p| self.engine.get(p)).max_by_key(|t| t.1);
-        if let Some(told) = told.filter(|_| main) {
-            mapped.by_engine.insert(turn, told.clone());
-        }
         if let Some(at) = record.ended_ms {
             mapped.closed.insert(turn, at);
         } else {
             mapped.closed.remove(&turn);
+        }
+        if record.woken.is_empty() {
+            mapped.woken.remove(&turn);
+        } else {
+            mapped.woken.insert(turn, record.woken.clone());
+        }
+        // A hook that ended it came first: the latest it heard stands.
+        let told = record.prompt_ids.iter().filter_map(|p| self.engine.get(p)).max_by_key(|t| t.1);
+        if let Some(told) = told.filter(|_| main) {
+            mapped.by_engine.insert(turn, told.clone());
+            let told_of = heard(&self.stops, record.prompt_ids.iter());
+            let held = mapped.heard.entry(turn).or_default();
+            *held = told_of.max(*held);
         }
         let before = mapped.turns.get(&turn).cloned();
         let mut updated = before.clone().unwrap_or_else(|| Turn {
@@ -1291,18 +1366,65 @@ impl History {
             actions.push(Action::TurnStarted(now));
         }
         let latest = turn == mapped.turn;
-        let failed = settled.as_ref().map(|(_, state)| matches!(state, TurnState::Failed { .. }));
-        actions.extend(settled.map(|(action, _)| action));
+        let state = settled.as_ref().map(|(_, state)| state.clone());
+        let ended = mapped.turns.get(&turn).and_then(|t| t.ended_ms);
+        // A turn woken again was told whole above, as it now runs.
+        actions.extend(
+            settled.map(|(action, _)| action).filter(|a| matches!(a, Action::TurnEnded { .. })),
+        );
         for action in actions {
             self.push(id, action);
         }
         if main
             && latest
-            && let Some(failed) = failed
+            && let Some(state) = state
         {
-            self.failed = failed;
-            self.settle_failed();
+            self.failed = matches!(state, TurnState::Failed { .. });
+            match ended {
+                None => self.rewake(record.woken.last().copied().unwrap_or(record.started_ms)),
+                Some(at) if !record.woken.is_empty() => self.rest_after(&state, at),
+                Some(_) => self.settle_failed(),
+            }
         }
+    }
+
+    /// The main thread's turn runs again since `at`: the session works, until a hook or the
+    /// records say it ended again. Whatever end it was told was of a stop it went on past.
+    fn rewake(&mut self, at: WallMs) {
+        let Some(status) = self.status.as_mut() else { return };
+        if matches!(status.phase, Phase::Done | Phase::Failed | Phase::Stopped)
+            && status.liveness == Liveness::Live
+        {
+            let live = Liveness::Live;
+            *status = Status { phase: Phase::Working, wait: None, liveness: live, since_ms: at };
+            self.reshow();
+        }
+    }
+
+    /// The main thread's turn, woken again after it stopped, ended at `at` as its records say,
+    /// in `state`: the session rests as it does. Its hook's `Stop` may tell it too, or may have
+    /// been taken for one of a stop the turn went on past ([`Self::outrun`]).
+    fn rest_after(&mut self, state: &TurnState, at: WallMs) {
+        let Some(status) = self.status.as_mut() else { return };
+        if matches!(status.phase, Phase::Working | Phase::NeedsYou | Phase::Waiting)
+            && status.liveness == Liveness::Live
+        {
+            let phase = match state {
+                TurnState::Active | TurnState::Complete => Phase::Done,
+                TurnState::Interrupted => Phase::Stopped,
+                TurnState::Failed { .. } => Phase::Failed,
+            };
+            let live = Liveness::Live;
+            *status = Status { phase, wait: None, liveness: live, since_ms: at };
+            self.reshow();
+        }
+    }
+
+    /// Whether the main thread's turn runs, woken again after it stopped, with no end standing
+    /// for it: an end the hooks tell now is of a stop it went on past ([`Mapped::end_of`]).
+    fn outrun(&self) -> bool {
+        let Some(main) = self.threads.get(&conv::ThreadId::Main) else { return false };
+        main.woken.contains_key(&main.turn) && main.end_of(main.turn).is_none()
     }
 
     /// A status of done after a turn that failed is a failure: tell it again as one.

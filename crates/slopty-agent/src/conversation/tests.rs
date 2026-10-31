@@ -914,6 +914,266 @@ fn a_turn_ends_at_the_models_final_answer() {
     );
 }
 
+/// A Stop hook's summary, as Claude Code writes one after a stop.
+fn stop_summary(uuid: &str, parent: &str, errors: &Value, prevented: bool) -> Value {
+    let reason = if prevented { "Build failed, fix it first" } else { "" };
+    json!({
+        "type": "system", "subtype": "stop_hook_summary", "uuid": uuid, "parentUuid": parent,
+        "hookCount": 1, "hookInfos": [{"command": "the hook"}], "hookErrors": errors,
+        "hookAdditionalContext": [], "preventedContinuation": prevented, "stopReason": reason,
+        "hasOutput": true, "level": "suggestion",
+    })
+}
+
+/// A blocking Stop hook wakes the model after its final answer, as a `/goal` that is not met
+/// yet did (recorded 2026-10-20): Claude Code writes the hook's feedback, then the summary of
+/// the hooks that ran, and the model works on. The turn runs from the feedback, through that
+/// summary, until the next final answer ends it, and a later summary moves the end on. A hook
+/// that stops Claude Code beside one that blocks (`continue: false`) ends it at the summary.
+#[test]
+fn a_blocking_stop_hook_runs_the_turn_until_the_next_answer() {
+    let at = |stamp: &str, mut record: Value| {
+        record["timestamp"] = json!(format!("2026-10-20T06:{stamp}Z"));
+        record
+    };
+    let ms = |stamp: &str| parse_ms(&format!("2026-10-20T06:{stamp}Z"));
+    let stopped = |mut record: Value, id: &str, stop: &str| {
+        record["message"]["id"] = json!(id);
+        record["message"]["stop_reason"] = json!(stop);
+        record
+    };
+    let says = |uuid: &str, parent: &str, words: &str| {
+        assistant(uuid, Some(parent), &json!([{"type": "text", "text": words}]))
+    };
+    let asked = |uuid: &str, parent: Option<&str>, words: &str, id: &str| {
+        let mut record = user(uuid, parent, &json!(words));
+        record["promptId"] = json!(id);
+        record
+    };
+    let feedback = |uuid: &str, parent: &str, said: &str, id: &str| {
+        let mut record = asked(uuid, Some(parent), &format!("Stop hook feedback:\n{said}"), id);
+        record["isMeta"] = json!(true);
+        record
+    };
+    let end = |c: &Conversation| c.turns(&MAIN).last().and_then(|t| t.ended_ms);
+    let mut c = Conversation::default();
+
+    c.ingest(&MAIN, &at("33:40.000", asked("p1", None, "Port the game 1:1", "q1")));
+    let done = says("a1", "p1", "Both backlog items are done and pushed.");
+    c.ingest(&MAIN, &at("34:02.589", stopped(done, "m1", "end_turn")));
+    assert_eq!(end(&c), ms("34:02.589"), "ended at its answer");
+    let not_met = "[Port the game 1:1]: There is no Unity port yet in this session.";
+    let told = c.ingest(&MAIN, &at("34:05.496", feedback("f1", "a1", not_met, "q1")));
+    assert!(
+        told.iter().any(|ch| matches!(ch, Change::Turn { turn, .. }
+            if turn.prompt == "p1" && turn.ended_ms.is_none())),
+        "it runs again, and says so: {told:?}"
+    );
+    let goal = json!({"type": "attachment", "uuid": "g1", "parentUuid": "f1",
+        "attachment": {"type": "goal_status", "met": false}});
+    c.ingest(&MAIN, &at("34:05.497", goal));
+    c.ingest(&MAIN, &at("34:05.498", stop_summary("s1", "g1", &json!([]), false)));
+    assert_eq!(end(&c), None, "the summary of the stop the hook kept from ending is no end");
+    let ls = call("a2", Some("s1"), "t1", "Bash", &json!({"command": "ls port"}));
+    c.ingest(&MAIN, &at("34:10.362", stopped(ls, "m2", "tool_use")));
+    c.ingest(&MAIN, &at("34:10.550", result("r1", Some("a2"), "t1", "STATUS.md", &json!({}))));
+    assert_eq!(end(&c), None, "it works");
+    let next = says("a3", "r1", "Continuing with the Unity client.");
+    c.ingest(&MAIN, &at("34:20.000", stopped(next, "m3", "end_turn")));
+    assert_eq!(end(&c), ms("34:20.000"), "the next answer ends it");
+    c.ingest(&MAIN, &at("34:20.100", stop_summary("s2", "a3", &json!([]), false)));
+    assert_eq!(end(&c), ms("34:20.100"), "a later end moves it on");
+
+    c.ingest(&MAIN, &at("40:00.000", asked("p2", Some("s2"), "Build it", "q2")));
+    c.ingest(&MAIN, &at("40:30.000", stopped(says("a4", "p2", "Built."), "m4", "end_turn")));
+    let fails = "[~/.claude/hooks/tests.sh]: 2 tests fail";
+    c.ingest(&MAIN, &at("40:30.020", feedback("f2", "a4", fails, "q2")));
+    assert_eq!(end(&c), None, "a command hook that exits 2 wakes it too");
+    let refused = stop_summary("s3", "f2", &json!(["2 tests fail"]), true);
+    c.ingest(&MAIN, &at("40:30.030", refused));
+    assert_eq!(end(&c), ms("40:30.030"), "another hook stopped Claude Code there");
+    let woken: Vec<Vec<Option<WallMs>>> =
+        c.turns(&MAIN).iter().map(|t| t.woken.iter().copied().map(Some).collect()).collect();
+    assert_eq!(
+        woken,
+        [vec![ms("34:05.496")], vec![ms("40:30.020")]],
+        "no wake is a turn of its own"
+    );
+}
+
+/// A Stop hook that only summarises leaves the turn ended: its summary (output for the person,
+/// or a hook that failed without blocking) moves the end on, and nothing wakes the model. Nor
+/// does what Claude Code writes before a command it runs itself (its caveat): the turn before
+/// keeps its own end, not the command's.
+#[test]
+fn a_stop_hook_that_only_summarises_leaves_the_turn_ended() {
+    let at = |stamp: &str, mut record: Value| {
+        record["timestamp"] = json!(format!("2026-10-20T08:{stamp}Z"));
+        record
+    };
+    let ms = |stamp: &str| parse_ms(&format!("2026-10-20T08:{stamp}Z"));
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &at("34:00.000", user("p1", None, &json!("Which keys does it read?"))));
+    let mut answer = assistant("a1", Some("p1"), &json!([{"type": "text", "text": "Two."}]));
+    answer["message"]["stop_reason"] = json!("end_turn");
+    c.ingest(&MAIN, &at("34:25.006", answer));
+    // What each record after the answer tells of the turns.
+    let mut runs = Vec::new();
+    let mut take = |c: &mut Conversation, record: Value| {
+        for change in c.ingest(&MAIN, &record) {
+            if let Change::Turn { turn, .. } = change {
+                runs.push((turn.prompt, turn.ended_ms));
+            }
+        }
+    };
+    take(&mut c, at("34:25.100", stop_summary("s1", "a1", &json!([]), false)));
+    let failed = stop_summary("s2", "s1", &json!(["lint: 2 warnings"]), false);
+    take(&mut c, at("34:25.150", failed));
+    let lasted = json!({"type": "system", "subtype": "turn_duration", "uuid": "d1",
+        "parentUuid": "s2", "durationMs": 25_177});
+    take(&mut c, at("34:25.177", lasted));
+    let mut caveat = user(
+        "c1",
+        Some("d1"),
+        &json!("<local-command-caveat>Run directly.</local-command-caveat>"),
+    );
+    caveat["isMeta"] = json!(true);
+    take(&mut c, at("35:30.222", caveat));
+    let copy = "<command-name>/copy</command-name>\n<command-args></command-args>";
+    take(&mut c, at("35:30.221", user("p2", Some("c1"), &json!(copy))));
+    let printed = "<local-command-stdout>Copied to clipboard</local-command-stdout>";
+    take(&mut c, at("35:30.221", user("o2", Some("p2"), &json!(printed))));
+
+    let first: Vec<&Option<WallMs>> =
+        runs.iter().filter(|(prompt, _)| prompt == "p1").map(|(_, end)| end).collect();
+    assert!(!first.is_empty() && first.iter().all(|end| end.is_some()), "never running again");
+    assert!(c.turns(&MAIN).iter().all(|t| t.woken.is_empty()), "nothing woke the model");
+    let ends: Vec<Option<WallMs>> = c.turns(&MAIN).iter().map(|t| t.ended_ms).collect();
+    assert_eq!(ends, [ms("34:25.177"), ms("35:30.221")], "each its own end");
+    let Some(Entry { body: Body::Note(note), .. }) = c.entries(&MAIN).iter().find(|e| e.id == "s2")
+    else {
+        panic!("the failure is said")
+    };
+    assert_eq!(note.kind, NoteKind::Hook);
+}
+
+/// A task's notice runs the turn again once Claude Code hands it to the model, as recorded
+/// (`background`): the notice lands in the queue when the command ends, which runs nothing;
+/// Claude Code then takes it out and hands it over (`promptSource: "system"`), and the turn runs
+/// from that record until the model's next answer ends it. The notice's prompt id names that
+/// run for its hooks, and the turn counts the one wake.
+#[test]
+fn a_tasks_notice_runs_the_turn_until_the_next_answer() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/conversation/background/transcript.jsonl");
+    let text = std::fs::read_to_string(path).expect("the recording");
+    let mut c = Conversation::default();
+    // Each telling record: what it is, when it was made, and the turn's end after it.
+    let mut seen = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let record: Value = serde_json::from_str(line).expect("a record");
+        c.ingest(&MAIN, &record);
+        let stop = record.get("message").and_then(|m| str_at(m, "stop_reason"));
+        let what = match (str_at(&record, "type"), str_at(&record, "subtype")) {
+            (Some("assistant"), _) if stop == Some("end_turn") => "answer",
+            (Some("system"), Some("stop_hook_summary")) => "summary",
+            (Some("queue-operation"), _)
+                if str_at(&record, "content")
+                    .is_some_and(|c| c.contains("<task-notification>")) =>
+            {
+                "queued"
+            }
+            (Some("user"), _) if str_at(&record, "promptSource") == Some("system") => "handed",
+            _ => continue,
+        };
+        let made = str_at(&record, "timestamp").and_then(parse_ms);
+        seen.push((what, made, c.turns(&MAIN).last().and_then(|t| t.ended_ms)));
+    }
+    let [answer, summary, queued, handed, again, last] = seen.as_slice() else {
+        panic!("an answer, its summary, the notice queued and handed, and the next: {seen:?}")
+    };
+    let what: Vec<&str> = seen.iter().map(|(what, ..)| *what).collect();
+    assert_eq!(what, ["answer", "summary", "queued", "handed", "answer", "summary"]);
+    assert_eq!(answer.2, answer.1, "the answer ends it");
+    assert_eq!(summary.2, summary.1, "its summary moves the end on");
+    assert_eq!(queued.2, summary.1, "the notice queued runs nothing");
+    assert_eq!(handed.2, None, "handed to the model, it runs the turn again");
+    assert_eq!(again.2, again.1, "the next answer ends it");
+    assert_eq!(last.2, last.1, "and its summary moves the end on");
+    let [turn] = c.turns(&MAIN) else { panic!("one turn: {:#?}", c.turns(&MAIN)) };
+    assert_eq!(
+        turn.prompt_ids,
+        ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000023"],
+        "the notice names its run"
+    );
+    assert_eq!(turn.woken.first().copied(), handed.1, "woken once, by the notice handed over");
+    assert_eq!(turn.woken.len(), 1, "woken once, by the notice handed over");
+}
+
+/// Whatever else Claude Code hands the model after its answer runs the turn again from that
+/// record: another session's message, a scheduled wakeup (as recorded 2026-10-20). Where no
+/// record says so (the request retried after an error it had given up on), the model's own
+/// next request does.
+#[test]
+fn the_model_woken_by_anything_else_runs_the_turn_again() {
+    let at = |stamp: &str, mut record: Value| {
+        record["timestamp"] = json!(format!("2026-10-20T03:{stamp}Z"));
+        record
+    };
+    let ms = |stamp: &str| parse_ms(&format!("2026-10-20T03:{stamp}Z"));
+    let handed = |uuid: &str, parent: &str, words: &str| {
+        let mut record = user(uuid, Some(parent), &json!(words));
+        record["isMeta"] = json!(true);
+        record["promptSource"] = json!("system");
+        record
+    };
+    let answered = |uuid: &str, parent: &str, id: &str, stop: &str| {
+        let mut record =
+            assistant(uuid, Some(parent), &json!([{"type": "text", "text": "On it."}]));
+        record["message"]["id"] = json!(id);
+        record["message"]["stop_reason"] = json!(stop);
+        record
+    };
+    let end = |c: &Conversation| c.turns(&MAIN).last().and_then(|t| t.ended_ms);
+    let mut c = Conversation::default();
+    c.ingest(&MAIN, &at("00:00.000", user("p1", None, &json!("Keep the port going"))));
+    c.ingest(&MAIN, &at("00:10.000", answered("a1", "p1", "m1", "end_turn")));
+
+    let mut peer = handed("w1", "a1", "Another Claude session sent a message: done, thanks.");
+    peer["origin"] = json!({"kind": "peer", "name": "slopty-f3"});
+    c.ingest(&MAIN, &at("01:00.000", peer));
+    assert_eq!(end(&c), None, "another session's message wakes it");
+    c.ingest(&MAIN, &at("01:03.000", answered("a2", "w1", "m2", "end_turn")));
+    assert_eq!(end(&c), ms("01:03.000"));
+
+    let fired = json!({"type": "system", "subtype": "scheduled_task_fire", "uuid": "t1",
+        "parentUuid": "a2", "content": "Claude resuming /loop wakeup", "taskKind": "loop"});
+    c.ingest(&MAIN, &at("09:00.972", fired));
+    assert_eq!(end(&c), ms("01:03.000"), "the wakeup's notice alone runs nothing");
+    let mut wakeup = handed("w2", "t1", "Continue the 1:1 port work.");
+    wakeup["turnOrigin"] = json!("scheduled");
+    c.ingest(&MAIN, &at("09:01.016", wakeup));
+    assert_eq!(end(&c), None, "its prompt, handed to the model, wakes it");
+    c.ingest(&MAIN, &at("09:05.000", answered("a3", "w2", "m3", "end_turn")));
+
+    let lost = json!({"type": "assistant", "uuid": "e1", "parentUuid": "a3",
+        "isApiErrorMessage": true, "error": "unknown",
+        "message": {"id": "m4", "role": "assistant", "model": "<synthetic>",
+            "stop_reason": "stop_sequence",
+            "content": [{"type": "text", "text": "API Error: Connection lost mid-response."}]}});
+    c.ingest(&MAIN, &at("09:30.000", lost));
+    assert_eq!(end(&c), ms("09:30.000"), "it gave up");
+    let retry = call("a4", Some("e1"), "t9", "Bash", &json!({"command": "tail log"}));
+    let mut retry = at("10:30.000", retry);
+    retry["message"]["id"] = json!("m5");
+    retry["message"]["stop_reason"] = json!("tool_use");
+    c.ingest(&MAIN, &retry);
+    assert_eq!(end(&c), None, "the retried request runs it again");
+    let [turn] = c.turns(&MAIN) else { panic!("one turn: {:#?}", c.turns(&MAIN)) };
+    let woken: Vec<Option<WallMs>> = turn.woken.iter().copied().map(Some).collect();
+    assert_eq!(woken, [ms("01:00.000"), ms("09:01.016"), ms("10:30.000")], "each wake, once");
+}
+
 /// A command Claude Code runs itself ends its turn with what it printed, as a line
 /// (`<local-command-stdout>`), a record of its own (`local_command`, empty or not) or a shell
 /// line's output; a command's printing in a turn a prompt opened leaves that turn running.

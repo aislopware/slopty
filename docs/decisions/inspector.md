@@ -298,10 +298,36 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
   next prompt. The transcript says where a turn's work ends: the model's final answer, an
   assistant record whose request stopped with nothing more to do (`end_turn`, a stop sequence,
   as Claude Code's own error records stop, or a refusal). The turn ends there. Each later end in
-  the same turn moves its end on to itself, as a hook's summary after the answer does, or a
-  later answer when the model is woken again (a task's notice, a blocking Stop hook). A turn
+  the same turn moves its end on to itself, as a hook's summary after the answer does. A turn
   whose last request called a tool, paused or ran out of tokens still runs, and its time ticks.
   A subagent's turn ends at its own final answer, not when its parent hears its report.
+  - **Woken again (2026-10-31).** Claude Code can wake the model after that answer, and the
+    turn then read as done, its time stopped, until the next answer, while the agent worked. A
+    turn runs again from the record that shows the wake: a blocking Stop hook's feedback (the
+    meta user record that starts `Stop hook feedback:`), a task's notice once Claude Code hands
+    it to the model, a peer's message or a scheduled wakeup (each a user record of its own,
+    `promptSource: "system"`), or, where no record names the wake, the model's next request
+    after the end. Its time ticks and the session works until the next final answer ends it.
+    The summary of the stop the hook blocked follows its feedback and is no end, unless a hook
+    stopped Claude Code there (`preventedContinuation`). A notice queued, a wakeup's own
+    notice, a hook that only summarises (with output or a failure that does not block), a
+    command's caveat: none wakes the model, so none reopens the turn.
+  - **The hooks' word on the stop before.** Slopty's own relay heard the `Stop` of the stop the
+    turn went on past, and it may be heard before the wake's records are read or after; a hook
+    that exits at once can leave the answer, its feedback and the summary in one read, and the
+    relay starts later than the hook ends. No time orders them, so the decoder counts the
+    wakes that came after a stop, where Claude Code ran its `Stop` hooks (`Turn::woken`), and
+    the history takes the hooks' end only once they told of more stops than that, each `Stop`
+    once however often its relay brought it. The TUI's idle notice (`idle_prompt`) rests the
+    session and ends no turn, since it fires while a background task still runs, between the
+    turn's `Stop` and the notice that wakes it. With a stop's `Stop` never heard, the woken
+    run's own is taken for it, and the records end the turn and rest the session instead.
+  - Tests (`slopty-agent`): `a_blocking_stop_hook_runs_the_turn_until_the_next_answer`,
+    `a_stop_hook_that_only_summarises_leaves_the_turn_ended`,
+    `a_tasks_notice_runs_the_turn_until_the_next_answer` (on the `background` recording) and
+    `the_model_woken_by_anything_else_runs_the_turn_again` for the records;
+    `a_woken_turn_runs_again_and_the_session_works` (every read and hearing order) and
+    `a_tasks_notice_runs_again_the_turn_its_stop_ended` for the turn and the session.
 - ✅ **How the deletions were made (2026-10-30).** Choices the ruling's "Left out, and why" left
   open:
   - **One clock.** Everything that runs (a turn's time, a step's lane, the working line's word)

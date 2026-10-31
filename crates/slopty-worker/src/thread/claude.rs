@@ -933,7 +933,9 @@ impl Reader {
                 self.history.status(Phase::NeedsYou, Some(wait), live, at)
             }
             // The turn of the prompt it names ends with its Stop, before or after the records
-            // that close it.
+            // that close it. The TUI idle at its prompt ends none: a task's notice may yet wake
+            // the turn its Stop ended.
+            Signal::Idle => self.history.status(Phase::Done, None, live, at),
             Signal::Done => {
                 let mut outs = self.history.turn_ended(prompt, &End::Complete, at);
                 outs.extend(self.history.status(Phase::Done, None, live, at));

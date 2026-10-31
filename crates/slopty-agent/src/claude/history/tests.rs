@@ -864,6 +864,7 @@ fn signalled(
         Signal::Asks { kind, text } => {
             history.status(Phase::NeedsYou, Some(Wait { kind: kind.to_owned(), text }), live, at)
         }
+        Signal::Idle => history.status(Phase::Done, None, live, at),
         Signal::Done => {
             let mut outs = history.turn_ended(prompt, &End::Complete, at);
             outs.extend(history.status(Phase::Done, None, live, at));
@@ -1149,6 +1150,173 @@ fn a_stop_ends_the_turn_a_notice_moved_on() {
     assert_eq!(run(records.len()), first, "heard after the result");
     let [turn] = first.as_slice() else { panic!("one turn: {first:#?}") };
     assert_eq!((&turn.state, turn.ended_ms), (&TurnState::Complete, Some(at)), "the hook's end");
+}
+
+/// A turn a blocking Stop hook woke again runs again in the thread, and the session works, from
+/// the hook's feedback to the model's next answer: however the records are read (the answer
+/// apart from the feedback, or in one read with it, as a hook that exits at once leaves them)
+/// and whenever the `Stop` of the stop the hook kept from ending is heard (before those records
+/// are read, between them, after them, or never, its relay passed over). The `Stop` after the
+/// next answer ends both, heard before that answer is read or after; with the first never
+/// heard, the answer does.
+#[test]
+fn a_woken_turn_runs_again_and_the_session_works() {
+    use serde_json::{Value, json};
+
+    use crate::hooks::Signal;
+    let at = |stamp: &str| format!("2026-10-20T06:{stamp}Z");
+    let ms = |stamp: &str| conv::parse_ms(&at(stamp)).expect("a time");
+    let answer = |uuid: &str, stamp: &str, id: &str, blocks: Value, stop: &str| {
+        json!({"type": "assistant", "uuid": uuid, "timestamp": at(stamp),
+            "message": {"id": id, "role": "assistant", "model": "claude-opus-5-5",
+                "content": blocks, "usage": {"input_tokens": 10, "output_tokens": 5},
+                "stop_reason": stop}})
+    };
+    let prompt = json!({"type": "user", "uuid": "p1", "timestamp": at("33:40.000"),
+        "promptId": "q1", "message": {"role": "user", "content": "Make the tests pass"}});
+    let said = |words: &str| json!([{"type": "text", "text": words}]);
+    let done = answer("a1", "34:02.589", "m1", said("Done."), "end_turn");
+    let fed = json!({"type": "user", "uuid": "f1", "timestamp": at("34:02.600"),
+        "promptId": "q1", "isMeta": true, "message": {"role": "user",
+            "content": "Stop hook feedback:\n[~/.claude/hooks/tests.sh]: 2 tests fail"}});
+    let summed = json!({"type": "system", "subtype": "stop_hook_summary", "uuid": "s1",
+        "timestamp": at("34:02.602"), "hookCount": 2, "hookErrors": ["2 tests fail"],
+        "preventedContinuation": false, "stopReason": ""});
+    let test = json!([{"type": "tool_use", "id": "t1", "name": "Bash",
+        "input": {"command": "cargo test"}}]);
+    let works = answer("a2", "34:06.000", "m2", test, "tool_use");
+    let ran = json!({"type": "user", "uuid": "r1", "timestamp": at("34:06.300"),
+        "promptId": "q1", "message": {"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}});
+    let passed = answer("a3", "34:20.000", "m3", said("They pass."), "end_turn");
+    let look = |host: &Host, history: &History| {
+        let thread = host.thread(history.main());
+        let turn = thread.turns.last().expect("a turn");
+        (turn.state.clone(), turn.ended_ms, thread.status.phase)
+    };
+    let running = (TurnState::Active, None, Phase::Working);
+    let (stop, last) = (ms("34:02.620"), ms("34:20.030"));
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let mut n = 0_u32;
+
+    for together in [false, true] {
+        for heard in ["first", "between", "late", "never"] {
+            for last_first in [false, true] {
+                if together && heard == "between" {
+                    continue;
+                }
+                n = n.saturating_add(1);
+                let path = scratch.path().join(format!("{n}.jsonl"));
+                let mut decoder = Transcripts::default();
+                let mut read = |history: &mut History, host: &mut Host, records: &[&Value]| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .expect("open");
+                    for record in records {
+                        writeln!(file, "{record}").expect("written");
+                    }
+                    host.take(history.transcript(&decoder.read(&path, &[]), &[]));
+                };
+                let (mut history, mut host) = (observed(), Host::default());
+                host.take(history.drain());
+                let ends = |history: &mut History, host: &mut Host, at: WallMs| {
+                    host.take(signalled(history, Signal::Done, Some("q1"), at));
+                };
+                read(&mut history, &mut host, &[&prompt]);
+                host.take(signalled(&mut history, Signal::Working, Some("q1"), ms("33:40.010")));
+                if heard == "first" {
+                    ends(&mut history, &mut host, stop);
+                }
+                if together {
+                    read(&mut history, &mut host, &[&done, &fed, &summed]);
+                } else {
+                    read(&mut history, &mut host, &[&done]);
+                    if heard == "between" {
+                        ends(&mut history, &mut host, stop);
+                    }
+                    read(&mut history, &mut host, &[&fed, &summed]);
+                }
+                if heard == "late" {
+                    ends(&mut history, &mut host, stop);
+                }
+                let woken = look(&host, &history);
+                read(&mut history, &mut host, &[&works, &ran]);
+                let working = look(&host, &history);
+                if last_first {
+                    ends(&mut history, &mut host, last);
+                }
+                read(&mut history, &mut host, &[&passed]);
+                if !last_first {
+                    ends(&mut history, &mut host, last);
+                }
+                let ended = look(&host, &history);
+
+                let case = format!(
+                    "read {}, the stop before heard {heard}, the last heard {}",
+                    if together { "together" } else { "apart" },
+                    if last_first { "first" } else { "after" }
+                );
+                assert_eq!(woken, running, "{case}: it runs again from the feedback");
+                assert_eq!(working, running, "{case}: it works");
+                assert_eq!(
+                    ended,
+                    (TurnState::Complete, Some(ms("34:20.000")), Phase::Done),
+                    "{case}: the next answer ends it"
+                );
+                let turns = &host.thread(history.main()).turns;
+                assert_eq!(turns.len(), 1, "{case}: one turn");
+            }
+        }
+    }
+}
+
+/// A task's notice runs again the turn its `Stop` ended, as recorded (`background`), from the
+/// notice Claude Code hands the model to the `Stop` after the model's next answer: neither the
+/// `Stop` before it nor the TUI's idle notice between (`idle_prompt`, which fires whatever runs
+/// in the background) ends the run, and the session works.
+#[test]
+fn a_tasks_notice_runs_again_the_turn_its_stop_ended() {
+    use crate::hooks::Signal;
+    let text = std::fs::read_to_string(dir("conversation", "background").join("transcript.jsonl"))
+        .expect("the recording");
+    let (mut history, mut host, mut decoder) =
+        (observed(), Host::default(), Conversation::default());
+    host.take(history.drain());
+    let first = "00000000-0000-4000-8000-000000000002";
+    let then = "00000000-0000-4000-8000-000000000023";
+    let look = |host: &Host, history: &History| {
+        let thread = host.thread(history.main());
+        let turn = thread.turns.last().expect("a turn");
+        (turn.state.clone(), turn.ended_ms, thread.status.phase)
+    };
+    let (mut summaries, mut woken, mut last) = (0_u32, None, None);
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let record: serde_json::Value = serde_json::from_str(line).expect("a record");
+        feed(&mut history, &mut host, &mut decoder, std::slice::from_ref(&record));
+        let stamp = record.get("timestamp").and_then(serde_json::Value::as_str);
+        let made = stamp.and_then(conv::parse_ms).unwrap_or_default();
+        let after = |ms: u64| WallMs::from_millis(made.as_millis().saturating_add(ms));
+        if record["subtype"] == "stop_hook_summary" {
+            summaries = summaries.saturating_add(1);
+            let prompt = if summaries == 1 { first } else { then };
+            host.take(signalled(&mut history, Signal::Done, Some(prompt), after(5)));
+            if summaries == 1 {
+                host.take(signalled(&mut history, Signal::Idle, Some(first), after(1_000)));
+            } else {
+                last = Some((made, look(&host, &history)));
+            }
+        } else if record["type"] == "user" && record["promptSource"] == "system" {
+            host.take(signalled(&mut history, Signal::Working, Some(then), after(2)));
+            woken = Some(look(&host, &history));
+        }
+    }
+    let running = (TurnState::Active, None, Phase::Working);
+    assert_eq!(woken, Some(running), "the notice handed over runs the turn again");
+    let (end, ended) = last.expect("a last summary");
+    assert_eq!(ended, (TurnState::Complete, Some(end), Phase::Done), "its next stop ends it");
+    assert_eq!(host.thread(history.main()).turns.len(), 1, "one turn");
 }
 
 /// The recorded `/compact`'s hooks heard one by one: from its `PreCompact` until its

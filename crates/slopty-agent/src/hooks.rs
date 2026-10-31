@@ -223,8 +223,12 @@ pub enum Signal {
         /// What it asks, in a line.
         text: String,
     },
-    /// The turn ended and it is at rest.
+    /// The turn ended and it is at rest (`Stop`).
     Done,
+    /// The TUI has waited at its prompt a while (`Notification`, `idle_prompt`): at rest, though
+    /// it ends no turn, since it can come after the turn's own `Stop` and before Claude Code
+    /// wakes the model again in that turn (a task's notice).
+    Idle,
     /// The turn ended on an error.
     Failed(Option<String>),
     /// Its context is being compacted (`true`), or that is over.
@@ -305,7 +309,7 @@ impl Hook {
                 Signal::Asks { kind: INPUT, text: line }
             }
             Some("elicitation_complete" | "elicitation_response") => Signal::Working,
-            Some("idle_prompt") => Signal::Done,
+            Some("idle_prompt") => Signal::Idle,
             _ => Signal::Nothing,
         }
     }
@@ -426,7 +430,7 @@ mod tests {
         );
         assert_eq!(
             hook(json!({"hook_event_name": "Notification", "notification_type": "idle_prompt"})),
-            Signal::Done
+            Signal::Idle
         );
         assert_eq!(
             hook(json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"})),

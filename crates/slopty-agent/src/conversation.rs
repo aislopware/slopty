@@ -31,6 +31,14 @@
 //! the record of their own call, not the newest one. So does a record with no parent, or one
 //! never seen (the file was picked up mid-way).
 //!
+//! **Turns.** A prompt opens a turn, and the model's final answer ends it (so do a command's
+//! output, an interrupt and Claude Code's end-of-turn records); each later end moves the end on.
+//! Claude Code may wake the model after that answer: a blocking Stop hook's feedback, a task's
+//! notice or other input it hands the model itself (`promptSource: "system"`), or, where no
+//! record says so, the model's own next request. The turn runs again from that record, and
+//! counts the wake when the model had stopped there ([`Turn::woken`]): each such stop had its
+//! `Stop` hooks run, so their word on the stop before ends no woken run.
+//!
 //! **Incremental.** [`Conversation::read`] builds on [`Tail`]: each call decodes the lines
 //! appended since the previous one and returns [`Change`]s. A tool call is an entry keyed by its
 //! `tool_use_id`; its result, or the notice that its background work finished, arrives in a later
@@ -122,6 +130,13 @@ struct Thread {
     /// The request the assistant records now arriving belong to: its message id and the usage
     /// already counted for it. A user record ends it, since the next request answers that.
     request: Option<(String, Usage)>,
+    /// Claude Code woke the model again after its turn's last end ([`Conversation::wake`]),
+    /// and the model has not answered since: a Stop hook's summary written now speaks of the
+    /// stop the hook kept from ending, not of the woken run.
+    woken: bool,
+    /// The model stopped at its last request (its final answer, or the error Claude Code gave
+    /// up on), where Claude Code runs its `Stop` hooks, and nothing has woken it since.
+    stopped: bool,
 }
 
 impl Thread {
@@ -503,6 +518,8 @@ impl Conversation {
                     && let Some(mut notice) =
                         attachment.and_then(|a| str_at(a, "prompt")).and_then(parse_notice)
                 {
+                    // The model takes the notice in with its next request.
+                    self.wake(&context, None, batch);
                     notice.at_ms = at_ms;
                     self.task_row(&thread, Some(made_at), &notice, batch);
                     self.notice(notice, batch);
@@ -541,11 +558,15 @@ impl Conversation {
             t.request = None;
         }
         let Some(content) = record.get("message").and_then(|m| m.get("content")) else { return };
+        if from_elsewhere(record) {
+            self.wake(ctx, Some(record), batch);
+        }
         // A stop hook's feedback wakes the model as a message of Claude Code's own: the TUI
         // says it as the hook's row, not the person's.
         if let Some(feedback) =
             content_text(content).trim_start().strip_prefix("Stop hook feedback")
         {
+            self.wake(ctx, Some(record), batch);
             let said = feedback.trim_start_matches(':').trim();
             let text = if said.is_empty() {
                 "Stop hook feedback".to_owned()
@@ -615,6 +636,9 @@ impl Conversation {
             {
                 Body::Interrupted { during_tool: marker.contains("for tool use") }
             } else if let Some(mut notice) = parse_notice(text) {
+                // Claude Code hands the model a task's notice as its next input: one that comes
+                // after the turn's answer wakes the model.
+                self.wake(ctx, Some(record), batch);
                 notice.at_ms = ctx.at_ms;
                 self.task_row(ctx.thread, Some(ctx.made_at), &notice, batch);
                 self.notice(notice, batch);
@@ -726,6 +750,8 @@ impl Conversation {
     fn start_turn(&mut self, ctx: &Ctx<'_>, prompt: &str, record: &Value, batch: &mut Batch) {
         let prompt_id = str_at(record, "promptId");
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
+        thread.woken = false;
+        thread.stopped = false;
         if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
             open.ended_ms = Some(ctx.at_ms);
             batch.turn(ctx.thread, open.clone());
@@ -822,11 +848,53 @@ impl Conversation {
     /// a session Claude Code ran with no Stop hook writes: without it, the turn would run on to
     /// the next prompt, or to now. A hook's summary after it, or a later final answer (the model
     /// woken again by a notice or a blocking hook), moves it on, as each end does.
+    ///
+    /// A request that goes on (a call, a pause), begun after the turn ended, is the model woken
+    /// again by something no record before it named ([`Self::wake`]): another session's
+    /// message, a scheduled wakeup, a retry after an error, a continuation after a refusal.
     fn assistant(&mut self, ctx: &Ctx<'_>, record: &Value, batch: &mut Batch) {
         let Some(message) = record.get("message") else { return };
+        let ended_one =
+            self.threads.get(ctx.thread).and_then(|t| t.request.as_ref()).is_some_and(|(id, _)| {
+                !id.is_empty() && str_at(message, "id") == Some(id.as_str())
+            });
+        if !answers_last(message) && !ended_one && !bool_at(record, "isApiErrorMessage") {
+            self.wake(ctx, None, batch);
+        }
+        if let Some(t) = self.threads.get_mut(ctx.thread) {
+            t.woken = false;
+        }
         self.answer(ctx, record, message, batch);
         if answers_last(message) {
+            if let Some(t) = self.threads.get_mut(ctx.thread) {
+                t.stopped = true;
+            }
             self.end_turn(ctx, batch);
+        }
+    }
+
+    /// Claude Code woke the model again (a blocking Stop hook's feedback, a task's notice, the
+    /// model's own next request): the thread's turn runs from here, though it had ended at the
+    /// model's answer, until the next answer ends it. Until the model answers, a Stop hook's
+    /// summary is the hook's word on the stop it kept from ending, not the end
+    /// ([`Thread::woken`]). A turn still running is as it was. A wake after the model stopped
+    /// is counted in its turn ([`Turn::woken`]), once however many records tell it. The user
+    /// `record` that woke it names the run for the hooks (`promptId`), as a tool result does
+    /// ([`Self::name_turn`]).
+    fn wake(&mut self, ctx: &Ctx<'_>, record: Option<&Value>, batch: &mut Batch) {
+        let Some(thread) = self.threads.get_mut(ctx.thread) else { return };
+        thread.woken = true;
+        let stopped = std::mem::take(&mut thread.stopped);
+        if let Some(turn) = thread.turns.last_mut().filter(|t| t.ended_ms.is_some()) {
+            turn.ended_ms = None;
+            if stopped {
+                turn.woken.push(ctx.at_ms);
+            }
+            let turn = turn.clone();
+            batch.turn(ctx.thread, turn);
+        }
+        if let Some(record) = record {
+            self.name_turn(ctx.thread, record, batch);
         }
     }
 
@@ -960,8 +1028,17 @@ impl Conversation {
                     stop: None,
                 })
             }
-            Some("stop_hook_summary" | "turn_duration") => {
-                self.end_turn(ctx, batch);
+            Some(kind @ ("stop_hook_summary" | "turn_duration")) => {
+                // Claude Code writes a blocking hook's feedback, which wakes the model, before
+                // the summary of the hooks that ran: that summary leaves the woken run going,
+                // unless a hook stopped Claude Code there (`continue: false`).
+                let woken = self.threads.get(ctx.thread).is_some_and(|t| t.woken);
+                let kept_going = kind == "stop_hook_summary"
+                    && woken
+                    && !bool_at(record, "preventedContinuation");
+                if !kept_going {
+                    self.end_turn(ctx, batch);
+                }
                 let errors: Vec<String> = record
                     .get("hookErrors")
                     .and_then(Value::as_array)
@@ -2300,6 +2377,16 @@ fn has_tool_result(record: &Value) -> bool {
 /// or a refusal). A request that stopped to call a tool, to pause or at its token limit goes on.
 fn answers_last(message: &Value) -> bool {
     matches!(str_at(message, "stop_reason"), Some("end_turn" | "stop_sequence" | "refusal"))
+}
+
+/// Whether a user record is input Claude Code itself handed the model (`promptSource:
+/// "system"`): a task's notice, another session's message or idle notice, a scheduled wakeup.
+/// It wakes the model when its turn had ended. The person's own (`typed`, `sdk`, `queued`, a
+/// suggestion taken) open turns of their own as prompts.
+fn from_elsewhere(record: &Value) -> bool {
+    str_at(record, "promptSource") == Some("system")
+        && !is_prompt(record)
+        && !has_tool_result(record)
 }
 
 /// Whether a record is something the person typed: a user record with words of theirs, not a
