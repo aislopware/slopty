@@ -865,10 +865,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           head=$(git rev-parse origin/main)
-          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 1 \
-            --json createdAt --jq '.[0].createdAt // empty')
-          busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 10 \
-            --json status --jq '[.[] | select(.status != "completed")] | length')
+          # A run whose name ends in a mark, `(id)`, is a lane's case (`e2e --hosted`, `remote
+          # --e2e`), not every case: it neither stands in for the nightly nor holds it back.
+          whole='[.[] | select(.displayTitle | test(" \\([^)]*\\)$") | not)]'
+          last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 100 \
+            --json createdAt,displayTitle --jq "$whole | .[0].createdAt // empty")
+          busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 30 \
+            --json status,displayTitle --jq "$whole | map(select(.status != \"completed\")) | length")
           if [ "${busy:-0}" -gt 0 ]; then
             echo "an e2e run is still going; none started" >> "$GITHUB_STEP_SUMMARY"
           elif [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 93600 ]; then
