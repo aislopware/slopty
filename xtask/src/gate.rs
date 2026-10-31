@@ -2529,7 +2529,7 @@ let windows = cfg!(windows);
             "[ \"$PACK\" = true ] && args+=(--pack target/e2e/pack/host.tar)",
             "name: host-build-${{ github.run_attempt }}\n          path: target/e2e/pack/host.tar",
             "HOST: host-build-${{ github.run_attempt }}",
-            "args+=(--no-build --test-threads 3)",
+            "args+=(--test-threads 3)\n            [ \"$PACK\" = true ] || args+=(--no-build)",
             "NEXTEST_RETRIES: \"0\"",
             "&& (needs.e2e.result == 'success'\n      \
              || (needs.e2e.result == 'skipped' && needs.smoke-plan.outputs.matrix == '[]'))",
@@ -2571,7 +2571,7 @@ let windows = cfg!(windows);
             "[ \"$PACK\" = true ] && args+=(--pack target/e2e/pack/host.tar)",
             "ios) args=(ios \"${args[@]}\" --sim iphone --host \"$HOST\") ;;",
             "ipad) args=(ios \"${args[@]}\" --sim ipad --host \"$HOST\") ;;",
-            "mac) args=(mac \"${args[@]}\" --no-build --test-threads 3) ;;",
+            "args=(mac \"${args[@]}\" --test-threads 3)\n              [ \"$PACK\" = true ] || args+=(--no-build) ;;",
             "args=(\"--$GOLDENS\")",
             "GOLDENS: ${{ inputs.goldens || 'review' }}",
             "group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.id || github.ref }}",

@@ -330,16 +330,16 @@ where the push left main and emits one job per kind of Mac run with the filterse
 tests; a push that reaches none skips them. `e2e (mac)` builds the daemons, the app and the test
 binaries once, in the check's one feature set (`--build-only`), and runs the app's cases (S1 to S3)
 and the server's (S4) on that runner from that build (`--no-build`), or `e2e (server)` the server's
-alone when the push reaches no other. When the plan has `e2e (ios)` too, the Mac's job also builds
-the simulator suite's test binary and the iOS app and hands them on as the artifact `host-build-<attempt>`
-before its own tests, with the iOS app built on the host build's units (`--pack`); a push that
-reaches the simulator alone gets a `mac` job that only builds and packs. `e2e (ios)` compiles
-nothing: it boots the iPhone meanwhile and lets it settle from its first boot while the build is
-on its way (the runner's CPU half idle on two `top` samples in a row, at most 10 minutes), takes the
-build (`--host`), installs the app, settles once more and runs S5 on the iPhone; the iPad's
-launch-and-layout
-check runs in `e2e.yml` only (`docs/decisions/testing.md`, "The simulator's runner builds no Mac
-side"). Both read the gate's compile cache, retry
+alone when the push reaches no other. When the plan has `e2e (ios)` too, the Mac's job first
+builds the simulator's part (its suite's test binary, the binaries it spawns but the Mac app, and
+the iOS app on the same units) and hands it on as the artifact `host-build-<attempt>` (`--pack`),
+then builds its own cases with their tests; a push that reaches the simulator alone gets a `mac`
+job that only builds and packs. `e2e (ios)` compiles nothing: it boots the iPhone meanwhile, lets
+it settle until the build comes and no longer (the runner's CPU half idle on two `top` samples in
+a row), takes the build (`--host`), installs the app and runs S5 on the iPhone beside whatever its
+boot still runs; the iPad's launch-and-layout check runs in `e2e.yml` only
+(`docs/decisions/testing.md`, "The simulator's runner builds no Mac side", "A hosted simulator
+settles only while its build is on its way"). Both read the gate's compile cache, retry
 nothing (`NEXTEST_RETRIES=0`), review rather than compare the goldens (`--review`), and stop once
 any other job of the run ended other than green (`--stop-on-red`, a look at the run's jobs each
 minute, conditional on its `ETag`, and a first one before any setup), since that run never promotes;

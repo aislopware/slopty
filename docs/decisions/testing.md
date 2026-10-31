@@ -2347,15 +2347,20 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   host build took 182 s in that run's `e2e (mac)` at the same 100 % compile-cache hits: beside
   the iPhone's first boot, a boot that takes a core and minutes of disk, three cores built at a
   fifth of the speed, and the boot itself took 230 s. The tests were never the cost.
-  - **The Mac's job builds the e2e once, for both.** With the simulator's job in the plan its
-    matrix entry says `pack`: `xtask e2e mac --build-only --pack` builds the case's test
-    binaries and the simulator suite's in the one feature set, records each, builds the iOS app,
-    and tars the binaries the suites spawn, the test binaries, the record and the app, which the
-    job uploads as `host-build-<attempt>` before its own tests run from that build
-    (`--no-build`). Every hosted runner checks out to `/Users/runner/work/slopty/slopty`, so the
-    record's absolute paths hold on the other runner unchanged, and the tar keeps the binaries
-    executable, which an artifact's own files do not. A plan that reaches the simulator alone gets
-    a `mac` job with an empty filter, which builds, packs and runs nothing.
+  - **The Mac's job builds the e2e once, for both, the simulator's part first.** With the
+    simulator's job in the plan its matrix entry says `pack`: `xtask e2e mac --build-only
+    --pack` builds the simulator suite's test binary and the binaries it spawns, all but the Mac
+    app, records it, builds the iOS app, and tars the binaries, the test binary, the record and
+    the app, which the job uploads as `host-build-<attempt>`. Its own cases build after, with
+    their tests, over the same feature set, so they reuse every unit and add only the Mac app's
+    and their test binaries. The first cut built the Mac's cases first and packed after them:
+    the Mac app's GPUI crates and link held the simulator's build back about 85 s of the host
+    build's 235 s (run 41231747992). Without the simulator's job the Mac's job builds its cases
+    in the build-only step and tests them `--no-build`. Every hosted runner checks out to
+    `/Users/runner/work/slopty/slopty`, so the record's absolute paths hold on the other runner
+    unchanged, and the tar keeps the binaries executable, which an artifact's own files do not. A
+    plan that reaches the simulator alone gets a `mac` job with an empty filter, which builds,
+    packs and runs nothing.
   - **The iOS app is built there too, not on the simulator's runner.** The first cut built it on
     the simulator's runner beside the boot (run 41226170614): 828 s, against 254 s when the host
     build ran first on the same runner. The iOS build's build scripts and proc macros are host
@@ -2363,15 +2368,14 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     built them again on cores the first boot held at 0 % idle. That run took 23.5 minutes (the
     `mac` job queued 5 of them behind a probe), of which the iOS app's build was 963 s.
   - **The simulator's runner only boots, installs and tests.** `xtask e2e ios --host <artifact>`
-    starts the boot and a wait for the artifact at once, joins the boot, waits for the
-    simulator to settle from its first boot while the artifact is still on its way, joins the
-    wait, installs the app, settles once more and runs the suite; it compiles nothing, so its job
-    takes neither the iOS targets nor zig nor xcodegen. The wait asks for the artifact every 10 s
+    starts the boot and a wait for the artifact at once, joins the boot, lets the simulator
+    settle while the artifact is on its way, joins the wait, installs the app and runs the suite
+    (below, "A hosted simulator settles only while its build is on its way"); it compiles
+    nothing, so its job takes neither the iOS targets nor zig nor xcodegen. The wait asks for the artifact every 10 s
     and reads the run's jobs every minute: a job ended red or cancelled means no build is coming,
     and it fails at once rather than at its 40-minute limit. The same path serves `e2e.yml`. On
     an idle runner a first boot holds all three cores for 70 s of boot and 294 s more (probe run
-    41225144069), which the wait now overlaps; with the settle after the install alone, that
-    work was waited out only once the build had come (249 s in run 41226170614).
+    41225144069), which the wait overlaps.
   - **The iPad's light check leaves the gate.** It runs in every `e2e.yml` run, nightly and at a
     round's end, as a job of its own beside the iPhone's from the same host build, where its
     first boot costs no push 16 minutes. The person does not use the iPad (its light check of
@@ -2385,9 +2389,31 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     plan runs five macOS jobs at once, and the gate's three test shards and its two e2e jobs take
     them all. A settled simulator restored from a tar (1.9 GB, 1.0 GB compressed, 12 s to unpack)
     boots in 39 s but still holds the cores 160 s, against 70 s and 294 s fresh (probe run
-    41225144069): worth about 2.5 minutes the simulator's runner now spends waiting anyway. Raising
-    the tests' timeouts so they run beside a busy simulator was ruled out on 2026-10-30 ("An iOS
-    run starts once its simulator has settled").
+    41225144069): worth about 2.5 minutes the simulator's runner now spends waiting anyway.
   - Tests: `gate::impact::tests::the_mac_job_builds_the_simulator_s_host_side` (the plan's
     `pack` and the build-only job), `e2e::tests::a_record_names_its_test_binaries`, and the
     workflow needles in `gate::tests`.
+
+- ✅ **A hosted simulator settles only while its build is on its way** (2026-11-01). On GitHub's
+  `xcode-27` runners (three cores, 7 GB) an iOS 27 simulator's boot keeps every core at 0 % idle
+  for 8-9 minutes, on its second boot too: 545 s and 521 s after `bootstatus` (probe run
+  41231883466). No one process does it: WidgetKit's extensions in turn, `PosterBoard`, Siri and
+  speech, Health, Home, `mobileassetd` unzipping Siri assets, `apsd`, the simulator's and the
+  host's `diagnosticd`, the host's `mds`, the largest 68 s of CPU. `simctl boot --disabledJob`
+  is accepted and ignored: 30 labels named, every one ran, and the settle took 470-537 s (probe
+  run 41234058749). Waiting for it, as a guest on this Mac did ("An iOS run starts once its
+  simulator has settled"), cost gate run 41231747992 601 s without calm and 208 s more after the
+  install, for 49 s of tests: a 21-minute `e2e (ios)`.
+  - Now the simulator's runner settles only until its build comes, then installs the app and
+    runs the suite beside whatever the boot still runs. A run that builds on its own runner
+    (`xtask e2e ios` without `--host`) still settles after the install.
+  - The full iPhone suite, all five tests, passed so, 62.5 s beside daemons still busy 205 s
+    after the boot, and the iPad's light check in 23.3 s beside ones busy 304 s on (run
+    41235899472). The guest's failures the earlier ruling answered (no worker address within
+    30 s, no agent started within 30 s) came from four cores held 18-20 minutes, with this Mac's
+    lanes building beside; a hosted runner holds only the run.
+  - A red there is the product's or the test's, as every e2e red: it is read, never retried. If
+    one test proves to need a quiet machine, it says what it waits on (its own deadline, a
+    `MEASURE` line) and the settle comes back for it alone, measured.
+  - Tests: the workflow needles in `gate::tests`; the settle's sampling is
+    `e2e::tests::the_settle_reads_top_s_second_sample` as before.

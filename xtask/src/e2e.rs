@@ -171,15 +171,16 @@ pub struct E2eOpts {
     #[arg(long)]
     no_build: bool,
     /// Build, record the suites' test binaries, and run nothing: `ci.yml`'s `e2e (mac)` builds
-    /// in one step, hands the build on (`--pack`), then runs its tests with `--no-build`.
+    /// in one step, then runs its tests with `--no-build`, or hands a build on first (`--pack`).
     #[arg(long, conflicts_with_all = ["no_build", "host"])]
     build_only: bool,
-    /// Also build the simulator suite's test binary and the iOS app, and write them with the
-    /// host side of the build (the binaries the suites spawn, every suite's test binary and the
-    /// record) to this tar, which another runner of the same workflow run takes with `--host`:
-    /// the gate builds the e2e once, and the simulator's runner only boots, installs and tests
+    /// Build the simulator's part instead of the case's (the binaries its suite spawns, all but
+    /// the Mac app, its test binary and the iOS app) and write it with its record to this tar,
+    /// which another runner of the same workflow run takes with `--host`. The case's own build
+    /// comes after, with its tests, so the simulator's runner never waits on the Mac app's: the
+    /// gate builds the e2e once, and that runner only boots, installs and tests
     /// (`docs/decisions/testing.md`, "The simulator's runner builds no Mac side").
-    #[arg(long, value_name = "TAR", conflicts_with_all = ["no_build", "host"])]
+    #[arg(long, value_name = "TAR", requires = "build_only", conflicts_with_all = ["no_build", "host"])]
     pack: Option<camino::Utf8PathBuf>,
     /// The `ios` case only: take the host side of the build and the iOS app from this artifact
     /// of the GitHub Actions run this job is in, once the job that built them (`--pack`)
@@ -370,12 +371,11 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             "--pack hands a Mac case's build to the simulator's runner; `ios` takes one (--host)"
         );
     }
-    // What this build makes test binaries for: the case's suites, and with `--pack` the
-    // simulator's too, for the runner that takes it.
-    let mut built: Vec<&Suite> = suites.clone();
-    if opts.pack.is_some() {
-        built.extend(IOS.iter().filter(|ios| !suites.iter().any(|s| s.test == ios.test)));
-    }
+    // What this build makes test binaries for: the case's suites, or with `--pack` the
+    // simulator's alone, for the runner that takes it, and the binaries they spawn.
+    let built: Vec<&Suite> =
+        if opts.pack.is_some() { IOS.iter().collect() } else { suites.clone() };
+    let bins = spawned(opts.pack.is_some());
     let data_dir = opts
         .data_dir
         .clone()
@@ -450,7 +450,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         // suites' test binaries with them: one feature set ([`build`]).
         let started = std::time::Instant::now();
         let (packages, tests) = suites_built(&built);
-        build(sh, &packages, &tests, &[])?;
+        build(sh, &packages, &tests, &bins, &[])?;
         std::fs::create_dir_all(&reuse)?;
         let metadata = cmd!(sh, "cargo metadata --format-version 1").quiet().read()?;
         std::fs::write(&cargo_metadata, metadata)?;
@@ -474,7 +474,8 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         record.phase("simulator app", started.elapsed(), None);
         let started = std::time::Instant::now();
         let records: Vec<std::path::PathBuf> = built.iter().map(|s| recorded(s)).collect();
-        pack(sh, tar, &bin_dir, &records, &cargo_metadata, &app.app)?;
+        let spawned: Vec<camino::Utf8PathBuf> = bins.iter().map(|bin| bin_dir.join(bin)).collect();
+        pack(sh, tar, &spawned, &records, &cargo_metadata, &app.app)?;
         record.phase("pack", started.elapsed(), None);
     }
     if opts.build_only {
@@ -512,10 +513,12 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     for (pass, sim) in passes.iter().enumerate() {
         hold_if_stopping();
         // The host build and the app with it (`--host`), joined before the install. The boot and
-        // the wait both run in the background; the simulator settles from its first boot while
-        // the build is on its way, so the two overlap, and once more after the install.
+        // the wait run in the background, and the simulator settles from its boot until the
+        // build comes, no longer: a hosted runner's boot keeps every core busy for 8-9 minutes,
+        // past the build, so the suite runs beside its daemons (`docs/decisions/testing.md`, "A
+        // hosted simulator settles only while its build is on its way").
         let host_coming = awaiting.is_some();
-        let mut host = |record: &mut Record| -> Result<()> {
+        let host = |awaiting: &mut Option<HostWait>, record: &mut Record| -> Result<()> {
             let Some(waiting) = awaiting.take() else { return Ok(()) };
             let started = std::time::Instant::now();
             let came = waiting
@@ -529,7 +532,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
             Ok(())
         };
         if sim.is_none() {
-            host(&mut record)?;
+            host(&mut awaiting, &mut record)?;
         }
         let device = sim.map(|sim| {
             let family = sim.family();
@@ -547,16 +550,18 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
                 };
                 record.phase(&format!("simulator {family} boot"), started.elapsed(), None);
                 if on_ci() && host_coming {
-                    settled(sh, family, "boot", &mut record);
+                    let came =
+                        || awaiting.as_ref().is_none_or(std::thread::JoinHandle::is_finished);
+                    settled(sh, family, "boot", &came, &mut record);
                 }
-                host(&mut record)?;
+                host(&mut awaiting, &mut record)?;
                 if let Some(app) = &app {
                     let started = std::time::Instant::now();
                     crate::ios::install(sh, &udid, app)?;
                     record.phase(&format!("simulator {family} install"), started.elapsed(), None);
                 }
-                if on_ci() {
-                    settled(sh, family, "install", &mut record);
+                if on_ci() && !host_coming {
+                    settled(sh, family, "install", &|| false, &mut record);
                 }
                 Ok((
                     sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
@@ -771,15 +776,15 @@ fn boot_in_background(
     })
 }
 
-/// Write an e2e build to the tar `out` for the simulator's runner (`--pack`): the binaries the
-/// suites spawn ([`BINS`] in `bin_dir`), each test binary the suites' `records` list, the records
+/// Write an e2e build to the tar `out` for the simulator's runner (`--pack`): the binaries its
+/// suite spawns (`bins`), each test binary the suites' `records` list, the records
 /// and cargo's metadata, and the iOS `app`, every path relative to the checkout. Every hosted
 /// runner checks out to the same directory, so the records' absolute paths hold there as they
 /// are, and `tar` keeps the binaries executable (an artifact's own files lose the bit).
 fn pack(
     sh: &Shell,
     out: &camino::Utf8Path,
-    bin_dir: &camino::Utf8Path,
+    bins: &[camino::Utf8PathBuf],
     records: &[std::path::PathBuf],
     cargo_metadata: &std::path::Path,
     app: &camino::Utf8Path,
@@ -792,8 +797,8 @@ fn pack(
         Ok(inside.to_string_lossy().into_owned())
     };
     let mut files: Vec<String> = Vec::new();
-    for bin in BINS {
-        files.push(relative(bin_dir.join(bin).as_std_path())?);
+    for bin in bins {
+        files.push(relative(bin.as_std_path())?);
     }
     for record in records {
         let listing = std::fs::read_to_string(record)
@@ -834,19 +839,22 @@ fn test_binaries(listing: &str) -> Result<Vec<String>> {
 }
 
 /// How long the simulator's runner waits for the host build ([`await_host`]): the job that packs
-/// it builds the Mac's side in 3 minutes warm and 20 cold on a hosted runner, and is waited on
-/// only after the boot and the iOS app's build.
+/// it builds the Mac's side and the iOS app in 5-6 minutes warm and about 20 cold on a hosted
+/// runner.
 const HOST_WAIT_MOST: std::time::Duration = std::time::Duration::from_mins(40);
 
 /// How often [`await_host`] asks for the artifact: one request in each, against the run's
 /// 1,000 an hour.
 const HOST_ASK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// The wait for the host build on its thread ([`await_host`]): how long from its start it came.
+type HostWait = std::thread::JoinHandle<Result<std::time::Duration>>;
+
 /// Wait on a thread of its own for the artifact `name` of this GitHub Actions run, which another
 /// job uploads (`--pack`, then `actions/upload-artifact`), then bring it here and unpack its tar
-/// over the checkout; how long from the call it came. A job that packs no build ends red, and
+/// over the checkout. A job that packs no build ends red, and
 /// `--stop-on-red` ends this run then.
-fn await_host(sh: &Shell, name: &str) -> std::thread::JoinHandle<Result<std::time::Duration>> {
+fn await_host(sh: &Shell, name: &str) -> HostWait {
     let dir = sh.current_dir();
     let name = name.to_owned();
     std::thread::spawn(move || {
@@ -912,12 +920,17 @@ fn fetch_host(dir: &std::path::Path, name: &str) -> Result<()> {
 /// settled").
 const SETTLE_MOST: std::time::Duration = std::time::Duration::from_mins(10);
 
-/// Wait for the machine to settle after the simulator `family`'s `step` ([`settle`]), saying how
-/// long it took and recording it.
-fn settled(sh: &Shell, family: &str, step: &str, record: &mut Record) {
+/// Wait for the machine to settle after the simulator `family`'s `step` ([`settle`]), or until
+/// `enough` says to go on, saying how long it took and recording it.
+fn settled(sh: &Shell, family: &str, step: &str, enough: &dyn Fn() -> bool, record: &mut Record) {
     let started = std::time::Instant::now();
-    match settle(sh) {
+    match settle(sh, enough) {
         Some(after) => println!("  the {family} settled after its {step} in {after:.0?}"),
+        None if enough() => println!(
+            "  the {family} was still busy after its {step} when its build came, {:.0?} on: its \
+             tests run beside its daemons",
+            started.elapsed()
+        ),
         None => println!(
             "  the {family} did not settle after its {step} within {SETTLE_MOST:?}: its tests \
              run beside its daemons"
@@ -926,15 +939,16 @@ fn settled(sh: &Shell, family: &str, step: &str, record: &mut Record) {
     record.phase(&format!("simulator {family} settle after the {step}"), started.elapsed(), None);
 }
 
-/// How long the machine took to settle once a simulator booted and took the app: until its CPU
-/// is half idle or more on two 4 s samples of `top` in a row. A booted simulator's daemons
+/// How long the machine took to settle once a simulator booted: until its CPU is half idle or
+/// more on two 4 s samples of `top` in a row. A booted simulator's daemons
 /// (`SetStoreUpdateService`, `MTLCompilerService`, `photolibraryd`) held every core of a guest
 /// on this Mac (2026-10, since removed) for minutes after `bootstatus`, and tests run beside them
-/// failed on time. `None` when [`SETTLE_MOST`] passed first, or `top` could not run.
-fn settle(sh: &Shell) -> Option<std::time::Duration> {
+/// failed on time. `None` when [`SETTLE_MOST`] passed first, `enough` said to go on, or `top`
+/// could not run.
+fn settle(sh: &Shell, enough: &dyn Fn() -> bool) -> Option<std::time::Duration> {
     let started = std::time::Instant::now();
     let mut calm = 0_u8;
-    while started.elapsed() < SETTLE_MOST {
+    while started.elapsed() < SETTLE_MOST && !enough() {
         let top = cmd!(sh, "top -l 2 -s 4 -n 0").quiet().ignore_stderr().read().ok()?;
         if idle_share(&top).is_some_and(|idle| idle >= 50.0) {
             calm = calm.saturating_add(1);
@@ -1298,15 +1312,32 @@ impl Record {
     }
 }
 
-/// Build every binary the suites spawn ([`BINS`]: the daemons, the CLI, the app with its `e2e`
-/// feature, the e2e crate's helpers and the test kit's stand-ins) and the test targets `tests`
-/// of `packages` (beside [`PACKAGES`]), in one cargo call over [`selection`]. The test targets
-/// are in it for more than their binaries: a call that builds a test resolves the selected
-/// packages' dev-dependencies too, so this one and the list or archive after it resolve alike,
-/// and the second compiles nothing. `args` go to cargo, such as a `--target-dir`.
-pub fn build(sh: &Shell, packages: &[&str], tests: &[&str], args: &[&str]) -> Result<()> {
+/// The binaries a build makes for the suites to spawn: every one of [`BINS`] (the daemons, the
+/// CLI, the app with its `e2e` feature, the e2e crate's helpers and the test kit's stand-ins),
+/// or for the simulator's runner (`--pack`) all but the Mac app, which no simulator test starts
+/// and whose GPUI build would come before the runner's.
+fn spawned(for_simulator: bool) -> Vec<&'static str> {
+    BINS.into_iter().filter(|bin| !(for_simulator && *bin == MAC_APP)).collect()
+}
+
+/// The Mac app's e2e build, of [`BINS`].
+const MAC_APP: &str = "slopty-app-e2e";
+
+/// Build the binaries `bins` ([`spawned`]) and the test targets `tests` of `packages` (beside
+/// [`PACKAGES`]), in one cargo call over [`selection`]. The test targets are in it for more than
+/// their binaries: a call that builds a test resolves the selected packages' dev-dependencies
+/// too, so this one and the list or archive after it resolve alike, and the second compiles
+/// nothing; a later build of the other binaries over the same selection reuses every unit. `args`
+/// go to cargo, such as a `--target-dir`.
+pub fn build(
+    sh: &Shell,
+    packages: &[&str],
+    tests: &[&str],
+    bins: &[&str],
+    args: &[&str],
+) -> Result<()> {
     let selection = selection(packages);
-    let bins: Vec<&str> = BINS.iter().flat_map(|bin| ["--bin", bin]).collect();
+    let bins: Vec<&str> = bins.iter().flat_map(|bin| ["--bin", bin]).collect();
     let tests: Vec<&str> = tests.iter().flat_map(|test| ["--test", test]).collect();
     step(
         "build daemons and app",

@@ -19049,3 +19049,71 @@ found no idle cores and only slowed it. The Linux parts are 164 s of this Mac's 
 cd ../slopty-export && cargo xtask bundle --fast
 vm_stat | grep -i swapouts   # before and after each run
 ```
+
+## 2026-11-01 — the gate's e2e on hosted Macs: where `e2e (ios)`'s 44 minutes went
+
+GitHub's `xcode-27` runners (three cores, 7 GB, macOS 27, Xcode 27), the gate's runs on `gate`:
+job times from the API, phases from each job's `run:` record line and step marks
+(`docs/decisions/testing.md`, "The simulator's runner builds no Mac side", "A hosted simulator
+settles only while its build is on its way").
+
+| run | commit | what changed | `e2e (mac)` | `e2e (ios)` | to promote |
+| --- | --- | --- | --- | --- | --- |
+| 41218759169 | 13ea21853 | before: the iOS job builds the Mac's side beside its boot, then the iPad | 6 m 17 s | 44 m 42 s | 46 m 45 s |
+| 41226170614 | 3fa479f92 | the Mac's job packs the host build; the iOS job builds the iOS app | 5 m 22 s (queued 5 m) | 22 m 31 s | 23 m 46 s |
+| 41228523444 | e73417604 | the Mac's job builds the iOS app too | 7 m 04 s, red | 7 m 31 s, stopped | — |
+| 41231747992 | 019176072 | settle beside the wait, then after the install | 8 m 20 s | 21 m 03 s | 21 m 46 s |
+
+`e2e (ios)`'s phases:
+
+| run | build here | iOS app | boot | settle | install | tests |
+| --- | --- | --- | --- | --- | --- | --- |
+| 41218759169 | 883 s | 363 s | 230 s | 205 s (after the install) | — | 67 s, and the iPad 950 s for 23 s |
+| 41226170614 | none | 962.9 s | beside the app | 249.0 s (after the install) | 21.8 s | 56.4 s |
+| 41231747992 | none | none | 312.0 s (`bootstatus` 206 s, `notifyutil` 100 s) | 601.5 s without calm, then 207.7 s after the install | 22.8 s | 48.9 s |
+
+Settling only until the build comes (`e2e.yml` run 41235899472, every simulator test): the iPhone
+booted in 155.5 s, was still busy when the build came 358 s into the run (204.8 s of settle),
+installed in 10.8 s and passed its five tests in 62.5 s, 433.5 s in all; the iPad booted in
+125.9 s, settled 303.6 s until its build came 425 s in, installed in 12.6 s and passed its light
+check in 23.3 s, 465.4 s in all.
+
+The same host build took 182 s in 41218759169's `e2e (mac)`, at the same 100 % compile-cache hits
+as the 883 s beside the boot. In 41231747992's `e2e (mac)` the build-only step took 235.5 s for
+the daemons and the app (gpui compiling at +78 s, slopty-ui and slopty-app at +151 s, the link
+done at +235 s), 86.7 s the iOS app's crates, 15.7 s `slopty-notify`, 15.1 s `xcodebuild`, 0.7 s
+the tar (190 MB), 8 s its upload; the iOS job had it 488 s into its run.
+
+A simulator's boot on an idle runner, one device at a time (probe runs):
+
+| run | boot | until half idle | notes |
+| --- | --- | --- | --- |
+| 41225144069 | 70 s | 294 s | fresh iPhone 18 Pro, iOS 27.0, first boot |
+| 41225144069 | 60 s | 155 s | the same device, second boot |
+| 41225144069 | 39 s | 160 s | restored from its tar (1.9 GB, 1.0 GB zstd, 12 s to unpack) |
+| 41225144069 | 40 s | 299 s | the image's own device, first boot |
+| 41225144069 | 45 s | 379 s | fresh iPad Pro 13-inch, first boot |
+| 41231883466 | 114 s | 545 s | fresh iPhone, first boot |
+| 41231883466 | 98 s | 521 s | the same device, second boot |
+| 41234058749 | 109 s, 52 s | 537 s, 470 s | two fresh iPhones booted with 30 `--disabledJob` labels |
+
+At 0 % idle no process stood out: the largest over 41231883466's first boot were the simulator's
+`diagnosticd` (68 s of CPU), `apsd` (45 s), `STExtractionService` (42 s, Siri assets unzipped
+for `mobileassetd`), the runner's `provjobd` (39 s), the host's `mds` (39 s, with Spotlight off)
+and `SpringBoard` (34 s), beside WidgetKit's extensions, which `chronod` started and stopped in
+turn, `PosterBoard`'s, Siri's, Health's and Home's. `simctl boot` takes `--disabledJob` and exits
+0, but every one of the 30 labels named still ran (183 of 403 jobs running), and the settle
+took as long.
+
+```sh
+# a run's jobs, and the iOS job's phases
+gh run view <run> --json jobs --jq '.jobs[] | "\(.name) \(.startedAt) \(.completedAt)"'
+gh api --allow-escape-sequences repos/aislopware/slopty/actions/jobs/<job>/logs | grep -a 'run: '
+# a probe: boot, then sample until half idle on two samples in a row
+cargo xtask remote --name sim --probe "$(cat probe.sh)"
+#   xcrun simctl boot "$U" [--disabledJob=<label>...]; xcrun simctl bootstatus "$U" -b
+#   top -l 2 -s 3 -n 0 | grep "CPU usage" | tail -1
+#   ps -A -o pcpu=,pid=,comm= | sort -rn | head -6
+#   ps -A -o time=,pid=,comm=                         # cumulative, after the settle
+#   xcrun simctl spawn "$U" launchctl list            # which jobs run
+```

@@ -103,11 +103,12 @@ jobs:
           gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$sha"
           echo "every e2e case started on main's head, $sha, on gate" >> "$GITHUB_STEP_SUMMARY"
 
-  # The jobs the cases make: the Mac's builds the e2e once for all of them, runs the app's and the
-  # server's suites when `mac` is asked for, and builds the iOS app and packs the build for the
-  # simulators' jobs when `ios` or `ipad` is (`--pack`); `ios` runs the simulator's suite on the
-  # iPhone and `ipad` the iPad's launch-and-layout check, each on a runner of its own that boots
-  # its simulator while the Mac's job builds, then takes the build from it (`--host`;
+  # The jobs the cases make: the Mac's builds the e2e once for all of them. When `ios` or `ipad`
+  # is asked for, it first builds the simulators' part (their suite's test binary, the binaries
+  # it spawns and the iOS app) and packs it for their jobs (`--pack`); when `mac` is, it builds
+  # and runs the app's and the server's suites, after the pack. `ios` runs the simulator's suite
+  # on the iPhone and `ipad` the iPad's launch-and-layout check, each on a runner of its own that
+  # boots its simulator while the Mac's job builds, then takes the build from it (`--host`;
   # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). The iPad's first
   # boot after the iPhone's tests on one runner took 16 of the case's 46 minutes.
   plan:
@@ -282,6 +283,7 @@ jobs:
           GOLDENS: ${{ inputs.goldens || 'review' }}
           SLOPTY_E2E_A11Y: ${{ inputs.a11y }}
           NEXTEST_RETRIES: "0"
+          PACK: ${{ matrix.pack }}
           HOST: host-build-${{ github.run_attempt }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -289,8 +291,11 @@ jobs:
           [ -n "$FILTER" ] && args+=(-E "$FILTER")
           case "$CASE" in
             # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
-            # "An e2e case runs in a guest here"), from the build above.
-            mac) args=(mac "${args[@]}" --no-build --test-threads 3) ;;
+            # "An e2e case runs in a guest here"), from the build above, or built now on the
+            # simulators' part when it packed that.
+            mac)
+              args=(mac "${args[@]}" --test-threads 3)
+              [ "$PACK" = true ] || args+=(--no-build) ;;
             ios) args=(ios "${args[@]}" --sim iphone --host "$HOST") ;;
             # Its launch-and-layout test alone, whatever the filter (`IPAD_LIGHT`).
             ipad) args=(ios "${args[@]}" --sim ipad --host "$HOST") ;;

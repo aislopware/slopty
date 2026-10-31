@@ -742,15 +742,16 @@ jobs:
       - run: xtask setup --lane tests
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      # The Mac's job builds the e2e once: its cases' test binaries and, when the plan has the
-      # simulator's job (`pack`), the simulator suite's and the iOS app too, on the host build's
-      # own build scripts and proc macros, packed into a tar it hands on as an artifact before its
-      # own tests. The simulator's runner takes it (`--host`) and only boots, installs and tests:
-      # building beside a first boot on three cores took 883 s for the Mac's side against 182 s
-      # here (run 41218759169), and 828 s for the iOS app alone (run 41226170614;
-      # docs/decisions/testing.md, "The simulator's runner builds no Mac side"). A plan that
-      # reaches the simulator alone gives this job an empty filter: it builds and packs, and runs
-      # nothing.
+      # The Mac's job builds the e2e once. When the plan has the simulator's job (`pack`), it
+      # builds the simulator's part first (the binaries its suite spawns, all but the Mac app,
+      # its test binary and the iOS app, on the same build scripts and proc macros) and hands it
+      # on as an artifact, then builds its own cases with their tests; else it builds its cases
+      # here and tests them `--no-build`. The simulator's runner takes the artifact (`--host`)
+      # and only boots, installs and tests: building beside a first boot on three cores took
+      # 883 s for the Mac's side against 182 s here (run 41218759169), and 828 s for the iOS app
+      # alone (run 41226170614; docs/decisions/testing.md, "The simulator's runner builds no Mac
+      # side"). A plan that reaches the simulator alone gives this job an empty filter: it builds
+      # and packs, and runs nothing.
       - if: matrix.case != 'ios'
         env:
           CASE: ${{ matrix.case }}
@@ -772,6 +773,7 @@ jobs:
         env:
           CASE: ${{ matrix.case }}
           FILTER: ${{ matrix.filter }}
+          PACK: ${{ matrix.pack }}
           HOST: host-build-${{ github.run_attempt }}
           NEXTEST_RETRIES: "0"
           GH_TOKEN: ${{ github.token }}
@@ -782,10 +784,12 @@ jobs:
             # and at a round's end, where its first boot costs no push 16 minutes.
             args+=(--stop-on-red --sim iphone --host "$HOST")
           else
-            # Three tests at a time on the runner's three cores, from the build above. Without
-            # `--stop-on-red`, whose first look would set the run aside for a push that came
-            # after this job built: a run whose jobs all began to build runs on.
-            args+=(--no-build --test-threads 3)
+            # Three tests at a time on the runner's three cores, from the build above, or built
+            # now on the simulator's part when it packed that. Without `--stop-on-red`, whose
+            # first look would set the run aside for a push that came after this job built: a
+            # run whose jobs all began to build runs on.
+            args+=(--test-threads 3)
+            [ "$PACK" = true ] || args+=(--no-build)
           fi
           xtask e2e "${args[@]}"
       - if: always()
