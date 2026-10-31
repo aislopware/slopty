@@ -18768,6 +18768,82 @@ SLOPTY_LANE=M cargo xtask remote --head --e2e app
 SLOPTY_REPO_ROOT=$PWD SLOPTY_LANE=X <xtask> remote -p slopty-net --only <the changed paths>
 ```
 
+## 2026-10-31 — the smoke plan's reach in a fixed number of git calls, and the hosted setup it trims
+
+`cargo xtask smoke reach` on this Mac (M1 Max) over this checkout's history, the graph-based map
+before and after its reads were batched (`docs/decisions/testing.md`, "The gate runs the smoke
+cases a push reaches"). Wall seconds; both gave byte-identical answers on every row and on 39
+single commits from `2d8640669` to `800b523e2` (0.07–0.12 s each after).
+
+Before, three git calls a changed Rust file (its diff, its two sides); after, one diff for all
+of them and one read of each side's files.
+
+| change | before | after |
+| --- | --- | --- |
+| one commit, 8 Rust files (`3c875037c`) | 0.32 | 0.10 |
+| one commit, 66 Rust files, most vendored (`636775315`, noq 1.4.0) | 5.03 | 0.28 |
+| `HEAD~120..HEAD` | 26.4 | 0.91 |
+| `HEAD~300..HEAD` | 30.9 | 1.0 |
+
+The one diff also fetches every changed file's old side into the `smoke plan` job's partial clone
+(`filter: blob:none`) in one request, where a call a file fetched one blob each.
+
+What the hosted ruling's item 2 trims, from its study's runs and the cache today: the UI shard's
+zig steps, 76 s a run (`.research/hosted-gate-2026-10-31/A-hosted-anatomy.md`, 1.2); the `linux`
+job's zig package fetch on a prebuilt hit, a median 83 s; the Actions cache's `cargo-home`
+entries, 26 holding 8.8 GB of the 10 GB at 12:30 UTC, all on `gate`, of which the prune keeps
+two. Not taken: the image's Rust. No image holds the pinned 1.99.1, so `dtolnay/rust-toolchain`
+downloads it, 3 components in 6.2 s on `xcode-27` and 5 in 8.6 s on `ubuntu-24.04` (run
+41197450658).
+
+```sh
+SLOPTY_REPO_ROOT=$PWD <xtask before|after> smoke reach --base <commit>~1 --head <commit>
+/usr/bin/time -p env SLOPTY_REPO_ROOT=$PWD <xtask> smoke reach --base HEAD~300 --head HEAD
+gh cache list --repo aislopware/slopty --limit 500 --json key,ref,sizeInBytes
+```
+
+## 2026-10-31 — what a push reaching the app costs on hosted runners, and the e2e jobs' bounds
+
+From the GitHub API in the review of the smoke gate (`docs/decisions/testing.md`, "The gate runs
+the smoke cases a push reaches", "What a push costs, measured"): the gate's three shards over the
+last 23 gate runs, a median 7.6, 6.4 and 6.2 minutes; 8 hosted nightly `e2e (app)` runs, a median
+20.6 minutes, the build 617.7 s of run 41181641898. A push that reaches the app then takes about
+18-22 minutes to main (the plan 1-2, setup about 3, build about 11, then the reached tests),
+where the hosted ruling estimated 7-10; `e2e (ios)` is not yet measured hosted. A push costs
+about 20 Mac-minutes of shards and 40 of e2e; the busiest hours held 16 pushes, and three held 32
+(2026-10-30, 18:30-21:30 UTC): 1,630 Mac-minutes against the five Macs' 900, a backlog of about
+2.4 hours with every push's e2e run. A run whose commit `gate` moved off before its e2e started
+stands aside, so in a burst an e2e job that waited past a newer push gives its Mac back as it
+gets one.
+
+The run's watch looks at its jobs once a minute, GitHub's own cache time for the listing
+(`Cache-Control: max-age=60`). A look with the last `ETag` that finds nothing changed answers
+`304 Not Modified` and does not count against the token's 1,000 requests an hour (`gh api -i -H
+'If-None-Match: <etag>'` exits 1 then, with the status line on stdout); it was 120 counted
+requests an hour per running e2e job, every 30 s. Mid-run the listing changes with nearly every
+step of every job, so few looks come back 304; two e2e jobs looking once a minute ask about 120
+times an hour either way. A job past its `timeout-minutes` is listed `cancelled`; its check
+run's annotations say "The job has exceeded the maximum execution time of 1h30m0s" (jobs
+112345159635 and 124521443249; 124147185790 at 45m0s), where a cancelled run's say "The run was
+canceled by @…" (111234919095).
+
+The gate tree's sync made durable past a power loss (`fsync` on each file written,
+`F_FULLFSYNC` on `tree.index` and its directory): a fresh sync of the checkout's 9,253 files
+into an empty directory on the external disk took 2.85 s, against 2.03 s without, and an
+unchanged one 91 and 89 ms; one run each, through `gate::snapshot_commit` in a test.
+
+The reach after the review's fixes (helper modules read from the head's target files, held
+packages through the e2e drivers): `HEAD~120..HEAD` 1.0 s (0.91 before) and `HEAD~300..HEAD`
+1.25 s (1.0), three runs each; single commits unchanged, 0.10 s (`3c875037c`) and 0.26 s
+(`636775315`).
+
+```sh
+gh api -i "repos/aislopware/slopty/actions/runs/<id>/jobs?per_page=100"
+gh api -i -H "If-None-Match: <etag>" "repos/aislopware/slopty/actions/runs/<id>/jobs?per_page=100"
+gh api repos/aislopware/slopty/check-runs/<job>/annotations --jq '.[].message'
+/usr/bin/time -p env SLOPTY_REPO_ROOT=$PWD <xtask> smoke reach --base HEAD~300 --head HEAD
+```
+
 ## 2026-10-31 — Goldens drawn in the test process: parity with the guest, time, and the windows
 
 This Mac (M1 Max, macOS 27.0.1) drawing the shell in the test process

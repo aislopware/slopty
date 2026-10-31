@@ -5,15 +5,18 @@ run-name: >-
 # The live tests (`cargo xtask e2e`): the real app with ptyd and the worker, the server with the
 # CLI and MCP, and the iOS app in the simulator on the iPhone and the iPad, each driven through
 # its test socket, every case on one commit (docs/decisions/testing.md, "Goldens render in the
-# test process; e2e is a smoke set chosen by what a change reaches"). Two ways in, both
+# test process; e2e is a smoke set chosen by what a change reaches"), in two jobs that build once
+# each: `mac` runs the app's and the server's, `ios` the simulator's on both devices. The gate
+# runs the cases a push reaches in the same two jobs (ci.yml's `e2e`). Two ways in, both
 # dispatched on `gate`, so the run reads the compile cache the test shards fill there (a cache is
 # read by its own branch alone, and a run on main built the app for 600 s,
 # .research/ci-speed-2026-10-11.md item 10):
 # - Nightly: the schedule, which runs on main, only dispatches this on `gate` with main's head.
-#   main moves only by `promote`'s token, which GitHub does not count as a push, so a scheduled
-#   run's own commit was the last one a person pushed (0d67253b, for two days). GitHub starts a
+#   Until 2026-10-31 main moved by `promote`'s token, which GitHub does not count as a push, so a
+#   scheduled run's own commit was the last one a person pushed (0d67253b, for two days). GitHub starts a
 #   schedule late or not at all under load, so `promote` starts one when none started for 26
-#   hours.
+#   hours. At 19:47 UTC, 02:47 in the person's time zone (UTC+7), so it holds no Mac the working
+#   day's gate wants.
 # - By hand, on the commit named (`gh workflow run e2e.yml --ref gate -f sha=<commit>`).
 # `--review`: a changed frame fails nothing here and leaves its render and diff in the
 # `e2e-<case>` artifact, since a runner's GPU draws apart from the Macs the goldens were drawn
@@ -22,7 +25,7 @@ run-name: >-
 # failed.
 on:
   schedule:
-    - cron: "47 3 * * *"
+    - cron: "47 19 * * *"
   workflow_dispatch:
     inputs:
       sha:
@@ -76,18 +79,14 @@ jobs:
 
   e2e:
     if: github.event_name == 'workflow_dispatch'
-    name: e2e (${{ matrix.case }}${{ matrix.sim && format(' {0}', matrix.sim) || '' }})
+    name: e2e (${{ matrix.case }})
     runs-on: xcode-27
     # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { case: app, sim: "" }
-          - { case: server, sim: "" }
-          - { case: ios, sim: iphone }
-          - { case: ios, sim: ipad }
+        case: [mac, ios]
     steps:
       # Spotlight off: it indexes every file a build and its tests write, and on a three-core
       # runner it took 200 CPU-seconds of a 353 s build of the worker crate's tests and 106 of
@@ -140,12 +139,14 @@ jobs:
       # Ghostty's zig packages only for a build of libghostty-vt: with the prebuilt for these
       # exact inputs restored, nothing builds it, and the fetch was 51-74 s of every run
       # (.research/e2e-reduction-2026-10-31/B-anatomy.md), as ci.yml's lanes already skip it.
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      # An entry a test shard saved, restored by its prefix, is for these inputs when its key
+      # ends in theirs.
+      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - if: steps.prebuilt.outputs.cache-hit != 'true'
+      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
         working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
@@ -200,19 +201,22 @@ jobs:
       # A red is the behaviour's: no test is retried, the named overrides' retries included.
       - env:
           CASE: ${{ matrix.case }}
-          SIM: ${{ matrix.sim }}
           NEXTEST_RETRIES: "0"
         run: |
           args=("$CASE" --review)
-          [ "$CASE" = ios ] && args+=(--sim "$SIM")
-          # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
-          # "An e2e case runs in a guest here").
-          [ "$CASE" = app ] && args+=(--test-threads 3)
+          if [ "$CASE" = ios ]; then
+            # The iPhone, then the iPad, from one build: the iPad boots while the iPhone tests.
+            args+=(--sim iphone --sim ipad)
+          else
+            # Three tests at a time on the runner's three cores (`docs/decisions/tooling.md`,
+            # "An e2e case runs in a guest here").
+            args+=(--test-threads 3)
+          fi
           xtask e2e "${args[@]}"
       - if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ matrix.case }}${{ matrix.sim }}
+          name: e2e-${{ matrix.case }}
           path: target/e2e/artifacts
           if-no-files-found: ignore
       - if: always()

@@ -1215,8 +1215,8 @@ more full-window layer.
     the newer run, which holds its commits, reports the rest. 13 red runs held a newer push a
     median 12 minutes in two days.
   - Left to the person: a token that lets CI's promote push workflow changes (7 green runs
-    needed a hand `xtask promote`), and more macOS slots (every plan short of Enterprise stops
-    at 5).
+    needed a hand `xtask promote`; it came on 2026-10-31 as a deploy key, and the hand promote
+    went), and more macOS slots (every plan short of Enterprise stops at 5).
   - Tests: `gate::tests::the_repository_s_invariants_hold`,
     `the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e`.
 
@@ -1284,15 +1284,17 @@ more full-window layer.
   per byte than the about 50 s each job spends compiling xtask. Superseded on 2026-10-11 for the
   binary alone, 5 MB ("CI caches the xtask binary").
 
-- ✅ **A commit that changes a workflow is promoted from a checkout** (2026-10-05). GitHub never
-  lets a run's own token create or update a file under `.github/workflows/`, so CI's `promote`
-  job was refused on 10193e1a and on 373913ce after every lane had passed. Main stayed behind,
-  and nothing said why except the push's error. `cargo xtask promote [commit]` makes the same
-  checks the job does and pushes from here: the run on the commit is complete, every `gate`
-  job in it passed, and main fast-forwards to the commit. `land --wait` calls it when the
-  lanes passed and only the promote failed. The promote job now says in the run's summary that
-  a workflow changed and which command to run. A token with the `workflows` scope in the
-  repository's secrets would let CI do it itself; that is the person's call.
+- ✅ **A commit that changes a workflow is promoted from a checkout** (2026-10-05; superseded on
+  2026-10-31 by `testing.md`'s "The gate runs the smoke cases a push reaches": `promote` pushes
+  with a deploy key, which may push a workflow change, and `cargo xtask promote` is gone).
+  GitHub never lets a run's own token create or update a file under `.github/workflows/`, so
+  CI's `promote` job was refused on 10193e1a and on 373913ce after every lane had passed. Main
+  stayed behind, and nothing said why except the push's error. `cargo xtask promote [commit]`
+  makes the same checks the job does and pushes from here: the run on the commit is complete,
+  every `gate` job in it passed, and main fast-forwards to the commit. `land --wait` calls it
+  when the lanes passed and only the promote failed. The promote job now says in the run's
+  summary that a workflow changed and which command to run. A token with the `workflows` scope
+  in the repository's secrets would let CI do it itself; that is the person's call.
 
 - ✅ **The Mac app says when a newer Slopty is out** (2026-10-05, readiness G11). Worker and
   server builds already follow the app, but the app itself never learned of a release.
@@ -2671,7 +2673,8 @@ more full-window layer.
   - **A commit missing what it calls, 2**, both before `xtask stage` put into the index exactly
     what a check passed.
   - **A promote refused for a workflow file, 2**: every lane passed, and `land --wait` or
-    `xtask promote` moves main from a checkout.
+    `xtask promote` moved main from a checkout (until 2026-10-31, when `promote` took a deploy
+    key that may push a workflow change).
   The rulings:
   - **rustdoc runs in the quick check.** `xtask check --quick`, which `remote` runs here, now
     documents the checked crates too (`--no-deps`, warnings denied, as CI's rustdoc lane). On
@@ -3569,13 +3572,24 @@ more full-window layer.
   - **Selecting unit tests by reach.** The person ruled on 2026-10-17 that a gate shard is
     skipped only exactly.
   - **Cancelling superseded runs.** A cancelled run throws its work away; overlap keeps it.
+    Superseded in part the same evening (`docs/decisions/testing.md`, "The gate runs the
+    smoke cases a push reaches"): a run whose commit `gate` moved off before its e2e started
+    is cancelled whole, its shards with it, since it can never promote and the newer run
+    carries its commit. Every other superseded run runs on: one whose e2e is building, and one
+    whose plan chose no case, either of which may still promote.
   - **Larger hosted runners.** They are for paid plans.
   - **Building Mac test binaries on Linux.** Apple's SDK licence forbids the SDK off Apple
     hardware.
 
   The target: push to main at a median of about 455 s and a p90 of about 640 s after items 1
-  and 2 (replayed over the 30 green runs), about 330 s and 516 s after item 7's dependency
-  cache and clippy split, and 7-10 minutes for a push that reaches the app's smoke cases.
+  and 2 (replayed over the 30 green runs), and about 330 s and 516 s after item 7's dependency
+  cache and clippy split. A push that reaches the app's smoke cases takes about 18-22 minutes,
+  not the 7-10 first estimated here: the plan's 1-2 minutes, then the `e2e (mac)` job's setup
+  (about 3), its build (about 11; 617.7 s in the hosted nightly run 41181641898) and the
+  reached tests, while the gate's shards take a median 7.6, 6.4 and 6.2 minutes beside it. The
+  numbers are the review's of 2026-10-31, read from the API over the last 23 gate runs and 8
+  hosted nightly `e2e (app)` runs (median 20.6 minutes); `e2e (ios)` is not yet measured on a
+  hosted runner, and is longer.
   Supersedes "The gate runs on warm runners here", "An e2e case runs in a guest here", "The
   simulator case runs in the guest too" and "The e2e guest makes room before each copy, to a
   budget" as each piece moves.

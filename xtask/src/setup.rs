@@ -35,6 +35,16 @@ const TOOLS: &[(&str, &str)] = &[
     ("cargo-fuzz", "0.13.2"),
 ];
 
+/// Whether the cargo subcommand `tool` on PATH says it is `version` (`cargo nextest --version`
+/// prints `cargo-nextest 0.9.150 (…)`). Any other tool is installed through binstall, which
+/// itself skips one it installed at that version.
+fn at_version(sh: &Shell, tool: &str, version: &str) -> bool {
+    let Some(sub) = tool.strip_prefix("cargo-") else { return false };
+    cmd!(sh, "cargo {sub} --version").quiet().ignore_stderr().read().is_ok_and(|said| {
+        said.split_whitespace().nth(1).is_some_and(|v| v.trim_start_matches('v') == version)
+    })
+}
+
 /// The release of `tool` (its crate) that setup installs.
 pub fn pinned(tool: &str) -> Option<&'static str> {
     TOOLS.iter().find(|(name, _)| *name == tool).map(|(_, version)| *version)
@@ -149,6 +159,11 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId], tools: &[String]) -> Re
                 continue;
             }
             let spec = format!("{tool}@{version}");
+            if at_version(sh, tool, version) {
+                // On PATH already at its pin: a CI job's nextest comes in xtask's cache entry.
+                println!("  ✓ {spec}");
+                continue;
+            }
             step(
                 &format!("binstall {spec}"),
                 &cmd!(sh, "cargo binstall --no-confirm --locked {spec}"),

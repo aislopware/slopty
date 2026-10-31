@@ -49,13 +49,23 @@ zed itself so it is never behind zed while longbridge lags.
   return soonest"). `cargo xtask remote -p <crate> [-p <crate>…]` commits the working tree beside
   the real index (`--only <path>`, repeatable: `HEAD` plus the edits under those paths alone, so
   another lane's unfinished work stays out; `--head`: the commit without the tree's edits) and
-  checks that commit in two places at once. Here, at full power: fmt, host clippy, rustdoc,
-  shear, typos and the crates' tests as a Mac runner runs them, in the lane's own warm directory
-  (`target/local/<lane>/`, `--name` or `SLOPTY_LANE`). On GitHub runners (`check.yml`, pushed
-  to `check/<name>`, deleted when its run ends): with `--full`, iOS and Linux clippy on an arm
-  Linux runner, and the tests on Linux when every crate tests there
-  (`gate::linux_tested`); and any e2e case or probe. A quick check of crates alone dispatches
-  nothing. `--place runner` sends all of it to runners, as before. With `--only` it first
+  checks that commit in two places at once. Here, at nice 10: fmt, host clippy, rustdoc,
+  shear, typos and the crates' tests as a Mac runner runs them, and with `--full` clippy for
+  both iOS triples, in a lane directory under `target/local/`. A check named `L-<lane>`
+  (`--name` or `SLOPTY_LANE`) shares `target/local/L` with the other `L-` checks, and a name
+  without a `-` has a directory of its own. A check whose commit moves the lock (the root
+  `Cargo.lock` or `Cargo.toml`, `workspace-hack/`, `vendor/`, `.cargo/` or
+  `rust-toolchain.toml`) works in `target/local/<name>-lock` instead, so a shared directory
+  never builds at a lane's lock, nor the lane at the shared one's. A new directory starts as an
+  APFS clone of the directory whose build keeps most of what the check's crates build on: the
+  registry's and git's packages they reach at the check's lock, built there at the same version
+  and source. The one used last goes first among equals. Every unit but those packages' is
+  dropped from the clone, and the submodules' checkouts are made afresh. It waits for that
+  directory while a check works there rather than take a worse one. On GitHub runners
+  (`check.yml`, pushed to `check/<name>`, deleted when its run ends): with `--full`, Linux
+  clippy alone (`lint: linux`) of the crates that build there, and the tests on Linux when every
+  crate tests there (`gate::linux_tested`); and any e2e case or probe. A quick check of crates
+  alone dispatches nothing, nor does a full check of crates no Linux builds. `--place runner` sends all of it to runners, as before. With `--only` it first
   formats the Rust files changed under those paths (nightly rustfmt), the vendored crates `cargo
   fmt --all` reaches among them, so no check fails on formatting. Before anything compiles, the
   gate's own tool steps run over the check's tree, each one the change reaches (`gate::Tool`):
@@ -99,10 +109,30 @@ zed itself so it is never behind zed while longbridge lags.
   Each failed run's log, data, frames and kept stack roots go to
   `target/remote/<name>/repeat/run-<i>/`. A flake counts as fixed only after that many clean
   runs (`docs/decisions/tooling.md`). `--workflow-ref
-  <branch>` runs that branch's `check.yml`, to try a change to it. A newer check of the same name
-  cancels the older one's run. A lane's directory is one check's at a time (a lock on
-  `target/local/<lane>/.lock`): a second check of the lane waits, saying "waiting for <lane>'s
-  check (pid N)", or with `--no-wait` fails at once naming it. A stopped wrapper leaves the run
+  <branch>` runs that branch's `check.yml`, to try a change to it. Checks of one name run one
+  after another, a newer one waiting for the older. A lane directory is one check's at a time, and
+  only while that check works in it (a lock on `target/local/<dir>/.lock`): it lets go before it
+  waits on the runners, which are dispatched before it takes the directory. A second check waits,
+  saying "waiting for target/local/<dir>: pid N works there (a check)" and then "took
+  target/local/<dir> after Ns", or with `--no-wait` fails at once naming it. A waiting check keeps
+  any other hold out of the directory (a clone, an eviction, a warm). Two checks of one name wait
+  for each other the same way (`target/remote/<name>/.lock`). Once the verdict is out, `remote`
+  starts an after-pass in the background, logged to `target/remote/after.log`. One pass at a
+  time evicts and prunes:
+  - it deletes a `-lock` directory once `HEAD` holds the lock it moved;
+  - it deletes the directories unused for a day, or for 3 hours when the volume is under its
+    floor and headroom, keeping the one used last;
+  - it runs a prune pass.
+
+  Then, one pass at a time again, it warms each directory used in the last 6 hours whose tree
+  is at another lock than `HEAD`'s and is not a `-lock` one. None runs while the volume is
+  under its floor and headroom. A warm builds that directory's recent crates (clippy, rustdoc
+  and their tests) at nice 10, as a check does, and makes itself stoppable only once its tree
+  is synced. A check that waits for the directory stops it within a quarter second, and it
+  keeps what it built. A gpui-fast bump is then built before the first lane check after it.
+
+  `ci-health` shows the queue for a lane directory beside each check's spread, and the warms
+  apart. A stopped wrapper leaves the run
   going; `--run <id>` with the same options follows it again and applies what it accepted. `cargo xtask ci-health` prints the
   day's spread of check latency beside the gate's and the Deep nightly.
 - Staging a lane's checkpoint: `cargo xtask stage <name>@<sha>…` puts into the index the blobs
@@ -116,12 +146,17 @@ zed itself so it is never behind zed while longbridge lags.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate compiles nothing and takes seconds; it prints the next step when it passes. `land` pushes
-  the commit to the `gate` branch, where CI runs every lane, and main moves to that commit only
-  once every lane passes (below, "Gate"). It pushes at once; `--check` first runs, here under
-  `nice`, host clippy, rustdoc and iOS clippy of the packages the commits change and of their
-  dependents, and `--full` adds their tests and Linux clippy. A red run names the failed lane and tests in its
-  summary: fix it in a new commit and land again; that push's run, which waits for any run in
-  progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
+  the commit to the `gate` branch, where CI runs every lane and the smoke cases it reaches, and
+  main moves to that commit only once all of them pass (below, "Gate"). It pushes at once;
+  `--check` first runs, here under `nice`, host clippy, rustdoc and iOS clippy of the packages
+  the commits change and of their dependents, and `--full` adds their tests and Linux clippy. A
+  red run names the failed lane and tests in its summary: fix it in a new commit and land again;
+  that push's run starts at once, beside any still going, and decides. `land --wait` blocks
+  until main holds the commit or the run failed (a job past its timeout counting), and says
+  which. A run that ends without a red and without promoting (it stood aside for a newer push
+  before its e2e) hands the commit to the newer run on `gate` that carries it, and `--wait`
+  follows that run; a later land that replaced the commit on `gate` withdrew it, and `--wait`
+  says so.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).
 - `cargo xtask e2e <case>` runs the live tests (`docs/TESTING.md`); `cargo xtask e2e server`
   is the one for the server, its worker link, the CLI and MCP, and takes seconds.
@@ -286,33 +321,71 @@ rustdoc, deny, hakari, shear, typos, taplo and `committed`. It is split in two:
 - On GitHub Actions, every lane runs on each push to the `gate` branch, which `cargo xtask land`
   makes: the commits on main not yet on `origin/main`, pushed with a lease. The tests lane runs as
   three jobs, one per shard of packages (`--lane tests --shard ui|worker|rest`, the table in
-  `xtask/src/gate.rs`); they alone take Macs. The tools lane and Linux clippy (`clippy-linux`) run
+  `xtask/src/gate.rs`); they and the smoke jobs below alone take Macs. The tools lane and Linux clippy (`clippy-linux`) run
   on x86_64 Linux, and host clippy, iOS clippy and rustdoc for the Apple triples on arm Linux
   (`ubuntu-24.04-arm`), each a job of its own: they never link, so zig compiles the C their build
   scripts compile (`cargo-zigbuild` for macOS, xtask itself for iOS) and libghostty-vt's zig build
-  is skipped (`tools::apple_cargo`). That leaves two of the plan's five macOS jobs for remote
-  checks and the e2e. `e2e.yml` runs every case (the app, the server, the iPhone and the iPad)
-  nightly on main's head and by hand on a commit named, dispatched on `gate` to read the test
-  shards' compile cache, and from `promote` when none ran for 26 hours; it is not yet a gate lane.
-  On a runner the goldens are reviewed, not compared (`--review`), and a red is never retried;
-  `xtask e2e` ends with each phase's seconds and the whole run's tests, also in the job's summary
-  with every failed test named. Before the push, `land` runs host clippy, rustdoc and iOS clippy of
-  the packages the commits change and of their dependents, side by side at a low priority
-  (`gate::land_checks`); `--full` adds their tests and Linux clippy. Runs on that branch form one
-  concurrency group. A newer push waits behind the run in progress rather than cancelling it, and
-  GitHub keeps only the newest push pending, whose green covers every commit under it; a pull
-  request's run is still cancelled by its next push. When every lane passed, the `promote` job
-  fast-forwards main to that exact commit (`git push origin <sha>:main`); it refuses one that is not
-  on top of main, and main is never gated a second time. A failed lane writes the run's summary: the
-  lane, the step that failed and, for the tests, each failed test from the JUnit report. `cargo
-  xtask ci-health [--since <time>]` prints how long each push to `gate` took to reach main, and the
-  spread.
+  is skipped (`tools::apple_cargo`).
+
+The e2e smoke cases a push reaches run beside the lanes (`docs/TESTING.md`, "The e2e smoke
+set"). The `smoke plan` job, on Linux in the first minute, runs `cargo xtask smoke plan` from
+where the push left main and emits one job per kind of Mac run with the filterset of its reached
+tests; a push that reaches none skips them. `e2e (mac)` builds the daemons, the app and the test
+binaries once, in the check's one feature set, and runs the app's cases (S1 to S3) and the
+server's (S4) on that runner, or `e2e (server)` the server's alone, with no app, when the push
+reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
+and the iPad only once the iPhone's tests are done, waits for each simulator to settle (the
+runner's CPU half idle on two `top` samples in a row, at most 10 minutes), and runs S5 on both.
+Both read the gate's compile cache, retry nothing (`NEXTEST_RETRIES=0`), review rather than
+compare the goldens (`--review`), and stop once any other job of the run ended other than green
+(`--stop-on-red`, a look at the run's jobs each minute, conditional on its `ETag`, and a first
+one before any setup), since that run never promotes; a job past its `timeout-minutes`, which
+GitHub lists as cancelled, counts as red by its annotation. A run stands aside once a newer push
+moved `gate` off its commit before its e2e set up or built: its plan, the e2e job's first step
+and the watch's first look read `gate`'s tip (`xtask/src/gate/order.rs`), and the run is
+cancelled whole, since it can never promote and the newer run carries its commit (its plan diffs
+from a main without it, so it reaches at least the same cases). An e2e that is building runs on
+and may still promote; a run whose plan chose no case runs on too. No concurrency group holds
+the e2e jobs, so nothing cancels a job of the run on `gate`'s tip, and the newest commit reaches
+main or goes red whatever order the jobs end in (`order`'s model test). The plan never judges
+its own change: one that touches `xtask/src/gate/impact.rs` or `order.rs`, `xtask/src/lib.rs` or
+`ci.yml` must plan both jobs, or the plan job is red. With both, a run takes all five of the
+plan's macOS jobs, and a remote check's runner jobs queue for the same five Macs, first come.
+`e2e.yml` runs every case (the app, the server, the iPhone and the iPad) nightly on main's head
+and by hand on a commit named, dispatched on `gate` to read the test shards' compile cache, and
+from `promote` when none ran for 26 hours. `xtask e2e` ends with each phase's seconds (each
+simulator's boot, install and settle apart) and the whole run's tests, also in the job's summary
+with every failed test named, and each suite excused for want of the runner's video encoder
+named as not run.
+
+Before the push, `land` runs host clippy, rustdoc and iOS clippy of the packages the commits
+change and of their dependents, side by side at a low priority (`gate::land_checks`); `--full`
+adds their tests and Linux clippy. Runs on that branch overlap: each push runs at once in a
+group of its own, and a red run cancels itself once a newer push runs (each lane's last step).
+A pull request's run is still cancelled by its next push. When every lane passed, and every
+smoke case the plan chose, the `promote` job fast-forwards main to that exact commit (`git
+push origin <sha>:main`), with the repository's deploy key (`SLOPTY_PROMOTE_KEY`), which may
+push a change to `.github/workflows` where the run's token may not; no workflow runs on a push
+to main. The key is the secret of the `promote` environment, which only a job on `gate` gets,
+and goes only to `actions/checkout` pinned by commit. Two rulesets bound it: main takes no
+force push and no deletion, and only the repository's admins create, move or delete a `v*` tag,
+so the key cannot cut a release. It succeeds without a push when main already holds the commit
+(a later run's green carried it there), skips one `gate` no longer holds (a later land withdrew
+it), pushes again after a wait when another run's promote moved main to a commit under it, says
+when a push was refused with main unmoved, and refuses one that is not on top of main; main is
+never gated a second time. What it starts after main moved (the overdue e2e and Deep runs) is
+best-effort and never turns the run red. Only that job moves
+main; should the key ever break, a plain `git push` of the green commit is the way out. A failed
+lane writes the run's summary: the lane, the step that failed and, for the tests, each failed
+test from the JUnit report. `cargo xtask ci-health [--since <time>]` prints how long each push
+to `gate` took to reach main, and the spread.
 
 `cargo gate --full` runs every lane here, as `cargo xtask release` once did; the release now runs
 the quick gate and CI gates its tag in full before it builds anything. The gate checks the
 **index**, not the working tree: the staged blobs are synced into `target/gate/tree`
-(submodules checked out at the commit the index pins, under `target/gate/modules`) and checked
-in parallel lanes on `target/gate/*` target dirs. Several agents edit this one checkout at
+(submodules checked out at the commit the index pins, under `target/gate/modules`; a sync
+killed midway is made exact by the next, as `tree.index` vouches only for files written) and
+checked in parallel lanes on `target/gate/*` target dirs. Several agents edit this one checkout at
 once, so stage exactly the change you mean to land (`git add <paths>`), gate it, and commit it;
 the tree stays free to edit meanwhile. `--fix` runs the fixers on the tree first (stage what
 they changed); `--in-place` checks the tree itself; `--lane <name>` (repeat for several:
@@ -356,9 +429,17 @@ lane runs `cargo xtask setup --lane <lane>` (only that lane's tools) and
 commit, and gives the tests lane the `ci` profile. That profile's `default-filter` leaves out
 the tests that read hardware a runner's virtual Mac lacks, each named with the reason; nextest
 lists them as skipped and every local gate still runs them. Only missing hardware puts a test
-there, never timing and never a pattern. Compiled units come from sccache on the Actions cache
-(`SCCACHE_GHA_ENABLED`); `rust-cache` keeps the registry, git checkouts and installed tools
-per lane, failures included. The job's post step prints sccache's hit rate.
+there, never timing and never a pattern. Compiled units come from sccache on Cloudflare R2
+(`.github/actions/sccache`; on the Actions cache for a pull request from a fork, which gets no
+secrets), and the registry and git checkouts from one `cargo-home` entry per lock, which the
+tools lane saves. The job's post step prints sccache's hit rate. No job sets up what it does not use: the UI shard builds no libghostty-vt (none of its
+packages depends on `slopty-engine`; `gate::tests::the_ui_shard_builds_no_libghostty`), so it
+installs no zig and restores no prebuilt; a job fetches ghostty's zig packages only when its
+prebuilt library missed (zig itself stays, since the prebuilt entry's key holds `zig version`);
+nextest rides in xtask's cache entry, whose key holds its pin, so `setup` finds it at that
+release and installs nothing. The tools lane, after it saves the lock's `cargo-home` entry,
+deletes all but each branch's newest two, which kept the 10 GB cache from evicting the compile
+cache and the prebuilt libraries first.
 
 `cargo xtask check -p <crate>…` runs the same steps on named crates only, on the working tree:
 what an agent that owns those crates runs before it reports. Its builds name `workspace-hack`
@@ -461,15 +542,24 @@ every target dir under `target/` and in both of cargo's layouts (to 1.99 and fro
 The fork checkouts' target dirs under `.research/` get the same pass. Then each dir over its
 budget (`target/` 200 GB, room for several days of warm builds, `SLOPTY_TARGET_BUDGET_GB` or
 `--budget-gb`; each fork 80 GB, `SLOPTY_FORK_BUDGET_GB`) gives up its own least recently used
-units and caches. When the volume has less free than the floor and its headroom (50 GB,
+units and caches. When the volume has less free than the floor and its headroom (30 GB,
 `SLOPTY_DISK_FLOOR_GB` or `--floor-gb`, plus 30 GB, `SLOPTY_DISK_HEADROOM_GB`), the least
 recently used of all of them go, wherever they sit, until that holds with a tenth to spare.
-Nothing used in the last hour goes that way. It runs after every `check` and `gate`, and before
-(when under that line) and after each local half of `remote`, skipping a dir whose build lock is
-held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). It prints
-what went, the largest entries and how much was used how recently. The gate will not start
-under the floor: it prunes first, and if that is not enough it names what takes the space. How
-prune knows a unit is in use: `docs/decisions/tooling.md`, "target/ stays under a byte budget".
+Nothing used in the last hour goes that way. It runs after every `check` and `gate`, and in
+`remote`'s after-pass once the verdict is out. Before a check's local half it runs only when the
+volume is under the floor and its headroom, after the idle lane directories have gone whole. A
+check still under the floor then evicts the other lane directories whole, at any age (`-lock`
+ones first, then the least recently used; never its own, one a check holds or waits for, or the
+one used last, the next clone's source), and is refused only if that is not enough: a block two
+clones share counts in neither's prune sizing, so only a whole directory frees it. It skips a
+dir whose build lock is held; by hand it waits for the lock (`--idle-hours N`, `--dry-run`). A
+lane directory goes whole rather than unit by unit: moved to `target/local/.evicted/` under its
+lock, then deleted, which frees exactly what it holds. Prune sizes a file by the blocks no clone
+shares (APFS's private size), so a clone takes none of the budget until either side writes, and
+a unit a clone shares is not taken for room. It prints what went, the largest entries and how
+much was used how recently. The gate will not start under the floor: it prunes first, and if
+that is not enough it names what takes the space. How prune knows a unit is in use:
+`docs/decisions/tooling.md`, "target/ stays under a byte budget".
 
 A test binary runs slowly from a large directory: every process that opens `VideoToolbox` or
 `CoreAudio` pays for the entries beside its executable, and `deps/` holds tens of thousands

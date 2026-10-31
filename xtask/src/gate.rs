@@ -26,16 +26,19 @@
 //! run on the snapshot of the index, and a lane that is not run passed on the same inputs.
 
 pub mod impact;
+pub mod order;
 mod pass;
+mod snapshot;
 pub mod warm;
 
-use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
 use pass::{Inputs, Plan, Scope};
+pub use snapshot::snapshot_commit;
+use snapshot::{Source, snapshot};
 use xshell::{Shell, cmd};
 
 use crate::tools::{
@@ -1233,6 +1236,19 @@ fn test_lane(
                 || VIDEOTOOLBOX.to_owned(),
                 |only| format!("({only}) & {VIDEOTOOLBOX}"),
             );
+            // A shard none of whose packages codes video (the UI's, the rest) has no test for
+            // the probe to run, which read as an encoder that did not answer.
+            let listed = cmd!(
+                side,
+                "cargo nextest list {p...} {target...} --profile {VIDEOTOOLBOX_PROFILE} --message-format oneline -E {expr}"
+            )
+            .env(crate::runner::RUNNER_VAR, runner_ref)
+            .quiet()
+            .read();
+            if listed.is_ok_and(|tests| tests.trim().is_empty()) {
+                println!("  – videotoolbox: no VideoToolbox test in this shard");
+                return Ok(());
+            }
             let ran = videotoolbox_step(
                 cmd!(
                     side,
@@ -1652,239 +1668,6 @@ pub fn spawned_bins_for(packages: &[&str]) -> Option<Vec<String>> {
     Some(args)
 }
 
-/// What [`snapshot`] copies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Source {
-    /// The index: what the next commit records, which the gate checks.
-    Index,
-    /// HEAD's tree: the commits `land` pushes.
-    Head,
-}
-
-/// `source`'s entries as `git ls-files --stage -z` lists the index's, `<mode> <sha>
-/// <stage>\t<path>` each: a commit's are all at stage 0.
-fn list(sh: &Shell, source: Source) -> Result<std::process::Output> {
-    Ok(match source {
-        Source::Index => cmd!(sh, "git ls-files --stage -z").quiet().output()?,
-        Source::Head => {
-            let format = "--format=%(objectmode) %(objectname) 0%x09%(path)";
-            cmd!(sh, "git ls-tree -r -z --full-tree {format} HEAD").quiet().output()?
-        }
-    })
-}
-
-/// Sync the **index** (what `git commit` would record, not the working tree), or HEAD's tree,
-/// into `target/gate/tree`. Several agents edit this one checkout at once, so only the staged
-/// state is a unit anyone vouched for: what passes is exactly what the next commit records. Blobs
-/// are read in one `git cat-file --batch` pass; a manifest of the blob each path was last written
-/// from keeps unchanged files untouched, so cargo in the snapshot rebuilds exactly what changed.
-/// Paths the source no longer lists are removed; a submodule (`vendor/ghostty`) is a symlink to
-/// a checkout at the commit the source pins ([`submodule_at`]). Returns the tree and the
-/// source's entries it holds.
-fn snapshot(root: &Utf8Path, source: Source) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
-    let sh = Shell::new()?;
-    sh.change_dir(root);
-    let what = if source == Source::Index { "the index" } else { "HEAD" };
-    sync(root, &root.join("target").join("gate"), &list(&sh, source)?, what)
-}
-
-/// Commit `sha`'s tree synced into `<dir>/tree` as [`snapshot`] syncs the index: a local check
-/// builds exactly what a runner would check out, beside the other lanes' unfinished edits.
-pub fn snapshot_commit(root: &Utf8Path, dir: &Utf8Path, sha: &str) -> Result<Utf8PathBuf> {
-    let sh = Shell::new()?;
-    sh.change_dir(root);
-    let format = "--format=%(objectmode) %(objectname) 0%x09%(path)";
-    let listed = cmd!(sh, "git ls-tree -r -z --full-tree {format} {sha}").quiet().output()?;
-    Ok(sync(root, dir, &listed, "the check's commit")?.0)
-}
-
-/// Sync the entries `listed` names (`git ls-files --stage -z` lines) into `<dir>/tree`, saying
-/// they are `what`.
-fn sync(
-    root: &Utf8Path,
-    gate: &Utf8Path,
-    listed: &std::process::Output,
-    what: &str,
-) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
-    let started = Instant::now();
-    let tree = gate.join("tree");
-    let manifest_path = gate.join("tree.index");
-    std::fs::create_dir_all(&tree).with_context(|| format!("create {tree}"))?;
-    let before: HashMap<String, String> = std::fs::read_to_string(&manifest_path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.split_once(' ').map(|(sha, rel)| (rel.to_owned(), sha.to_owned())))
-        .collect();
-    let mut after: HashMap<String, String> = HashMap::new();
-    let mut wanted: HashSet<String> = HashSet::new();
-    let mut fetch: Vec<(String, String, bool)> = Vec::new();
-    let mut listing = Vec::new();
-    for entry in listed.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        let entry = std::str::from_utf8(entry).context("an index path is not UTF-8")?;
-        let Some((meta, rel)) = entry.split_once('\t') else { continue };
-        let mut fields = meta.split(' ');
-        let (Some(mode), Some(sha), Some(stage)) = (fields.next(), fields.next(), fields.next())
-        else {
-            bail!("unexpected `git ls-files --stage` line: {entry}");
-        };
-        if stage != "0" {
-            bail!("{rel} is unmerged in the index");
-        }
-        wanted.insert(rel.to_owned());
-        listing.push(pass::Entry { path: rel.to_owned(), id: format!("{mode} {sha}") });
-        let dst = tree.join(rel);
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if mode == "160000" {
-            let module = submodule_at(root, gate, rel, sha)?;
-            if std::fs::read_link(&dst).ok().as_deref() != Some(module.as_std_path()) {
-                let _removed = std::fs::remove_file(&dst);
-                std::os::unix::fs::symlink(&module, &dst).with_context(|| format!("link {dst}"))?;
-            }
-            continue;
-        }
-        let key = format!("{mode}:{sha}");
-        let present = std::fs::symlink_metadata(&dst).is_ok();
-        if !present || before.get(rel) != Some(&key) {
-            fetch.push((rel.to_owned(), sha.to_owned(), mode == "120000"));
-        }
-        after.insert(rel.to_owned(), key);
-    }
-    let written = write_blobs(root, &tree, &fetch, &after)?;
-    let removed = prune(&tree, &tree, &wanted)?;
-    let manifest = after.iter().fold(String::new(), |mut s, (rel, key)| {
-        s.push_str(key);
-        s.push(' ');
-        s.push_str(rel);
-        s.push('\n');
-        s
-    });
-    std::fs::write(&manifest_path, manifest).with_context(|| format!("write {manifest_path}"))?;
-    println!(
-        "  snapshot of {what}, {} files: {written} written, {removed} removed ({:.1?})",
-        wanted.len(),
-        started.elapsed()
-    );
-    Ok((tree, listing))
-}
-
-/// A checkout of submodule `rel` at the commit the index pins, under `target/gate/modules/`:
-/// the working submodule may be mid-bump, and the snapshot must build what the index records.
-/// It is a worktree of the submodule's own repository, so it shares its objects and moving it
-/// to another commit rewrites only the files that differ.
-fn submodule_at(root: &Utf8Path, gate: &Utf8Path, rel: &str, sha: &str) -> Result<Utf8PathBuf> {
-    let module = gate.join("modules").join(rel.replace('/', "__"));
-    let sh = Shell::new()?;
-    if module.join(".git").exists() {
-        sh.change_dir(&module);
-        let head = cmd!(sh, "git rev-parse HEAD").quiet().read()?;
-        if head.trim() != sha {
-            cmd!(sh, "git checkout --quiet --detach {sha}").quiet().run()?;
-        }
-    } else {
-        std::fs::create_dir_all(gate.join("modules"))?;
-        sh.change_dir(root.join(rel));
-        cmd!(sh, "git worktree add --quiet --detach --force {module} {sha}").quiet().run()?;
-    }
-    Ok(module)
-}
-
-/// Write the blobs `fetch` names into `tree`, reading them all through one
-/// `git cat-file --batch`. A file whose bytes already match keeps its mtime; a rewritten one is
-/// stamped now, because a lane may have built the old bytes after the blob's own time.
-fn write_blobs(
-    root: &Utf8Path,
-    tree: &Utf8Path,
-    fetch: &[(String, String, bool)],
-    modes: &HashMap<String, String>,
-) -> Result<usize> {
-    use std::io::{BufRead as _, Read as _, Write as _};
-    if fetch.is_empty() {
-        return Ok(0);
-    }
-    let mut child = std::process::Command::new("git")
-        .args(["cat-file", "--batch"])
-        .current_dir(root)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .context("spawn git cat-file")?;
-    let mut stdin = child.stdin.take().context("git cat-file stdin")?;
-    let shas = fetch.iter().fold(String::new(), |mut s, (_, sha, _)| {
-        s.push_str(sha);
-        s.push('\n');
-        s
-    });
-    let feeder = std::thread::spawn(move || stdin.write_all(shas.as_bytes()));
-    let mut out = std::io::BufReader::new(child.stdout.take().context("git cat-file stdout")?);
-    let mut written = 0_usize;
-    for (rel, sha, link) in fetch {
-        let mut header = String::new();
-        out.read_line(&mut header)?;
-        let size: usize = header
-            .split(' ')
-            .nth(2)
-            .and_then(|s| s.trim().parse().ok())
-            .with_context(|| format!("git cat-file header for {sha}: {header:?}"))?;
-        let mut blob = vec![0_u8; size];
-        out.read_exact(&mut blob)?;
-        let mut newline = [0_u8; 1];
-        out.read_exact(&mut newline)?;
-        let dst = tree.join(rel);
-        if *link {
-            let target = std::str::from_utf8(&blob).context("a symlink target is not UTF-8")?;
-            if std::fs::read_link(&dst).ok().as_deref() != Some(Utf8Path::new(target).as_std_path())
-            {
-                let _removed = std::fs::remove_file(&dst);
-                std::os::unix::fs::symlink(target, &dst)?;
-                written = written.saturating_add(1);
-            }
-            continue;
-        }
-        if std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_symlink() || m.is_dir()) {
-            let _removed = std::fs::remove_file(&dst);
-        }
-        if std::fs::read(&dst).is_ok_and(|old| old == blob) {
-            continue;
-        }
-        std::fs::write(&dst, &blob).with_context(|| format!("write {rel}"))?;
-        let executable = modes.get(rel).is_some_and(|k| k.starts_with("100755"));
-        let mode = if executable { 0o755 } else { 0o644 };
-        std::fs::set_permissions(&dst, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
-        written = written.saturating_add(1);
-    }
-    feeder.join().map_err(|panic| anyhow::anyhow!("git cat-file feeder panicked: {panic:?}"))??;
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("git cat-file failed: {status}");
-    }
-    Ok(written)
-}
-
-/// Remove every file under `dir` that the tree no longer lists, and the directories that
-/// empties. Returns how many files went.
-fn prune(tree: &Utf8Path, dir: &Utf8Path, wanted: &HashSet<String>) -> Result<usize> {
-    let mut removed = 0_usize;
-    for entry in std::fs::read_dir(dir).with_context(|| format!("read {dir}"))? {
-        let entry = entry?;
-        let path = Utf8PathBuf::try_from(entry.path())
-            .map_err(|e| anyhow::anyhow!("a snapshot path is not UTF-8: {e}"))?;
-        let rel = path.strip_prefix(tree)?.as_str().to_owned();
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            removed = removed.saturating_add(prune(tree, &path, wanted)?);
-            if std::fs::read_dir(&path)?.next().is_none() {
-                std::fs::remove_dir(&path)?;
-            }
-        } else if !wanted.contains(&rel) {
-            std::fs::remove_file(&path).with_context(|| format!("remove {path}"))?;
-            removed = removed.saturating_add(1);
-        }
-    }
-    Ok(removed)
-}
-
 /// Format check (or apply): [`rustfmt`], then taplo when it is installed.
 pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
     rustfmt(sh, apply)?;
@@ -2291,9 +2074,9 @@ fn commits(sh: &Shell, message: Option<&Utf8Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, Source, failed_tests,
-        host_lines, list, llvm_cov_build_dir, mac_binaries_filter, next_step, one_gpui,
-        runnable_doctests, spawned_selection, summary_of, test_binary, within,
+        BINS_BUILT, BINS_FRESH, ENCODER_PROBE, SPAWNED_BINS, Shard, failed_tests, host_lines,
+        llvm_cov_build_dir, mac_binaries_filter, next_step, one_gpui, runnable_doctests,
+        spawned_selection, summary_of, test_binary, within,
     };
     use crate::tools::repo_root;
 
@@ -2513,7 +2296,10 @@ let windows = cfg!(windows);
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
         assert!(workflow.contains("run: xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("run: xtask setup --lane linux"), "with its tools");
-        assert!(workflow.contains("needs: [gate, linux, warm]"), "and main waits for it");
+        assert!(
+            workflow.contains("needs: [gate, linux, warm, smoke-plan, e2e]"),
+            "and main waits for it"
+        );
         assert!(
             workflow.contains("lane: clippy-linux\n            os: ubuntu-24.04"),
             "clippy for Linux takes a Linux runner, not one of the five Macs"
@@ -2563,7 +2349,7 @@ let windows = cfg!(windows);
         let hosted = "if: vars.SLOPTY_RUNNERS != 'warm' || github.event_name == 'pull_request'";
         assert_eq!(ci.matches(hosted).count(), 2, "the hosted matrix and its linux job");
         let warm = ci.split("\n  warm:\n").nth(1).expect("the warm job");
-        let (warm, _) = warm.split_once("\n  promote:\n").expect("before promote");
+        let (warm, _) = warm.split_once("\n  smoke-plan:\n").expect("before the smoke plan");
         for needle in [
             "if: vars.SLOPTY_RUNNERS == 'warm' && github.event_name == 'push'",
             "runs-on: ${{ format('slopty-warm-{0}', matrix.host) }}",
@@ -2584,7 +2370,10 @@ let windows = cfg!(windows);
         for cache in ["uses: ./.github/actions/sccache", "uses: actions/cache", "rust-toolchain@"] {
             assert!(!warm.contains(cache), "the runner keeps its own: no `{cache}`");
         }
-        assert!(ci.contains("needs: [gate, linux, warm]") && ci.contains("needs: [gate, warm]"));
+        assert!(
+            ci.contains("needs: [gate, linux, warm, smoke-plan, e2e]")
+                && ci.contains("needs: [gate, warm]")
+        );
         assert!(
             ci.contains("(needs.gate.result == 'success' && needs.linux.result == 'success'))")
         );
@@ -2661,13 +2450,19 @@ let windows = cfg!(windows);
         }
     }
 
-    /// Nothing that compiles runs in the quick gate, which is the tools lane. The e2e runs in a
-    /// workflow of its own, which holds no gate run back: every case, dispatched on `gate` (by
-    /// its own nightly schedule with main's head, or by `promote` when none ran for 26 hours),
-    /// so it reads the test shards' compile cache; a red is never retried, and a changed frame
-    /// is a review, not a red, on a runner's GPU.
+    /// Nothing that compiles runs in the quick gate, which is the tools lane. The gate runs the
+    /// smoke cases a push reaches, as the plan's matrix, and `promote` waits for them; every case
+    /// runs in `e2e.yml`, dispatched on `gate` (by its own nightly schedule with main's head, or
+    /// by `promote` when none ran for 26 hours), so it reads the test shards' compile cache. A red
+    /// is never retried, and a changed frame is a review, not a red, on a runner's GPU; a job
+    /// stops once its run is red, a job past its timeout counting, and a run stands aside once
+    /// `gate` moved off it before its e2e, never promoting with cases unchecked. The plan cannot
+    /// pass a change to itself that leaves out a job. Runs on `gate` overlap, and `promote`
+    /// takes a commit main already holds for a green, never one `gate` withdrew; it pushes with
+    /// the deploy key of an environment only `gate` reaches, through an action pinned by commit,
+    /// and what it starts after main moved is best-effort.
     #[test]
-    fn the_quick_gate_compiles_nothing_and_e2e_runs_nightly_on_gate() {
+    fn the_quick_gate_compiles_nothing_and_the_gate_runs_the_reached_smoke() {
         use clap::ValueEnum as _;
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
@@ -2679,7 +2474,51 @@ let windows = cfg!(windows);
         assert_eq!(
             workflow.matches(", os: xcode-27,").count(),
             Shard::value_variants().len(),
-            "only the test shards take one of the five macOS runners"
+            "only the test shards take one of the five macOS runners in the matrix"
+        );
+        for needle in [
+            "xtask smoke plan --base origin/main --head \"$GITHUB_SHA\"",
+            "include: ${{ fromJSON(needs.smoke-plan.outputs.matrix) }}",
+            "--head \"$GITHUB_SHA\" \\\n            --stand-aside",
+            "superseded: ${{ steps.plan.outputs.superseded }}",
+            "&& needs.smoke-plan.outputs.superseded != 'true'",
+            "args=(\"$CASE\" --review --stop-on-red -E \"$FILTER\")",
+            "select(.conclusion != null and .conclusion != \"success\" and .conclusion != \"skipped\")",
+            "gh api \"repos/$GITHUB_REPOSITORY/git/ref/heads/gate\" --jq .object.sha",
+            "elif [ -n \"$tip\" ] && [ \"$tip\" != \"$GITHUB_SHA\" ]; then",
+            "if gh run cancel \"$GITHUB_RUN_ID\" --repo \"$GITHUB_REPOSITORY\"; then\n            sleep 300",
+            "jq -e --arg case \"$case\" 'any(.[]; .case == $case)'",
+            "-- xtask/src/gate/impact.rs \\\n            xtask/src/gate/order.rs xtask/src/lib.rs .github/workflows/ci.yml)",
+            "args+=(--sim iphone --sim ipad)",
+            "NEXTEST_RETRIES: \"0\"",
+            "&& (needs.e2e.result == 'success'\n      \
+             || (needs.e2e.result == 'skipped' && needs.smoke-plan.outputs.matrix == '[]'))",
+            "git merge-base --is-ancestor \"$GITHUB_SHA\" origin/main",
+            "github.event_name == 'pull_request' && github.ref || github.run_id",
+            "git merge-base --is-ancestor \"$GITHUB_SHA\" origin/gate",
+            "environment: promote",
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n        with:\n          \
+             fetch-depth: 0\n          ssh-key: ${{ secrets.SLOPTY_PROMOTE_KEY }}",
+            "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$head\"",
+        ] {
+            assert!(workflow.contains(needle), "ci.yml has `{needle}`");
+        }
+        // A job past its timeout is red by the words `order` reads, and no e2e job waits in a
+        // concurrency group, whose waiting job a later one cancels whatever its commit
+        // (`order::tests::the_newest_commit_reaches_main_whatever_order_the_jobs_end_in`).
+        assert!(workflow.contains(&format!("grep -q '{}'", super::order::TIMED_OUT)));
+        let e2e_job = workflow.split("\n  e2e:\n").nth(1).expect("the e2e job");
+        let e2e_job = e2e_job.split("\n    steps:\n").next().unwrap_or_default();
+        assert!(!e2e_job.contains("concurrency:"), "no group holds the e2e jobs");
+        // The key goes only to a pinned action, and nothing after the push can turn the run red.
+        let promote = workflow.split("\n  promote:\n").nth(1).expect("the promote job");
+        let promote = promote.split("\n  release:\n").next().unwrap_or_default();
+        assert_eq!(promote.matches("secrets.").count(), 1, "the key alone, once");
+        let after = promote.split("      - id: push\n").nth(1).expect("the push step");
+        assert_eq!(
+            after.matches("\n      - ").count(),
+            after.matches("\n      - continue-on-error: true\n").count(),
+            "every step after the push is best-effort"
         );
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
         for needle in [
@@ -2687,6 +2526,7 @@ let windows = cfg!(windows);
             "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"",
             "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$sha\"",
             "if: github.event_name == 'workflow_dispatch'",
+            "case: [mac, ios]",
             "args=(\"$CASE\" --review)",
             "NEXTEST_RETRIES: \"0\"",
             "shell: bash",
@@ -2694,13 +2534,25 @@ let windows = cfg!(windows);
             assert!(e2e.contains(needle), "e2e.yml has `{needle}`");
         }
         assert!(!e2e.contains("push:"), "never beside every land's run");
+        assert!(!workflow.contains("xtask promote"), "main moves by CI's promote alone");
+    }
+
+    /// The UI shard's packages build no libghostty-vt, so its job takes neither zig nor the
+    /// prebuilt library (ci.yml): one that comes to depend on the terminal engine fails here.
+    #[test]
+    fn the_ui_shard_builds_no_libghostty() {
+        let graph =
+            super::impact::Graph::of_checkout(repo_root().expect("repo root").as_std_path())
+                .expect("the workspace's graph");
+        let roots: Vec<(&str, u8, bool)> =
+            Shard::Ui.packages().iter().map(|p| (*p, super::impact::EVERY, true)).collect();
+        let built = graph.compiled(&roots);
+        let ghostty: Vec<usize> = graph.named("libghostty-vt-sys").collect();
+        assert!(!ghostty.is_empty(), "the lock has libghostty-vt-sys");
         assert!(
-            workflow.contains(
-                "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$GITHUB_SHA\""
-            ),
-            "promote starts it on the main it pushed when the schedule did not"
+            ghostty.iter().all(|i| built.get(*i).copied().unwrap_or(0) == 0),
+            "a package of the UI shard builds libghostty-vt"
         );
-        assert!(!workflow.contains("xtask e2e"), "in a workflow of its own, off the gate's queue");
     }
 
     /// Every workflow that runs xtask runs the binary it cached, under one key naming every
@@ -2794,42 +2646,6 @@ let windows = cfg!(windows);
             ["--workspace", "--tests"],
             "the whole lane builds them as before"
         );
-    }
-
-    /// `land` snapshots HEAD as the gate snapshots the index: the same entries, in the same form,
-    /// for every file the index holds as HEAD has it.
-    #[test]
-    fn head_is_listed_as_the_index_is() {
-        let sh = xshell::Shell::new().expect("a shell");
-        // `land` runs this inside its HEAD snapshot (`target/gate/tree`), which is no checkout of
-        // its own: git answers there for the repository around it, and from that ignored folder
-        // `ls-files` would list nothing. The listings are compared at the repository's top.
-        sh.change_dir(repo_root().expect("repo root"));
-        let top =
-            xshell::cmd!(sh, "git rev-parse --show-toplevel").quiet().read().expect("a checkout");
-        sh.change_dir(top);
-        let entries = |source| {
-            let listed = list(&sh, source).expect("git lists it");
-            assert!(listed.status.success(), "{source:?}: {listed:?}");
-            listed
-                .stdout
-                .split(|b| *b == 0)
-                .filter(|e| !e.is_empty())
-                .map(|e| String::from_utf8(e.to_vec()).expect("UTF-8"))
-                .collect::<std::collections::BTreeSet<String>>()
-        };
-        let (head, index) = (entries(Source::Head), entries(Source::Index));
-        for entry in &head {
-            let (meta, _path) = entry.split_once('\t').expect("a tab before the path");
-            let fields: Vec<&str> = meta.split(' ').collect();
-            assert!(
-                matches!(fields.as_slice(), [mode, sha, "0"] if mode.len() == 6 && sha.len() == 40),
-                "{entry}"
-            );
-        }
-        let shared = head.intersection(&index).count();
-        let alike = shared.saturating_mul(10) > head.len().saturating_mul(9);
-        assert!(alike, "{shared} of {} entries alike", head.len());
     }
 
     const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#58fb4674";

@@ -119,11 +119,13 @@ pub enum Case {
     /// the directory, a shell typed to and read, files both ways, ports, close and exit, the
     /// lease lost on a killed worker and taken back. No permissions needed.
     Server,
+    /// The app's cases and the server's, from one build: what the gate's `e2e (mac)` job runs.
+    Mac,
     /// All of the above but the simulator case (`ios`).
     All,
-    /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`), driven
-    /// through its test socket: add the worker, open a shell, type, read the rows back, render
-    /// frames against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
+    /// ptyd + worker on the Mac and the iOS app in the simulator (`--sim iphone|ipad`, either or
+    /// both), driven through its test socket: add the worker, open a shell, type, read the rows
+    /// back, render frames against the per-device goldens (`ios-phone-*`, `ios-pad-*`).
     Ios,
 }
 
@@ -150,9 +152,11 @@ pub struct E2eOpts {
     /// `RUST_LOG` for the daemons and tests.
     #[arg(long, default_value = "info")]
     log: String,
-    /// Which simulator the `ios` case uses.
-    #[arg(long, value_enum, default_value_t)]
-    sim: crate::ios::SimKind,
+    /// The simulators the `ios` case runs on, one after the other (`--sim iphone --sim ipad`),
+    /// from one build: the first boots while it builds, the next while the one before tests. The
+    /// iPhone when none is named.
+    #[arg(long, value_enum)]
+    sim: Vec<crate::ios::SimKind>,
     /// A nextest filterset narrowing the case, such as
     /// `test(a_folder_tile_browses_the_worker)`. `--accept` and `--review` then touch only the
     /// goldens the chosen tests render. A suite it matches nothing in is skipped; matching
@@ -171,6 +175,12 @@ pub struct E2eOpts {
     /// one at a time with every line shown as it comes (`--no-capture`).
     #[arg(long, value_name = "N")]
     test_threads: Option<usize>,
+    /// On GitHub Actions, stop once another job of this run has ended other than green (failed,
+    /// past its timeout or cancelled), or, before the build, once `gate` has moved off the run's
+    /// commit (`crate::gate::order`): the run never promotes then, so a smoke job gives its Mac
+    /// back (`ci.yml`'s `e2e (mac)` and `e2e (ios)`).
+    #[arg(long)]
+    stop_on_red: bool,
 }
 
 /// How a suite's tests stay out of `cargo gate`.
@@ -297,6 +307,7 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         Case::Screen => SCREEN.iter().collect(),
         Case::Input => INPUT.iter().collect(),
         Case::Server => SERVER.iter().collect(),
+        Case::Mac => APP.iter().chain(&SERVER).collect(),
         Case::All => APP.iter().chain(WORKER).chain(&SERVER).chain(SCREEN).chain(INPUT).collect(),
         Case::Ios => IOS.iter().collect(),
     };
@@ -306,6 +317,20 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
         .unwrap_or_else(|| sh.current_dir().join("target/e2e").to_string_lossy().into_owned());
     std::fs::create_dir_all(format!("{data_dir}/run"))?;
     println!("▶ e2e {:?} (data dir {data_dir})", opts.case);
+    if opts.stop_on_red {
+        stop_on_red()?;
+    }
+    // The simulators the case runs on, the first booting while the build runs.
+    let mut sims: Vec<crate::ios::SimKind> = Vec::new();
+    if matches!(opts.case, Case::Ios) {
+        for sim in if opts.sim.is_empty() { &[crate::ios::SimKind::Iphone][..] } else { &opts.sim }
+        {
+            if !sims.contains(sim) {
+                sims.push(*sim);
+            }
+        }
+    }
+    let mut booting = Booting(sims.first().map(|sim| boot_in_background(sh, *sim)));
 
     let artifacts = format!("{data_dir}/artifacts");
     std::fs::create_dir_all(&artifacts)?;
@@ -363,106 +388,177 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     // Every binary a suite spawns is built: `slopty_testkit::bins` looks no further.
     let _fresh = sh.push_env(crate::gate::BINS_FRESH, "1");
 
-    // The iOS case also needs the app in a booted simulator; the test launches it there.
-    let simulator = matches!(opts.case, Case::Ios)
-        .then(|| -> Result<_> {
-            let started = std::time::Instant::now();
-            let ios_opts = crate::ios::IosOpts::for_e2e(opts.sim, &opts.log);
-            let udid = crate::ios::install_on_simulator(sh, &ios_opts)?;
-            record.phase("simulator", started.elapsed(), None);
-            Ok((
-                sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
-                sh.push_env("SLOPTY_SIM_BUNDLE_ID", crate::ios::BUNDLE_ID),
-                udid,
-            ))
-        })
-        .transpose()?;
-
-    let mut failed = Vec::new();
-    let mut matched = 0_usize;
-    for suite in &suites {
-        let _gate = match suite.kept {
-            Kept::Env(var) => Some(sh.push_env(var, "1")),
-            Kept::No | Kept::Ignored => None,
-        };
-        let title = format!("{} {} {}", suite.package, suite.test, suite.only.unwrap_or_default());
-        let title = title.trim();
-        let binaries = recorded(suite);
-        if !opts.no_build && build_suite(sh, suite, &suites, &binaries).is_err() {
-            failed.push(title.to_owned());
-            continue;
-        }
-        let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
-        let ignored: &[&str] =
-            if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
-        let output: Vec<String> = match opts.test_threads {
-            None => vec!["--no-capture".to_owned()],
-            // Passing tests' output too: their MEASURE lines are what a run reports.
-            Some(n) => vec![
-                "--test-threads".to_owned(),
-                n.to_string(),
-                "--failure-output".to_owned(),
-                "final".to_owned(),
-                "--success-output".to_owned(),
-                "final".to_owned(),
-            ],
-        };
-        let mut command = cmd!(
-            sh,
-            "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} {output...} --no-fail-fast {ignored...} -E {expr}"
-        );
-        if suite.no_videotoolbox {
-            command = command.env(NO_VIDEOTOOLBOX, "1");
-        }
-        println!("▶ {title}");
-        // A suite that runs nothing writes no report: the last suite's must not count for it.
-        let _gone = std::fs::remove_file(&junit);
+    // The iOS case's app, built once for every simulator it runs on.
+    let app = if sims.is_empty() {
+        None
+    } else {
         let started = std::time::Instant::now();
-        let watchdog = on_ci().then(|| {
-            crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER, None)
-        });
-        let ran = if suite.codes && cfg!(target_os = "macos") {
-            coding_step(&bin_dir.join(PROBE), command)
-        } else {
-            Ran::Exited(
-                std::process::Command::from(command)
-                    .status()
-                    .with_context(|| format!("start nextest for {title}"))?
-                    .code(),
-            )
-        };
-        if let Some(watchdog) = watchdog {
-            // Given no group to end, it ends nothing.
-            let _ended = watchdog.finish();
-        }
-        let outcome = match ran {
-            Ran::Exited(Some(0)) | Ran::Excused => {
-                matched = matched.saturating_add(1);
-                "✓"
-            }
-            // Nextest's "no tests to run": the filter picked nothing in this suite, or every test
-            // it holds captures the screen and this run has no `--screen-recording`.
-            Ran::Exited(Some(NO_TESTS_RUN)) if opts.filter.is_some() || !opts.screen_recording => {
-                "–"
-            }
-            Ran::Exited(_) => {
-                matched = matched.saturating_add(1);
-                failed.push(title.to_owned());
-                if on_ci() {
-                    print!("{}", machine_state());
+        let first = sims.first().copied().unwrap_or_default();
+        let built = crate::ios::build_for_simulator(sh, first, &opts.log)?;
+        record.phase("simulator app", started.elapsed(), None);
+        Some(built.app)
+    };
+    let mut failed = Vec::new();
+    // The suites whose build failed, which a later simulator's pass skips.
+    let mut unbuilt = Vec::new();
+    let mut matched = 0_usize;
+    // One pass over the suites, or one per simulator: each boots its simulator (the first's
+    // boot began beside the build), installs the app, waits for it to settle, runs the suites
+    // against it and shuts it down. A later simulator boots only once the last one's tests are
+    // done: a boot takes a core and about 2 GB for minutes, and beside the timed tests of a
+    // three-core runner with no retries it could fail them on time.
+    let passes: Vec<Option<crate::ios::SimKind>> =
+        if sims.is_empty() { vec![None] } else { sims.iter().copied().map(Some).collect() };
+    for (pass, sim) in passes.iter().enumerate() {
+        hold_if_stopping();
+        let device = sim.map(|sim| {
+            let family = sim.family();
+            (|| -> Result<_> {
+                let started = std::time::Instant::now();
+                let udid = match booting.0.take() {
+                    Some(boot) => {
+                        let (udid, booted) = boot
+                            .join()
+                            .map_err(|_panic| anyhow::anyhow!("the {family} boot panicked"))??;
+                        println!("  the {family} booted in {booted:.1?}, beside the build");
+                        udid
+                    }
+                    None => crate::ios::boot_simulator(sh, sim)?,
+                };
+                record.phase(&format!("simulator {family} boot"), started.elapsed(), None);
+                if let Some(app) = &app {
+                    let started = std::time::Instant::now();
+                    crate::ios::install(sh, &udid, app)?;
+                    record.phase(&format!("simulator {family} install"), started.elapsed(), None);
                 }
-                "✘"
+                if on_ci() {
+                    let started = std::time::Instant::now();
+                    match settle(sh) {
+                        Some(after) => println!("  the {family} settled in {after:.0?}"),
+                        None => println!(
+                            "  the {family} did not settle within {SETTLE_MOST:?}: its tests run \
+                             beside its daemons"
+                        ),
+                    }
+                    record.phase(&format!("simulator {family} settle"), started.elapsed(), None);
+                }
+                Ok((
+                    sh.push_env("SLOPTY_SIM_UDID", udid.clone()),
+                    sh.push_env("SLOPTY_SIM_BUNDLE_ID", crate::ios::BUNDLE_ID),
+                    udid,
+                ))
+            })()
+        });
+        let device = match device.transpose() {
+            Ok(device) => device,
+            Err(e) => {
+                let family = sim.map_or("", crate::ios::SimKind::family);
+                println!("  ✘ simulator {family}: {e:#}");
+                failed.push(format!("simulator {family}"));
+                continue;
             }
         };
-        println!("  {outcome} {title} ({:.1?})", started.elapsed());
-        let report = std::fs::read_to_string(&junit).ok();
-        record.phase(title, started.elapsed(), report.as_deref().and_then(Tests::of));
-    }
-    if let Some((_, _, udid)) = &simulator {
-        // A simulator left booted keeps CoreAudio busy long after: the client's audio player
-        // then takes tens of seconds to open and the screen worker's test times out in the
-        // next gate (gate 307, 2026-09-15).
-        cmd!(sh, "xcrun simctl shutdown {udid}").ignore_status().quiet().run()?;
+        let on = sim.map_or_else(String::new, |sim| format!(" ({})", sim.family()));
+        for suite in &suites {
+            hold_if_stopping();
+            let _gate = match suite.kept {
+                Kept::Env(var) => Some(sh.push_env(var, "1")),
+                Kept::No | Kept::Ignored => None,
+            };
+            let title =
+                format!("{} {} {}", suite.package, suite.test, suite.only.unwrap_or_default());
+            let title = format!("{}{on}", title.trim());
+            let title = title.as_str();
+            let binaries = recorded(suite);
+            // Built once: a later simulator's pass runs the same test binary.
+            if unbuilt.contains(&binaries) {
+                continue;
+            }
+            if !opts.no_build && pass == 0 && build_suite(sh, suite, &suites, &binaries).is_err() {
+                failed.push(title.to_owned());
+                unbuilt.push(binaries);
+                continue;
+            }
+            let expr = filterset(suite, opts.filter.as_deref(), opts.screen_recording);
+            let ignored: &[&str] =
+                if suite.kept == Kept::Ignored { &["--run-ignored", "only"] } else { &[] };
+            let output: Vec<String> = match opts.test_threads {
+                None => vec!["--no-capture".to_owned()],
+                // Passing tests' output too: their MEASURE lines are what a run reports.
+                Some(n) => vec![
+                    "--test-threads".to_owned(),
+                    n.to_string(),
+                    "--failure-output".to_owned(),
+                    "final".to_owned(),
+                    "--success-output".to_owned(),
+                    "final".to_owned(),
+                ],
+            };
+            let mut command = cmd!(
+                sh,
+                "cargo nextest run --binaries-metadata {binaries} --cargo-metadata {cargo_metadata} {output...} --no-fail-fast {ignored...} -E {expr}"
+            );
+            if suite.no_videotoolbox {
+                command = command.env(NO_VIDEOTOOLBOX, "1");
+            }
+            println!("▶ {title}");
+            // A suite that runs nothing writes no report: the last suite's must not count for it.
+            let _gone = std::fs::remove_file(&junit);
+            let started = std::time::Instant::now();
+            let watchdog = on_ci().then(|| {
+                crate::watchdog::Watchdog::start(title, std::process::id(), SUITE_HANG_AFTER, None)
+            });
+            let ran = if suite.codes && cfg!(target_os = "macos") {
+                coding_step(&bin_dir.join(PROBE), command)
+            } else {
+                Ran::Exited(
+                    std::process::Command::from(command)
+                        .status()
+                        .with_context(|| format!("start nextest for {title}"))?
+                        .code(),
+                )
+            };
+            if let Some(watchdog) = watchdog {
+                // Given no group to end, it ends nothing.
+                let _ended = watchdog.finish();
+            }
+            let outcome = match ran {
+                Ran::Exited(Some(0)) => {
+                    matched = matched.saturating_add(1);
+                    "✓"
+                }
+                // Green, as the runner's encoder says nothing of the change, but said as not run.
+                Ran::Excused => {
+                    matched = matched.saturating_add(1);
+                    record.excused.push(title.to_owned());
+                    "⚠ excused"
+                }
+                // Nextest's "no tests to run": the filter picked nothing in this suite, or every
+                // test it holds captures the screen and this run has no `--screen-recording`.
+                Ran::Exited(Some(NO_TESTS_RUN))
+                    if opts.filter.is_some() || !opts.screen_recording =>
+                {
+                    "–"
+                }
+                Ran::Exited(_) => {
+                    matched = matched.saturating_add(1);
+                    failed.push(title.to_owned());
+                    if on_ci() {
+                        print!("{}", machine_state());
+                    }
+                    "✘"
+                }
+            };
+            println!("  {outcome} {title} ({:.1?})", started.elapsed());
+            let report = std::fs::read_to_string(&junit).ok();
+            record.phase(title, started.elapsed(), report.as_deref().and_then(Tests::of));
+        }
+        if let Some((_, _, udid)) = &device {
+            // A simulator left booted keeps CoreAudio busy long after: the client's audio player
+            // then takes tens of seconds to open and the screen worker's test times out in the
+            // next gate (gate 307, 2026-09-15).
+            cmd!(sh, "xcrun simctl shutdown {udid}").ignore_status().quiet().run()?;
+        }
     }
     if let Some(filter) = &opts.filter
         && matched == 0
@@ -486,12 +582,328 @@ pub fn run(sh: &Shell, opts: &E2eOpts) -> Result<()> {
     }
 }
 
+/// A simulator booting in the background ([`boot_in_background`]): one the run ends before it
+/// uses is shut down once booted, as every simulator a run boots is.
+struct Booting(Option<std::thread::JoinHandle<Result<(String, std::time::Duration)>>>);
+
+impl Drop for Booting {
+    fn drop(&mut self) {
+        if let Some(boot) = self.0.take()
+            && let Ok(Ok((udid, _))) = boot.join()
+            && let Err(e) =
+                std::process::Command::new("xcrun").args(["simctl", "shutdown", &udid]).status()
+        {
+            println!("  the simulator {udid} stays booted: {e}");
+        }
+    }
+}
+
+/// The simulator `kind` booted, created on first use, on a thread of its own while the caller
+/// builds ([`crate::ios::boot_simulator`]); its UDID and how long the boot took, once joined.
+fn boot_in_background(
+    sh: &Shell,
+    kind: crate::ios::SimKind,
+) -> std::thread::JoinHandle<Result<(String, std::time::Duration)>> {
+    let dir = sh.current_dir();
+    std::thread::spawn(move || {
+        let sh = Shell::new()?;
+        sh.change_dir(dir);
+        let started = std::time::Instant::now();
+        let udid = crate::ios::boot_simulator(&sh, kind)?;
+        Ok((udid, started.elapsed()))
+    })
+}
+
+/// The longest a run waits for its simulator to settle ([`settle`]): in the e2e guest a clone
+/// of a settled simulator took 132-138 s, and a first boot's work 18-20 minutes
+/// (`docs/decisions/testing.md`, "An iOS run starts once its simulator has settled").
+const SETTLE_MOST: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// How long the machine took to settle once a simulator booted and took the app: until its CPU
+/// is half idle or more on two 4 s samples of `top` in a row, as the e2e guest's run waits. A
+/// booted simulator's daemons (`SetStoreUpdateService`, `MTLCompilerService`, `photolibraryd`)
+/// held every core of the guest for minutes after `bootstatus`, and tests run beside them
+/// failed on time. `None` when [`SETTLE_MOST`] passed first, or `top` could not run.
+fn settle(sh: &Shell) -> Option<std::time::Duration> {
+    let started = std::time::Instant::now();
+    let mut calm = 0_u8;
+    while started.elapsed() < SETTLE_MOST {
+        let top = cmd!(sh, "top -l 2 -s 4 -n 0").quiet().ignore_stderr().read().ok()?;
+        if idle_share(&top).is_some_and(|idle| idle >= 50.0) {
+            calm = calm.saturating_add(1);
+            if calm == 2 {
+                return Some(started.elapsed());
+            }
+        } else {
+            calm = 0;
+        }
+    }
+    None
+}
+
+/// The CPU's idle share in `top -l 2`'s second sample (its first counts since boot), from its
+/// `CPU usage: 5.2% user, 10.5% sys, 84.2% idle` line.
+fn idle_share(top: &str) -> Option<f64> {
+    let usage = top.lines().filter(|line| line.starts_with("CPU usage:")).nth(1)?;
+    usage.split(',').find_map(|part| part.trim().strip_suffix("% idle")?.trim().parse().ok())
+}
+
+/// Start the watch that ends the run once another job of its workflow run has ended red
+/// ([`E2eOpts::stop_on_red`]): it looks at once, then every [`WATCH_EVERY`], through `gh` and the
+/// job's token.
+fn stop_on_red() -> Result<()> {
+    let (Ok(repo), Ok(run), Ok(sha)) = (
+        std::env::var("GITHUB_REPOSITORY"),
+        std::env::var("GITHUB_RUN_ID"),
+        std::env::var("GITHUB_SHA"),
+    ) else {
+        bail!("--stop-on-red watches a GitHub Actions run, and this is none");
+    };
+    let _watch = std::thread::spawn(move || {
+        watch_run(&repo, &run, &sha);
+    });
+    Ok(())
+}
+
+/// How often [`watch_run`] looks: GitHub caches the jobs' listing for 60 s
+/// (`Cache-Control: max-age=60`), so a shorter wait sees nothing newer. A run's jobs share the
+/// repository's 1,000 requests an hour with binstall's lookups and `promote`'s, and a look that
+/// finds nothing changed (`304`) counts against none of them.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// How long the processes under the run have to end once it stops ([`end_children`]): nextest
+/// gives its tests 10 s past a `SIGTERM` before it kills them.
+const ENDING: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Set once [`watch_run`] has found the run red: no suite starts after.
+static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wait here for good once the run is stopping, so no suite starts while [`watch_run`] ends the
+/// ones running and then the process.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; held for its end")]
+fn hold_if_stopping() {
+    while STOPPING.load(std::sync::atomic::Ordering::Acquire) {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+/// Look at the run's jobs until another has ended other than green ([`ended_jobs`]), then end
+/// the processes under this one ([`end_children`]) and the process: the run never promotes, and
+/// the cases still to come would hold a Mac for nothing. The first look, before the build, asks
+/// first whether the run stands aside for a newer one on `gate` ([`crate::gate::order`]). A run
+/// that stands aside, or whose jobs were only cancelled, is cancelled whole first. Each look
+/// after the first is conditional on the last listing's `ETag`; one that fails is tried again
+/// at the next.
+#[expect(clippy::exit, reason = "the watch ends the whole run, its build and tests with it")]
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; polling GitHub")]
+fn watch_run(repo: &str, run: &str, sha: &str) -> ! {
+    let jobs = format!("repos/{repo}/actions/runs/{run}/jobs?per_page=100");
+    let checks = format!("repos/{repo}");
+    let mut etag: Option<String> = None;
+    let mut first = true;
+    loop {
+        let looking_first = first;
+        if !first {
+            std::thread::sleep(WATCH_EVERY);
+        }
+        first = false;
+        let Ok(sh) = Shell::new() else { continue };
+        let aside = looking_first
+            .then(|| crate::gate::order::tip(&sh))
+            .flatten()
+            .filter(|tip| crate::gate::order::stands_aside(Some(tip), sha));
+        let stop = if let Some(tip) = aside {
+            Stop::Aside(tip)
+        } else {
+            let header = etag.as_ref().map(|tag| format!("If-None-Match: {tag}"));
+            let header: Vec<&str> = header.iter().flat_map(|h| ["-H", h.as_str()]).collect();
+            // `gh` exits 1 on a `304`; the status line says what came.
+            let looked =
+                cmd!(sh, "gh api -i {header...} {jobs}").quiet().ignore_status().ignore_stderr();
+            let Ok(output) = looked.output() else { continue };
+            let text = String::from_utf8_lossy(&output.stdout);
+            let Some(answer) = Answer::read(&text) else { continue };
+            if answer.status != 200 {
+                continue;
+            }
+            etag = answer.etag.map(str::to_owned);
+            let timed_out = |job| crate::gate::order::timed_out(&sh, &checks, job);
+            let Some(stop) = ended_jobs(answer.body, timed_out) else { continue };
+            stop
+        };
+        STOPPING.store(true, std::sync::atomic::Ordering::Release);
+        let said = match &stop {
+            Stop::Red(job) => format!("{job}: the run never promotes, so its e2e stops here"),
+            Stop::Cancelled(job) => {
+                format!("{job}: the run is being cancelled, so its e2e stops here")
+            }
+            Stop::Aside(tip) => format!(
+                "`gate` moved on to {tip} before this e2e built, and that run carries this commit \
+                 or a later land withdrew it: the run stands aside, cancelled whole"
+            ),
+        };
+        println!("✋ {said}");
+        if let Some(summary) = std::env::var_os("GITHUB_STEP_SUMMARY")
+            && let Ok(mut file) =
+                std::fs::OpenOptions::new().append(true).create(true).open(summary)
+        {
+            let _written =
+                std::io::Write::write_all(&mut file, format!("### ✋ {said}\n\n").as_bytes());
+        }
+        // A run that stands aside, or whose jobs were only cancelled, ends cancelled, not red, so
+        // `land --wait` follows the newer run that carries its commit. The runner then cancels
+        // this job in seconds and ends its processes itself; ending them first would end the
+        // step red before it.
+        if matches!(stop, Stop::Cancelled(_) | Stop::Aside(_))
+            && cmd!(sh, "gh run cancel {run} --repo {repo}").quiet().run().is_ok()
+        {
+            std::thread::sleep(CANCEL_ARRIVES);
+        }
+        end_children();
+        std::process::exit(1);
+    }
+}
+
+/// How long a job waits for the runner to cancel it once its run is cancelled: seconds, as a
+/// rule; past this it ends red instead.
+const CANCEL_ARRIVES: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// An HTTP answer as `gh api -i` prints it: the status line, the headers, a blank line and the
+/// body.
+#[derive(Debug, PartialEq, Eq)]
+struct Answer<'a> {
+    status: u16,
+    etag: Option<&'a str>,
+    body: &'a str,
+}
+
+impl<'a> Answer<'a> {
+    /// The answer `text` holds, or `None` when it starts with no status line.
+    fn read(text: &'a str) -> Option<Self> {
+        let (head, body) =
+            text.split_once("\r\n\r\n").or_else(|| text.split_once("\n\n")).unwrap_or((text, ""));
+        let mut lines = head.lines();
+        let status =
+            lines.next()?.strip_prefix("HTTP/")?.split_whitespace().nth(1)?.parse().ok()?;
+        let etag = lines.find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim().eq_ignore_ascii_case("etag").then(|| value.trim())
+        });
+        Some(Self { status, etag, body })
+    }
+}
+
+/// Why a run's e2e stops ([`ended_jobs`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Stop {
+    /// A job failed or ran past its timeout (or ended any other way but cancelled): the run is
+    /// red. The first such job, with how it ended.
+    Red(String),
+    /// Jobs were cancelled and none went red: the run is being cancelled whole, by a job of it
+    /// that stood aside, a red one, or someone. The first, named.
+    Cancelled(String),
+    /// `gate` has moved on to this commit before the e2e built (`crate::gate::order`).
+    Aside(String),
+}
+
+/// Whether a run's jobs listing (`body`) has a job that ended other than green or skipped: one
+/// that did keeps the run from promoting, a sibling e2e job's as much as a gate lane's. One
+/// still running has no conclusion. A cancelled job is red when `timed_out` says, by its id,
+/// that it ran past its timeout.
+fn ended_jobs(body: &str, timed_out: impl Fn(u64) -> bool) -> Option<Stop> {
+    use crate::gate::order::{End, end};
+    #[derive(serde::Deserialize)]
+    struct Jobs {
+        jobs: Vec<Job>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Job {
+        id: u64,
+        name: String,
+        conclusion: Option<String>,
+    }
+    let listed: Jobs = serde_json::from_str(body).ok()?;
+    let mut cancelled = None;
+    for job in listed.jobs {
+        let ended = job.conclusion.as_deref();
+        match end(ended, || timed_out(job.id)) {
+            End::Running | End::Green => {}
+            End::Red if ended == Some("cancelled") => {
+                return Some(Stop::Red(format!("{} ran past its timeout", job.name)));
+            }
+            End::Red => {
+                return Some(Stop::Red(format!("{} ended {}", job.name, ended.unwrap_or("?"))));
+            }
+            End::Cancelled => {
+                cancelled.get_or_insert_with(|| format!("{} ended cancelled", job.name));
+            }
+        }
+    }
+    cancelled.map(Stop::Cancelled)
+}
+
+/// Send `SIGTERM` to every process under this one, so nextest ends its tests and cargo its
+/// compilers, and wait up to [`ENDING`] for them to go: the runner's own cleanup comes only at
+/// the job's end, after its cache steps.
+#[expect(clippy::disallowed_methods, reason = "xtask is a script, not a library; waiting on ps")]
+fn end_children() {
+    let me = std::process::id();
+    let under = || {
+        let Ok(ps) = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pid=,ppid="])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+        else {
+            return Vec::new();
+        };
+        let lister = ps.id();
+        let listed = ps.wait_with_output().map(|out| out.stdout).unwrap_or_default();
+        let mut pids = descendants(&String::from_utf8_lossy(&listed), me);
+        pids.retain(|pid| *pid != lister);
+        pids
+    };
+    for pid in under() {
+        if let Some(pid) = i32::try_from(pid).ok().and_then(rustix::process::Pid::from_raw) {
+            let _sent = rustix::process::kill_process(pid, rustix::process::Signal::TERM);
+        }
+    }
+    let started = std::time::Instant::now();
+    while started.elapsed() < ENDING && !under().is_empty() {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// The processes whose parent chain reaches `root` in `ps -o pid=,ppid=`'s `listing`.
+fn descendants(listing: &str, root: u32) -> Vec<u32> {
+    let pairs: Vec<(u32, u32)> = listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut under = Vec::new();
+    let mut todo = vec![root];
+    while let Some(parent) = todo.pop() {
+        for &(pid, ppid) in &pairs {
+            if ppid == parent && pid != root && !under.contains(&pid) {
+                under.push(pid);
+                todo.push(pid);
+            }
+        }
+    }
+    under
+}
+
 /// What a run cost and ran: each phase's time (the build, the simulator, every suite) and each
 /// suite's tests as nextest's `JUnit` report counts them, summed over the run. A run of several
 /// suites otherwise reads, in its last `Summary` line, as its last suite's tests alone.
 #[derive(Default)]
 struct Record {
     phases: Vec<(String, std::time::Duration, Option<Tests>)>,
+    /// The suites that did not run, or whose failure did not count, for want of the runner's
+    /// encoder ([`Ran::Excused`]).
+    excused: Vec<String>,
 }
 
 /// One suite's tests, from its `JUnit` report.
@@ -543,8 +955,12 @@ impl Record {
             });
             phases.push(format!("{title} {:.1}s{counted}", time.as_secs_f64()));
         }
+        let excused = match self.excused.len() {
+            0 => String::new(),
+            n => format!(", {n} suite(s) excused"),
+        };
         format!(
-            "{} ({:.1}s): {} tests, {} failed",
+            "{} ({:.1}s): {} tests, {} failed{excused}",
             phases.join("; "),
             took.as_secs_f64(),
             whole.run,
@@ -563,6 +979,10 @@ impl Record {
             for test in tests.iter().flat_map(|tests| &tests.failed) {
                 let _written = writeln!(text, "- ✘ `{test}`");
             }
+        }
+        for suite in &self.excused {
+            let _written =
+                writeln!(text, "- ⚠ `{suite}` did not run: the runner's video encoder stopped");
         }
         text.push('\n');
         let mut file = std::fs::OpenOptions::new().append(true).create(true).open(summary)?;
@@ -870,7 +1290,10 @@ fn filterset(suite: &Suite, caller: Option<&str>, screen_recording: bool) -> Str
 
 #[cfg(test)]
 mod tests {
-    use super::{APP, BINS, PACKAGES, Record, Suite, Tests, filterset};
+    use super::{
+        APP, Answer, BINS, PACKAGES, Record, Stop, Suite, Tests, descendants, ended_jobs,
+        filterset, idle_share,
+    };
 
     /// The binaries of [`PACKAGES`] an e2e build leaves out, and why (`BINS`).
     const LEFT_OUT: [(&str, &str); 3] = [
@@ -915,6 +1338,100 @@ mod tests {
             "build 14.0s; app 211.2s, 3 tests; app codes 10.5s, 1 tests; none ran 0.1s \
              (235.8s): 4 tests, 1 failed"
         );
+        record.excused.push("slopty-e2e app codes".to_owned());
+        assert!(
+            record.line().ends_with("4 tests, 1 failed, 1 suite(s) excused"),
+            "{}",
+            record.line()
+        );
+    }
+
+    /// A look at the run's jobs reads `gh api -i`'s answer whole: a `200` with its `ETag` and
+    /// body, a `304` with no body, and nothing from text with no status line.
+    #[test]
+    fn a_look_reads_the_status_the_etag_and_the_body() {
+        let fresh = "HTTP/2.0 200 OK\r\nCache-Control: private, max-age=60\r\n\
+                     Etag: W/\"86c6\"\r\nX-Ratelimit-Remaining: 4941\r\n\r\n{\"jobs\":[]}";
+        assert_eq!(
+            Answer::read(fresh),
+            Some(Answer { status: 200, etag: Some("W/\"86c6\""), body: "{\"jobs\":[]}" })
+        );
+        let same = "HTTP/2.0 304 Not Modified\r\nEtag: W/\"86c6\"\r\n\r\n";
+        assert_eq!(Answer::read(same).map(|answer| (answer.status, answer.body)), Some((304, "")));
+        let bare = "HTTP/1.1 502 Bad Gateway\nServer: x\n";
+        assert_eq!(Answer::read(bare), Some(Answer { status: 502, etag: None, body: "" }));
+        assert_eq!(Answer::read("gh: HTTP 304"), None);
+        assert_eq!(Answer::read(""), None);
+    }
+
+    /// Any job that ended other than green or skipped stops the run's e2e, a sibling e2e job's
+    /// and a lane past its timeout as much as a failed gate lane's; a running one does not. One
+    /// that was only cancelled (its run is being cancelled whole) is told apart, so the run ends
+    /// cancelled rather than red; one GitHub calls cancelled for running past its timeout is red.
+    #[test]
+    fn a_job_that_ended_neither_green_nor_skipped_stops_the_run() {
+        let jobs = |conclusions: &[(&str, Option<&str>)]| {
+            let jobs: Vec<String> = conclusions
+                .iter()
+                .enumerate()
+                .map(|(id, (name, ended))| {
+                    let ended = ended.map_or_else(|| "null".to_owned(), |e| format!("\"{e}\""));
+                    format!(r#"{{"id":{id},"name":"{name}","status":"x","conclusion":{ended}}}"#)
+                })
+                .collect();
+            format!(r#"{{"total_count":{},"jobs":[{}]}}"#, jobs.len(), jobs.join(","))
+        };
+        let green = [
+            ("gate (ui)", Some("success")),
+            ("gate (warm)", Some("skipped")),
+            ("e2e (ios)", None),
+            ("promote", None),
+        ];
+        let never = |_| false;
+        assert_eq!(ended_jobs(&jobs(&green), never), None);
+        for ended in ["failure", "timed_out", "startup_failure"] {
+            let mut run = green.to_vec();
+            run.push(("e2e (mac)", Some("cancelled")));
+            run.push(("gate (tools)", Some(ended)));
+            assert_eq!(
+                ended_jobs(&jobs(&run), never),
+                Some(Stop::Red(format!("gate (tools) ended {ended}"))),
+                "a red counts before a cancel"
+            );
+        }
+        let mut cancelled = green.to_vec();
+        cancelled.push(("e2e (mac)", Some("cancelled")));
+        assert_eq!(
+            ended_jobs(&jobs(&cancelled), never),
+            Some(Stop::Cancelled("e2e (mac) ended cancelled".to_owned()))
+        );
+        assert_eq!(
+            ended_jobs(&jobs(&cancelled), |job| job == 4),
+            Some(Stop::Red("e2e (mac) ran past its timeout".to_owned())),
+            "GitHub lists a job past its timeout as cancelled"
+        );
+        assert_eq!(ended_jobs("not json", never), None, "an answer it can't read stops nothing");
+    }
+
+    /// The processes the watch ends are those whose parent chain reaches the run's, at any depth,
+    /// and no other.
+    #[test]
+    fn the_processes_under_the_run_are_its_whole_tree() {
+        let listing = "    1     0\n  100     1\n  200   100\n  201   200\n  300   201\n  202   100\n\
+                       \n  999     1\n garbage\n";
+        let mut under = descendants(listing, 100);
+        under.sort_unstable();
+        assert_eq!(under, [200, 201, 202, 300]);
+        assert_eq!(descendants(listing, 300), Vec::<u32>::new());
+    }
+
+    /// The settle reads `top`'s second sample, its first counting since boot.
+    #[test]
+    fn the_settle_reads_top_s_second_sample() {
+        let top = "Processes: 512 total\nCPU usage: 90.0% user, 9.0% sys, 1.0% idle \n\
+                   Processes: 513 total\nCPU usage: 20.5% user, 12.25% sys, 67.25% idle \n";
+        assert_eq!(idle_share(top), Some(67.25));
+        assert_eq!(idle_share("CPU usage: 1.0% user, 1.0% sys, 98.0% idle\n"), None);
     }
 
     /// The guest runs both of the app's groups, the one that codes last and on its own, each

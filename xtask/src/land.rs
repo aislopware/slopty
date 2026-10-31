@@ -2,9 +2,11 @@
 //! lane passed there (`.github/workflows/ci.yml`, its `promote` job).
 //!
 //! The `gate` branch is always `origin/main` plus what is landing, so each land replaces what the
-//! last one left, with a lease, so a push this checkout has not seen is never dropped. CI runs one
-//! gate at a time on that branch; a newer push waits behind the run in progress, and only the
-//! newest waits, since its green covers every commit under it.
+//! last one left, with a lease, so a push this checkout has not seen is never dropped. Each push
+//! runs at once, beside any run still going; main moves to whichever green comes, and a later
+//! one carries every commit under it. Only CI's `promote` moves main, with the repository's
+//! deploy key, workflow changes included; should that key ever break, a plain `git push` of the
+//! green commit to main is the way out.
 //!
 //! It pushes at once: nothing compiles on this Mac, whose cores and disk are the person's
 //! (`docs/decisions/tooling.md`, "Every compile runs on a runner"). A change likely to go red is
@@ -44,88 +46,6 @@ pub struct LandOpts {
     /// With `--check`: also run the changed packages' tests and Linux clippy.
     #[arg(long, requires = "check")]
     pub full: bool,
-}
-
-/// A run as `promote` reads it from `gh run list`.
-#[derive(serde::Deserialize)]
-struct Listed {
-    #[serde(rename = "databaseId")]
-    id: u64,
-    url: String,
-    status: String,
-}
-
-/// `cargo xtask promote` options.
-#[derive(clap::Args, Debug)]
-pub struct PromoteOpts {
-    /// The commit to move main to; the `gate` branch's head when left out.
-    pub commit: Option<String>,
-}
-
-/// Move main to a commit every gate lane passed on, from this checkout. CI's `promote` job does
-/// this with the run's own token, which GitHub never lets update a workflow file: a commit that
-/// changes `.github/workflows/` is refused there however green (runs 37254289819, 37255378937).
-/// The same checks as that job: every `gate` job in the run on the commit passed, and main
-/// fast-forwards to the commit.
-pub fn promote(sh: &Shell, opts: &PromoteOpts) -> Result<()> {
-    cmd!(sh, "git fetch --quiet origin main").run()?;
-    cmd!(sh, "git fetch --quiet origin +refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}").run()?;
-    let wanted = opts.commit.clone().unwrap_or_else(|| format!("origin/{BRANCH}"));
-    let wanted = format!("{wanted}^{{commit}}");
-    let head = cmd!(sh, "git rev-parse --verify {wanted}").read()?;
-    let main = cmd!(sh, "git rev-parse origin/main").read()?;
-    if main == head {
-        println!("✔ main is already at {head}");
-        return Ok(());
-    }
-    let listed = cmd!(
-        sh,
-        "gh run list --workflow {WORKFLOW} --branch {BRANCH} --commit {head} --limit 1 --json databaseId,url,status"
-    )
-    .quiet()
-    .read()
-    .context("gh run list (is `gh` installed and logged in?)")?;
-    let runs: Vec<Listed> = serde_json::from_str(&listed).context("gh run list's JSON")?;
-    let Some(run) = runs.into_iter().next() else {
-        bail!("no {WORKFLOW} run on {BRANCH} for {head}: land it first");
-    };
-    // The gate lanes decide, not the run: a job that is not one (`release`) may still be going.
-    ensure!(
-        gate_passed(sh, run.id)?,
-        "not every gate lane has passed on {head} (the run is {}): {}",
-        run.status,
-        run.url
-    );
-    let on_main = cmd!(sh, "git merge-base --is-ancestor {main} {head}").quiet().run().is_ok();
-    ensure!(on_main, "{head} is not on top of origin/main ({main}); main only fast-forwards");
-    cmd!(sh, "git push --quiet origin {head}:refs/heads/main").run()?;
-    println!("✔ main fast-forwarded to {head}, which every gate lane passed in {}", run.url);
-    Ok(())
-}
-
-/// Whether the run's gate passed whole; `promote` and `release` are not lanes.
-fn gate_passed(sh: &Shell, id: u64) -> Result<bool> {
-    let id = id.to_string();
-    let jobs = cmd!(sh, "gh run view {id} --json jobs --jq .jobs[]|[.name,.conclusion]|@tsv")
-        .quiet()
-        .read()?;
-    Ok(lanes_passed(&jobs))
-}
-
-/// Whether every lane of one of the gate's two sets passed, as ci.yml's `promote` asks: the hosted
-/// matrix with the linux job, or both warm runners (`SLOPTY_RUNNERS` picks which runs, and the
-/// other is skipped). `jobs` is one `name\tconclusion` line per job.
-fn lanes_passed(jobs: &str) -> bool {
-    let lanes = || {
-        jobs.lines()
-            .filter_map(|line| line.split_once('\t'))
-            .filter(|(name, _)| name.starts_with("gate"))
-    };
-    let passed = |warm: bool| {
-        let mut set = lanes().filter(|(name, _)| name.starts_with("gate (warm") == warm).peekable();
-        set.peek().is_some() && set.all(|(_, done)| done == "success")
-    };
-    passed(true) || passed(false)
 }
 
 pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
@@ -184,10 +104,55 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         println!("       then `gh run watch <id> --exit-status`, or land with --wait");
         return Ok(());
     }
-    let run = find_run(sh, &head)?;
-    println!("  run {}: {}", run.id, run.url);
-    let conclusion = finish(sh, run.id)?;
-    outcome(sh, &run, &conclusion, &head)
+    let mut run = find_run(sh, &head)?;
+    loop {
+        println!("  run {}: {}", run.id, run.url);
+        let conclusion = finish(sh, run.id)?;
+        match outcome(sh, &run, &head)? {
+            Next::Held(main) if main == head => {
+                println!("✔ main is at {head}");
+                return Ok(());
+            }
+            Next::Held(main) => {
+                println!("✔ main holds {head}, and is at {main}");
+                return Ok(());
+            }
+            Next::Red(jobs) => {
+                for job in &jobs {
+                    eprintln!("✘ {job}");
+                }
+                bail!(
+                    "the gate {conclusion} on {}; main stays. The run's summary names each failed \
+                     lane and test: {}\n  its failed steps' logs: gh run view {} --log-failed",
+                    run.sha,
+                    run.url,
+                    run.id
+                )
+            }
+            Next::Follow(tip) => {
+                println!(
+                    "  run {} {conclusion} without a red, and {BRANCH} moved on to {tip}, which \
+                     carries {head}: following its run",
+                    run.id
+                );
+                run = find_run(sh, &tip)?;
+            }
+            Next::Withdrawn(tip) => bail!(
+                "run {} {conclusion}, and {BRANCH} ({tip}) no longer holds {head}: a later land \
+                 withdrew it, so main never takes it: {}",
+                run.id,
+                run.url
+            ),
+            Next::Ended => bail!(
+                "run {} {conclusion} without a red, and main does not hold {head}: someone \
+                 cancelled it, or its promote stopped; `gh run rerun {} --failed` runs it again: \
+                 {}",
+                run.id,
+                run.id,
+                run.url
+            ),
+        }
+    }
 }
 
 /// A workflow run as `gh run list` describes it.
@@ -196,6 +161,9 @@ struct Run {
     #[serde(rename = "databaseId")]
     id: u64,
     url: String,
+    /// The commit it gates: the landed one, or one on top of it that a later land pushed.
+    #[serde(rename = "headSha")]
+    sha: String,
 }
 
 /// The gate's run on `head`, once GitHub lists it.
@@ -205,7 +173,7 @@ fn find_run(sh: &Shell, head: &str) -> Result<Run> {
     loop {
         let listed = cmd!(
             sh,
-            "gh run list --workflow {WORKFLOW} --branch {BRANCH} --commit {head} --limit 1 --json databaseId,url"
+            "gh run list --workflow {WORKFLOW} --branch {BRANCH} --commit {head} --limit 1 --json databaseId,url,headSha"
         )
         .quiet()
         .read()
@@ -247,73 +215,150 @@ fn finish(sh: &Shell, id: u64) -> Result<String> {
     }
 }
 
-/// Report how the run on `head` ended, and fail unless main moved to it.
-fn outcome(sh: &Shell, run: &Run, conclusion: &str, head: &str) -> Result<()> {
+/// What a completed run says of the landed `head`, and where `--wait` goes next.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Next {
+    /// Main holds it, and is at this commit: at it, or past it when a later push's green
+    /// promoted first.
+    Held(String),
+    /// The run went red: these jobs failed or ran past their timeout.
+    Red(Vec<String>),
+    /// The run ended without a red and without main taking `head` (it stood aside before its
+    /// e2e, `gate` having moved on: `crate::gate::order`), and `gate` moved on to this commit on
+    /// top of it, whose run carries it.
+    Follow(String),
+    /// `gate` (at this commit) no longer holds `head`: a later land replaced it.
+    Withdrawn(String),
+    /// Neither: cancelled by hand, or a promote that stopped.
+    Ended,
+}
+
+/// Ask git and GitHub where the run on `head` left it ([`decide`]).
+fn outcome(sh: &Shell, run: &Run, head: &str) -> Result<Next> {
+    cmd!(sh, "git fetch --quiet origin main").run()?;
+    let main = cmd!(sh, "git rev-parse origin/main").read()?;
+    let holds = cmd!(sh, "git merge-base --is-ancestor {head} {main}").quiet().run().is_ok();
     let id = run.id.to_string();
-    match conclusion {
-        "success" => {
-            cmd!(sh, "git fetch --quiet origin main").run()?;
-            let main = cmd!(sh, "git rev-parse origin/main").read()?;
-            ensure!(
-                main == head,
-                "the gate passed but origin/main is {main}, not {head}: see {}",
-                run.url
-            );
-            println!("✔ main is at {head}");
-            Ok(())
-        }
-        "cancelled" => bail!(
-            "run {id} was cancelled, most likely while it waited, by a newer push to {BRANCH}, \
-             whose run decides"
-        ),
-        // Every lane passed and only CI's promote was refused: a change to a workflow file.
-        _ if gate_passed(sh, run.id)? => {
-            println!("  CI could not promote it (a workflow file changed); promoting from here");
-            promote(sh, &PromoteOpts { commit: Some(head.to_owned()) })
-        }
-        _ => {
-            // One argument: `cmd!` splits its literal at spaces, and gh took the filter's
-            // words after the first as more runs to view.
-            let jq = r#".jobs[] | select(.conclusion | IN("failure", "timed_out")) | .name"#;
-            let failed = cmd!(sh, "gh run view {id} --json jobs --jq {jq}")
-                .quiet()
-                .read()
-                .unwrap_or_default();
-            for job in failed.lines() {
-                eprintln!("✘ {job}");
-            }
-            bail!(
-                "the gate {conclusion} on {head}; main stays. The run's summary names each failed \
-                 lane and test: {}\n  its failed steps' logs: gh run view {id} --log-failed",
-                run.url
-            )
-        }
+    let jobs = cmd!(sh, "gh run view {id} --json jobs").quiet().read().unwrap_or_default();
+    let red = red_jobs(&jobs, |job| crate::gate::order::timed_out(sh, "repos/{owner}/{repo}", job));
+    let _gate =
+        cmd!(sh, "git fetch --quiet origin +refs/heads/{BRANCH}:refs/remotes/origin/{BRANCH}")
+            .quiet()
+            .ignore_stderr()
+            .run();
+    let tip = cmd!(sh, "git rev-parse --verify --quiet refs/remotes/origin/{BRANCH}")
+        .quiet()
+        .read()
+        .unwrap_or_default();
+    let carries = !tip.is_empty()
+        && cmd!(sh, "git merge-base --is-ancestor {head} {tip}").quiet().run().is_ok();
+    Ok(decide(Gate { main, holds, red, tip, carries }, &run.sha))
+}
+
+/// The red jobs in `gh run view --json jobs`'s `listing`: each that failed, or ran past its
+/// timeout, which GitHub lists as cancelled and `timed_out` tells apart by its job's id.
+fn red_jobs(listing: &str, timed_out: impl Fn(u64) -> bool) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Listing {
+        jobs: Vec<Job>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Job {
+        #[serde(rename = "databaseId")]
+        id: u64,
+        name: String,
+        conclusion: String,
+    }
+    let Ok(listing) = serde_json::from_str::<Listing>(listing) else { return Vec::new() };
+    listing
+        .jobs
+        .into_iter()
+        .filter_map(|job| {
+            let late = std::cell::Cell::new(false);
+            let end = crate::gate::order::end(Some(&job.conclusion), || {
+                late.set(timed_out(job.id));
+                late.get()
+            });
+            (end == crate::gate::order::End::Red).then(|| {
+                if late.get() { format!("{}, past its timeout", job.name) } else { job.name }
+            })
+        })
+        .collect()
+}
+
+/// What [`outcome`] found once the run on `sha` ended.
+pub struct Gate {
+    /// Main's head, and whether it holds the landed commit.
+    pub main: String,
+    pub holds: bool,
+    /// The run's jobs that failed or ran past their timeout.
+    pub red: Vec<String>,
+    /// `gate`'s head, and whether it holds the landed commit.
+    pub tip: String,
+    pub carries: bool,
+}
+
+/// Where the run on `sha` left the landed commit: held by main, red, carried by a newer run on
+/// `gate` to follow, withdrawn from `gate`, or none of these. `crate::gate::order`'s model
+/// holds it to every commit held or withdrawn once the runs end green, in any order.
+pub fn decide(gate: Gate, sha: &str) -> Next {
+    if gate.holds {
+        Next::Held(gate.main)
+    } else if !gate.red.is_empty() {
+        Next::Red(gate.red)
+    } else if !gate.carries {
+        Next::Withdrawn(gate.tip)
+    } else if gate.tip != sha {
+        Next::Follow(gate.tip)
+    } else {
+        Next::Ended
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::lanes_passed;
+    use super::{Gate, Next, decide, red_jobs};
 
-    /// Main moves on the hosted lanes with the warm jobs skipped, on both warm runners with the
-    /// hosted ones skipped, and on nothing less: ci.yml's `promote` condition.
+    /// A run's red jobs are those that failed or ran past their timeout, which GitHub lists as
+    /// cancelled; a job cancelled with its run is not one.
     #[test]
-    fn the_gate_passes_on_either_whole_set() {
-        let hosted = "gate (tools)\tsuccess\ngate (linux)\tsuccess\n";
-        let warm_skipped = "gate (warm ${{ matrix.host }})\tskipped\n";
-        let promote = "promote\tfailure\n";
-        assert!(lanes_passed(&format!("{hosted}{warm_skipped}{promote}")));
-        let warm = "gate (warm mac)\tsuccess\ngate (warm linux)\tsuccess\n";
-        let hosted_skipped = "gate (${{ matrix.lane }})\tskipped\ngate (linux)\tskipped\n";
-        assert!(lanes_passed(&format!("{hosted_skipped}{warm}")));
+    fn a_job_past_its_timeout_is_red_and_a_cancelled_one_is_not() {
+        let listing = r#"{"jobs": [
+            {"databaseId": 1, "name": "gate (ui)", "conclusion": "success"},
+            {"databaseId": 2, "name": "gate (rest)", "conclusion": "failure"},
+            {"databaseId": 3, "name": "gate (worker)", "conclusion": "cancelled"},
+            {"databaseId": 4, "name": "e2e (mac)", "conclusion": "cancelled"},
+            {"databaseId": 5, "name": "promote", "conclusion": "skipped"},
+            {"databaseId": 6, "name": "e2e (ios)", "conclusion": ""}
+        ]}"#;
+        assert_eq!(
+            red_jobs(listing, |job| job == 3),
+            ["gate (rest)", "gate (worker), past its timeout"]
+        );
+        assert_eq!(red_jobs("not json", |_| true), Vec::<String>::new());
+    }
 
-        assert!(!lanes_passed(&format!(
-            "gate (tools)\tfailure\ngate (linux)\tsuccess\n{warm_skipped}"
-        )));
-        assert!(!lanes_passed(&format!(
-            "{hosted_skipped}gate (warm mac)\tsuccess\ngate (warm linux)\tcancelled\n"
-        )));
-        assert!(!lanes_passed(&format!("{hosted_skipped}{warm_skipped}")), "nothing ran");
-        assert!(!lanes_passed(promote), "no gate job at all");
+    /// `--wait` reports main holding the commit first, whatever the run said; then a red; and
+    /// follows a newer run on `gate` only when the last ended without one, so a run that stood
+    /// aside before its e2e ends in that run's verdict.
+    #[test]
+    fn a_run_without_a_red_hands_its_commit_to_the_newer_run_carrying_it() {
+        let gate = |holds, red: &[&str], tip: &str, carries| Gate {
+            main: "m".to_owned(),
+            holds,
+            red: red.iter().map(|job| (*job).to_owned()).collect(),
+            tip: tip.to_owned(),
+            carries,
+        };
+        assert_eq!(decide(gate(true, &["gate (ui)"], "a", true), "a"), Next::Held("m".to_owned()));
+        assert_eq!(
+            decide(gate(false, &["gate (ui)"], "b", true), "a"),
+            Next::Red(vec!["gate (ui)".to_owned()]),
+            "a red is the land's to fix, though a newer run carries it"
+        );
+        assert_eq!(decide(gate(false, &[], "b", true), "a"), Next::Follow("b".to_owned()));
+        assert_eq!(decide(gate(false, &[], "c", false), "a"), Next::Withdrawn("c".to_owned()));
+        assert_eq!(decide(gate(false, &[], "", false), "a"), Next::Withdrawn(String::new()));
+        assert_eq!(decide(gate(false, &[], "a", true), "a"), Next::Ended, "nothing newer runs");
     }
 }

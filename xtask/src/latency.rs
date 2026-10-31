@@ -2,10 +2,10 @@
 //! every lane feels, rather than any one job's time.
 //!
 //! Each push to `gate` starts a run of `ci.yml`. Main moves when a run's `promote` job
-//! fast-forwards it, or when a person or `gate-watch` runs `cargo xtask promote` (a change to a
-//! workflow), which the repository's push events show. A push has landed at the first move of
-//! main, at or after it, to a commit that contains it. A push whose run was cancelled by a newer
-//! one lands with that one, so its wait counts the newer run's too.
+//! fast-forwards it (before 2026-10-31 a change to a workflow was promoted by hand from a
+//! checkout), which the repository's push events show. A push has landed at the first move of
+//! main, at or after it, to a commit that contains it. A push whose run was cancelled, or carried
+//! by a later green, lands with that one, so its wait counts the later run's too.
 
 use anyhow::{Context as _, Result};
 use xshell::{Shell, cmd};

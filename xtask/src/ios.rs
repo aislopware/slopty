@@ -688,35 +688,47 @@ settings:
     )
 }
 
-/// Build for the simulator, boot it (creating it on first use) and install the app; returns
-/// the simulator's UDID. `cargo xtask e2e ios` launches the app itself, with its own environment.
-///
-/// # Errors
-///
-/// When the build, the boot or the install fails.
 /// The e2e build of the app for the simulator, in `sh`'s directory and target dir; its `.app`.
 pub fn build_for_simulator(sh: &Shell, sim: SimKind, log: &str) -> Result<Built> {
     build(sh, Sdk::Simulator, &IosOpts::for_e2e(sim, log))
 }
 
-pub fn install_on_simulator(sh: &Shell, opts: &IosOpts) -> Result<String> {
-    let app = build(sh, Sdk::Simulator, opts)?.app;
-    let udid = boot_and_install(sh, &app, opts.sim)?;
+/// Boot the simulator for `kind` (creating it on first use) and install `app`; its UDID.
+fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String> {
+    let udid = boot_simulator(sh, kind)?;
+    install(sh, &udid, app)?;
     Ok(udid)
 }
 
-/// Boot the simulator for `kind` (creating it on first use) and install `app`.
-fn boot_and_install(sh: &Shell, app: &Utf8Path, kind: SimKind) -> Result<String> {
+/// Boot the simulator for `kind`, creating it on first use, to the end of its boot and with no
+/// hardware keyboard; its UDID. `cargo xtask e2e ios` boots it while it builds, and launches the
+/// app itself, with its own environment.
+///
+/// # Errors
+///
+/// When it cannot be created or boots no further.
+pub fn boot_simulator(sh: &Shell, kind: SimKind) -> Result<String> {
     let udid = simulator_udid(sh, kind)?;
     let boot = cmd!(sh, "xcrun simctl boot {udid}").ignore_status().ignore_stderr().quiet();
     boot.run()?;
     // A device created a moment ago is still booting; `launch` on it blocks for minutes.
     // Headless: simctl boots and drives it, and nothing needs Simulator.app's window.
-    step("simctl bootstatus", &cmd!(sh, "xcrun simctl bootstatus {udid} -b"))?;
+    step(
+        &format!("simctl bootstatus ({})", kind.family()),
+        &cmd!(sh, "xcrun simctl bootstatus {udid} -b"),
+    )?;
     let keyboard = no_hardware_keyboard(&udid);
     step("simctl: no hardware keyboard", &cmd!(sh, "xcrun simctl {keyboard...}"))?;
-    step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))?;
     Ok(udid)
+}
+
+/// Install `app` in the booted simulator `udid`.
+///
+/// # Errors
+///
+/// When `simctl` cannot.
+pub fn install(sh: &Shell, udid: &str, app: &Utf8Path) -> Result<()> {
+    step("simctl install", &cmd!(sh, "xcrun simctl install {udid} {app}"))
 }
 
 /// The Darwin notification whose state says `CoreDevice`'s `dtuhidd` carries the host's keys,

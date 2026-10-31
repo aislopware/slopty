@@ -2166,3 +2166,171 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     a runner before taking it). First-boot daemons off in the guest: the settle they cost was
     already hidden behind the build or skipped by the kept simulator. The app and iOS cases in
     the two guests at once: moot on hosted runners, where each case is its own job.
+
+- ✅ **The gate runs the smoke cases a push reaches; reach follows the dependency graph**
+  (2026-10-31). Item 3 of `docs/decisions/tooling.md`, "The gate and e2e run on free hosted
+  runners; this Mac runs none", with its items 1 and 2 built beside it, and the impact map of the
+  entry above rebuilt after a review of it found what its table of paths missed: a crate the
+  table did not list (a new one, a `vendor/` member) failed a test until someone placed it; its
+  `cfg` reading took a bare `target_os = ".."` alone, not `not(..)`, mixed `any` and `all`, or
+  `if cfg!(..)`; a removed line was judged by the new file's spans; `.config/nextest.toml`, the
+  workflows and actions the smoke jobs run, and the xtask code an e2e run goes through reached
+  nothing; and neither did `workspace-hack`, which every build selects.
+  - **Reach is the graph's.** A case reaches what its run compiles: the binaries it starts, its
+    test target and `workspace-hack`, and everything they depend on in the lock and the
+    manifests at the change's head, read from git in two calls (no `cargo metadata`, so no
+    resolve and no network), each package marked with the systems it is built for there
+    (macOS, iOS, Linux; a target table's `cfg` narrows an edge, and a build or proc-macro
+    dependency is built for the host). A changed Rust line counts on the systems its `cfg`
+    allows, read three-valued (a feature or an unknown predicate may go either way) through
+    `not`, `all` and `any`: its attributes' spans, its file's inner attributes, its module's
+    declarations up the tree, and an `if cfg!(..)` block and its `else`; an added line on the new
+    side, a removed one on the old. A package the lock moves reaches the cases that compile it,
+    where a moved lock reached every case before. `RULES` keeps only what the graph cannot see.
+  - **What the second review found, fixed.** Each holds by a test in `gate::impact`.
+    - *A `cfg` on a field, variant, arm or argument* narrowed every line after it in the list,
+      since its span ran to the enclosing bracket and a line's spans intersect: `Workspace`'s
+      fields after its first iOS field counted for no system. A span with no braces of its own
+      now ends at the first `,` at its own depth outside a generic's `<>` or a `where` clause, at
+      a `;`, or at the bracket; a comma it cannot place ends it early, which only over-selects.
+      The scanner also reads `br#".."#`, nested block comments and a string's escaped newline
+      (which had moved every later line by one).
+    - *A target's helper modules* (`app/served.rs`, `app/planted.rs`, `ios/compact.rs`) reached
+      nothing, as they hold no test. A module reaches every case of its target unless all its
+      tests are other cases' and no other module names it (`crate::m`, `super::m`).
+    - *A held package an e2e driver reads.* The app's e2e dump is `slopty_kit::a11y`'s tree, and
+      every lookup goes through it, yet `slopty-kit` is held. A held package now reaches the
+      cases of a driver (a `src/e2e.rs`) that names one of its modules, derived from the driver's
+      own text rather than a hand rule.
+    - *A changed `cfg` attribute* counted only its new or old side, so adding an iOS-only gate
+      above a line iOS ran reached macOS alone. A changed attribute line, or `#![cfg`, counts the
+      union of its context with and without its span.
+    - *The plan judged itself.* `xtask/src/gate/impact.rs` and its wiring in `lib.rs` reach every
+      case, and the plan job is red when a change touches them or `ci.yml` and its matrix lacks
+      either job, so a plan that drops its own cases cannot pass.
+    - `assets/icon.svg`, which the iOS build reads, reaches S5; a push reaching only S4 starts
+      `e2e (server)`, which builds no app.
+  - **A fixed number of git calls.** One diff of every Rust file's lines (which also fetches
+    their old sides into a partial clone in one request) and one read of each side's files, in
+    place of three calls a file: 300 commits read in 1.0 s, not 31 s; on 39 single commits both
+    gave the same answer, in about 0.1 s each.
+  - **The gate's smoke jobs.** `smoke plan`, on Linux beside the gate's first minute, emits one job
+    per kind of Mac run with the filterset of its reached tests: `mac` for the app's and the
+    server's cases, `ios` for the simulator's, none when nothing is reached. `e2e (mac)` and `e2e
+    (ios)` each build once, in the one feature set of the entry above; `ios` boots the iPhone while
+    it builds and the iPad only once the iPhone's tests are done, from one build: a boot takes a
+    core and about 2 GB for minutes, and beside the timed tests of a three-core runner with no
+    retries it could fail them on time. Each simulator then waits to settle (the runner's CPU half
+    idle on two `top` samples in a row, at most 10 minutes), as the guest's run did, and its boot,
+    install and settle are recorded apart until a hosted run measures them. A job stops once any
+    other job of its run ended other than green: a failed gate lane, one past its `timeout-minutes`,
+    or a sibling e2e job, since that run never promotes. GitHub lists a job past its timeout as
+    cancelled, as it does a job of a cancelled run; its annotation tells it apart ("has exceeded the
+    maximum execution time", jobs 112345159635 and 124521443249), so it is red there and in `land
+    --wait`. A job looks once before its setup and then every minute through the run, conditional on
+    the listing's `ETag`, whose `304` costs none of the token's 1,000 requests an hour, though the
+    listing changes with nearly every step of every job, so few looks come back `304`; it ends its
+    builds and tests with `SIGTERM` before it exits. A run whose jobs were only cancelled is being
+    cancelled whole, and is cancelled whole again, so it ends cancelled rather than red. A suite
+    excused for the runner's video encoder is named in the summary as not run. `promote` needs the
+    plan and the jobs it chose. `e2e.yml` runs every case nightly in the same two jobs, at 19:47
+    UTC, the small hours of the person's day, so it holds no Mac the working day's gate wants. One
+    matrix job named per case, rather than two jobs, so the plan starts only the ones it reached.
+  - **What a push costs, measured.** The gate's three shards take a median 7.6, 6.4 and 6.2
+    minutes (the last 23 gate runs), and a hosted nightly `e2e (app)` a median 20.6 minutes
+    over 8 runs, 617.7 s of it the build (run 41181641898). So a push that reaches the app takes
+    about 18-22 minutes to main (the plan, about 3 minutes of setup, about 11 of build, then the
+    tests), not the 7-10 the hosted ruling estimated, and about 20 Mac-minutes of shards plus
+    40 of e2e. 245 of the 320 commits since 10-29 touch a path that likely reaches a case.
+    Bursts reached 16 pushes in an hour and 32 in three (2026-10-30, 18:30-21:30 UTC): 1,630
+    Mac-minutes against the five Macs' 900, a backlog of about 2.4 hours if every push ran its
+    e2e. So a run stands aside once a newer push moved `gate` off its commit before its e2e
+    started (the next item): in a burst an e2e job that waited past a newer push gives its Mac
+    back as it gets one, its run's shards with it. The shards of runs that still may promote
+    queue in an hour of 16 pushes.
+  - **A run stands aside by `gate`'s tip, not by a queue.** A first fix gave each kind of e2e
+    job a concurrency group of one running and one waiting, the newest to queue cancelling the
+    one waiting, on the reasoning that a newer run's job queues later. Its review found that a
+    job queues when its plan ends, not in its commit's order: an older run whose plan ended
+    after the newer one's cancelled the newer run's waiting job, promoted the older commit, and
+    left the newer one on `gate` with no run to promote it, and `land --wait` saying someone
+    had cancelled it; a re-run of an old run's e2e did the same. No group holds the e2e jobs
+    now. The plan reads `gate`'s tip as it ends (`smoke plan --stand-aside`), and once a newer
+    push moved it, says `superseded`: the e2e jobs skip, a run whose plan chose cases is
+    cancelled whole, and `promote` takes a skipped e2e only when the plan chose none, so a run
+    never promotes its cases unchecked. The e2e job's first step and the watch's first look,
+    before the build, stand aside the same way; an e2e already building runs on and may still
+    promote, and so does a run whose plan chose no case. The rule lives in one place
+    (`xtask/src/gate/order.rs`), and the newest run never meets it, so nothing cancels a job of
+    the run on `gate`'s tip and the newest commit reaches main or goes red. A model test runs
+    every order in which the plans, the e2e jobs and the shards of two or three pushes can end,
+    with any run re-run by hand, over five histories (one with a push whose plan chose no case,
+    one whose last push withdrew the commit before it): main always ends at `gate`'s tip and
+    `land --wait` hears every commit held or withdrawn; the same model with the groups strands
+    the newer commit, `land --wait` hearing "ended". Without a group two runs' e2e jobs of a
+    kind can run at once when both started while their run was the newest; a third that waited
+    stands aside as it gets its Mac.
+  - **Runs overlap** (the hosted ruling's item 1). Each push to `gate` runs at once in a group of
+    its own; a red run still cancels itself once a newer push runs. `promote` succeeds when main
+    already holds its commit and pushes again when another run's promote moved main under it, after
+    a wait, saying when a push was refused with main unmoved; it skips a commit `gate` no longer
+    holds, which a later land withdrew (an amend landed again), so only what `gate` still holds
+    reaches main. It pushes with a deploy key that may write to this repository alone, once the
+    person turned deploy keys on for the organisation. GitHub lets such a key push a change to
+    `.github/workflows`, which the run's token may not: a probe push of one, made with the key
+    alone, created a scratch branch (2026-10-31). So `cargo xtask promote`, which moved main by hand
+    for such a change, is gone; should the key ever break, a plain `git push` of the green commit to
+    main is the way out. The key is kept as narrow as the job: it is the secret of a `promote`
+    environment that only a job on `gate` gets, with no bypass for admins (a workflow on any other
+    branch or pull request names it in vain), it goes only to `actions/checkout` pinned by commit,
+    and two rulesets bound what it can push: `main` takes no force push and no deletion, so "never
+    backwards" is the repository's rule and not only the job's, and only the repository's admins
+    create, move or delete a `v*` tag, so the key cannot cut a release. A probe of the new key
+    fast-forwarded a scratch branch. What `promote` starts after main moved (the overdue e2e and
+    Deep runs) is best-effort: a failed call never turns the run red.
+  - **No job sets up what it does not use** (item 2). The UI shard installs no zig and restores
+    no prebuilt Ghostty, since none of its packages depends on `slopty-engine`
+    (`gate::tests::the_ui_shard_builds_no_libghostty`); the `linux` job fetches ghostty's zig
+    packages only when its prebuilt missed; nextest rides in xtask's cache entry, whose key holds
+    its pin, so `setup` installs nothing; the tools lane deletes every `cargo-home` entry but each
+    branch's newest two after it saves one; the encoder probe says when a shard holds no
+    VideoToolbox test. Kept: zig itself in a lane that builds libghostty-vt, prebuilt hit or not,
+    since the prebuilt entry's key holds `zig version`. Not taken: the image's Rust, since no
+    image holds the pinned release (the step downloads it, 6 s on a Mac, 9 s on Linux).
+  - **A hosted Mac's grants, probed** (run 41195749375 on `xcode-27`, item 7 of the hosted
+    ruling). The system TCC database grants Screen Recording to `/bin/bash`, the hosted-compute
+    agent and the provisioner; Accessibility to bash, osascript, Terminal, `sshd-keygen-wrapper`,
+    Xcode's helper and the agent; PostEvent to the agent's start script, the provisioner's and
+    Anka's run daemon. The runner user's own database does not open, even to root. A step runs
+    under a chain that starts at a `/bin/bash` launchd started (bash, the runner's worker and
+    listener, the agent, bash), and a binary built ad hoc in the step a moment before reads
+    `CGPreflightScreenCaptureAccess` and `CGPreflightPostEventAccess` as true: a fresh build
+    inherits the grants with no signing and no TCC row. `xtask e2e input` passed 8 of 8 (a cold
+    build of 473 s, tests 44 s). `xtask e2e screen` captured windows and display crops (both
+    geometry tests and 7 of 8 latency tests passed; the display crop's p95, 6.6 ms, sat over a
+    floor measured on this Mac), and its encoder tests met the runner's paravirtual encoder
+    stopping, which the run excuses. Its step then outlived `xtask` by 66 minutes, to the job's
+    timeout: most likely a test process the encoder hung, run with `--no-capture`, held the
+    step's output open. The gate's `e2e (mac)` captures its tests' output (`--test-threads 3`),
+    so none of its tests holds the step's. No e2e case needs a guest for its grants.
+  - **The second hosted probe** (run 41204644936, macOS 27.0.1 26A434, Apple M1 virtual, three
+    cores, 7 GB). `csrutil status` says SIP is disabled (the authenticated root is on), so a TCC
+    row can be written on the image. The latency suite failed its floor test in each of three
+    runs, on the window path's p95 once (5.6 ms, cold) and on the display crop's twice (6.8 and
+    5.7 ms, against 4 ms): the window path holds 1.6-1.9 ms at depths 2 to 8, but the virtual
+    display delivers 11-15 frames a second, only on change. The whole screen case, its output to
+    a file instead of a pipe, ended in 552 s with no process left behind: the encoder stopped
+    with 22 clients open and the run excused its coding tests. So the earlier step's hang was a
+    child holding the step's pipe, not xtask.
+  - **The gate's tree survives a killed sync.** A sync wrote files in place and recorded them
+    in `tree.index` only at its end, so a sync killed midway left files the next one trusted as
+    current. `tree.index` now vouches only for what is on disk: the entries a sync is about to
+    write are dropped from it, and it is written (atomically, through a rename) before any write;
+    the prune runs first; a submodule's checkout is kept only when its `.git` points to a git
+    directory that points back to it, and a stale `index.lock` is removed before a forced
+    checkout. A test kills a sync at each point and shows the next one exact
+    (`gate::snapshot::tests`). The same holds past a power loss: each file written is pushed to
+    the disk (`fsync`), and `tree.index` goes through the drive's cache (`F_FULLFSYNC`) before
+    its rename and its directory after it, so it never vouches for bytes the disk lacks. A
+    fresh sync of the tree's 9,253 files took 2.85 s with it against 2.03 s without, and an
+    unchanged one 90 ms either way (one run each, on the external disk).

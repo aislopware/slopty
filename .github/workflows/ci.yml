@@ -9,14 +9,17 @@ on:
     tags: [ "v*" ]
   pull_request:
 
-# One run at a time per ref. A newer push to `gate` waits behind the run in progress instead of
-# cancelling it: that run is often most of the way to promoting main, and cancelled runs threw
-# away up to 48 minutes each (10 of 41 runs; MEASUREMENTS 2026-10-02, "the tests lane's build").
-# GitHub keeps one run pending per group and replaces it with each newer push, so the queue never
-# grows past the newest commit, whose green covers every commit under it. A pull request's run is
+# Runs on `gate` overlap: each push runs at once, in a group of its own, and `promote` takes the
+# greens in whatever order they end, succeeding when main already holds the commit. A cancelled
+# run threw away up to 48 minutes (MEASUREMENTS 2026-10-02, "the tests lane's build"), and waiting
+# behind one cost a median 64 s and a p90 of 489 s a push (docs/decisions/tooling.md, "The gate
+# and e2e run on free hosted runners; this Mac runs none", item 1). A red run still cancels
+# itself once a newer push runs (each lane's last step), and so does one whose e2e has not
+# started (`xtask/src/gate/order.rs`): the newer run carries its commit. A pull request's run is
 # still cancelled by its next push; a tag's never is.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -134,8 +137,12 @@ jobs:
       - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
       # libghostty-vt-sys builds its library with zig in the lanes that build it, and the Apple
       # lints on Linux compile their build scripts' C with it: the zig the vendored ghostty
-      # names, not Homebrew's, which moves on its own.
-      - if: matrix.lane != 'tools'
+      # names, not Homebrew's, which moves on its own. A lane whose build takes the prebuilt
+      # library still needs it, since the entry's key holds `zig version`. The UI shard builds
+      # none of it (no package of its depends on `slopty-engine`,
+      # `gate::tests::the_ui_shard_builds_no_libghostty`): 76 s of zig steps a run
+      # (.research/hosted-gate-2026-10-31/A-hosted-anatomy.md, section 1.2).
+      - if: matrix.lane != 'tools' && matrix.shard != 'ui'
         uses: ./.github/actions/zig
       # libghostty-vt built once per set of inputs (`LIBGHOSTTY_VT_SYS_PREBUILT_DIR`), the head
       # of the build in most lanes: kept per lane, since each builds its own triples, and keyed
@@ -146,13 +153,15 @@ jobs:
       # lane keeps its build and its packages too (a codeberg.org fetch inside its build script
       # failed run 41037072359).
       - if: >-
-          matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host'
+          matrix.lane == 'clippy-linux' || matrix.lane == 'clippy-host'
+          || (matrix.lane == 'tests' && matrix.shard != 'ui')
         id: ghostty
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
       - if: >-
-          matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host'
+          matrix.lane == 'clippy-linux' || matrix.lane == 'clippy-host'
+          || (matrix.lane == 'tests' && matrix.shard != 'ui')
         id: prebuilt
         uses: actions/cache@v6
         with:
@@ -166,14 +175,16 @@ jobs:
       # (run 37080698786). Only a lane that builds libghostty-vt needs them: one whose build of
       # it came from the cache does not.
       - if: >-
-          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host')
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'clippy-host'
+          || (matrix.lane == 'tests' && matrix.shard != 'ui'))
           && steps.prebuilt.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
       - if: >-
-          (matrix.lane == 'clippy-linux' || matrix.lane == 'tests' || matrix.lane == 'clippy-host')
+          (matrix.lane == 'clippy-linux' || matrix.lane == 'clippy-host'
+          || (matrix.lane == 'tests' && matrix.shard != 'ui'))
           && steps.prebuilt.outputs.cache-hit != 'true'
         working-directory: vendor/ghostty
         timeout-minutes: 15
@@ -211,11 +222,6 @@ jobs:
             --package xtask
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
-      - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ~/.cache/slopty-xtask
-          key: ${{ steps.xtask.outputs.cache-primary-key }}
       - run: |
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
@@ -226,6 +232,20 @@ jobs:
       - run: xtask setup --lane ${{ matrix.lane }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # nextest rides in xtask's entry, whose key holds its pin (`setup::TOOLS`): setup finds it
+      # on PATH at that release and installs nothing. The Linux x64 entry is the linux job's,
+      # which runs nextest there; the tools and clippy-linux lanes would save it without.
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          nextest=$(command -v cargo-nextest || true)
+          if [ -n "$nextest" ] && [ "$nextest" != ~/.cache/slopty-xtask/cargo-nextest ]; then
+            cp "$nextest" ~/.cache/slopty-xtask/
+          fi
+      - if: steps.xtask.outputs.cache-hit != 'true' && matrix.os != 'ubuntu-24.04'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
       # A failed lane writes the run's summary: the lane, its failed step and the failed tests.
       # The tests lane counts who holds the pseudo-terminals while it runs (`xtask/src/ptys.rs`)
       # and fails on a leak, on more than its budget, or on running out.
@@ -271,6 +291,20 @@ jobs:
             ~/.cargo/git/db/
           key: ${{ steps.cargo-home.outputs.cache-primary-key }}
           enableCrossOsArchive: true
+      # Every entry but each branch's newest two goes: a job restores its lock's entry or the
+      # newest, so the older ones only filled the 10 GB the compile cache and the prebuilt
+      # libraries need (26 stale ones, 8.8 GB, on 2026-10-31), and GitHub evicted those first.
+      # Housekeeping, never a red: two overlapping runs prune the same entries, and the second
+      # delete of one fails.
+      - if: always() && steps.fetch.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key cargo-home- --limit 100 \
+            --json id,ref,createdAt \
+            --jq 'group_by(.ref)[] | sort_by(.createdAt) | reverse | .[2:][] | .id' \
+            | while read -r id; do gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true; done
       - if: always() && matrix.lane != 'tools'
         run: $SCCACHE_PATH --show-stats
       - if: always() && runner.os == 'macOS'
@@ -347,19 +381,23 @@ jobs:
         run: >-
           echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
           'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      - id: prebuilt
+        uses: actions/cache@v6
         with:
           path: target/ghostty-prebuilt
           key: ghostty-prebuilt-${{ runner.os }}-linux-${{ steps.ghostty.outputs.key }}
       # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
       # by the root manifest's hash (which pins every package's), and fetched again with
       # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
-      # (run 37080698786).
-      - uses: actions/cache@v6
+      # (run 37080698786). Only for a build of libghostty-vt: with the prebuilt restored nothing
+      # builds it, and the fetch was a median 83 s of every run.
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
         with:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
-      - working-directory: vendor/ghostty
+      - if: steps.prebuilt.outputs.cache-hit != 'true'
+        working-directory: vendor/ghostty
         timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # xtask built once per change to what it is built from, rather than in every job: 20-90 s
@@ -382,17 +420,24 @@ jobs:
             --package xtask
           mkdir -p ~/.cache/slopty-xtask
           cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
-      - if: steps.xtask.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: ~/.cache/slopty-xtask
-          key: ${{ steps.xtask.outputs.cache-primary-key }}
       - run: |
           echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
           echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
       - run: xtask setup --lane linux
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      # nextest rides in xtask's entry (the gate job's comment).
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          nextest=$(command -v cargo-nextest || true)
+          if [ -n "$nextest" ] && [ "$nextest" != ~/.cache/slopty-xtask/cargo-nextest ]; then
+            cp "$nextest" ~/.cache/slopty-xtask/
+          fi
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: ${{ steps.xtask.outputs.cache-primary-key }}
       - run: xtask gate --ci --lane linux
       - if: always()
         run: $SCCACHE_PATH --show-stats
@@ -484,49 +529,413 @@ jobs:
             gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
           fi
 
+  # What a push reaches of the e2e smoke set (`cargo xtask smoke plan`; docs/decisions/testing.md,
+  # "A change's smoke cases follow from its paths"): the cases its changes since main reach
+  # through the packages' dependency graph and their lines' `cfg`, as one job of `e2e` per kind
+  # of Mac run, each with the filterset of its reached tests. A push it reaches none with skips
+  # `e2e`. On Linux, beside the gate's first minute. As it ends it reads `gate`'s tip: once a
+  # newer push has moved it, the run stands aside (`superseded`, xtask/src/gate/order.rs), and
+  # one whose plan chose cases is cancelled whole, since it can never promote and the newer run
+  # carries its commit; one that chose none runs on and may still promote.
+  smoke-plan:
+    if: github.ref == 'refs/heads/gate'
+    name: smoke plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: write
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      superseded: ${{ steps.plan.outputs.superseded }}
+    steps:
+      # The whole history, without the files it does not read: the plan diffs from where the
+      # commit left main, and git fetches a file's old side as it asks for it.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          filter: blob:none
+      # xtask, as the gate's lanes take it; built on a miss only.
+      - id: xtask
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+          actions-cache: "false"
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+      # The cargo cache the tools lane saves, read only (the gate job's comment).
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --locked --quiet --target-dir target/xtask \
+            --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      # The plan does not judge a change to itself: when the change touches its code
+      # (`xtask/src/gate/impact.rs` and `order.rs`, its wiring in `xtask/src/lib.rs`) or the jobs
+      # that run it (this file), both e2e jobs must be in its matrix, as its rules put them, or the
+      # job is red, so a plan that drops its own cases cannot pass.
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --quiet origin main
+          ~/.cache/slopty-xtask/xtask smoke plan --base origin/main --head "$GITHUB_SHA" \
+            --stand-aside
+          matrix=$(sed -n 's/^matrix=//p' "$GITHUB_OUTPUT" | tail -n1)
+          if [ -z "$matrix" ]; then
+            echo "::error::the plan wrote no matrix"
+            exit 1
+          fi
+          own=$(git diff --name-only "origin/main...$GITHUB_SHA" -- xtask/src/gate/impact.rs \
+            xtask/src/gate/order.rs xtask/src/lib.rs .github/workflows/ci.yml)
+          if [ -n "$own" ]; then
+            for case in mac ios; do
+              if ! jq -e --arg case "$case" 'any(.[]; .case == $case)' <<<"$matrix" >/dev/null; then
+                echo "::error::the change touches the plan's own code ($(tr '\n' ' ' <<<"$own")), and its plan leaves out e2e ($case)"
+                exit 1
+              fi
+            done
+          fi
+          superseded=$(sed -n 's/^superseded=//p' "$GITHUB_OUTPUT" | tail -n1)
+          if [ "$superseded" = true ] && [ "$matrix" != "[]" ]; then
+            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+              || echo "::warning::the run stands aside but could not be cancelled; its e2e and promote skip"
+          fi
+
+  # The smoke cases the plan chose, on hosted Macs beside the gate (docs/decisions/tooling.md, "The
+  # gate and e2e run on free hosted runners; this Mac runs none", item 3). `e2e (mac)` builds the
+  # daemons, the app and the test binaries once, in the check's one feature set, and runs the app's
+  # cases (S1-S3) and the server's (S4), or `e2e (server)` the server's alone when the change
+  # reaches no other; `e2e (ios)` builds the same and the iOS app, boots the iPhone while it builds
+  # and the iPad once the iPhone's tests are done, waits for each to settle, and runs S5 on both.
+  # Only the reached tests run, none retried (`NEXTEST_RETRIES=0`); a changed frame is a review, not
+  # a red, on a runner's GPU (`--review`, as in e2e.yml). A job stops once any other job of its run
+  # ended other than green (failed, past its timeout, or cancelled), since the run then never
+  # promotes: before its setup, and through the run (`--stop-on-red`). It stands aside once a newer
+  # push moved `gate` before it set up or built, its run cancelled whole, and the newer run carries
+  # its commit; one already building runs on, and may still promote. `promote` needs it; a job the
+  # plan leaves out never starts.
+  e2e:
+    needs: smoke-plan
+    if: >-
+      needs.smoke-plan.outputs.matrix != '' && needs.smoke-plan.outputs.matrix != '[]'
+      && needs.smoke-plan.outputs.superseded != 'true'
+    name: e2e (${{ matrix.case }})
+    runs-on: xcode-27
+    # A cold build of the app and its daemons on a three-core runner took over 30 minutes.
+    timeout-minutes: 75
+    # No concurrency group: one that keeps a job running and one waiting cancels the waiting one
+    # when a third queues, and jobs queue as their plans end, not in their commits' order, so an
+    # older run's job could cancel the newest run's and leave its commit off main with no run to
+    # carry it. A run instead stands aside only by `gate`'s tip, which never sets the newest
+    # aside (`xtask/src/gate/order.rs`, whose model test runs every order; docs/decisions/
+    # testing.md, "The gate runs the smoke cases a push reaches").
+    # `actions: write`: the job reads the run's lanes, cancels a run that stands aside, and a
+    # red one cancels its run once a newer push runs.
+    permissions:
+      contents: read
+      actions: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.smoke-plan.outputs.matrix) }}
+    # `bash` named, so a step runs with pipefail, which GitHub's default shell leaves off.
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The server stays up to the end, so the last step's statistics count the run.
+      SCCACHE_IDLE_TIMEOUT: "0"
+    steps:
+      # Spotlight off (the gate job's comment).
+      - if: runner.os == 'macOS'
+        run: sudo mdutil -a -i off
+      # A run already red never promotes: a job that waited for a Mac past a red sets nothing
+      # up. GitHub lists a job past its timeout as cancelled, and says so in its annotations,
+      # which tell it apart as red. One whose jobs were only cancelled is being cancelled whole,
+      # and one whose commit `gate` moved off stands aside (`xtask/src/gate/order.rs`): each is
+      # cancelled whole here, so it ends cancelled, not red, and `land --wait` follows the newer
+      # run (`xtask e2e --stop-on-red` does the same before its build, and watches for a red
+      # through the run). A look that fails stops nothing, nor a cancel that fails.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ended=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | "\(.id)\t\(.conclusion)\t\(.name)"') \
+            || ended=
+          red=
+          cancelled=
+          while IFS=$'\t' read -r id conclusion name; do
+            [ -n "$id" ] || continue
+            if [ "$conclusion" != cancelled ]; then
+              red+="${red:+, }$name $conclusion"
+            elif notes=$(gh api "repos/$GITHUB_REPOSITORY/check-runs/$id/annotations" --jq '.[].message') \
+              && grep -q 'has exceeded the maximum execution time' <<<"$notes"; then
+              red+="${red:+, }$name past its timeout"
+            else
+              cancelled+="${cancelled:+, }$name"
+            fi
+          done <<<"$ended"
+          if [ -n "$red" ]; then
+            echo "### ✋ red: $red; the run never promotes, so its e2e stops here" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::red: $red"
+            exit 1
+          fi
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/gate" --jq .object.sha) || tip=
+          if [ -n "$cancelled" ]; then
+            said="$cancelled cancelled: the run is being cancelled whole"
+          elif [ -n "$tip" ] && [ "$tip" != "$GITHUB_SHA" ]; then
+            said="\`gate\` moved on to $tip, whose run carries this commit or replaced it: the run stands aside, cancelled whole"
+          else
+            exit 0
+          fi
+          echo "### ✋ $said" >> "$GITHUB_STEP_SUMMARY"
+          if gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"; then
+            sleep 300
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      # sccache on R2, or the Actions cache without its credentials (.github/actions/sccache).
+      - uses: ./.github/actions/sccache
+        with:
+          r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
+          r2-secret-access-key: ${{ secrets.SCCACHE_R2_SECRET_ACCESS_KEY }}
+      # The Mac's triple, and the simulator's for the iOS app.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.1
+          targets: >-
+            ${{ matrix.case == 'ios' && 'aarch64-apple-darwin, aarch64-apple-ios,
+            aarch64-apple-ios-sim' || 'aarch64-apple-darwin' }}
+      # The cargo cache the tools lane saves, read only (the gate job's comment).
+      - uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-home-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-
+          enableCrossOsArchive: true
+      - uses: cargo-bins/cargo-binstall@main
+      # As the gate's lanes compile them, so the compile cache's entries are theirs
+      # (xtask/src/ci_profile.rs).
+      - run: cp .cargo/ci-profile.toml "${CARGO_HOME:-$HOME/.cargo}/config.toml"
+      # The worker's libghostty-vt, from the prebuilt the e2e and the worker shard keep: zig
+      # for the entry's key, and its packages only to build it. An entry restored by its prefix
+      # whose key ends in these inputs' is theirs, so nothing builds it then either.
+      - uses: ./.github/actions/zig
+      - id: ghostty
+        run: >-
+          echo "key=$(git rev-parse HEAD:vendor/ghostty)-$(grep -m1 -o
+          'libghostty-rs.git#[0-9a-f]*' Cargo.lock | cut -d'#' -f2)" >> "$GITHUB_OUTPUT"
+      - id: prebuilt
+        uses: actions/cache@v6
+        with:
+          path: target/ghostty-prebuilt
+          key: ghostty-prebuilt-${{ runner.os }}-e2e-app-${{ steps.ghostty.outputs.key }}
+          restore-keys: ghostty-prebuilt-${{ runner.os }}-tests
+      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+        uses: actions/cache@v6
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - if: ${{ !endsWith(steps.prebuilt.outputs.cache-matched-key, steps.ghostty.outputs.key) }}
+        working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
+      # xcodegen writes the iOS app's Xcode project (e2e.yml's comment).
+      - if: matrix.case == 'ios'
+        id: xcodegen
+        uses: actions/cache@v6
+        with:
+          path: ~/.local/xcodegen
+          key: xcodegen-2.46.0-${{ runner.os }}-${{ runner.arch }}
+      - if: matrix.case == 'ios' && steps.xcodegen.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 5 -o "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" \
+            | shasum -a 256 -c -
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d ~/.local/xcodegen
+      - if: matrix.case == 'ios'
+        run: echo "$HOME/.local/xcodegen/xcodegen/bin" >> "$GITHUB_PATH"
+      # xtask and nextest from their cache entry, as the gate's lanes take them.
+      - id: xtask
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cache/slopty-xtask
+          key: >-
+            xtask-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('xtask/**',
+            'crates/slopty-crash/**', 'crates/slopty-testkit/**', 'Cargo.toml', 'Cargo.lock',
+            'rust-toolchain.toml', '.cargo/*.toml') }}
+      - if: steps.xtask.outputs.cache-hit != 'true'
+        run: |
+          CARGO_PROFILE_DEV_OPT_LEVEL=0 cargo build --locked --quiet --target-dir target/xtask \
+            --package xtask
+          mkdir -p ~/.cache/slopty-xtask
+          cp target/xtask/debug/xtask ~/.cache/slopty-xtask/
+      - run: |
+          echo "$HOME/.cache/slopty-xtask" >> "$GITHUB_PATH"
+          echo "SLOPTY_XTASK=$HOME/.cache/slopty-xtask/xtask" >> "$GITHUB_ENV"
+      - run: xtask setup --lane tests
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - env:
+          CASE: ${{ matrix.case }}
+          FILTER: ${{ matrix.filter }}
+          NEXTEST_RETRIES: "0"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=("$CASE" --review --stop-on-red -E "$FILTER")
+          if [ "$CASE" = ios ]; then
+            args+=(--sim iphone --sim ipad)
+          else
+            # Three tests at a time on the runner's three cores.
+            args+=(--test-threads 3)
+          fi
+          xtask e2e "${args[@]}"
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-${{ matrix.case }}
+          path: target/e2e/artifacts
+          if-no-files-found: ignore
+      - if: always() && env.SCCACHE_PATH != ''
+        run: $SCCACHE_PATH --show-stats
+      # As the gate's lanes: a red run cancels itself once a newer push runs.
+      - if: failure() && github.ref == 'refs/heads/gate'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          newest=$(git ls-remote origin refs/heads/gate | cut -f1)
+          if [ -n "$newest" ] && [ "$newest" != "$GITHUB_SHA" ]; then
+            gh run cancel "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY"
+          fi
+
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
   promote:
-    needs: [gate, linux, warm]
-    # Every lane passed: on the hosted matrix and the linux job, or on both warm runners.
+    needs: [gate, linux, warm, smoke-plan, e2e]
+    # Every lane passed: on the hosted matrix and the linux job, or on both warm runners; and the
+    # smoke cases the plan chose passed, or it chose none. An e2e skipped for a run that stood
+    # aside, with cases chosen, never promotes it unchecked.
     if: >-
       github.ref == 'refs/heads/gate' && !cancelled()
       && (needs.warm.result == 'success'
       || (needs.gate.result == 'success' && needs.linux.result == 'success'))
+      && needs.smoke-plan.result == 'success'
+      && (needs.e2e.result == 'success'
+      || (needs.e2e.result == 'skipped' && needs.smoke-plan.outputs.matrix == '[]'))
     runs-on: ubuntu-24.04
+    # The deploy key is the `promote` environment's secret, which GitHub hands only to a job on
+    # `gate` (its deployment branch): a workflow on any other branch or pull request names it in
+    # vain.
+    environment: promote
     # `actions: write` starts the e2e cases and the Deep checks on the new main when overdue.
+    # The push to main goes with the repository's deploy key, not this token.
     permissions:
-      contents: write
+      contents: read
       actions: write
     steps:
-      - uses: actions/checkout@v7
+      # The deploy key that may write to this repository alone (`SLOPTY_PROMOTE_KEY`): unlike
+      # the run's token, GitHub lets it push a change to `.github/workflows`, which this token
+      # was refused however green (runs 37254289819, 37255378937), and which a probe push of one
+      # with the key settled (docs/decisions/testing.md, "The gate runs the smoke cases a push
+      # reaches"). No workflow runs on a push to main. The action that holds the key is pinned
+      # by commit (v7.0.1), as a tag can move. Rulesets keep the key from more: main takes no
+      # force push and no deletion, and only the repository's admins create, move or delete a
+      # `v*` tag, so the key cannot cut a release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
-      - run: |
-          git fetch --quiet origin main
+          ssh-key: ${{ secrets.SLOPTY_PROMOTE_KEY }}
+      - id: push
+        run: |
+          git fetch --quiet origin main gate
           short=${GITHUB_SHA:0:10}
+          # Runs overlap: a later push's green may have carried main past this commit already.
+          if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "### ✔ main already holds $short" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # A commit `gate` no longer holds was withdrawn: `land` replaced it (an amend landed
+          # again), and only what gate still holds may reach main.
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/gate; then
+            echo "### – not promoted: gate no longer holds $short (at $(git rev-parse --short=10 origin/gate)), so it was withdrawn" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if ! git merge-base --is-ancestor origin/main "$GITHUB_SHA"; then
             echo "### ✘ not promoted: $short is not on top of main" >> "$GITHUB_STEP_SUMMARY"
             echo "main is at $(git rev-parse --short=10 origin/main); rebase onto it and land again." >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$short is not a fast-forward of main"
             exit 1
           fi
-          # GitHub never lets this job's token update a workflow file, however green the run.
-          if [ -n "$(git diff --name-only origin/main "$GITHUB_SHA" -- .github/workflows)" ]; then
-            echo "### ✋ not promoted: $short changes a workflow file" >> "$GITHUB_STEP_SUMMARY"
-            echo "Every lane passed. From a checkout: \`cargo xtask promote $short\`." >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::$short changes .github/workflows, which this token may not push; run cargo xtask promote"
-            exit 1
+          # Another run's promote may move main between the fetch and the push: then this one is
+          # done if main now holds the commit, and pushes again, after a wait, while it is still
+          # ahead of main. A refusal with main unmoved is GitHub's or a rule's, said as such.
+          for wait in 0 5 15 30; do
+            sleep "$wait"
+            if git push origin "$GITHUB_SHA:refs/heads/main" 2> "$RUNNER_TEMP/push.err"; then
+              echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            cat "$RUNNER_TEMP/push.err" >&2
+            before=$(git rev-parse origin/main)
+            git fetch --quiet origin main
+            if git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "### ✔ main already holds $short" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            git merge-base --is-ancestor origin/main "$GITHUB_SHA" || break
+            if [ "$(git rev-parse origin/main)" = "$before" ]; then
+              refused=$(grep -m1 -E 'remote:|rejected|error' "$RUNNER_TEMP/push.err" || echo "no reason given")
+              echo "the push was refused with main unmoved: $refused" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          if git merge-base --is-ancestor origin/main "$GITHUB_SHA"; then
+            echo "### ✘ not promoted: the push of $short was refused four times, main still under it" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::the push to main was refused: $(head -c 300 "$RUNNER_TEMP/push.err" | tr '\n' ' ')"
+          else
+            echo "### ✘ not promoted: main moved to $(git rev-parse --short=10 origin/main), not under $short" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::main moved past a commit $short is not on top of"
           fi
-          git push origin "$GITHUB_SHA:refs/heads/main"
-          echo "### ✔ main fast-forwarded to $short" >> "$GITHUB_STEP_SUMMARY"
-      # Every e2e case on the main just promoted, once 26 hours have passed since an e2e run
-      # last started and none is queued or running: e2e.yml's nightly schedule, which GitHub
-      # starts late under load or not at all (as the Deep checks' below). Dispatched on `gate`
-      # with the commit, so it reads the compile cache the test shards just filled.
-      - env:
+          exit 1
+      # Every e2e case on main's head, once 26 hours have passed since an e2e run last started
+      # and none is queued or running: e2e.yml's nightly schedule, which GitHub starts late under
+      # load or not at all (as the Deep checks' below). Dispatched on `gate` with the commit, so
+      # it reads the compile cache the test shards just filled. Main has moved by now, so this
+      # and the next step are best-effort: a failed call (the token's hourly budget, an outage)
+      # leaves the run green.
+      - continue-on-error: true
+        env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          head=$(git rev-parse origin/main)
           last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 1 \
             --json createdAt --jq '.[0].createdAt // empty')
           busy=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow e2e.yml --limit 10 \
@@ -534,15 +943,16 @@ jobs:
           if [ "${busy:-0}" -gt 0 ]; then
             echo "an e2e run is still going; none started" >> "$GITHUB_STEP_SUMMARY"
           elif [ -z "$last" ] || [ $(( $(date +%s) - $(date -d "$last" +%s) )) -ge 93600 ]; then
-            gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$GITHUB_SHA"
-            echo "every e2e case started on the main just promoted: none for 26 hours" \
+            gh workflow run e2e.yml --repo "$GITHUB_REPOSITORY" --ref gate -f sha="$head"
+            echo "every e2e case started on main's head: none for 26 hours" \
               >> "$GITHUB_STEP_SUMMARY"
           fi
       # The Deep checks, once 26 hours have passed since a Deep run on main last started. GitHub
       # starts a schedule late under load, by six hours (run 38133881188), or not at all: none
       # had started for 2026-10-12's 04:37 by 09:20. Its macOS jobs still wait for the gate to
       # go idle (deep.yml's `wait`), so a run started in the working day holds no gate Mac.
-      - env:
+      - continue-on-error: true
+        env:
           GH_TOKEN: ${{ github.token }}
         run: |
           last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deep.yml --branch main \

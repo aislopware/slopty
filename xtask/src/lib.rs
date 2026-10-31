@@ -141,11 +141,8 @@ enum Cmd {
         warm: bool,
     },
     /// After a commit on main: push it to the `gate` branch, where CI runs every gate lane and
-    /// fast-forwards main to it once all pass.
+    /// the smoke cases it reaches, and fast-forwards main to it once all pass.
     Land(land::LandOpts),
-    /// Fast-forward main to a commit every gate lane passed on (the `gate` branch's head by
-    /// default), from this checkout: CI's token may not update a workflow file.
-    Promote(land::PromoteOpts),
     /// The checks of the working tree on a GitHub runner, not this Mac: `xtask check` for the
     /// crates named and an e2e case, whose accepted goldens come back into the tree.
     Remote(remote::RemoteOpts),
@@ -191,7 +188,7 @@ enum Cmd {
         /// GB `target/` may hold (default `SLOPTY_TARGET_BUDGET_GB`, else 200).
         #[arg(long)]
         budget_gb: Option<u64>,
-        /// GB its volume keeps free (default `SLOPTY_DISK_FLOOR_GB`, else 50); a pass that acts
+        /// GB its volume keeps free (default `SLOPTY_DISK_FLOOR_GB`, else 30); a pass that acts
         /// frees `SLOPTY_DISK_HEADROOM_GB` (else 30) more.
         #[arg(long)]
         floor_gb: Option<u64>,
@@ -256,8 +253,8 @@ enum Cmd {
     ClaudeMod(claude_mod::ClaudeModCmd),
     /// Run the live end-to-end tests (daemons, screen capture, input) in an isolated data dir.
     E2e(e2e::E2eOpts),
-    /// What a change reaches of the e2e smoke set (`reach`), the gate's run of it (`plan`), and
-    /// each case's verdict in a run's logs (`verdicts`).
+    /// What a change reaches of the e2e smoke set and why (`reach`), and the gate's plan of it:
+    /// the filtersets its smoke jobs run (`plan`).
     #[command(subcommand)]
     Smoke(gate::impact::SmokeCmd),
     /// Format everything (rustfmt nightly if present, taplo).
@@ -416,7 +413,6 @@ pub fn main() -> Result<()> {
             gated
         }
         Cmd::Land(opts) => land::run(&sh, &opts),
-        Cmd::Promote(opts) => land::promote(&sh, &opts),
         Cmd::Remote(opts) => remote::run(&sh, &opts),
         Cmd::Stage(opts) => remote::stage::run(&sh, &opts),
         Cmd::CiHealth { since } => health::run(&sh, since.as_deref()),
