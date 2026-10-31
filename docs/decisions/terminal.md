@@ -4263,3 +4263,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `upstream::tests::{a_flat_replay_of_a_fork_with_a_merge_carries_every_patch,
     a_replay_that_drops_a_patch_is_refused}`; the fork's `cargo check` and `cargo test -p
     libghostty-vt` on the sync's runner; the `CHECKED` requirement in every build of vt-sys.
+
+- ✅ **ghostty takes upstream `ae0dc1b71`; none of it reaches the parser or terminal state Slopty
+  runs, and `slopty ssh` takes its terminfo fix** (2026-10-31, fork `4bc2a08e6`, libghostty-rs
+  `f11a37806`). Upstream's 20 commits since `cf0ab14ae` merged without a conflict.
+  - **Under the watched paths, one: `51e7fe51d`.** tmux's `%output` notification is parsed by
+    hand instead of through an Oniguruma regex compiled for every pane write; a pane id past
+    `usize` is dropped instead of reaching `unreachable`, and empty output is accepted.
+    libghostty-vt is built without Oniguruma, and tmux control mode goes with it
+    (`tmux_control_mode`): its stream ignores `DCS 1000p`, and none of this is compiled in.
+  - **Outside them, one more that libghostty-vt compiles: `9644c7571`.** A ring buffer of zero
+    capacity stays full after `clear()`, so an append fails instead of panicking. The ring
+    backs the terminal's search window and the glyph protocol's glossary, and Slopty calls
+    neither. `check` did not list it, since `src/datastruct/` was not under `paths`. `paths`
+    now also names what the terminal imports from outside its own directories, found by
+    following its `@import`s: `src/datastruct/`, `src/lib/` (the C ABI and allocator glue),
+    and `fastmem`, `fastprint`, `quirks`, `quirks_memset`, `tripwire`, `crc32c` and
+    `os/string_encoding` (the semantic prompt's decoding).
+  - **Taken into Slopty: `4d7de0a48`.** Ghostty's `+ssh` discarded ssh's standard error while it
+    installed its terminfo, and a keyboard-interactive login's instructions with it. `slopty
+    ssh` did the same (`slopty_pty::ssh`'s install). Its ssh now keeps the terminal's standard
+    error, so a second factor's choices, the host's banner and why a login failed show before
+    the install's connection as plain `ssh` shows them. Password and host-key prompts already
+    went to the terminal itself. The remote steps stay quiet: `mkdir` joins `tic` under
+    `2>/dev/null`.
+  - The rest are the GTK app, the snap's packaging, config's direct commands, the fuzz replay
+    script and the VOUCHED lists. No engine bench: neither terminal change is compiled into
+    what `cargo xtask bench --filter engine` drives.
+  - Tests: the sync's runner check (`cargo check` and `cargo test -p libghostty-vt` against the
+    merged tree, with the bindings regenerated from it); `slopty-pty`
+    `ssh::tests::the_install_leaves_ssh_its_standard_error_to_speak_on`; the full checks of
+    `slopty-engine` and `slopty-terminal` on the new pins.

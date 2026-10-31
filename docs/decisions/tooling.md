@@ -3194,3 +3194,26 @@ more full-window layer.
   - **Not taken.** Allowing `linker_messages` hides the cause, and lints are never loosened. No
     `-C link-arg` removes an argument rustc adds, and a target spec of our own that names no
     GNU-like linker needs nightly.
+
+- ✅ **Upstream sync of 2026-10-31: gpui-fast `c4583d5e`, zed `14b7b0ef`; a pin moves by its
+  revision when the fork's manifests did not move.** gpui-fast merges longbridge `7fcd37e6`
+  (#93: a Windows renderer recovers from a failed resize, and from a failed rebuild after a lost
+  device, instead of panicking; #94: DirectWrite's legacy font lookup as a fallback) and imports
+  zed `14b7b0ef` (#53746: Wayland's blur through `ext-background-effect`, with
+  `Pixels::to_i32` and `Window::set_client_corner_radii`, a no-op off Wayland). Slopty's GPUI
+  pins move from `acd4617c`, whose #70 to #75 stay, to `c4583d5e`. gpui-kit and libghostty-rs
+  were current; ghostty's bump is in `terminal.md`.
+  - **The merge.** The fork has no Windows window composition, so #93's guard in
+    `fast/composition.rs` went with that file, and `fast::device_recovery` reads the renderer's
+    `width`, now `pub(crate)`. The allowlist folds #93's `events.rs` line into the fork's own,
+    since the first matching line applies. The fork's CI built and tested it on Windows.
+  - **Nothing to adopt.** Slopty builds GPUI for neither Windows nor Wayland, and the corner
+    radii shape a compositor's blur behind a translucent window, which AppKit and UIKit draw
+    themselves.
+  - **The lock moves by revision.** `cargo update -p gpui` re-resolved the registry crates
+    around it again: windows-sys 0.61 went back to 0.60 and 0.52, and windows 0.62 to 0.58,
+    under crates that accept any of them (first seen 2026-10-03). In each lock, `Cargo.lock`
+    and `fuzz/Cargo.lock`, `move_pins` now rewrites a fork's revision when no `Cargo.toml` of
+    the fork changed since that lock's pin, and keeps `cargo update` for a fork whose manifests
+    moved. Tests: xtask `upstream::tests::{a_repin_moves_that_commit_and_nothing_else,
+    only_a_changed_manifest_sends_a_pin_through_cargo}`.

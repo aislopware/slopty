@@ -147,8 +147,9 @@ zed itself so it is never behind zed while longbridge lags.
   (`git ls-remote`) and warns when it moved. A source with `paths` (ghostty) warns only when
   GitHub's compare says the move changed a file under them. For ghostty, `check` also lists the
   upstream commits since the base that touch those paths (the terminal, its C API and headers,
-  SIMD, Unicode, the key and mouse encoders, the lib-vt build, `build.zig.zon`), and where
-  `vendor/ghostty` stands against the fork head and the commit this repository records.
+  SIMD, Unicode, the key and mouse encoders, the lib-vt build, `build.zig.zon`, and the data
+  structures and helpers the terminal imports from outside them), and where `vendor/ghostty`
+  stands against the fork head and the commit this repository records.
 - `cargo xtask upstream watch [--interval 300] [--once]` prints a line whenever a watched
   upstream's default branch moves (its subject and how many commits it is past our base) or a
   pull request there is opened, updated, merged, closed or reopened. It watches the forks'
@@ -164,7 +165,8 @@ zed itself so it is never behind zed while longbridge lags.
   holding zed's tracked directories byte for byte, built from the zed checkout (`.research/zed-main`,
   fetched, its work tree untouched), merged into the fork with `UPSTREAM` rewritten. It then runs
   `script/check-upstream` and the build checks, pushes (`SSH_AUTH_SOCK` on the signing agent
-  first) and moves the `Cargo.lock` pins. A conflict that is not `Cargo.lock` stops it. So does an
+  first) and moves the `Cargo.lock` pins: by their revision alone when the fork's manifests did
+  not change, else with `cargo update`. A conflict that is not `Cargo.lock` stops it. So does an
   import that needs a hand: a conflict, a file zed changed that a `#[path = "fast/…"]` redirect
   replaces (port it into our copy), or a crate the workspace manifest must add or drop. It stops
   mid-merge with `UPSTREAM` already staged and prints the list; finish there, `git commit`, and
