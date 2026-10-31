@@ -1007,7 +1007,9 @@ mod tests {
     }
 
     /// While an agent asks the person at a dialog, what another agent tells it is refused, with
-    /// why, and nothing reaches its terminal: the dialog would take the words as its answer.
+    /// why, and nothing reaches its terminal: the dialog would take the words as its answer. Nor
+    /// does orchestration type into the thread's terminal: it is an agent's from its start, seen
+    /// or not yet by the agent poll.
     #[tokio::test]
     async fn an_agents_words_wait_while_the_agent_asks_the_person() {
         use slopty_proto::thread::Phase;
@@ -1030,6 +1032,9 @@ mod tests {
             panic!("not refused: {refused:?}")
         };
         assert!(message.contains("answer it there"), "why, in words: {message}");
+        let term = TermRef { worker: reg.worker, session: seat };
+        let sent = peer.ask(Verb::SendInput { term, input: text("Blue, by hand\n") }).await;
+        assert!(matches!(sent, Outcome::Error { code: ErrorCode::Forbidden, .. }), "{sent:?}");
         let seen =
             recorded(&record, |r| r["prompts"].as_array().is_some_and(|p| !p.is_empty())).await;
         let typed: String = reads(&seen).into_iter().map(|(b, _)| b).collect();

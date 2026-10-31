@@ -562,7 +562,13 @@ impl Orchestrator {
             Verb::SendInput { term, input } => {
                 let handle = self.session(term)?;
                 let agents = inner.worker.agents();
-                let expects_agent = inner.agent_terms.lock().contains(&term.session);
+                // Started as an agent's from its start, before the poll first sees the agent: a
+                // terminal opened to run Claude Code, or the one a thread is seated at.
+                let expects_agent = inner.agent_terms.lock().contains(&term.session)
+                    || inner
+                        .thread_reads
+                        .get()
+                        .is_some_and(|r| r.seated_at(term.session).is_some());
                 let guard = || may_type(&handle, agents, expects_agent);
                 write_input(&handle, &input, guard).await?;
                 Ok(Outcome::Done)
@@ -972,10 +978,10 @@ pub async fn resize(handle: &SessionHandle, size: TermSize) -> Result<(), Failur
 /// of the write.
 ///
 /// Not while a coding agent runs there (the table holds one, or orchestration started the
-/// terminal as an agent's, `expects_agent`, and it has not ended): Slopty drives an agent
-/// through its own door, as a thread, never by typing into its screen, and an agent the person
-/// runs by hand is theirs ([`ErrorCode::Forbidden`]). Once the agent ended, its terminal is a
-/// shell again and takes input.
+/// terminal as an agent's, `expects_agent`: opened to run Claude Code, or a thread's seat, and
+/// it has not ended): Slopty drives an agent through its own door, as a thread, never by typing
+/// into its screen, and an agent the person runs by hand is theirs ([`ErrorCode::Forbidden`]).
+/// Once the agent ended, its terminal is a shell again and takes input.
 ///
 /// # Errors
 ///
