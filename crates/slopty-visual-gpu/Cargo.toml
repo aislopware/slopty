@@ -44,22 +44,12 @@ objc2-core-video = { workspace = true, features = [
 ] }
 # With the CoreFoundation type `CVPixelBufferGetIOSurface` returns, which objc2-core-video's
 # `objc2-io-surface` feature leaves out.
-objc2-io-surface = { version = "=0.3.2", default-features = false, features = [
-    "std",
+objc2-io-surface = { workspace = true, features = [
     "IOSurfaceRef",
     "IOSurfaceTypes",
     "objc2-core-foundation",
 ] }
-objc2-metal = { version = "=0.3.2", default-features = false, features = [
-    "std",
-    "MTLPixelFormat",
-    "MTLTexture",
-] }
+objc2-metal = { workspace = true, features = [ "MTLPixelFormat", "MTLTexture" ] }
 
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
-objc2-metal = { version = "=0.3.2", default-features = false, features = [
-    "std",
-    "MTLDevice",
-    "MTLPixelFormat",
-    "MTLTexture",
-] }
+objc2-metal = { workspace = true, features = [ "MTLDevice", "MTLPixelFormat", "MTLTexture" ] }
