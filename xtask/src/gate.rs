@@ -25,6 +25,7 @@
 //! the tests of those packages and of every package that depends on them. Either way the lanes
 //! run on the snapshot of the index, and a lane that is not run passed on the same inputs.
 
+pub mod impact;
 mod pass;
 pub mod warm;
 
@@ -702,7 +703,7 @@ fn summary_of(failed: &[(&str, String)], tests: &[String]) -> String {
 
 /// The tests a nextest `JUnit` report says failed, as `binary test`. A test that failed and then
 /// passed on a retry is flaky (`<flakyFailure>`), not failed.
-fn failed_tests(junit: &str) -> Vec<String> {
+pub fn failed_tests(junit: &str) -> Vec<String> {
     junit
         .split("<testcase ")
         .skip(1)
@@ -720,7 +721,7 @@ fn failed_tests(junit: &str) -> Vec<String> {
 }
 
 /// The unescaped value of `key` in an element's attributes.
-fn attribute(head: &str, key: &str) -> String {
+pub fn attribute(head: &str, key: &str) -> String {
     let value = format!(" {head}")
         .split_once(&format!(" {key}=\""))
         .and_then(|(_, rest)| rest.split_once('"'))
@@ -803,20 +804,7 @@ fn tools_lane(
 ) -> Result<()> {
     let on_tree = &on_tree;
     let results: Vec<Result<()>> = std::thread::scope(|scope| {
-        let handles = [
-            // The CI profile reads the graph `cargo fetch` just completed.
-            scope.spawn(move || {
-                let tree = on_tree()?;
-                locked(&tree)?;
-                crate::ci_profile::check(&tree)
-            }),
-            scope.spawn(move || deny(&on_tree()?)),
-            scope.spawn(move || hakari(&on_tree()?, false)),
-            scope.spawn(move || shear(&on_tree()?, false)),
-            scope.spawn(move || typos(&on_tree()?, false)),
-            scope.spawn(move || repo_invariants(&tree_root(&on_tree()?)?)),
-            scope.spawn(move || crate::claude_mod::check_tree(&tree_root(&on_tree()?)?)),
-        ];
+        let handles = Tool::LANE.map(|tool| scope.spawn(move || tool.run(&on_tree()?)));
         // `committed` reads the history, which only the checkout has.
         let mut results = vec![commits(checkout, message)];
         results.extend(handles.into_iter().map(join));
@@ -1897,8 +1885,18 @@ fn prune(tree: &Utf8Path, dir: &Utf8Path, wanted: &HashSet<String>) -> Result<us
     Ok(removed)
 }
 
-/// Format check (or apply). Uses nightly rustfmt when available for the unstable options.
+/// Format check (or apply): [`rustfmt`], then taplo when it is installed.
 pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
+    rustfmt(sh, apply)?;
+    if has(sh, "taplo") {
+        taplo(sh, apply)?;
+    }
+    Ok(())
+}
+
+/// `cargo fmt --all`: every member and every path dependency it reaches, the vendored ones too,
+/// then the fuzz crate. Nightly rustfmt when available, for the unstable options.
+fn rustfmt(sh: &Shell, apply: bool) -> Result<()> {
     let nightly =
         cmd!(sh, "rustup run nightly rustfmt --version").quiet().ignore_stderr().read().is_ok();
     let toolchain: &[&str] = if nightly { &["+nightly"] } else { &[] };
@@ -1912,10 +1910,136 @@ pub fn fmt(sh: &Shell, apply: bool) -> Result<()> {
             cmd!(sh, "cargo {toolchain...} fmt --manifest-path fuzz/Cargo.toml -- {check...}"),
         )?;
     }
-    if has(sh, "taplo") {
-        taplo(sh, apply)?;
-    }
     Ok(())
+}
+
+/// A step of the gate's tools lane ([`fmt`] and [`tools_lane`]) and what reaches it. A lane's
+/// check runs every step its change reaches, over its own tree, by this same code
+/// (`crate::remote`), so the gate never goes red on what a check could have said in seconds:
+/// three times on 2026-10-31 it did, on a stale `workspace-hack`, on vendored files `cargo fmt
+/// --all` reaches and a check's fmt of its own crates did not, and on a lock whose new
+/// `tempfile` moved the hack. `committed`, which lints the history and the message about to be
+/// committed, is the gate's alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    /// [`rustfmt`]: `cargo fmt --all --check`, vendored path dependencies and the fuzz crate.
+    Rustfmt,
+    /// taplo over the tracked TOML files.
+    Taplo,
+    /// Both locks hold what the manifests ask (`cargo fetch --locked`), and the CI profile names
+    /// every proc macro the lock brings (`ci_profile::check`).
+    Locked,
+    /// `cargo deny` and the one GPUI.
+    Deny,
+    /// `workspace-hack` is current (`cargo hakari generate --diff`).
+    Hakari,
+    /// No unused dependency (`cargo shear`).
+    Shear,
+    /// typos over the tree.
+    Typos,
+    /// The repository's text in step ([`repo_invariants`]).
+    Invariants,
+    /// The Claude Code mod's checks (`claude_mod::check_tree`).
+    ClaudeMod,
+}
+
+impl Tool {
+    /// Every step, [`fmt`]'s first.
+    pub const ALL: [Self; 9] = [
+        Self::Rustfmt,
+        Self::Taplo,
+        Self::Locked,
+        Self::Deny,
+        Self::Hakari,
+        Self::Shear,
+        Self::Typos,
+        Self::Invariants,
+        Self::ClaudeMod,
+    ];
+    /// The tools lane's steps beside [`fmt`]'s.
+    pub const LANE: [Self; 7] = [
+        Self::Locked,
+        Self::Deny,
+        Self::Hakari,
+        Self::Shear,
+        Self::Typos,
+        Self::Invariants,
+        Self::ClaudeMod,
+    ];
+
+    /// Its name in a check's log.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Rustfmt => "fmt",
+            Self::Taplo => "taplo",
+            Self::Locked => "locks",
+            Self::Deny => "deny",
+            Self::Hakari => "hakari",
+            Self::Shear => "shear",
+            Self::Typos => "typos",
+            Self::Invariants => "invariants",
+            Self::ClaudeMod => "claude-mod",
+        }
+    }
+
+    /// Whether a change to `path` (from the repository's root) can change the step's verdict.
+    pub fn reached_by(self, path: &str) -> bool {
+        let file = path.rsplit('/').next().unwrap_or(path);
+        let rust = Utf8Path::new(file).extension() == Some("rs");
+        let manifest = file == "Cargo.toml" || file == "Cargo.lock";
+        match self {
+            // A manifest's `edition` or `style_edition` sets how its crate formats.
+            Self::Rustfmt => {
+                rust || matches!(file, "rustfmt.toml" | ".rustfmt.toml" | "Cargo.toml")
+                    || path == "rust-toolchain.toml"
+            }
+            Self::Taplo => Utf8Path::new(file).extension() == Some("toml"),
+            Self::Locked => manifest || path.starts_with(".cargo/"),
+            Self::Deny => manifest || path == "deny.toml",
+            // The fuzz crate is a workspace of its own, outside the hack's union.
+            Self::Hakari => {
+                (manifest && !path.starts_with("fuzz/"))
+                    || path.starts_with("workspace-hack/")
+                    || path == ".config/hakari.toml"
+            }
+            // A dependency's last use can go with a source file.
+            Self::Shear => manifest || rust,
+            Self::Typos => true,
+            // Members, their shards and the sources' spawned binaries and doctests, the
+            // shards' table and the workflow that runs them.
+            Self::Invariants => {
+                rust || manifest
+                    || path.starts_with(".github/workflows/")
+                    || path.starts_with("xtask/")
+            }
+            Self::ClaudeMod => crate::claude_mod::WATCHED.iter().any(|w| path.starts_with(w)),
+        }
+    }
+
+    /// Run the step in `sh`'s directory, the tree it judges, as the gate does.
+    pub fn run(self, sh: &Shell) -> Result<()> {
+        match self {
+            Self::Rustfmt => rustfmt(sh, false),
+            Self::Taplo => {
+                if has(sh, "taplo") {
+                    taplo(sh, false)
+                } else {
+                    Ok(())
+                }
+            }
+            // The CI profile reads the graph `cargo fetch` just completed.
+            Self::Locked => {
+                locked(sh)?;
+                crate::ci_profile::check(sh)
+            }
+            Self::Deny => deny(sh),
+            Self::Hakari => hakari(sh, false),
+            Self::Shear => shear(sh, false),
+            Self::Typos => typos(sh, false),
+            Self::Invariants => repo_invariants(&tree_root(sh)?),
+            Self::ClaudeMod => crate::claude_mod::check_tree(&tree_root(sh)?),
+        }
+    }
 }
 
 /// Clippy on every triple: [`lint_host`], [`lint_ios`], then [`lint_linux`].
@@ -2056,7 +2180,9 @@ fn locked(sh: &Shell) -> Result<()> {
     Ok(())
 }
 
-fn deny(sh: &Shell) -> Result<()> {
+/// `cargo deny` over the workspace, and its one GPUI ([`one_gpui`]): in the tools lane, and in a
+/// lane's check that changes a manifest or the lock (`crate::remote`).
+pub fn deny(sh: &Shell) -> Result<()> {
     quiet_step("cargo deny", cmd!(sh, "cargo deny --workspace check"))?;
     one_gpui(&sh.read_file(sh.current_dir().join("Cargo.lock"))?)
 }
@@ -2101,8 +2227,9 @@ fn one_gpui(lock: &str) -> Result<()> {
 }
 
 /// `workspace-hack` carries the workspace's current feature union (`cargo xtask check` builds
-/// against it): regenerated under `--fix`, a stale one fails the gate.
-fn hakari(sh: &Shell, fix: bool) -> Result<()> {
+/// against it): regenerated under `--fix`, a stale one fails the gate, and a lane's check that
+/// changes a manifest (`crate::remote`).
+pub fn hakari(sh: &Shell, fix: bool) -> Result<()> {
     let diff: &[&str] = if fix { &[] } else { &["--diff"] };
     quiet_step("cargo hakari", cmd!(sh, "cargo hakari generate {diff...}"))
 }
@@ -2118,12 +2245,28 @@ fn typos(sh: &Shell, fix: bool) -> Result<()> {
 }
 
 /// Only the tracked TOML files: left to its own globs taplo walks `target/` and the vendored
-/// trees before its `exclude` list applies, which took ~90 s.
+/// trees before its `exclude` list applies, which took ~90 s. A snapshot (the gate's, a lane
+/// check's) is listed by its `tree.index` beside it; the checkout by git.
 fn taplo(sh: &Shell, apply: bool) -> Result<()> {
     let check: &[&str] = if apply { &[] } else { &["--check"] };
-    let root = repo_root()?;
-    let files = cmd!(sh, "git -C {root} ls-files *.toml").read()?;
-    let files: Vec<&str> = files.lines().collect();
+    let here = tree_root(sh)?;
+    let listing = here
+        .parent()
+        .filter(|_| here.file_name() == Some("tree"))
+        .map(|dir| dir.join("tree.index"));
+    let listed: Vec<String> = if let Some(path) = listing.filter(|path| path.exists()) {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("read {path}"))?
+            .lines()
+            .filter_map(|line| line.split_once(' ').map(|(_, rel)| rel.to_owned()))
+            .filter(|rel| Utf8Path::new(rel).extension() == Some("toml"))
+            .collect()
+    } else {
+        let root = repo_root()?;
+        cmd!(sh, "git -C {root} ls-files *.toml").read()?.lines().map(str::to_owned).collect()
+    };
+    let mut files: Vec<String> = listed;
+    files.sort_unstable();
     quiet_step("taplo", cmd!(sh, "taplo fmt {check...} {files...}"))
 }
 
@@ -2518,11 +2661,13 @@ let windows = cfg!(windows);
         }
     }
 
-    /// Nothing that compiles runs in the quick gate, which is the tools lane; CI carries the
-    /// app's live tests in a workflow of their own, which holds no gate run back, started by
-    /// `promote` on the main it pushed: a schedule checked out a commit days old.
+    /// Nothing that compiles runs in the quick gate, which is the tools lane. The e2e runs in a
+    /// workflow of its own, which holds no gate run back: every case, dispatched on `gate` (by
+    /// its own nightly schedule with main's head, or by `promote` when none ran for 26 hours),
+    /// so it reads the test shards' compile cache; a red is never retried, and a changed frame
+    /// is a review, not a red, on a runner's GPU.
     #[test]
-    fn the_quick_gate_compiles_nothing_and_ci_runs_the_app_e2e() {
+    fn the_quick_gate_compiles_nothing_and_e2e_runs_nightly_on_gate() {
         use clap::ValueEnum as _;
         assert_eq!(super::QUICK, [super::LaneId::Tools], "the tools read text");
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
@@ -2537,19 +2682,25 @@ let windows = cfg!(windows);
             "only the test shards take one of the five macOS runners"
         );
         let e2e = std::fs::read_to_string(path.with_file_name("e2e.yml")).expect("e2e.yml");
-        assert!(e2e.contains("run: xtask e2e app --review"), "the app's e2e on CI");
-        assert!(
-            !e2e.contains("push:") && !e2e.contains("schedule:"),
-            "never beside every land's run, and never on a schedule's stale commit"
-        );
+        for needle in [
+            "schedule:",
+            "gh api \"repos/$GITHUB_REPOSITORY/commits/main\"",
+            "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$sha\"",
+            "if: github.event_name == 'workflow_dispatch'",
+            "args=(\"$CASE\" --review)",
+            "NEXTEST_RETRIES: \"0\"",
+            "shell: bash",
+        ] {
+            assert!(e2e.contains(needle), "e2e.yml has `{needle}`");
+        }
+        assert!(!e2e.contains("push:"), "never beside every land's run");
         assert!(
             workflow.contains(
                 "gh workflow run e2e.yml --repo \"$GITHUB_REPOSITORY\" --ref gate -f sha=\"$GITHUB_SHA\""
             ),
-            "promote starts it on the main it pushed"
+            "promote starts it on the main it pushed when the schedule did not"
         );
-        assert!(e2e.contains("name: e2e-app\n          path: target/e2e/artifacts"));
-        assert!(!workflow.contains("e2e app"), "in a workflow of its own, off the gate's queue");
+        assert!(!workflow.contains("xtask e2e"), "in a workflow of its own, off the gate's queue");
     }
 
     /// Every workflow that runs xtask runs the binary it cached, under one key naming every

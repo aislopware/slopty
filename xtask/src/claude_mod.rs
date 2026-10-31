@@ -84,7 +84,7 @@ const NOT_SOURCES: [&str; 4] = ["node_modules", "types", ".stryker-tmp", "report
 const THIS_FILE: &str = include_str!("claude_mod.rs");
 
 /// The paths whose change makes CI run the check.
-const WATCHED: [&str; 3] = [MOD, "xtask/src/claude_mod.rs", "xtask/src/claude.rs"];
+pub const WATCHED: [&str; 3] = [MOD, "xtask/src/claude_mod.rs", "xtask/src/claude.rs"];
 
 /// The environment a mutant's run reads the pinned `claude` and its home from.
 const MUTANT_CLAUDE: &str = "SLOPTY_CLAUDE_MOD_CLAUDE";

@@ -311,7 +311,8 @@ pub struct RemoteOpts {
     /// rustdoc, shear, typos); repeat for several.
     #[arg(short = 'p', long = "package")]
     pub packages: Vec<String>,
-    /// An `xtask e2e` case to run after the checks: app, ios, worker, …
+    /// An `xtask e2e` case to run after the checks: app, ios, server, worker, …; or `auto`, the
+    /// smoke cases the check's change reaches (`gate::impact`), each where it runs here.
     #[arg(long)]
     pub e2e: Option<String>,
     /// The e2e case's nextest filterset, such as `test(a_folder_tile_browses_the_worker)`;
@@ -438,11 +439,17 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     // (`docs/decisions/tooling.md`, "An e2e case runs in a guest here").
     let in_guest = opts.attach.is_none()
         && opts.place == Place::Auto
-        && matches!(opts.e2e.as_deref(), Some("app" | "ios"))
+        && matches!(opts.e2e.as_deref(), Some("app" | "ios" | "auto"))
         && opts.probe.is_none()
         && !opts.accept_snapshots
         && e2e_in_guest()
         && guest::available();
+    let auto = opts.e2e.as_deref() == Some("auto");
+    ensure!(
+        !auto || (in_guest && opts.filter.is_none()),
+        "--e2e auto runs here, the smoke cases' own tests: --place auto, no --run, --probe or -E, \
+         and the guest there (`SLOPTY_E2E_GUEST` not 0)"
+    );
     ensure!(
         in_guest || (opts.repeat.is_none() && opts.until_fail.is_none()),
         "--repeat and --until-fail run in the e2e guest: the app or ios case, --place auto, no \
@@ -454,7 +461,29 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         && !opts.accept_snapshots
         && cfg!(target_os = "macos");
     if !here {
-        let ran = on_runners(sh, opts, &root, &dir, None, None);
+        // The gate's tool steps the change reaches run here first, in seconds, as for a check
+        // here: a runner's check runs fmt, shear and typos of its crates alone.
+        let sha = if opts.attach.is_some() {
+            None
+        } else {
+            let sha = if opts.head {
+                cmd!(sh, "git rev-parse HEAD").read()?
+            } else {
+                format_own(sh, &opts.only);
+                snapshot(sh, &root, &dir, &opts.name, &opts.only)?
+            };
+            stage::started(sh, &dir, &sha, if opts.head { &[] } else { &opts.only });
+            let held = hold_lane(&root, lane(&opts.name), opts.no_wait)?;
+            let tools = tools_hold(&root, lane(&opts.name), &sha, &opts.packages);
+            drop(held);
+            if let Err(e) = tools {
+                println!("✘ the gate's tools: {e:#}");
+                stage::verdict(&dir, false);
+                return Err(e.context("the gate's tools"));
+            }
+            Some(sha)
+        };
+        let ran = on_runners(sh, opts, &root, &dir, sha.as_deref(), None);
         stage::verdict(&dir, ran.is_ok());
         return ran;
     }
@@ -506,26 +535,22 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     let abandon = Abandon::new(false);
     let (local, runners) = std::thread::scope(|scope| {
         let local = scope.spawn(|| {
-            let outcome = if opts.packages.is_empty() {
-                Ok(crate::local::Outcome::nothing())
-            } else {
-                crate::local::check(&root, lane(&opts.name), &sha, &opts.packages)
+            let outcome = match tools_hold(&root, lane(&opts.name), &sha, &opts.packages) {
+                Err(e) => {
+                    println!("✘ the gate's tools: {e:#}");
+                    Ok(crate::local::Outcome {
+                        failed: Some(format!("the gate's tools: {e}")),
+                        passed: false,
+                        ..crate::local::Outcome::nothing()
+                    })
+                }
+                Ok(()) if opts.packages.is_empty() => Ok(crate::local::Outcome::nothing()),
+                Ok(()) => crate::local::check(&root, lane(&opts.name), &sha, &opts.packages),
             };
             let passed = outcome.as_ref().is_ok_and(|o| o.passed);
-            let e2e = (passed && in_guest).then(|| {
-                let run = guest::Run {
-                    name: &opts.name,
-                    filter: opts.filter.as_deref(),
-                    goldens: opts.goldens,
-                    ios,
-                    repeat: match (opts.repeat, opts.until_fail) {
-                        (_, Some(n)) => guest::Repeat::UntilFail(n),
-                        (n, None) => guest::Repeat::Times(n.unwrap_or(1)),
-                    },
-                };
-                guest::e2e(&root, lane(&opts.name), &sha, &run)
-            });
-            if !passed || e2e.as_ref().is_some_and(|e| !e.as_ref().is_ok_and(|o| o.passed)) {
+            let e2e =
+                if passed && in_guest { e2e_runs(&root, opts, &sha, ios) } else { Vec::new() };
+            if !passed || e2e.iter().any(|ran| !ran.result.as_ref().is_ok_and(|o| o.passed)) {
                 abandon.store(true, Ordering::Release);
             }
             outcome.map(|o| (o, e2e))
@@ -538,21 +563,27 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         Ok(outcome) => outcome?,
         Err(_) => bail!("the local check panicked"),
     };
-    let e2e_said = e2e.as_ref().map(|e| match e {
-        Ok(o) => format!(
-            "{} in {}: {} (built in {}s, copied and tested in {}s)",
-            if o.passed { "passed" } else { "FAILED" },
-            o.guest,
-            o.summary,
-            o.build.as_secs(),
-            o.tests.as_secs()
-        ),
-        Err(e) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
-    });
-    if let Some(said) = &e2e_said {
-        println!("  e2e {case} in the guest: {said}");
-    }
-    let e2e_passed = e2e.as_ref().is_none_or(|e| e.as_ref().is_ok_and(|o| o.passed));
+    let said: Vec<String> = e2e
+        .iter()
+        .map(|ran| {
+            let said = match &ran.result {
+                Ok(o) => format!(
+                    "{} in {}: {} ({}; {}m{:02}s in all)",
+                    if o.passed { "passed" } else { "FAILED" },
+                    o.guest,
+                    o.count,
+                    o.phases,
+                    o.wall.as_secs() / 60,
+                    o.wall.as_secs() % 60
+                ),
+                Err(e) => format!("FAILED: {}", e.to_string().lines().next().unwrap_or("")),
+            };
+            println!("  e2e {}: {said}", ran.label);
+            format!("e2e {} {said}", ran.label)
+        })
+        .collect();
+    let e2e_said = (!said.is_empty()).then(|| said.join("; "));
+    let e2e_passed = e2e.iter().all(|ran| ran.result.as_ref().is_ok_and(|o| o.passed));
     let took = started.elapsed().as_secs();
     let thermal = local.thermal.map_or_else(|| "unread".to_owned(), |t| t.to_string());
     if !opts.packages.is_empty() {
@@ -565,8 +596,10 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
         );
     }
     record(&root, opts, &local, runners.as_ref().map(Result::is_ok), took);
-    if let Some(Ok(o)) = &e2e {
-        record_e2e(&root, opts, o);
+    for ran in &e2e {
+        if let Ok(o) = &ran.result {
+            record_e2e(&root, opts, ran, o);
+        }
     }
     // Each half's verdict, last, where the lane reads: the runners' failure came above the
     // local half's lines, which said "passed", and a lane took the check for green.
@@ -575,7 +608,7 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     if !local.passed || runners_failed.is_some() || !e2e_passed {
         let here = if local.passed { "passed" } else { "FAILED" };
         let here = match &e2e_said {
-            Some(said) => format!("{here}; e2e {case} in the guest {said}"),
+            Some(said) => format!("{here}; {said}"),
             None => here.to_owned(),
         };
         let said = match (&runners, runners_failed) {
@@ -599,6 +632,74 @@ pub fn run(sh: &Shell, opts: &RemoteOpts) -> Result<()> {
     };
     println!("✔ {what} passed here{and} ({}m{:02}s)", took / 60, took % 60);
     Ok(())
+}
+
+/// The gate's tool steps (`gate::Tool`) that the check's commit `sha` reaches, over the check's
+/// own tree, side by side, before anything compiles: they take seconds, and each was a red only
+/// the gate found (a stale `workspace-hack`, a vendored file `cargo fmt --all` reaches, a lock
+/// whose new `tempfile` moved the hack; 2026-10-31). A change inside the checked `crates` is
+/// formatted, sheared and spelled by their own steps (`crate::check`), so those three run over
+/// the whole tree only for a change outside them.
+fn tools_hold(root: &Path, lane: &str, sha: &str, crates: &[String]) -> Result<()> {
+    let sh = Shell::new()?;
+    sh.change_dir(root);
+    let changed = cmd!(sh, "git diff --name-only HEAD {sha}").quiet().read()?;
+    let changed: Vec<&str> = changed.lines().collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    let tree = crate::gate::snapshot_commit(root, &crate::local::dir(root, lane), sha)?;
+    let dirs: Vec<String> = crate::tools::packages_in(&tree)?
+        .into_iter()
+        .filter(|package| crates.contains(&package.name))
+        .filter_map(|package| Some(format!("{}/", package.dir.strip_prefix(&tree).ok()?)))
+        .collect();
+    let tools = reached_tools(&changed, &dirs);
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
+    println!("▶ the gate's tools this change reaches: {}", names.join(", "));
+    let started = Instant::now();
+    let failed: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = tools
+            .iter()
+            .map(|&tool| {
+                let tree = &tree;
+                scope.spawn(move || {
+                    let sh = Shell::new()?;
+                    sh.change_dir(tree);
+                    tool.run(&sh)
+                })
+            })
+            .collect();
+        tools
+            .iter()
+            .zip(handles)
+            .filter_map(|(tool, handle)| match handle.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(format!("{}: {e:#}", tool.name())),
+                Err(_) => Some(format!("{}: panicked", tool.name())),
+            })
+            .collect()
+    });
+    ensure!(failed.is_empty(), "{}", failed.join("; "));
+    println!("  ✓ the gate's tools ({:.1?})", started.elapsed());
+    Ok(())
+}
+
+/// The gate's tool steps a change to `changed` reaches, of which a path under one of the
+/// checked crates' `dirs` reaches fmt, shear and typos only through those crates' own steps.
+fn reached_tools(changed: &[&str], dirs: &[String]) -> Vec<crate::gate::Tool> {
+    use crate::gate::Tool;
+    let own = |path: &str| dirs.iter().any(|dir| path.starts_with(dir.as_str()));
+    Tool::ALL
+        .into_iter()
+        .filter(|&tool| {
+            let crates_judge = matches!(tool, Tool::Rustfmt | Tool::Shear | Tool::Typos);
+            changed.iter().any(|path| tool.reached_by(path) && !(crates_judge && own(path)))
+        })
+        .collect()
 }
 
 /// The lock on lane `lane`'s directory (`target/local/<lane>/.lock`, holding its holder's pid),
@@ -637,19 +738,125 @@ fn e2e_in_guest() -> bool {
     std::env::var("SLOPTY_E2E_GUEST").map_or(true, |v| v != "0")
 }
 
-/// One e2e run in the guest, appended to `target/remote/e2e-history.jsonl`.
-fn record_e2e(root: &Path, opts: &RemoteOpts, outcome: &guest::Outcome) {
+/// One e2e run of a check ([`e2e_runs`]): what ran, with which filterset, and how it went.
+struct Ran {
+    /// The case as the verdict names it: `app`, `ios iphone`, `server`, `linux`, …
+    label: String,
+    /// The target it ran.
+    case: &'static str,
+    /// The simulator, for the simulator's case.
+    sim: Option<&'static str>,
+    /// The filterset it ran with.
+    filter: Option<String>,
+    /// Its outcome.
+    result: Result<guest::Outcome>,
+}
+
+/// The check's e2e runs of commit `sha`: the case `--e2e` names, in an e2e guest; or with `--e2e
+/// auto`, every smoke case the change reaches (`gate::impact`), from `HEAD` to the commit (from
+/// `origin/main` with `--head`): the app's, the server's and, on the iPhone and the iPad, the
+/// simulator's in a guest with their smoke tests alone. S6 and the VM's, which need Docker and
+/// tart, are named when reached and run nowhere here: this Mac runs no VM
+/// (`docs/decisions/tooling.md`, "The gate and e2e run on free hosted runners").
+fn e2e_runs(
+    root: &Path,
+    opts: &RemoteOpts,
+    sha: &str,
+    ios: Option<crate::ios::SimKind>,
+) -> Vec<Ran> {
+    use crate::gate::impact::Runs;
+    use crate::ios::SimKind;
+    let lane = lane(&opts.name);
+    let repeat = match (opts.repeat, opts.until_fail) {
+        (_, Some(n)) => guest::Repeat::UntilFail(n),
+        (n, None) => guest::Repeat::Times(n.unwrap_or(1)),
+    };
+    let in_guest = |target: guest::Target, filter: Option<&str>| {
+        let run = guest::Run { name: &opts.name, filter, goldens: opts.goldens, target, repeat };
+        let label = match target.sim() {
+            Some(sim) => format!("ios {}", sim.family().to_lowercase()),
+            None => target.case().to_owned(),
+        };
+        Ran {
+            label: format!("{label} in the guest"),
+            case: target.case(),
+            sim: target.sim().map(SimKind::family),
+            filter: filter.map(str::to_owned),
+            result: guest::e2e(root, lane, sha, &run),
+        }
+    };
+    if opts.e2e.as_deref() != Some("auto") {
+        let target = match ios {
+            Some(sim) => guest::Target::Ios(sim),
+            None => guest::Target::App,
+        };
+        return vec![in_guest(target, opts.filter.as_deref())];
+    }
+    let base = if opts.head { "origin/main" } else { "HEAD" };
+    let reach = Shell::new().map_err(anyhow::Error::from).and_then(|sh| {
+        sh.change_dir(root);
+        crate::gate::impact::reach(&sh, base, sha)
+    });
+    let reach = match reach {
+        Ok(reach) => reach,
+        Err(e) => {
+            let result = Err(e.context("what the change reaches"));
+            return vec![Ran {
+                label: "auto".to_owned(),
+                case: "auto",
+                sim: None,
+                filter: None,
+                result,
+            }];
+        }
+    };
+    println!("▶ e2e auto, from {base}: {reach}");
+    let mut runs = Vec::new();
+    let targets = [
+        (Runs::App, guest::Target::App),
+        (Runs::Server, guest::Target::Server),
+        (Runs::Ios, guest::Target::Ios(SimKind::Iphone)),
+        (Runs::Ios, guest::Target::Ios(SimKind::Ipad)),
+    ];
+    for (runs_as, target) in targets {
+        if let Some(filter) = reach.filterset(runs_as) {
+            runs.push(in_guest(target, Some(&filter)));
+        }
+    }
+    let elsewhere: Vec<&str> = ["S6", "VM"].into_iter().filter(|id| reach.has(id)).collect();
+    if !elsewhere.is_empty() {
+        println!("  reached and not run here (they need Docker or tart): {}", elsewhere.join(", "));
+    }
+    runs
+}
+
+/// One e2e run in the guest, appended to `target/remote/e2e-history.jsonl`: the case, every
+/// phase's seconds and the whole run's, and what nextest ran over all of the case's groups.
+fn record_e2e(root: &Path, opts: &RemoteOpts, ran: &Ran, outcome: &guest::Outcome) {
+    let tenths = |d: Duration| (d.as_secs_f64() * 10.0).round() / 10.0;
+    let phases: serde_json::Map<String, serde_json::Value> =
+        outcome.phases.iter().map(|(name, took)| (name.to_owned(), tenths(took).into())).collect();
+    let mut tests = serde_json::Map::new();
+    tests.insert("run".to_owned(), outcome.count.run.into());
+    for (outcome, n) in &outcome.count.outcomes {
+        tests.insert(outcome.clone(), (*n).into());
+    }
+    tests.insert("skipped".to_owned(), outcome.count.skipped.into());
+    tests.insert("groups".to_owned(), outcome.count.groups.into());
     let line = serde_json::json!({
         "at": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs()),
         "name": opts.name,
+        "case": ran.case,
+        "sim": ran.sim,
+        "auto": opts.e2e.as_deref() == Some("auto"),
         "guest": outcome.guest,
-        "filter": opts.filter,
+        "filter": ran.filter,
         "passed": outcome.passed,
-        "build_s": outcome.build.as_secs(),
-        "tests_s": outcome.tests.as_secs(),
-        "summary": outcome.summary,
+        "wall_s": outcome.wall.as_secs(),
+        "phases": phases,
+        "tests": tests,
     });
     let path = root.join("target").join("remote").join("e2e-history.jsonl");
     let _written = std::fs::OpenOptions::new()
@@ -958,10 +1165,11 @@ fn snapshot(sh: &Shell, root: &Path, dir: &Path, name: &str, only: &[String]) ->
     Ok(sha)
 }
 
-/// Where the Rust files `cargo fmt` formats live: the workspace's members and the fuzz crate,
-/// which the gate formats on its own. Not the excluded vendored crates.
-const FORMATTED: [&str; 6] =
-    ["crates/", "apps/", "xtask/", "workspace-hack/", "vendor/gpui_tokio/", "fuzz/"];
+/// Where the Rust files the gate's `cargo fmt --all` formats live: the workspace's members, the
+/// vendored crates it reaches as path dependencies (`noq-proto` and `noq-udp`, outside the
+/// workspace; their re-vendored files passed a check and went red at the gate, 2026-10-31), and
+/// the fuzz crate, which the gate formats on its own.
+const FORMATTED: [&str; 6] = ["crates/", "apps/", "xtask/", "workspace-hack/", "vendor/", "fuzz/"];
 
 /// The Rust files a lane changed under `only` (against `HEAD`, untracked ones too), formatted in
 /// the tree with nightly rustfmt and the repository's `rustfmt.toml`, as `cargo xtask fmt` would,
@@ -1683,6 +1891,39 @@ mod tests {
         drop(waiting.join().expect("joins"));
         drop(other);
         let _gone = std::fs::remove_dir_all(&root);
+    }
+
+    /// A check runs the gate's hakari step when it changes a member's manifest, the lock, the
+    /// hack or hakari's configuration, and its deny step for those and deny's configuration; not
+    /// for the fuzz workspace's or anything else.
+    #[test]
+    fn a_change_reaches_the_gate_s_tools_that_read_it() {
+        use crate::gate::Tool;
+        let reached =
+            |paths: &[&str]| super::reached_tools(paths, &["crates/slopty-net/".to_owned()]);
+        // U's crate refresh: the lock moved `tempfile` and with it the hack.
+        let lock = reached(&["Cargo.lock"]);
+        for tool in [Tool::Locked, Tool::Deny, Tool::Hakari, Tool::Shear, Tool::Invariants] {
+            assert!(lock.contains(&tool), "{tool:?}: {lock:?}");
+        }
+        assert!(!lock.contains(&Tool::Rustfmt) && !lock.contains(&Tool::Taplo), "{lock:?}");
+        // N's re-vendored noq: `cargo fmt --all` reaches the path dependency.
+        let vendored = reached(&["vendor/noq-udp/src/unix.rs", "crates/slopty-net/src/lib.rs"]);
+        assert!(vendored.contains(&Tool::Rustfmt) && vendored.contains(&Tool::Shear));
+        // A change inside the checked crates is formatted by their own fmt.
+        let own = reached(&["crates/slopty-net/src/lib.rs"]);
+        assert!(!own.contains(&Tool::Rustfmt) && !own.contains(&Tool::Typos), "{own:?}");
+        assert!(own.contains(&Tool::Invariants) && !own.contains(&Tool::Hakari), "{own:?}");
+        let hack = reached(&["workspace-hack/Cargo.toml"]);
+        assert!(hack.contains(&Tool::Hakari) && hack.contains(&Tool::Taplo), "{hack:?}");
+        assert!(reached(&["deny.toml"]).contains(&Tool::Deny));
+        assert!(!reached(&["fuzz/Cargo.lock"]).contains(&Tool::Hakari));
+        // A manifest's edition sets how its crate formats: the whole tree's fmt for another
+        // crate's, the checked crate's own fmt for its own.
+        assert!(reached(&["crates/slopty-proto/Cargo.toml"]).contains(&Tool::Rustfmt));
+        assert!(!reached(&["crates/slopty-net/Cargo.toml"]).contains(&Tool::Rustfmt));
+        assert_eq!(reached(&["docs/DEV.md"]), [Tool::Typos]);
+        assert_eq!(reached(&[]), []);
     }
 
     /// A run's title gives back the check's name and commit; another title gives nothing.
