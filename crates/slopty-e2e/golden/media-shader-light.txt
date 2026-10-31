@@ -1,0 +1,31 @@
+Window
+Button │ Filter projects: All projects
+Button │ repo, 1
+Button │ Show the shaders
+Button │ Server: e2e-server, Connected
+Button │ Settings
+Splitter │ Resize sidebar
+Group │ Show the shaders
+Button │ Fill the view
+Group
+Terminal │ shell │ >
+Group │ Inspector (focused)
+Button │ Fill the view
+Button │ Close Inspector
+Button │ Prompts
+Button │ Steps
+Button │ All
+Article │ You
+Paragraph │ Show the shaders
+Button │ Copy message
+Status │ claude-stub · 2 in · 2 out · 4s
+Article │ Claude Code
+Button │ Tool mcp__slopty__show_visual
+Group │ Shaders
+Paragraph │ Done: Show the shaders
+Button │ Copy message
+Button │ Show the shaders
+Button │ Inbox
+Button │ Command palette
+Button │ New session
+Button │ Hide sidebar

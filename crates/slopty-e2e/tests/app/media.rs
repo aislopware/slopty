@@ -4,7 +4,8 @@
 //! answers with a chart fence, a Mermaid diagram and formulas; a session planted with a `Read` of
 //! a picture shows the picture. Each is judged by the accessibility tree and by numbers: what a
 //! page reached, what the card's actions left on the run's pasteboard and in the folder, where a
-//! formula sits on its line, what a tab changed in the picture.
+//! formula sits on its line, what a tab changed in the picture, which surfaces a visual's shaders
+//! were painted on and what their frames changed.
 
 #![cfg(target_os = "macos")]
 
@@ -15,7 +16,8 @@ use std::time::Duration;
 
 use serde_json::json;
 use slopty_e2e::harness::{ServedApp, pasteboard_name};
-use slopty_e2e::{A11yNode, Dump};
+use slopty_e2e::visual::{self, changed_inside};
+use slopty_e2e::{A11yNode, Command, Dump};
 use slopty_platform::pasteboard::{MacPasteboard, Pasteboard as _};
 
 use crate::served::{
@@ -45,24 +47,6 @@ end
 async fn stack(turns: &serde_json::Value) -> ServedApp {
     let turns = turns.to_string();
     ServedApp::launch_with(MACHINE, &[], &[("STUB_TURNS", &turns)]).await.unwrap()
-}
-
-/// How many of `a`'s pixels inside `rect` (points, at `scale`) differ from `b`'s.
-fn changed_inside(
-    before: &image::RgbaImage,
-    after: &image::RgbaImage,
-    rect: [f32; 4],
-    scale: f32,
-) -> usize {
-    let [left, top, width, height] = rect;
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "pixels")]
-    let px = |v: f32| (v * scale).max(0.0) as u32;
-    let (x0, y0) = (px(left), px(top));
-    let (x1, y1) = (px(left + width).min(before.width()), px(top + height).min(before.height()));
-    (y0..y1)
-        .flat_map(|row| (x0..x1).map(move |col| (col, row)))
-        .filter(|&(col, row)| before.get_pixel(col, row) != after.get_pixel(col, row))
-        .count()
 }
 
 /// How many pixels inside `rect` (points, at `scale`) stand apart from the colour at its middle
@@ -137,7 +121,7 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
 
     // The pointer rests on the sidebar for both pictures, so no hover strip or wash differs; the
     // shown tab is pressed first, so the keyboard has left whatever held it in both.
-    let rest = slopty_e2e::Command::Move { x: 100.0, y: 600.0 };
+    let rest = Command::Move { x: 100.0, y: 600.0 };
     click(drv, "Tab", "p95").await;
     drv.ok(&rest).await.unwrap();
     tokio::time::sleep(SETTLE).await;
@@ -160,6 +144,43 @@ async fn a_visual_draws_from_its_script_read_through_the_thread() {
         "nothing outside the visual moved: {} pixels",
         everywhere.saturating_sub(inside_visual)
     );
+    stack.shutdown().await;
+}
+
+/// An agent's GPU visual draws on the surface path in the real window: the stand-in's
+/// `show_visual` of two shaders ([`visual::SCRIPT`]), one animating and one still, is painted as
+/// two BGRA surfaces, each an `IOSurface` the shader's last pass drew into, never an image
+/// uploaded to the atlas. The self-test holds Reduce Motion, so the animating one draws its
+/// first frame at time 0 and stands there: its golden is the same in every run. Then the rules of
+/// [`visual::hold_to_its_rules`]: the still shader keeps its one frame through the goldens' two
+/// appearances and while motion runs; the animating one draws while motion runs and stands once
+/// held; nothing outside the visual moves.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn an_animated_shader_draws_on_the_surface_path_and_moves_only_while_motion_runs() {
+    let prompt = "Show the shaders";
+    let turns = json!({ prompt: [{ "name": "show_visual", "arguments": {
+        "title": visual::TITLE, "script": visual::SCRIPT,
+    }}]});
+    let mut stack = stack(&turns).await;
+    let repo = stack.path("repo");
+    let agent = start(&stack, MACHINE, &repo, prompt).await;
+    thread_until(&stack, &agent, "showed the visual", |r| says(r, "Done: Show the shaders")).await;
+
+    let renders = stack.path("");
+    let drv = &mut stack.driver;
+    // The pointer rests on the sidebar before the visual is drawn: over a shader it would be the
+    // shader's `iMouse`, and leaving it a new frame.
+    drv.ok(&Command::Move { x: 100.0, y: 600.0 }).await.unwrap();
+    open_thread(drv, 1).await;
+    show_inspector(drv).await;
+    let shown = visual::settled(drv, STEP).await.unwrap_or_else(|e| panic!("{e:#}"));
+    println!("MEASURE shader-first-frames: first painted [{}]", shown.first);
+    goldens(drv, &renders, "media-shader", &[]).await;
+    let held = visual::hold_to_its_rules(drv, &shown, &renders, "media-shader", STEP)
+        .await
+        .unwrap_or_else(|e| panic!("{e:#}"));
+    println!("MEASURE shader-moved: {held}");
     stack.shutdown().await;
 }
 

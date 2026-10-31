@@ -8805,6 +8805,7 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-io-surface",
  "serde",
  "serde_json",
  "similar 3.2.0",

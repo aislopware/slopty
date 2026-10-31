@@ -818,6 +818,11 @@ fn apply(
             window.refresh();
             Reply::Ok
         }
+        // A flip redraws every window, so each view reads it again.
+        Command::Motion { reduced } => {
+            slopty_shell::motion::hold(reduced, cx);
+            Reply::Ok
+        }
         Command::Dump
         | Command::PushRegister { .. }
         | Command::OpenPush { .. }
@@ -1036,6 +1041,28 @@ const fn a11y_nodes(_window: &Window) -> Vec<slopty_e2e::A11yNode> {
     Vec::new()
 }
 
+/// The surfaces the last frame painted, in window points.
+#[cfg(feature = "e2e")]
+fn surfaces(window: &Window) -> Vec<slopty_e2e::SurfaceInfo> {
+    let scale = window.scale_factor();
+    let points = |v: gpui::ScaledPixels| v.as_f32() / scale;
+    window
+        .painted_surfaces()
+        .iter()
+        .map(|painted| {
+            let gpui::Bounds { origin, size: extent } = painted.bounds;
+            let bounds =
+                [points(origin.x), points(origin.y), points(extent.width), points(extent.height)];
+            slopty_e2e::SurfaceInfo::of(&painted.image_buffer, bounds)
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "e2e"))]
+const fn surfaces(_window: &Window) -> Vec<slopty_e2e::SurfaceInfo> {
+    Vec::new()
+}
+
 /// Everything a test may want to know about one remote window, timings in microseconds.
 fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
     let us = |d: std::time::Duration| u64::try_from(d.as_micros()).unwrap_or(u64::MAX);
@@ -1186,6 +1213,7 @@ impl Workspace {
         };
         let mut dump = Dump {
             a11y: a11y_nodes(window),
+            surfaces: surfaces(window),
             window: WindowInfo {
                 width: f32::from(viewport.width),
                 height: f32::from(viewport.height),

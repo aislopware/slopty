@@ -9,8 +9,9 @@
 //! machine that has granted no permission at all.
 //!
 //! The `harness` feature adds the [`Driver`] (the client side of the socket), the
-//! [`harness`] (ptyd + worker + app in a temporary directory) and [`snapshot`] (compare a
-//! rendered frame with a golden PNG and write the diff for a failed one).
+//! [`harness`] (ptyd + worker + app in a temporary directory), [`snapshot`] (compare a
+//! rendered frame with a golden PNG and write the diff for a failed one) and [`visual`] (an
+//! agent's visual of two GPU shaders, and how a test reads it).
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -29,6 +30,8 @@ pub mod driver;
 pub mod harness;
 #[cfg(feature = "harness")]
 pub mod snapshot;
+#[cfg(feature = "harness")]
+pub mod visual;
 
 #[cfg(feature = "harness")]
 pub use driver::Driver;
@@ -277,6 +280,13 @@ pub enum Command {
     Surface {
         /// Frosted when true, opaque otherwise.
         frosted: bool,
+    },
+    /// Hold Reduce Motion, as every run starts, or let motion run, as for a person with it off:
+    /// what moves on its own (an animating visual) moves only while it runs, and stands where
+    /// it got to once held again, so a render taken held shows one moment of it.
+    Motion {
+        /// Held when true; running when false.
+        reduced: bool,
     },
     /// A hardware key press delivered at the UIKit boundary (iOS only): what the metal
     /// view's `pressesBegan:` / `pressesEnded:` reads out of the `UIPress`, run through the
@@ -607,6 +617,75 @@ pub struct Dump {
     /// the hitboxes drawn above it there, which keep the pointer from it.
     #[serde(default)]
     pub native_hits: Vec<NativeHit>,
+    /// The surfaces the window last painted, in the order its scene holds them: pictures GPUI
+    /// samples where they lie (an agent visual's frames), never copied into its atlas. Empty
+    /// when the app was built without `e2e`.
+    #[serde(default)]
+    pub surfaces: Vec<SurfaceInfo>,
+}
+
+/// A surface the window painted ([`Dump::surfaces`]).
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, Default)]
+pub struct SurfaceInfo {
+    /// Where it is painted, `[x, y, w, h]` in window points.
+    pub bounds: [f32; 4],
+    /// Its pixels' format in CoreVideo's four characters: `BGRA` for an agent visual's frame.
+    pub format: String,
+    /// Its buffer's width and height in pixels: those of its bounds at the window's scale when
+    /// it was drawn for the place it is painted at ([`SurfaceInfo::fits`]), others when a frame
+    /// drawn for another size is stretched there.
+    pub pixels: [u32; 2],
+    /// The `IOSurface` its pixels lie in, by id; `None` for a buffer in plain memory. A pool
+    /// hands its few surfaces out again frame after frame, each time in a new pixel buffer, so
+    /// this is a frame's identity, never the buffer's address.
+    pub surface: Option<u32>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl SurfaceInfo {
+    /// The surface `buffer`, painted at `bounds` (window points).
+    #[must_use]
+    pub fn of(buffer: &objc2_core_video::CVPixelBuffer, bounds: [f32; 4]) -> Self {
+        let side = |pixels: usize| u32::try_from(pixels).unwrap_or(u32::MAX);
+        Self {
+            bounds,
+            format: fourcc(objc2_core_video::CVPixelBufferGetPixelFormatType(buffer)),
+            pixels: [
+                side(objc2_core_video::CVPixelBufferGetWidth(buffer)),
+                side(objc2_core_video::CVPixelBufferGetHeight(buffer)),
+            ],
+            surface: objc2_core_video::CVPixelBufferGetIOSurface(Some(buffer))
+                .map(|surface| objc2_io_surface::IOSurfaceRef::id(&surface)),
+        }
+    }
+}
+
+impl SurfaceInfo {
+    /// Whether its buffer was drawn for the place it is painted at, `scale` device pixels a
+    /// point: as many pixels as its bounds cover there, to the pixel either way that rounding
+    /// moves a side.
+    #[must_use]
+    pub fn fits(&self, scale: f32) -> bool {
+        let [_, _, width, height] = self.bounds;
+        let near =
+            |pixels: u32, points: f32| (f64::from(pixels) - f64::from(points * scale)).abs() <= 1.0;
+        near(self.pixels[0], width) && near(self.pixels[1], height)
+    }
+}
+
+/// A CoreVideo pixel format's four characters (`BGRA`, `420f`), or its number when they do not
+/// all print (`kCVPixelFormatType_32ARGB` is 32).
+#[cfg_attr(
+    not(any(test, target_os = "macos", target_os = "ios")),
+    expect(dead_code, reason = "only Apple's buffers have a format to name")
+)]
+fn fourcc(format: u32) -> String {
+    let bytes = format.to_be_bytes();
+    if bytes.iter().all(u8::is_ascii_graphic) {
+        bytes.into_iter().map(char::from).collect()
+    } else {
+        format!("{format:#010x}")
+    }
 }
 
 /// One native's place in the pointer's way ([`Dump::native_hits`]).
@@ -1174,6 +1253,34 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"cmd\":\"ui_key_press\"") && json.contains("\"began\""), "{json}");
         assert_eq!(serde_json::from_str::<Command>(&json).unwrap(), cmd);
+    }
+
+    /// A surface's format reads as CoreVideo's four characters, and one that does not print
+    /// as its number, so a format no one named still says which it is.
+    #[test]
+    fn a_surface_format_reads_as_its_four_characters() {
+        assert_eq!(fourcc(0x4247_5241), "BGRA");
+        assert_eq!(fourcc(0x3432_3066), "420f");
+        assert_eq!(fourcc(32), "0x00000020");
+        assert_eq!(fourcc(0x4247_2041), "0x42472041", "a space does not print");
+    }
+
+    /// A surface fits its bounds when its buffer has the pixels they cover at the scale, and a
+    /// frame drawn for another size (a provisional layout's) does not.
+    #[test]
+    fn a_surface_fits_the_bounds_it_was_drawn_for() {
+        let surface = |pixels| SurfaceInfo {
+            bounds: [10.0, 20.0, 423.0, 80.0],
+            format: "BGRA".into(),
+            pixels,
+            surface: Some(1),
+        };
+        assert!(surface([846, 160]).fits(2.0));
+        assert!(surface([423, 80]).fits(1.0));
+        assert!(surface([847, 159]).fits(2.0), "a pixel of rounding either way");
+        assert!(!surface([846, 160]).fits(1.0), "drawn at another scale");
+        assert!(!surface([700, 160]).fits(2.0), "drawn for a narrower place");
+        assert!(!surface([846, 120]).fits(2.0), "drawn for a shorter place");
     }
 
     #[test]

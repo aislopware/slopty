@@ -42,10 +42,11 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    no other clock: `crate::clock` is its one door, and clippy refuses a wall-clock read anywhere
    else in it (docs/decisions/testing.md, "Every clock in the shell is the frame's"). What
    still reads the wall clock moves between draws: the self-test holds GPUI's Reduce Motion
-   (`motion::hold`), and a frame whose two scratch draws disagree is judged only on what holds
-   still, at whatever depth what moves leaves it. The headless tests name such a read: two
-   frames from scratch at one moment, the wall clock moved on between them, must agree
-   (`retention_tests::wobble`).
+   (`motion::hold`; a test lets motion run between two held renders with `Command::Motion`, as
+   an animating visual's case does), and a frame whose two scratch draws disagree is judged
+   only on what holds still, at whatever depth what moves leaves it. The headless tests name
+   such a read: two frames from scratch at one moment, the wall clock moved on between them,
+   must agree (`retention_tests::wobble`).
    **Fuzzed whole.** `shell::fuzz_tests` takes the whole shell through seeded sequences of what
    a person and the engine do, on a Mac's window, a phone's at 3 × and an iPad's, and checks
    every step against both oracles, the model's selection and the accessibility tree. The suite
@@ -99,7 +100,9 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    state (the workspace's items, each with its kind, worker and session, the live terminals
    and screens with their rows and sizes, which one holds the keyboard, and `a11y`: the
    accessibility tree as role/label/value/focused/bounds in reading order, from the frame that
-   painted the state in the same dump); `render` is GPUI drawing its own window to a PNG,
+   painted the state in the same dump, and `surfaces`: what that frame painted as surfaces, each
+   with its bounds, its buffer's size and pixel format and the `IOSurface` it lies in, so a
+   visual's frames are seen on the surface path); `render` is GPUI drawing its own window to a PNG,
    composited over one slate backdrop, compared numerically with `crates/slopty-e2e/golden`,
    and what the same frame says in words (its accessibility tree's roles, labels and values, a
    line a node) compared exactly with the `.txt` beside it, so a changed word fails with the

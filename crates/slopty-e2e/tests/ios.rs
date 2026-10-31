@@ -6,7 +6,8 @@
 //! Chats page, a chat over the whole screen) is `compact`; its frames are compared with a
 //! golden per device, `ios-phone-*.png` or `ios-pad-*.png`. A session there (its terminal, its
 //! inspector, a shell, the files) is `screens`. A finger over a page
-//! card, as UIKit delivers it, is `pages`.
+//! card, as UIKit delivers it, is `pages`. An agent's GPU visual on the surface path is
+//! `visuals`.
 
 /// The phone's anatomy: its Chats page, a chat over the whole screen.
 #[cfg(test)]
@@ -20,3 +21,7 @@ mod pages;
 #[cfg(test)]
 #[path = "ios/screens.rs"]
 mod screens;
+/// An agent's GPU visual, drawn on the surface path.
+#[cfg(test)]
+#[path = "ios/visuals.rs"]
+mod visuals;

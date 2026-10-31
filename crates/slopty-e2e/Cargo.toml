@@ -86,12 +86,24 @@ slopty-platform.workspace = true
 slopty-capture.workspace = true
 # The encoder probe (`src/bin/slopty-encoder-probe.rs`): one keyframe through a real session.
 objc2-core-foundation.workspace = true
-objc2-core-video.workspace = true
 slopty-codec.workspace = true
 slopty-client.workspace = true
 slopty-core.workspace = true
 slopty-net.workspace = true
 slopty-proto.workspace = true
+
+# What a painted surface is (`SurfaceInfo::of`): its buffer's format and the `IOSurface` it lies
+# in, which the app's dump reads on the Mac and on iOS; the encoder probe's buffer too.
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2-core-video = { workspace = true, features = [ "objc2-io-surface" ] }
+# With the CoreFoundation type `CVPixelBufferGetIOSurface` returns, which objc2-core-video's
+# `objc2-io-surface` feature leaves out.
+objc2-io-surface = { version = "=0.3.2", default-features = false, features = [
+    "std",
+    "IOSurfaceRef",
+    "IOSurfaceTypes",
+    "objc2-core-foundation",
+] }
 
 [dev-dependencies]
 anyhow.workspace = true
