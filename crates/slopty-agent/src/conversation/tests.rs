@@ -843,6 +843,97 @@ fn a_prompt_ends_the_turn_still_open_before_it() {
     assert_eq!(next.ended_ms, None, "the new turn runs");
 }
 
+/// What the person pasted is their prompt, however it starts: Claude Code wraps each paste
+/// in `<pasted_content id="…">` lines (the id the first four hex digits of the SHA-256 of the
+/// session's id), and a record that opens with one (as recorded 2026-10-30: queued, or typed
+/// with nothing before the paste) opens a turn as any prompt does. Its text is what Claude
+/// Code's TUI shows: the paste's words where they stood, the marks gone, on lines of their own
+/// when they are several, an inline paste inline. A notice the person pasted is their words,
+/// not Claude Code's notice. The whole text, read again, reads the same.
+#[test]
+fn a_pasted_prompt_is_the_persons_and_opens_a_turn() {
+    let session = "909e3b00-86c1-4960-913f-ca14422e66d4";
+    let pasted =
+        |body: &str| format!("<pasted_content id=\"71f8\">\n{body}\n</pasted_content id=\"71f8\">");
+    let log = "Workspace/office-1 took 24s\n$ sudo pfctl -s rules | grep -i scrub\nscrub-anchor \"com.apple/*\" all fragment reassemble";
+    let asked = |uuid: &str, stamp: &str, source: &str, id: &str, content: String| {
+        json!({"type": "user", "uuid": uuid, "parentUuid": null, "sessionId": session,
+            "timestamp": format!("2026-10-30T09:{stamp}Z"), "promptId": id,
+            "promptSource": source, "turnOrigin": "human", "origin": {"kind": "human"},
+            "message": {"role": "user", "content": content}})
+    };
+    let records = [
+        asked("p1", "00:00.000", "queued", "q1", pasted(log)),
+        asked("p2", "01:00.000", "typed", "q2", format!("\n\n{}\n", pasted("alpha\nbeta"))),
+        asked(
+            "p3",
+            "02:00.000",
+            "typed",
+            "q3",
+            format!("check this\n\n\n{}\n\nwhat does it mean", pasted("one\ntwo")),
+        ),
+        asked("p4", "03:00.000", "typed", "q4", format!("run `{}` now", pasted("cargo test"))),
+        asked(
+            "p5",
+            "04:00.000",
+            "typed",
+            "q5",
+            format!(
+                "{}\n\nwhat is this?",
+                pasted(
+                    "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"
+                )
+            ),
+        ),
+    ];
+    let mut c = Conversation::default();
+    for record in &records {
+        assert!(is_prompt(record), "a prompt: {record}");
+        c.ingest(&MAIN, record);
+    }
+    let shown: Vec<(&str, &str)> = c
+        .entries(&MAIN)
+        .iter()
+        .filter_map(|e| match &e.body {
+            Body::Prompt(p) => Some((e.id.as_str(), p.text.text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("p1", log),
+            ("p2", "alpha\nbeta"),
+            ("p3", "check this\none\ntwo\nwhat does it mean"),
+            ("p4", "run `cargo test` now"),
+            (
+                "p5",
+                "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>\nwhat is this?"
+            ),
+        ],
+        "each the person's words as the TUI shows them"
+    );
+    let turns: Vec<(&str, Vec<&str>)> = c
+        .turns(&MAIN)
+        .iter()
+        .map(|t| (t.prompt.as_str(), t.prompt_ids.iter().map(String::as_str).collect()))
+        .collect();
+    assert_eq!(
+        turns,
+        [
+            ("p1", vec!["q1"]),
+            ("p2", vec!["q2"]),
+            ("p3", vec!["q3"]),
+            ("p4", vec!["q4"]),
+            ("p5", vec!["q5"])
+        ],
+        "each opens its turn"
+    );
+    assert_eq!(c.turns(&MAIN)[0].ended_ms, parse_ms("2026-10-30T09:01:00.000Z"), "to the next");
+    let whole = part_text(&records[2], &Part::Block { index: 0 });
+    assert_eq!(whole.as_deref(), Some("check this\none\ntwo\nwhat does it mean"), "read again");
+}
+
 /// A session Claude Code ran with no Stop hook writes no end-of-turn record: each turn ends at
 /// the model's final answer, as its request's stop reason says, not at the next prompt a minute
 /// later, and the last not at now. A Stop hook's summary after the answer moves the end on to
@@ -992,12 +1083,16 @@ fn a_blocking_stop_hook_runs_the_turn_until_the_next_answer() {
     let refused = stop_summary("s3", "f2", &json!(["2 tests fail"]), true);
     c.ingest(&MAIN, &at("40:30.030", refused));
     assert_eq!(end(&c), ms("40:30.030"), "another hook stopped Claude Code there");
-    let woken: Vec<Vec<Option<WallMs>>> =
-        c.turns(&MAIN).iter().map(|t| t.woken.iter().copied().map(Some).collect()).collect();
+    let wake = |stamp: &str, id: &str| Wake {
+        at_ms: ms(stamp).expect("a time"),
+        prompt_id: Some(id.to_owned()),
+        hooked: true,
+    };
+    let woken: Vec<&[Wake]> = c.turns(&MAIN).iter().map(|t| t.woken.as_slice()).collect();
     assert_eq!(
         woken,
-        [vec![ms("34:05.496")], vec![ms("40:30.020")]],
-        "no wake is a turn of its own"
+        [[wake("34:05.496", "q1")].as_slice(), [wake("40:30.020", "q2")].as_slice()],
+        "each woken once, its hooks run, and no wake is a turn of its own"
     );
 }
 
@@ -1106,8 +1201,13 @@ fn a_tasks_notice_runs_the_turn_until_the_next_answer() {
         ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000023"],
         "the notice names its run"
     );
-    assert_eq!(turn.woken.first().copied(), handed.1, "woken once, by the notice handed over");
-    assert_eq!(turn.woken.len(), 1, "woken once, by the notice handed over");
+    let [wake] = turn.woken.as_slice() else { panic!("woken once: {:?}", turn.woken) };
+    assert_eq!(Some(wake.at_ms), handed.1, "by the notice handed over");
+    assert_eq!(
+        (wake.prompt_id.as_deref(), wake.hooked),
+        (Some("00000000-0000-4000-8000-000000000002"), true),
+        "past the end its Stop named, whose hooks ran"
+    );
 }
 
 /// Whatever else Claude Code hands the model after its answer runs the turn again from that
@@ -1170,8 +1270,14 @@ fn the_model_woken_by_anything_else_runs_the_turn_again() {
     c.ingest(&MAIN, &retry);
     assert_eq!(end(&c), None, "the retried request runs it again");
     let [turn] = c.turns(&MAIN) else { panic!("one turn: {:#?}", c.turns(&MAIN)) };
-    let woken: Vec<Option<WallMs>> = turn.woken.iter().copied().map(Some).collect();
-    assert_eq!(woken, [ms("01:00.000"), ms("09:01.016"), ms("10:30.000")], "each wake, once");
+    let woken: Vec<(Option<WallMs>, bool)> =
+        turn.woken.iter().map(|w| (Some(w.at_ms), w.hooked)).collect();
+    // No summary followed its answers, so no `Stop` hook ran there; one does on an error.
+    assert_eq!(
+        woken,
+        [(ms("01:00.000"), false), (ms("09:01.016"), false), (ms("10:30.000"), true)],
+        "each wake, once"
+    );
 }
 
 /// A command Claude Code runs itself ends its turn with what it printed, as a line

@@ -1319,6 +1319,138 @@ fn a_tasks_notice_runs_again_the_turn_its_stop_ended() {
     assert_eq!(host.thread(history.main()).turns.len(), 1, "one turn");
 }
 
+/// A task's notice that wakes the turn after its end runs it until the `Stop` of the notice's
+/// own run, which names the notice's prompt id: the `Stop` of the end before, heard first, late
+/// or never (its relay passed over), ends nothing, nor does an end with no `Stop` at all (a
+/// command's output, after which the notice wakes the command's turn) leave one to pass over.
+/// The notice's `Stop` ends the run as soon as it is heard, before its answer is read or after.
+#[test]
+fn a_notices_run_ends_by_its_own_stop_whatever_came_before() {
+    use serde_json::{Value, json};
+
+    use crate::hooks::Signal;
+    let at = |stamp: &str| format!("2026-10-21T09:{stamp}Z");
+    let ms = |stamp: &str| conv::parse_ms(&at(stamp)).expect("a time");
+    let user = |uuid: &str, stamp: &str, id: &str, content: &str| {
+        json!({"type": "user", "uuid": uuid, "timestamp": at(stamp), "promptId": id,
+            "promptSource": "typed", "message": {"role": "user", "content": content}})
+    };
+    let answer = |uuid: &str, stamp: &str, id: &str, words: &str| {
+        json!({"type": "assistant", "uuid": uuid, "timestamp": at(stamp),
+            "message": {"id": id, "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": words}],
+                "usage": {"input_tokens": 10, "output_tokens": 5}, "stop_reason": "end_turn"}})
+    };
+    let summary = |uuid: &str, stamp: &str| {
+        json!({"type": "system", "subtype": "stop_hook_summary", "uuid": uuid,
+            "timestamp": at(stamp), "hookCount": 1, "hookErrors": [],
+            "preventedContinuation": false, "stopReason": ""})
+    };
+    let prompt = user("p1", "00:00.000", "q1", "Build it in the background");
+    let started = answer("a1", "00:10.000", "m1", "The build runs in the background.");
+    let summed = summary("s1", "00:10.010");
+    let copy = user(
+        "c1",
+        "01:00.000",
+        "q2",
+        "<command-name>/copy</command-name>\n<command-args></command-args>",
+    );
+    let copied = user(
+        "o1",
+        "01:00.020",
+        "q2",
+        "<local-command-stdout>Copied to clipboard</local-command-stdout>",
+    );
+    let mut notice = user(
+        "n1",
+        "03:00.000",
+        "n1",
+        "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n<summary>Background command \"cargo build\" completed (exit code 0)</summary>\n</task-notification>",
+    );
+    notice["promptSource"] = json!("system");
+    notice["origin"] = json!({"kind": "task-notification"});
+    notice["turnOrigin"] = json!("task_notification");
+    let passed = answer("a2", "03:05.000", "m2", "The build passed.");
+    let ended = summary("s2", "03:05.010");
+    let look = |host: &Host, history: &History| {
+        let thread = host.thread(history.main());
+        let turn = thread.turns.last().expect("a turn");
+        (turn.state.clone(), turn.ended_ms, thread.status.phase)
+    };
+    let running = (TurnState::Active, None, Phase::Working);
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let mut n = 0_u32;
+
+    for command in [false, true] {
+        for before in ["first", "late", "never"] {
+            for last_first in [false, true] {
+                n = n.saturating_add(1);
+                let path = scratch.path().join(format!("{n}.jsonl"));
+                let mut decoder = Transcripts::default();
+                let mut read = |history: &mut History, host: &mut Host, records: &[&Value]| {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                        .expect("open");
+                    for record in records {
+                        writeln!(file, "{record}").expect("written");
+                    }
+                    host.take(history.transcript(&decoder.read(&path, &[]), &[]));
+                };
+                let hear = |history: &mut History,
+                            host: &mut Host,
+                            signal: Signal,
+                            prompt: &str,
+                            at: WallMs| {
+                    host.take(signalled(history, signal, Some(prompt), at));
+                };
+                let (mut history, mut host) = (observed(), Host::default());
+                host.take(history.drain());
+                read(&mut history, &mut host, &[&prompt]);
+                hear(&mut history, &mut host, Signal::Working, "q1", ms("00:00.010"));
+                read(&mut history, &mut host, &[&started, &summed]);
+                if before == "first" {
+                    hear(&mut history, &mut host, Signal::Done, "q1", ms("00:10.020"));
+                }
+                if command {
+                    read(&mut history, &mut host, &[&copy, &copied]);
+                }
+                read(&mut history, &mut host, &[&notice]);
+                hear(&mut history, &mut host, Signal::Working, "n1", ms("03:00.010"));
+                if before == "late" {
+                    hear(&mut history, &mut host, Signal::Done, "q1", ms("00:10.020"));
+                }
+                let woken = look(&host, &history);
+                let heard_first = last_first.then(|| {
+                    hear(&mut history, &mut host, Signal::Done, "n1", ms("03:05.020"));
+                    look(&host, &history)
+                });
+                read(&mut history, &mut host, &[&passed, &ended]);
+                if !last_first {
+                    hear(&mut history, &mut host, Signal::Done, "n1", ms("03:05.020"));
+                }
+                let last = look(&host, &history);
+
+                let case = format!(
+                    "{}, the end's Stop heard {before}, the notice's {}",
+                    if command { "after a command's output" } else { "after an answer" },
+                    if last_first { "before its answer is read" } else { "after" }
+                );
+                assert_eq!(woken, running, "{case}: the notice runs the turn again");
+                if let Some(heard) = heard_first {
+                    let stop = (TurnState::Complete, Some(ms("03:05.020")), Phase::Done);
+                    assert_eq!(heard, stop, "{case}: its Stop ends it at once");
+                }
+                let done = (TurnState::Complete, Some(ms("03:05.010")), Phase::Done);
+                assert_eq!(last, done, "{case}: at its records' end");
+                let turns = host.thread(history.main()).turns.len();
+                assert_eq!(turns, if command { 2 } else { 1 }, "{case}: no turn of its own");
+            }
+        }
+    }
+}
+
 /// The recorded `/compact`'s hooks heard one by one: from its `PreCompact` until its
 /// `PostCompact` the session shows compacting since the compaction began, whatever its phase
 /// beneath said meanwhile (its `SessionStart` of the compacted session), and then that phase,

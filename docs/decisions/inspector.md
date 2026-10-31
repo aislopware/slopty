@@ -312,22 +312,42 @@ studies behind this file are in `.research/inspector-2026-10-30/`: `claude-deskt
     stopped Claude Code there (`preventedContinuation`). A notice queued, a wakeup's own
     notice, a hook that only summarises (with output or a failure that does not block), a
     command's caveat: none wakes the model, so none reopens the turn.
-  - **The hooks' word on the stop before.** Slopty's own relay heard the `Stop` of the stop the
-    turn went on past, and it may be heard before the wake's records are read or after; a hook
-    that exits at once can leave the answer, its feedback and the summary in one read, and the
-    relay starts later than the hook ends. No time orders them, so the decoder counts the
-    wakes that came after a stop, where Claude Code ran its `Stop` hooks (`Turn::woken`), and
-    the history takes the hooks' end only once they told of more stops than that, each `Stop`
-    once however often its relay brought it. The TUI's idle notice (`idle_prompt`) rests the
-    session and ends no turn, since it fires while a background task still runs, between the
-    turn's `Stop` and the notice that wakes it. With a stop's `Stop` never heard, the woken
-    run's own is taken for it, and the records end the turn and rest the session instead.
+  - **The hooks' word on the stop before.** Slopty's own relay hears the `Stop` of each stop
+    the turn went on past, before the wake's records are read or after: a hook that exits at
+    once can leave the answer, its feedback and the summary in one read, and the relay starts
+    later than the hook ends. No time orders them, so the count goes by what each names. A
+    `Stop` names its run's prompt id, and a notice's run takes an id of its own, so a `Stop`
+    naming an id the turn moved on from ends nothing, heard or lost, early or late. Of those
+    naming the turn's latest id, the decoder keeps each end it went past under that id and
+    whether Claude Code ran its `Stop` hooks there (`Turn::woken`): a summary, a blocking
+    hook's feedback or a failed request's `StopFailure` shows they ran, while an interrupt, a
+    command's output or a refusal retried on the fallback model runs none. The history takes
+    the hooks' end only once they told of more `Stop`s under that id than those ends, each
+    once however often its relay brought it; an end from the session going away stands past
+    every wake. A `Stop` never heard leaves the end to the records, which end the turn at its
+    next final answer and rest the session there, never sooner. The TUI's idle notice
+    (`idle_prompt`) ends no turn, since it fires while a background task still runs, between
+    the turn's `Stop` and the notice that wakes it.
   - Tests (`slopty-agent`): `a_blocking_stop_hook_runs_the_turn_until_the_next_answer`,
     `a_stop_hook_that_only_summarises_leaves_the_turn_ended`,
     `a_tasks_notice_runs_the_turn_until_the_next_answer` (on the `background` recording) and
     `the_model_woken_by_anything_else_runs_the_turn_again` for the records;
     `a_woken_turn_runs_again_and_the_session_works` (every read and hearing order) and
-    `a_tasks_notice_runs_again_the_turn_its_stop_ended` for the turn and the session.
+    `a_tasks_notice_runs_again_the_turn_its_stop_ended` and
+    `a_notices_run_ends_by_its_own_stop_whatever_came_before` (with and without a command's
+    output before the notice, the stale `Stop` heard first, late or never) for the turn and
+    the session.
+- ✅ **A pasted prompt is the person's (2026-10-31).** Claude Code (2.1.316) marks each paste in
+  a prompt's record between a `<pasted_content id="…">` line and a closing line with the same
+  id, four hex digits of the session's own. A prompt that opened with a paste, queued or typed
+  with nothing before it, started with a mark, so the decoder took it for text Claude Code
+  injected: no prompt, no turn of its own, its work added to the turn before. A record that
+  opens with a paste is now the person's prompt whatever the paste says, a notice they pasted
+  too, and opens its turn. Its text is what Claude Code's TUI shows, read as Claude Code reads
+  its marks: each paste's words where the person put them, on lines of their own when they are
+  several and inline when one, the typed words around it trimmed to meet it. A paste among
+  typed words reads the same, where before its marks showed. Test:
+  `a_pasted_prompt_is_the_persons_and_opens_a_turn`.
 - ✅ **How the deletions were made (2026-10-30).** Choices the ruling's "Left out, and why" left
   open:
   - **One clock.** Everything that runs (a turn's time, a step's lane, the working line's word)

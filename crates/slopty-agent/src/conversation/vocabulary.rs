@@ -824,12 +824,10 @@ pub struct Turn {
     /// model after an end (a blocking Stop hook's feedback, a task's notice, the model's next
     /// request) runs it again, up to its next end.
     pub ended_ms: Option<WallMs>,
-    /// When Claude Code woke the model again after it stopped in this turn (its final answer,
-    /// or the error it gave up on), each time: a blocking Stop hook's feedback, a task's notice,
-    /// the model's next request. Each went on past a stop Claude Code ran its `Stop` hooks at
-    /// (`StopFailure`, after an error).
+    /// Each time Claude Code woke the model again after the turn had ended: a blocking Stop
+    /// hook's feedback, a task's notice, the model's next request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub woken: Vec<WallMs>,
+    pub woken: Vec<Wake>,
     /// The models that answered in it, in the order they first did (`claude-opus-5-5`).
     pub models: Vec<String>,
     /// Tokens, summed over its requests.
@@ -842,6 +840,21 @@ pub struct Turn {
     /// cache and written to it.
     #[serde(default)]
     pub context: Option<u64>,
+}
+
+/// Claude Code woke a turn's model again after the turn had ended ([`Turn::woken`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Wake {
+    /// When: the record that woke it, else the model's next request.
+    pub at_ms: WallMs,
+    /// The prompt id the turn's hooks named the end it went on past by: the turn's latest
+    /// then, which its `Stop` names. The record that woke it may move the turn on to its own.
+    pub prompt_id: Option<String>,
+    /// Whether that end had its `Stop` hooks run, as the transcript shows: the model answered,
+    /// and their summary or a blocking hook's feedback followed; or Claude Code gave up on an
+    /// error, which runs `StopFailure` ones. An interrupt, a command's output or an answer
+    /// Claude Code took up again itself (a refusal retried on its fallback model) ran none.
+    pub hooked: bool,
 }
 
 /// Tokens a request (or a turn's) used.

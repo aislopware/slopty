@@ -35,9 +35,9 @@
 //! output, an interrupt and Claude Code's end-of-turn records); each later end moves the end on.
 //! Claude Code may wake the model after that answer: a blocking Stop hook's feedback, a task's
 //! notice or other input it hands the model itself (`promptSource: "system"`), or, where no
-//! record says so, the model's own next request. The turn runs again from that record, and
-//! counts the wake when the model had stopped there ([`Turn::woken`]): each such stop had its
-//! `Stop` hooks run, so their word on the stop before ends no woken run.
+//! record says so, the model's own next request. The turn runs again from that record and keeps
+//! the wake ([`Turn::woken`]): the prompt id the end's `Stop` named, and whether the transcript
+//! shows that end ran `Stop` hooks at all, so their word on it ends no woken run.
 //!
 //! **Incremental.** [`Conversation::read`] builds on [`Tail`]: each call decodes the lines
 //! appended since the previous one and returns [`Change`]s. A tool call is an entry keyed by its
@@ -134,9 +134,21 @@ struct Thread {
     /// and the model has not answered since: a Stop hook's summary written now speaks of the
     /// stop the hook kept from ending, not of the woken run.
     woken: bool,
-    /// The model stopped at its last request (its final answer, or the error Claude Code gave
-    /// up on), where Claude Code runs its `Stop` hooks, and nothing has woken it since.
-    stopped: bool,
+    /// Where the model's last stop stands, until something wakes it ([`Wake::hooked`]).
+    stop: Stopped,
+}
+
+/// How the model's last stop in a thread stands ([`Thread::stop`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Stopped {
+    /// It runs, or ended where no `Stop` hook runs (an interrupt, a command's output).
+    #[default]
+    No,
+    /// It answered last, and the transcript has not shown its `Stop` hooks run yet.
+    Answered,
+    /// Its `Stop` hooks ran (their summary, a blocking hook's feedback), or it gave up on an
+    /// error, which runs `StopFailure` ones.
+    Hooked,
 }
 
 impl Thread {
@@ -566,6 +578,7 @@ impl Conversation {
         if let Some(feedback) =
             content_text(content).trim_start().strip_prefix("Stop hook feedback")
         {
+            self.hooked(ctx);
             self.wake(ctx, Some(record), batch);
             let said = feedback.trim_start_matches(':').trim();
             let text = if said.is_empty() {
@@ -627,6 +640,8 @@ impl Conversation {
             };
             let Some(text) = text else { continue };
             let text = fork_directive(text).unwrap_or(text);
+            // What the person pasted first is their prompt, whatever its words say.
+            let pasted = leads_paste(text);
             let reference = || TextRef {
                 record: ctx.uuid.to_owned(),
                 part: Part::Block { index: to_u32(index) },
@@ -635,7 +650,7 @@ impl Conversation {
                 text.trim().strip_prefix("[Request interrupted by user")
             {
                 Body::Interrupted { during_tool: marker.contains("for tool use") }
-            } else if let Some(mut notice) = parse_notice(text) {
+            } else if let Some(mut notice) = parse_notice(text).filter(|_| !pasted) {
                 // Claude Code hands the model a task's notice as its next input: one that comes
                 // after the turn's answer wakes the model.
                 self.wake(ctx, Some(record), batch);
@@ -709,13 +724,16 @@ impl Conversation {
                     retry: None,
                     stop: None,
                 })
-            } else if text.trim_start().starts_with('<') || text.trim().is_empty() || prompt_made {
+            } else if (text.trim_start().starts_with('<') && !pasted)
+                || text.trim().is_empty()
+                || prompt_made
+            {
                 // Text Claude Code injects for the model (reminders, caveats) is not the person's.
                 continue;
             } else {
                 prompt_made = true;
                 Body::Prompt(Prompt {
-                    text: Clipped::head(text, PROSE, Some(reference())),
+                    text: Clipped::head(&unpasted(text), PROSE, Some(reference())),
                     images: std::mem::take(&mut images),
                     command: None,
                 })
@@ -751,7 +769,7 @@ impl Conversation {
         let prompt_id = str_at(record, "promptId");
         let thread = self.threads.entry(ctx.thread.clone()).or_default();
         thread.woken = false;
-        thread.stopped = false;
+        thread.stop = Stopped::No;
         if let Some(open) = thread.turns.last_mut().filter(|t| t.ended_ms.is_none()) {
             open.ended_ms = Some(ctx.at_ms);
             batch.turn(ctx.thread, open.clone());
@@ -867,7 +885,9 @@ impl Conversation {
         self.answer(ctx, record, message, batch);
         if answers_last(message) {
             if let Some(t) = self.threads.get_mut(ctx.thread) {
-                t.stopped = true;
+                // Claude Code gives up on an error with `StopFailure` hooks, which write nothing.
+                let gave_up = bool_at(record, "isApiErrorMessage");
+                t.stop = if gave_up { Stopped::Hooked } else { Stopped::Answered };
             }
             self.end_turn(ctx, batch);
         }
@@ -877,24 +897,37 @@ impl Conversation {
     /// model's own next request): the thread's turn runs from here, though it had ended at the
     /// model's answer, until the next answer ends it. Until the model answers, a Stop hook's
     /// summary is the hook's word on the stop it kept from ending, not the end
-    /// ([`Thread::woken`]). A turn still running is as it was. A wake after the model stopped
-    /// is counted in its turn ([`Turn::woken`]), once however many records tell it. The user
-    /// `record` that woke it names the run for the hooks (`promptId`), as a tool result does
+    /// ([`Thread::woken`]). A turn still running is as it was. A turn woken after its end
+    /// keeps the wake ([`Turn::woken`]), once however many records tell it, with the prompt id
+    /// its end's `Stop` named and whether that end ran `Stop` hooks at all. The user `record`
+    /// that woke it then names the run for the hooks (`promptId`), as a tool result does
     /// ([`Self::name_turn`]).
     fn wake(&mut self, ctx: &Ctx<'_>, record: Option<&Value>, batch: &mut Batch) {
         let Some(thread) = self.threads.get_mut(ctx.thread) else { return };
         thread.woken = true;
-        let stopped = std::mem::take(&mut thread.stopped);
+        let stop = std::mem::take(&mut thread.stop);
         if let Some(turn) = thread.turns.last_mut().filter(|t| t.ended_ms.is_some()) {
             turn.ended_ms = None;
-            if stopped {
-                turn.woken.push(ctx.at_ms);
-            }
+            turn.woken.push(Wake {
+                at_ms: ctx.at_ms,
+                prompt_id: turn.prompt_ids.last().cloned(),
+                hooked: stop == Stopped::Hooked,
+            });
             let turn = turn.clone();
             batch.turn(ctx.thread, turn);
         }
         if let Some(record) = record {
             self.name_turn(ctx.thread, record, batch);
+        }
+    }
+
+    /// The transcript shows Claude Code ran its `Stop` hooks at the model's last stop (their
+    /// summary, a blocking hook's feedback).
+    fn hooked(&mut self, ctx: &Ctx<'_>) {
+        if let Some(thread) = self.threads.get_mut(ctx.thread)
+            && thread.stop == Stopped::Answered
+        {
+            thread.stop = Stopped::Hooked;
         }
     }
 
@@ -1032,6 +1065,9 @@ impl Conversation {
                 // Claude Code writes a blocking hook's feedback, which wakes the model, before
                 // the summary of the hooks that ran: that summary leaves the woken run going,
                 // unless a hook stopped Claude Code there (`continue: false`).
+                if kind == "stop_hook_summary" {
+                    self.hooked(ctx);
+                }
                 let woken = self.threads.get(ctx.thread).is_some_and(|t| t.woken);
                 let kept_going = kind == "stop_hook_summary"
                     && woken
@@ -2417,9 +2453,139 @@ fn is_prompt(record: &Value) -> bool {
     first.is_some_and(|text| {
         let text = text.trim_start();
         !text.is_empty()
-            && !text.starts_with('<')
+            && (!text.starts_with('<') || leads_paste(text))
             && !text.starts_with("[Request interrupted by user")
     })
+}
+
+/// One part of a prompt's text, as Claude Code marks what the person pasted into it
+/// ([`pastes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pasted<'a> {
+    /// Words typed around the pastes.
+    Typed(&'a str),
+    /// A paste: its words, and the marked text it stands in (its marks, and up to two newlines
+    /// on either side of them).
+    Paste { body: &'a str, raw: &'a str },
+}
+
+/// `text` cut where Claude Code marked what the person pasted, as Claude Code itself reads its
+/// marks (2.1.316): each paste between a `<pasted_content id="…">` line and the line
+/// `</pasted_content id="…">` with the same id, four hex digits (its session's own).
+fn pastes(text: &str) -> Vec<Pasted<'_>> {
+    const OPEN: &str = "<pasted_content id=\"";
+    let hex = |id: &&str| id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let mut parts = Vec::new();
+    let (mut typed, mut from) = (0_usize, 0_usize);
+    while let Some(at) = text.get(from..).and_then(|t| t.find(OPEN)).map(|f| from.saturating_add(f))
+    {
+        let id_at = at.saturating_add(OPEN.len());
+        let rest = text.get(id_at..).unwrap_or_default();
+        let opened = rest.get(4..).is_some_and(|r| r.starts_with("\">\n"));
+        let Some(id) = rest.get(..4).filter(hex).filter(|_| opened) else {
+            from = id_at;
+            continue;
+        };
+        let body_at = id_at.saturating_add(7);
+        let close = format!("\n</pasted_content id=\"{id}\">");
+        // Sought from the opening line's own newline, so an empty paste closes too.
+        let line = body_at.saturating_sub(1);
+        let Some(newline) =
+            text.get(line..).and_then(|t| t.find(&close)).map(|f| line.saturating_add(f))
+        else {
+            break;
+        };
+        let mut start = at;
+        for _ in 0..2 {
+            if start > typed && text.get(..start).is_some_and(|t| t.ends_with('\n')) {
+                start = start.saturating_sub(1);
+            }
+        }
+        if let Some(words) = text.get(typed..start).filter(|w| !w.is_empty()) {
+            parts.push(Pasted::Typed(words));
+        }
+        let mut end = newline.saturating_add(close.len());
+        for _ in 0..2 {
+            if text.get(end..).is_some_and(|t| t.starts_with('\n')) {
+                end = end.saturating_add(1);
+            }
+        }
+        let body = text.get(body_at..newline).unwrap_or_default();
+        parts.push(Pasted::Paste { body, raw: text.get(start..end).unwrap_or_default() });
+        (typed, from) = (end, end);
+    }
+    if let Some(words) = text.get(typed..).filter(|w| !w.is_empty()) {
+        parts.push(Pasted::Typed(words));
+    }
+    parts
+}
+
+/// Whether `text` opens with something the person pasted ([`pastes`]): their prompt, though it
+/// starts with a mark.
+fn leads_paste(text: &str) -> bool {
+    matches!(pastes(text.trim_start()).first(), Some(Pasted::Paste { .. }))
+}
+
+/// A prompt's `text` as Claude Code's TUI shows it (2.1.316): each paste's words where the
+/// person put them, its marks gone, on lines of their own when they are several, with the
+/// typed words about it trimmed to meet it. Text with no paste is as it was.
+fn unpasted(text: &str) -> String {
+    let parts = pastes(text);
+    if !parts.iter().any(|p| matches!(p, Pasted::Paste { .. })) {
+        return text.to_owned();
+    }
+    // Whether the next typed words start a line of their own, after a paste.
+    let mut apart = false;
+    let mut shown = String::with_capacity(text.len());
+    let mut parts = parts.iter().peekable();
+    while let Some(part) = parts.next() {
+        let next = parts.peek().copied();
+        let next_paste = match next {
+            Some(Pasted::Paste { body, .. }) => Some(*body),
+            Some(Pasted::Typed(_)) | None => None,
+        };
+        match part {
+            Pasted::Typed(words) => {
+                let mut words: &str = words;
+                if apart {
+                    words = words.trim_start();
+                }
+                if next_paste.is_some_and(|body| body.contains('\n')) {
+                    words = words.trim_end();
+                }
+                if words.is_empty() {
+                    continue;
+                }
+                if apart && !shown.is_empty() {
+                    shown.push('\n');
+                }
+                shown.push_str(words);
+                apart = false;
+            }
+            Pasted::Paste { body, .. } => {
+                let lines = body.contains('\n');
+                let before = shown.trim_end_matches(['(', '[', '{', '"', '\'', '`']);
+                let spaced = before.is_empty() || before.ends_with(char::is_whitespace);
+                if (lines || apart || !spaced) && !shown.is_empty() {
+                    shown.push('\n');
+                }
+                shown.push_str(body);
+                let after = match next {
+                    Some(Pasted::Typed(words)) => *words,
+                    Some(Pasted::Paste { raw, .. }) => *raw,
+                    None => "",
+                };
+                let mut space = after.chars().take(2).filter(|c| c.is_whitespace());
+                let indented = space.next().is_some() && space.next().is_some();
+                let word = after.trim_start_matches([
+                    ')', ']', '}', '"', '\'', '`', '.', ',', ';', ':', '!', '?',
+                ]);
+                let ends = word.is_empty() || word.starts_with(char::is_whitespace);
+                apart = lines || next_paste.is_some() || indented || !ends;
+            }
+        }
+    }
+    shown
 }
 
 /// An MCP server's word that a resource or a polled tool changed, as the TUI's row says it:
@@ -2759,18 +2925,25 @@ fn part_text(record: &Value, part: &Part) -> Option<String> {
         Part::Block { index: 0 } if bool_at(record, "isCompactSummary") => {
             Some(summary_text(&joined_text(content?)))
         }
-        Part::Block { index } => match content? {
-            Value::String(s) if *index == 0 => Some(s.clone()),
-            Value::Array(blocks) => {
-                let block = blocks.get(usize::try_from(*index).ok()?)?;
-                block
-                    .as_str()
-                    .or_else(|| str_at(block, "text"))
-                    .or_else(|| str_at(block, "thinking"))
-                    .map(str::to_owned)
-            }
-            _ => None,
-        },
+        Part::Block { index } => {
+            let text = match content? {
+                Value::String(s) if *index == 0 => Some(s.as_str()),
+                Value::Array(blocks) => {
+                    let block = blocks.get(usize::try_from(*index).ok()?)?;
+                    block
+                        .as_str()
+                        .or_else(|| str_at(block, "text"))
+                        .or_else(|| str_at(block, "thinking"))
+                }
+                _ => None,
+            }?;
+            // The person's words read as the decoder showed them ([`unpasted`]).
+            Some(if str_at(record, "type") == Some("user") {
+                unpasted(text)
+            } else {
+                text.to_owned()
+            })
+        }
         Part::Call { tool_use_id } => blocks()
             .iter()
             .find(|b| str_at(b, "id") == Some(tool_use_id.as_str()))

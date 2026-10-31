@@ -22,11 +22,12 @@
 //!   (completed, failed, stopped), at the time the records say, else the hook's. A command Claude
 //!   Code runs itself (`/compact`, `/model`) has no hook; its records end its turn. A turn the
 //!   records show running again after its end (Claude Code woke the model: a blocking `Stop` hook,
-//!   a task's notice) runs again, and works the session, until its next end. Each such wake went on
-//!   past a stop whose `Stop` the hooks tell, before or after the wake is read, so their end stands
-//!   only once they told of more stops than that. The TUI idle at its prompt (`idle_prompt`) ends
-//!   no turn. A branch (a rewind, an edited prompt) truncates the thread back to before the dropped
-//!   prompt.
+//!   a task's notice) runs again, and works the session, until its next end. A `Stop` heard of an
+//!   end it went on past, before the wake is read or after, ends nothing: one naming a prompt id
+//!   the turn moved on from (a notice's run names its own), and of those naming its latest, as many
+//!   as the ends under that id the transcript shows ran `Stop` hooks before a wake. The TUI idle at
+//!   its prompt (`idle_prompt`) ends no turn. A branch (a rewind, an edited prompt) truncates the
+//!   thread back to before the dropped prompt.
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
 //! - **Status.** The phase is told from outside ([`History::status`]): the session's hooks, or its
@@ -221,13 +222,17 @@ struct Mapped {
     by_engine: HashMap<TurnId, (End, WallMs)>,
     /// When the transcript's records end each turn they end.
     closed: HashMap<TurnId, WallMs>,
-    /// When the transcript shows Claude Code woke each turn's model again after it stopped (a
-    /// blocking Stop hook, a task's notice), each time: every wake went on past a stop whose
-    /// `Stop` the hooks tell ([`Mapped::end_of`]).
-    woken: HashMap<TurnId, Vec<WallMs>>,
-    /// How many `Stop`s (or `StopFailure`s) the hooks told of each turn, each once; an end
-    /// that names no prompt (the turn open, or nothing left running it) counts past every wake.
+    /// Each time the transcript shows Claude Code woke a turn's model again after its end (a
+    /// blocking Stop hook, a task's notice): the end it went on past ([`Mapped::end_of`]).
+    woken: HashMap<TurnId, Vec<conv::Wake>>,
+    /// The prompt id each turn's hooks name it by now: its latest.
+    named: HashMap<TurnId, String>,
+    /// How many `Stop`s (or `StopFailure`s) the hooks told naming each turn's latest prompt id,
+    /// each once.
     heard: HashMap<TurnId, usize>,
+    /// Turns an end that names no prompt was told of (the turn open, or nothing left running
+    /// it): it ends them as they stand, past every wake.
+    unnamed: HashSet<TurnId>,
     /// Each turn by the prompt id its hooks name it by (`promptId`).
     prompt_ids: HashMap<String, TurnId>,
     /// Each turn as last sent.
@@ -259,7 +264,9 @@ impl Mapped {
             by_engine: HashMap::new(),
             closed: HashMap::new(),
             woken: HashMap::new(),
+            named: HashMap::new(),
             heard: HashMap::new(),
+            unnamed: HashSet::new(),
             prompt_ids: HashMap::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
@@ -332,14 +339,20 @@ impl Mapped {
     /// interrupt, the error it stopped on, else complete); at the time its records end it, else
     /// when its hook was heard. A failure says what the transcript said of it, else the hook.
     ///
-    /// A turn Claude Code woke again after it stopped ([`Self::woken`]) takes its hooks' end only
-    /// once they told of more stops than it went on past: the `Stop` of each stop it went on
-    /// past (one a hook kept from ending, the answer a notice came after) ends nothing, however
-    /// late it is heard, before the wake's records are read or after.
+    /// A turn Claude Code woke again after its end ([`Self::woken`]) takes its hooks' end only
+    /// from a `Stop` of an end it has not gone on past, however late the others are heard,
+    /// before the wake's records are read or after: one naming its latest prompt id (a notice's
+    /// run names its own), past as many as the ends under that id that ran `Stop` hooks and
+    /// were woken from (a stop a hook kept from ending, an answer a peer's message came after).
+    /// An end with no `Stop` (an interrupt, a command's output, a refusal Claude Code retried on
+    /// its own) is gone past with none to pass over.
     fn end_of(&self, turn: TurnId) -> Option<(TurnState, WallMs)> {
-        let woken = self.woken.get(&turn).map_or(0, Vec::len);
+        let woken = self.woken.get(&turn).map(Vec::as_slice).unwrap_or_default();
+        let named = self.named.get(&turn);
+        let gone = woken.iter().filter(|w| w.hooked && w.prompt_id.as_ref() == named).count();
         let heard = self.heard.get(&turn).copied().unwrap_or_default();
-        let engine = self.by_engine.get(&turn).filter(|_| woken == 0 || heard > woken);
+        let stands = woken.is_empty() || self.unnamed.contains(&turn) || heard > gone;
+        let engine = self.by_engine.get(&turn).filter(|_| stands);
         let at = self.closed.get(&turn).copied().or_else(|| engine.map(|(_, at)| *at))?;
         let stopped = self.stopped.get(&turn).map(|(_, error)| error.clone());
         let state = match engine.map(|(end, _)| end) {
@@ -469,14 +482,6 @@ impl SubagentEnd {
     }
 }
 
-/// How many `Stop`s the hooks told of a turn its prompt ids `prompts` name ([`History::stops`]).
-fn heard<'a>(
-    stops: &HashMap<String, HashSet<WallMs>>,
-    prompts: impl Iterator<Item = &'a String>,
-) -> usize {
-    prompts.filter_map(|p| stops.get(p)).map(HashSet::len).sum()
-}
-
 /// End each of `tasks` still at work at `at`, as `state` says, but one waiting on its own work
 /// (a subagent that reported), which completed; whether any was.
 fn end_tasks(tasks: &mut [BackgroundTask], at: WallMs, state: &str) -> bool {
@@ -506,8 +511,8 @@ pub struct History {
     /// when: kept for a prompt the transcript has not shown yet, and for the records read again.
     engine: HashMap<String, (End, WallMs)>,
     /// When the hooks told each prompt's turn ended, by the prompt id they named: each `Stop`
-    /// once, however many times its relay brought it. A turn woken again after it stopped takes
-    /// their end only past the stops it went on past ([`Mapped::end_of`]).
+    /// once, however many times its relay brought it. A turn woken again after its end takes
+    /// their end only past the ends it went on past ([`Mapped::end_of`]).
     stops: HashMap<String, HashSet<WallMs>>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
@@ -772,15 +777,21 @@ impl History {
                     .filter(|turn| *turn != TurnId::BEFORE && !mapped.ended.contains(turn)),
             };
             if let Some(turn) = turn {
-                // A word naming no prompt ends the turn as it stands now, past every wake.
-                let named = mapped.prompt_ids.iter().filter(|(_, t)| **t == turn);
-                let told_of = match prompt {
-                    Some(_) => heard(&self.stops, named.map(|(p, _)| p)),
-                    None => mapped.woken.get(&turn).map_or(0, Vec::len).saturating_add(1),
-                };
-                let held = mapped.heard.entry(turn).or_default();
-                *held = told_of.max(*held);
-                mapped.by_engine.insert(turn, told);
+                match prompt {
+                    // A word naming no prompt ends the turn as it stands now, past every wake.
+                    None => {
+                        mapped.unnamed.insert(turn);
+                    }
+                    Some(prompt) if mapped.named.get(&turn).is_some_and(|p| p == prompt) => {
+                        let heard = self.stops.get(prompt).map_or(0, HashSet::len);
+                        mapped.heard.insert(turn, heard);
+                    }
+                    Some(_) => {}
+                }
+                // Of the turn's prompt ids, the latest word stands.
+                if mapped.by_engine.get(&turn).is_none_or(|had| had.1 <= told.1) {
+                    mapped.by_engine.insert(turn, told);
+                }
                 action = mapped.settle(turn).map(|(action, _)| action);
             }
         }
@@ -1303,7 +1314,9 @@ impl History {
             mapped.by_engine.retain(|t, _| *t < turn);
             mapped.closed.retain(|t, _| *t < turn);
             mapped.woken.retain(|t, _| *t < turn);
+            mapped.named.retain(|t, _| *t < turn);
             mapped.heard.retain(|t, _| *t < turn);
+            mapped.unnamed.retain(|t| *t < turn);
             mapped.prompt_ids.retain(|_, t| *t < turn);
             actions.push(Action::Truncated { after: Some(after) });
         }
@@ -1334,9 +1347,10 @@ impl History {
         let told = record.prompt_ids.iter().filter_map(|p| self.engine.get(p)).max_by_key(|t| t.1);
         if let Some(told) = told.filter(|_| main) {
             mapped.by_engine.insert(turn, told.clone());
-            let told_of = heard(&self.stops, record.prompt_ids.iter());
-            let held = mapped.heard.entry(turn).or_default();
-            *held = told_of.max(*held);
+        }
+        if let Some(latest) = record.prompt_ids.last() {
+            mapped.heard.insert(turn, self.stops.get(latest).map_or(0, HashSet::len));
+            mapped.named.insert(turn, latest.clone());
         }
         let before = mapped.turns.get(&turn).cloned();
         let mut updated = before.clone().unwrap_or_else(|| Turn {
@@ -1381,7 +1395,10 @@ impl History {
         {
             self.failed = matches!(state, TurnState::Failed { .. });
             match ended {
-                None => self.rewake(record.woken.last().copied().unwrap_or(record.started_ms)),
+                None => {
+                    let since = record.woken.last().map_or(record.started_ms, |w| w.at_ms);
+                    self.rewake(since);
+                }
                 Some(at) if !record.woken.is_empty() => self.rest_after(&state, at),
                 Some(_) => self.settle_failed(),
             }
