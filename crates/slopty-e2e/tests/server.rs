@@ -8,11 +8,18 @@
 
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::time::{Duration, Instant};
 
     use anyhow::{Context as _, Result, bail, ensure};
     use serde_json::{Value, json};
+    use slopty_client::WorkerLink;
+    use slopty_core::{ClientId, SessionId};
     use slopty_e2e::harness::ServerStack;
+    use slopty_net::client::{bind_client, connect_addr};
+    use slopty_proto::ClientMsg;
+    use slopty_proto::handshake::Hello;
+    use slopty_proto::terminal::TermRequest;
 
     /// A lease that ends without a goodbye has the 5 s idle timeout to run out. From the kill to
     /// `unreachable` in the listing took 5.99 to 6.07 s over four runs (2026-09-25), so the
@@ -100,6 +107,42 @@ mod tests {
         let done = stack.slopty(&["send", term, "--text", text]).await?;
         ensure!(done == json!({ "ok": true }), "send: {done}");
         Ok(())
+    }
+
+    /// The person at a client of the worker, typing in a terminal as in its TUI. Orchestration
+    /// (`slopty send`) never types into an agent's terminal; the person does, through a client.
+    struct Person {
+        endpoint: slopty_net::Endpoint,
+        link: WorkerLink,
+    }
+
+    impl Person {
+        async fn connect(stack: &ServerStack) -> Result<Self> {
+            let addr: SocketAddr = stack.worker.address().parse()?;
+            let endpoint = bind_client()?;
+            let hello = Hello { client: ClientId::new(), name: "the person".to_owned() };
+            let conn = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello))
+                .await
+                .context("the worker answers a client in time")??;
+            let mut link = WorkerLink::start(conn);
+            let mut events = link.events().context("the link's events")?;
+            tokio::spawn(async move { while events.recv().await.is_some() {} });
+            Ok(Self { endpoint, link })
+        }
+
+        /// Type `words` and Enter into `term` (`<machine>/<terminal>`).
+        async fn typed(&self, term: &str, words: &str) -> Result<()> {
+            let session: SessionId = term.rsplit('/').next().context("a terminal")?.parse()?;
+            let req = TermRequest::Raw(format!("{words}\r").into_bytes());
+            self.link.send(ClientMsg::Term { session, req }).await?;
+            Ok(())
+        }
+
+        /// Quit, as a client does.
+        async fn leave(self) {
+            self.endpoint.close(0_u32.into(), b"done");
+            let _drained = tokio::time::timeout(STEP, self.endpoint.wait_idle()).await;
+        }
     }
 
     /// Wall time per step, printed at the end.
@@ -515,9 +558,10 @@ mod tests {
     /// A Claude Code thread (the stand-in) that asks the person a question: its read says it
     /// needs them and what it asks. Nothing answers for the person: MCP offers an agent no tool
     /// to, and a tell or a stop (an Esc would answer the dialog) is refused, naming what it waits
-    /// on. The person answers in its terminal and the agent hears it; at rest it is told again,
-    /// and stopped while that turn runs. Then a still picture of a window no worker has, so
-    /// nothing is captured (`docs/decisions/agents.md`, "TUI-first").
+    /// on. A `slopty send` into its terminal is refused too, as orchestration never types into an
+    /// agent; the person answers there through a client and the agent hears it; at rest it is
+    /// told again, and stopped while that turn runs. Then a still picture of a window no worker
+    /// has, so nothing is captured (`docs/decisions/agents.md`, "TUI-first").
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
         let folder = stack.path("agent-folder");
         std::fs::create_dir_all(&folder)?;
@@ -574,7 +618,8 @@ mod tests {
             "the question still waits: {still}"
         );
 
-        // The person answers in its terminal, and the agent hears it and comes to rest.
+        // Orchestration types nothing there; the person answers in its terminal through a
+        // client, and the agent hears it and comes to rest.
         let term = until("the agent's terminal listed", STEP, async || {
             let terminals = stack.slopty(&["terminals"]).await?;
             let all = terminals.as_array().context("terminals is a list")?;
@@ -583,9 +628,12 @@ mod tests {
         })
         .await?;
         let answer = "Teal";
-        send_text(stack, &term, answer).await?;
-        let enter = stack.slopty(&["send", &term, "--keys", "enter"]).await?;
-        ensure!(enter == json!({ "ok": true }), "{enter}");
+        let typed = stack.slopty(&["send", &term, "--text", answer]).await;
+        let forbidden =
+            typed.as_ref().err().is_some_and(|e| format!("{e:#}").contains("(Forbidden)"));
+        ensure!(forbidden, "orchestration types nothing into an agent: {typed:?}");
+        let person = Person::connect(stack).await?;
+        person.typed(&term, answer).await?;
         let mut last = String::new();
         let heard = until("the agent hears the answer and rests", STEP, async || {
             let read = stack.slopty(&reading).await?;
@@ -602,7 +650,9 @@ mod tests {
             Ok((read["phase"] == "done" && said).then_some(read))
         })
         .await
-        .with_context(|| format!("the last read: {last}"))?;
+        .with_context(|| format!("the last read: {last}"));
+        person.leave().await;
+        let heard = heard?;
         ensure!(heard.get("wait").is_none(), "nothing waits on the person: {heard}");
 
         // At rest it is told, and its turn under way is stopped, as Esc stops it in its terminal.
