@@ -4208,9 +4208,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     0.85 with hue and saturation untouched, WezTerm's inactive-pane transform at saturation 1.0,
     one quad a frame. Ghostty's veil of 30 % background was rejected: it greys every hue toward
     the ground. On an iPad the band the safe area leaves under the panes (the home indicator's)
-    takes the same quad under each dimmed terminal that meets the foot, painted where the panes
-    are laid out that frame, so the pane reads dimmed to the window's edge as on the Mac; the
-    element and the shell share the one shade (`live::UNFOCUSED_SHADE`).
+    takes the same quad under each dimmed terminal that meets the foot, and the same line under
+    each divider between panes side by side, painted where the panes are laid out that frame, so
+    the pane reads dimmed and the line runs to the window's edge as on the Mac; the element and
+    the shell share the one shade (`live::UNFOCUSED_SHADE`).
   - The screen's clear moved to ⌥⌘K: ⌘K is the picker in every session.
   - Tests: `slopty-terminal` `view::tests::scrolled_away_the_pill_counts_the_new_lines_and_a_key_goes_home`,
     `the_find_card_is_ghostty_s`, `shift_return_in_the_find_field_steps_back`,

@@ -458,21 +458,30 @@ impl Shell {
         };
         let phone = self.compact();
         // Over the foot's band, under each terminal pane drawn dimmed beside the focused one, the
-        // same dim, where the panes are laid out in this frame: the pane reads dimmed down to the
-        // window's edge, as on the Mac.
+        // same dim, and under each divider between panes side by side, the same line, where the
+        // panes are laid out in this frame: they run down to the window's edge, as on the Mac.
         let feet = (session && !phone && bottom > Pixels::ZERO).then(|| {
             let (panes, grid) = (self.panes_now(cx), self.pane_grid);
+            let line = super::pane_frame::divider_over(ground);
             let area = std::rc::Rc::clone(&self.pane_area_at);
             gpui::canvas(
                 |_, _, _| {},
                 move |band, (), window, _| {
                     let Some(area) = area.get() else { return };
-                    for (x, width) in super::pane_frame::dimmed_feet(&panes, area, grid) {
-                        let at = gpui::Bounds::new(
+                    let under = super::pane_frame::feet(&panes, area, grid);
+                    let column = |x: Pixels, width: Pixels| {
+                        gpui::Bounds::new(
                             gpui::point(x, band.top()),
                             gpui::size(width, band.size.height),
-                        );
-                        window.paint_quad(gpui::fill(at, crate::live::UNFOCUSED_SHADE));
+                        )
+                    };
+                    for (x, width) in under.dims {
+                        window
+                            .paint_quad(gpui::fill(column(x, width), crate::live::UNFOCUSED_SHADE));
+                    }
+                    for x in under.dividers {
+                        let width = px(super::panes::DIVIDER);
+                        window.paint_quad(gpui::fill(column(x, width), line));
                     }
                 },
             )
@@ -2154,25 +2163,13 @@ mod tests {
         );
     }
 
-    /// On an iPad the room the panes leave under them, the home indicator's, takes the dim of
-    /// each terminal pane drawn dimmed over it, across that pane's width: one beside the focused
-    /// pane, never the focused one, one above another or a view, and none while one pane fills
-    /// the view.
-    #[gpui::test]
-    fn an_ipads_foot_takes_the_dim_of_each_dimmed_terminal_over_it(cx: &mut gpui::TestAppContext) {
-        use super::super::pane_frame::dimmed_feet;
-        use super::super::panes::{Direction, Pane};
+    /// An iPad's shell with chat a's session open in its own terminal.
+    fn ipad_session(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::Entity<Shell>, &mut gpui::VisualTestContext) {
         use super::super::retention_tests::{Screen, launch};
         let ipad = Screen { size: (1366.0, 1024.0), scale: 2.0, touch: true, reduced: true };
         let (shell, cx) = launch(cx, ipad);
-        let draw = |cx: &mut gpui::VisualTestContext| {
-            cx.run_until_parked();
-            cx.update(|window, cx| {
-                window.refresh();
-                window.draw(cx).clear(cx);
-            });
-            cx.run_until_parked();
-        };
         shell.update(cx, |shell, cx| {
             shell.state.update(cx, |state, cx| {
                 state.apply_session_terminals([("a".to_owned(), "t-a".to_owned())].into());
@@ -2180,69 +2177,150 @@ mod tests {
             });
             shell.open_chat("a".into(), cx);
         });
-        draw(cx);
-        let feet = |cx: &mut gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, cx| {
-                let area = shell.pane_area_at.get();
-                area.map(|area| dimmed_feet(&shell.panes_now(cx), area, shell.pane_grid))
-                    .unwrap_or_default()
-            })
-        };
-        let span = |cx: &mut gpui::VisualTestContext, pane: Pane| {
-            shell.read_with(cx, |shell, cx| {
-                let at = shell.laid_panes(cx).of(pane).expect("laid out");
-                (at.left(), at.size.width)
-            })
-        };
-        let focused = |cx: &mut gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused())
-        };
-        assert!(feet(cx).is_empty(), "the session alone is not dimmed: {:?}", feet(cx));
+        draw_frame(cx);
+        (shell, cx)
+    }
 
-        cx.update(|_, cx| {
-            shell.update(cx, |shell, cx| shell.split_pane(Some(Direction::Right), cx));
+    /// A frame drawn from what the shell holds now.
+    fn draw_frame(cx: &mut gpui::VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
         });
-        draw(cx);
-        let right = focused(cx);
+        cx.run_until_parked();
+    }
+
+    /// What of `shell`'s panes meets the foot of their area, as the last frame laid them out.
+    fn feet_of(
+        shell: &gpui::Entity<Shell>,
+        cx: &gpui::VisualTestContext,
+    ) -> super::super::pane_frame::Feet {
+        shell.read_with(cx, |shell, cx| {
+            let area = shell.pane_area_at.get();
+            area.map(|area| {
+                super::super::pane_frame::feet(&shell.panes_now(cx), area, shell.pane_grid)
+            })
+            .unwrap_or_default()
+        })
+    }
+
+    /// `pane`'s left edge and width as the last frame laid it out.
+    fn span_of(
+        shell: &gpui::Entity<Shell>,
+        cx: &gpui::VisualTestContext,
+        pane: super::super::panes::Pane,
+    ) -> (Pixels, Pixels) {
+        shell.read_with(cx, |shell, cx| {
+            let at = shell.laid_panes(cx).of(pane).expect("laid out");
+            (at.left(), at.size.width)
+        })
+    }
+
+    /// Split `shell`'s focused pane toward `toward` and draw.
+    fn split(
+        shell: &gpui::Entity<Shell>,
+        cx: &mut gpui::VisualTestContext,
+        toward: super::super::panes::Direction,
+    ) -> super::super::panes::Pane {
+        cx.update(|_, cx| {
+            shell.update(cx, |shell, cx| shell.split_pane(Some(toward), cx));
+        });
+        draw_frame(cx);
+        shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused())
+    }
+
+    /// Give `pane` of `shell` the keyboard and draw.
+    fn focus(
+        shell: &gpui::Entity<Shell>,
+        cx: &mut gpui::VisualTestContext,
+        pane: super::super::panes::Pane,
+    ) {
+        shell.update(cx, |shell, cx| shell.focus_pane(pane, cx));
+        draw_frame(cx);
+    }
+
+    /// Fill `shell`'s view with its focused pane, or put the view back, and draw.
+    fn toggle_zoom(shell: &gpui::Entity<Shell>, cx: &mut gpui::VisualTestContext) {
+        shell.update(cx, |shell, cx| {
+            shell.panes_mut(cx).toggle_zoom();
+            cx.notify();
+        });
+        draw_frame(cx);
+    }
+
+    /// On an iPad the room the panes leave under them, the home indicator's, takes the dim of
+    /// each terminal pane drawn dimmed over it, across that pane's width: one beside the focused
+    /// pane, never the focused one, one above another or a view, and none while one pane fills
+    /// the view.
+    #[gpui::test]
+    fn an_ipads_foot_takes_the_dim_of_each_dimmed_terminal_over_it(cx: &mut gpui::TestAppContext) {
+        use super::super::panes::{Direction, Pane};
+        let (shell, cx) = ipad_session(cx);
+        let dims = |cx: &mut gpui::VisualTestContext| feet_of(&shell, cx).dims;
+        let span = |cx: &mut gpui::VisualTestContext, pane: Pane| span_of(&shell, cx, pane);
+        assert!(dims(cx).is_empty(), "the session alone is not dimmed: {:?}", dims(cx));
+
+        let right = split(&shell, cx, Direction::Right);
         assert!(matches!(right, Pane::Shell(_)), "an iPad splits: {right:?}");
-        assert_eq!(feet(cx), [span(cx, Pane::Session)], "the session's, the split focused");
-        shell.update(cx, |shell, cx| shell.focus_pane(Pane::Session, cx));
-        draw(cx);
-        assert_eq!(feet(cx), [span(cx, right)], "the split's, the session focused");
+        assert_eq!(dims(cx), [span(cx, Pane::Session)], "the session's, the split focused");
+        focus(&shell, cx, Pane::Session);
+        assert_eq!(dims(cx), [span(cx, right)], "the split's, the session focused");
 
-        cx.update(|_, cx| {
-            shell.update(cx, |shell, cx| shell.split_pane(Some(Direction::Down), cx));
-        });
-        draw(cx);
-        let below = focused(cx);
-        assert_eq!(feet(cx), [span(cx, right)], "the session stands over the focused shell");
-        shell.update(cx, |shell, cx| shell.focus_pane(Pane::Session, cx));
-        draw(cx);
+        let below = split(&shell, cx, Direction::Down);
+        assert_eq!(dims(cx), [span(cx, right)], "the session stands over the focused shell");
+        focus(&shell, cx, Pane::Session);
         assert_eq!(
-            feet(cx),
+            dims(cx),
             [span(cx, below), span(cx, right)],
             "both shells, the session focused"
         );
 
-        let zoom = |cx: &mut gpui::VisualTestContext| {
-            shell.update(cx, |shell, cx| {
-                shell.panes_mut(cx).toggle_zoom();
-                cx.notify();
-            });
-            draw(cx);
-        };
-        zoom(cx);
-        assert!(feet(cx).is_empty(), "the zoomed pane alone: {:?}", feet(cx));
-        zoom(cx);
+        toggle_zoom(&shell, cx);
+        assert!(dims(cx).is_empty(), "the zoomed pane alone: {:?}", dims(cx));
+        toggle_zoom(&shell, cx);
 
         cx.update(|window, cx| shell.update(cx, |shell, cx| shell.add_diff_surface(window, cx)));
-        draw(cx);
-        let view = focused(cx);
+        draw_frame(cx);
+        let view = shell.read_with(cx, |shell, cx| shell.panes_now(cx).focused());
         assert!(matches!(view, Pane::View(_)), "the view focused: {view:?}");
-        let feet_now = feet(cx);
-        assert!(feet_now.contains(&span(cx, below)), "{feet_now:?}");
-        assert!(feet_now.contains(&span(cx, right)), "{feet_now:?}");
-        assert!(!feet_now.contains(&span(cx, view)), "a view is never dimmed: {feet_now:?}");
+        let dims_now = dims(cx);
+        assert!(dims_now.contains(&span(cx, below)), "{dims_now:?}");
+        assert!(dims_now.contains(&span(cx, right)), "{dims_now:?}");
+        assert!(!dims_now.contains(&span(cx, view)), "a view is never dimmed: {dims_now:?}");
+        FORCE_COMPACT.with(|force| force.set(false));
+    }
+
+    /// On an iPad the same room carries each divider between panes side by side down to the
+    /// window's edge, at the line's own x: never a split down's, which lies across the view, nor
+    /// one between panes that stand over another, and none while one pane fills the view.
+    #[gpui::test]
+    fn an_ipads_foot_carries_each_divider_that_meets_it(cx: &mut gpui::TestAppContext) {
+        use super::super::panes::{Direction, Pane};
+        let (shell, cx) = ipad_session(cx);
+        let dividers = |cx: &mut gpui::VisualTestContext| feet_of(&shell, cx).dividers;
+        let right_of = |cx: &mut gpui::VisualTestContext, pane: Pane| {
+            let (left, width) = span_of(&shell, cx, pane);
+            left + width
+        };
+        assert!(dividers(cx).is_empty(), "one pane, no line: {:?}", dividers(cx));
+
+        let below = split(&shell, cx, Direction::Down);
+        assert!(dividers(cx).is_empty(), "a split down's line lies across: {:?}", dividers(cx));
+
+        split(&shell, cx, Direction::Right);
+        assert_eq!(dividers(cx), [right_of(cx, below)], "the line between the shells below");
+
+        focus(&shell, cx, Pane::Session);
+        split(&shell, cx, Direction::Right);
+        assert_eq!(
+            dividers(cx),
+            [right_of(cx, below)],
+            "the line between the panes on top stands over the shells, short of the foot"
+        );
+
+        toggle_zoom(&shell, cx);
+        assert!(dividers(cx).is_empty(), "the zoomed pane alone: {:?}", dividers(cx));
         FORCE_COMPACT.with(|force| force.set(false));
     }
 }

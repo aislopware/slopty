@@ -6,7 +6,7 @@
 use gpui::{Hsla, size};
 
 use super::pane_area::PaneArea;
-use super::panes::{Direction, Grid, Laid, Pane, Panes};
+use super::panes::{Axis, Direction, Grid, Laid, Pane, Panes};
 use super::*;
 
 /// A pane's header while its view holds more than one pane: the program's icon, its title, and
@@ -556,25 +556,37 @@ fn dims(panes: &Panes, pane: Pane) -> bool {
     panes.len() > 1 && panes.zoomed().is_none() && pane != panes.focused()
 }
 
-/// Where the terminals `panes` draws dimmed, laid out in `area` on `grid`, meet the area's foot:
-/// the left edge and width of each. On an iPad the room under the view, the home indicator's,
-/// takes their dim there (`compact_frame`), so each reads dimmed down to the window's edge as on
-/// the Mac; a view is never dimmed.
-pub(super) fn dimmed_feet(
-    panes: &Panes,
-    area: gpui::Bounds<Pixels>,
-    grid: Option<Grid>,
-) -> Vec<(Pixels, Pixels)> {
+/// What of the panes meets the foot of the area they are laid out in. On an iPad the room under
+/// the view, the home indicator's, continues it (`compact_frame`), so each pane reads dimmed and
+/// each line between panes runs down to the window's edge, as on the Mac.
+#[derive(Debug, Default)]
+pub(super) struct Feet {
+    /// The left edge and width of each terminal drawn dimmed; a view is never dimmed.
+    pub dims: Vec<(Pixels, Pixels)>,
+    /// The left edge of each divider between panes side by side; a split down's divider lies
+    /// across the area and never meets its foot.
+    pub dividers: Vec<Pixels>,
+}
+
+/// The [`Feet`] of `panes` laid out in `area` on `grid`, as the frame draws them.
+pub(super) fn feet(panes: &Panes, area: gpui::Bounds<Pixels>, grid: Option<Grid>) -> Feet {
     let foot = area.bottom() - px(0.5);
-    panes
-        .layout(area, grid)
+    let laid = panes.layout(area, grid);
+    let dimmed = laid
         .panes
-        .into_iter()
+        .iter()
         .filter(|(pane, at)| {
             !matches!(pane, Pane::View(_)) && dims(panes, *pane) && at.bottom() >= foot
         })
         .map(|(_, at)| (at.left(), at.size.width))
-        .collect()
+        .collect();
+    let dividers = laid
+        .dividers
+        .iter()
+        .filter(|divider| divider.axis == Axis::Row && divider.span.bottom() >= foot)
+        .map(|divider| divider.at)
+        .collect();
+    Feet { dims: dimmed, dividers }
 }
 
 /// A pane's name in ids and selectors.
