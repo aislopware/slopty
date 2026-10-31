@@ -9,7 +9,11 @@
 //! read back to the CPU or uploaded again. One device serves every visual;
 //! pipelines are cached by source, so a shader compiles once however many
 //! frames it draws.
+//!
+//! Apple's platforms only, as the shell that shows the frames: Metal draws
+//! them and CoreVideo pools them. Elsewhere the crate is empty.
 
+#![cfg(target_vendor = "apple")]
 #![warn(unreachable_pub)]
 #![allow(
     clippy::redundant_pub_crate,
@@ -109,7 +113,7 @@ fn edge_fade(pixel: vec2<f32>, size: vec2<f32>) -> f32 {
 impl Gpu {
     async fn new() -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::PRIMARY,
+            backends: wgpu::Backends::METAL,
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
@@ -150,11 +154,13 @@ impl Gpu {
     }
 
     /// Run `encoder`'s passes and wait until the GPU finished them: a frame's buffer goes to
-    /// GPUI only once it is drawn.
-    pub(crate) fn finish(&self, encoder: wgpu::CommandEncoder) {
+    /// GPUI only once it is drawn, and a wait that fails (the device lost) hands out none.
+    pub(crate) fn finish(&self, encoder: wgpu::CommandEncoder) -> Result<(), String> {
         self.queue.submit([encoder.finish()]);
-        // A wait that fails leaves the frame as far as the GPU got; the next one tries again.
-        let _waited = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map(|_finished| ())
+            .map_err(|error| format!("the GPU never finished the frame: {error}"))
     }
 }
 

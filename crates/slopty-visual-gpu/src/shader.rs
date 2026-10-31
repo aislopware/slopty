@@ -378,7 +378,15 @@ fn texture(
 }
 
 impl ShaderState {
+    /// Lets go of the frames' spare surfaces once the shader stops drawing: it keeps those its
+    /// frames still in use lie in, such as the one shown.
+    pub fn settle(&self) {
+        self.surfaces.settle();
+    }
+
     fn new(device: &wgpu::Device, size: (u32, u32), buffers: usize) -> Result<Self, String> {
+        // First, so a pool that fails costs no textures.
+        let surfaces = crate::surface::Surfaces::new(device, size)?;
         let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
         Ok(Self {
             size,
@@ -396,7 +404,7 @@ impl ShaderState {
                 texture(device, "shader bloom", half, HDR),
                 texture(device, "shader bloom", half, HDR),
             ],
-            surfaces: crate::surface::Surfaces::new(device, size)?,
+            surfaces,
         })
     }
 }
@@ -641,7 +649,7 @@ pub fn render_shader(
         &pipelines.composite,
         &post_bind(&state.image, &composite, &glow),
     );
-    gpu.finish(encoder);
+    gpu.finish(encoder)?;
     state.latest = write;
     Ok(state.surfaces.finish(target))
 }

@@ -112,6 +112,50 @@ struct ShaderCache {
     /// render thread while a frame renders.
     gpu: Option<slopty_visual_gpu::ShaderState>,
     rendering: bool,
+    /// Whether `settle_later` watches its frames.
+    watched: bool,
+    /// What its place asked for when it was last laid out, and what of that the shader reads.
+    wanted: Option<(slopty_visual::shader::ShaderUniforms, Reads)>,
+}
+
+/// What a shader's picture changes with, besides its size and named inputs: the moment while
+/// it animates and names `iTime`, `iTimeDelta` or `iFrame`, or has a buffer pass, each of whose
+/// frames starts from its last (one step a frame); the pointer when it names `iMouse`; the
+/// camera when it names `iCamera`. A shader that reads none of them draws one frame and keeps
+/// it, whatever its neighbours, the pointer or Reduce Motion do around it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Reads {
+    time: bool,
+    mouse: bool,
+    camera: bool,
+}
+
+impl Reads {
+    /// What `node`'s passes name. A name in a comment counts too, at the cost of frames drawn
+    /// again for nothing.
+    fn of(node: &slopty_visual::ShaderNode) -> Self {
+        let names = |name: &str| {
+            std::iter::once(&node.code).chain(&node.buffers).any(|code| code.contains(name))
+        };
+        Self {
+            time: !node.buffers.is_empty() || names("iTime") || names("iFrame"),
+            mouse: names("iMouse"),
+            camera: names("iCamera"),
+        }
+    }
+
+    /// Whether a frame drawn with `drawn` shows what one drawn with `wanted` would.
+    fn same(
+        self,
+        drawn: &slopty_visual::shader::ShaderUniforms,
+        wanted: &slopty_visual::shader::ShaderUniforms,
+    ) -> bool {
+        same_bits(&drawn.resolution, &wanted.resolution)
+            && same_bits(drawn.inputs.as_flattened(), wanted.inputs.as_flattened())
+            && (!self.mouse || same_bits(&drawn.mouse, &wanted.mouse))
+            && (!self.camera || same_bits(&drawn.camera, &wanted.camera))
+            && (!self.time || drawn.time[0].to_bits() == wanted.time[0].to_bits())
+    }
 }
 
 struct CanvasCache {
@@ -136,6 +180,9 @@ struct SceneCache {
     /// GPU targets kept between frames; away while a frame renders.
     gpu: Option<slopty_visual_gpu::SceneState>,
     rendering: bool,
+    /// Frames started, and whether `settle_later` watches them.
+    frame: u32,
+    watched: bool,
 }
 
 /// What a scene image depends on besides the geometry.
@@ -1647,15 +1694,19 @@ impl VisualFrame {
 
     /// A `ui.shader`: the script's GLSL run on the GPU every frame it
     /// animates, each frame drawn into a pixel buffer the window's surface
-    /// shows as it lies.
+    /// shows as it lies. It draws again only for a change to what it reads
+    /// ([`Reads`]): one that never names the time and has no buffer pass stands
+    /// still, animated or not.
     fn shader(
         &self,
         node: &slopty_visual::ShaderNode,
         key: SharedString,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let spin = if cx.reduce_motion() { 0.0 } else { node.spin };
-        let animate = node.animate && !cx.reduce_motion();
+        let reads = Reads::of(node);
+        let spin = if cx.reduce_motion() || !reads.camera { 0.0 } else { node.spin };
+        let animate = node.animate && reads.time && !cx.reduce_motion();
+        let reads = Reads { time: animate, ..reads };
         let orbit = self.orbit(node.yaw, node.pitch, &key, cx);
         let yaw = Self::shown_yaw(orbit, spin, cx);
         let moving = animate || (spin != 0.0 && orbit.drag.is_none());
@@ -1710,8 +1761,6 @@ impl VisualFrame {
             .collect();
         let (code, buffers, blend, bloom, zoom) =
             (node.code.clone(), node.buffers.clone(), node.blend, node.bloom, node.zoom);
-        // Buffers evolve every frame, so a shader with any keeps running.
-        let moving = moving || !buffers.is_empty() && !cx.reduce_motion();
         let (local, time, entity) =
             (Rc::clone(&self.local), self.time(crate::clock::now(cx)), cx.entity().downgrade());
         el.child(
@@ -1769,17 +1818,9 @@ impl VisualFrame {
                         inputs,
                         channels: Default::default(),
                     };
-                    let unchanged = buffers.is_empty()
-                        && entry.shown.as_ref().is_some_and(|(p, _)| {
-                            same_bits(&p.resolution, &uniforms.resolution)
-                                && same_bits(&p.mouse, &uniforms.mouse)
-                                && same_bits(&p.camera, &uniforms.camera)
-                                && same_bits(
-                                    p.inputs.as_flattened(),
-                                    uniforms.inputs.as_flattened(),
-                                )
-                                && (!animate || p.time[0].to_bits() == uniforms.time[0].to_bits())
-                        });
+                    let unchanged =
+                        entry.shown.as_ref().is_some_and(|(p, _)| reads.same(p, &uniforms));
+                    entry.wanted = Some((uniforms, reads));
                     let shown = entry.shown.as_ref().map(|(_, frame)| frame.clone());
                     // One frame in flight at a time; when it lands the view
                     // paints again and starts the next if anything moved.
@@ -1787,6 +1828,7 @@ impl VisualFrame {
                         entry.rendering = true;
                         entry.frame = entry.frame.saturating_add(1);
                         entry.last_time = time;
+                        let feedback = !buffers.is_empty();
                         let mut gpu_state = entry.gpu.take();
                         let (code, buffers, names, textures) =
                             (code.clone(), buffers.clone(), names.clone(), textures.clone());
@@ -1816,7 +1858,24 @@ impl VisualFrame {
                                     (Some(entry), Ok(frame)) => {
                                         entry.rendering = false;
                                         entry.gpu = gpu_state;
-                                        entry.shown = Some((uniforms, frame));
+                                        // A frame for a place the shader has left since (a
+                                        // window drawn once at another scale, a size it only
+                                        // passed through) never replaces one drawn for where it
+                                        // is: it is dropped, and the frame shown kept.
+                                        let left = !feedback
+                                            && entry.wanted.is_some_and(|(wanted, reads)| {
+                                                !reads.same(&uniforms, &wanted)
+                                                    && entry.shown.as_ref().is_some_and(
+                                                        |(shown, _)| reads.same(shown, &wanted),
+                                                    )
+                                            });
+                                        if !left {
+                                            entry.shown = Some((uniforms, frame));
+                                        }
+                                        if !std::mem::replace(&mut entry.watched, true) {
+                                            let (local, key) = (Rc::clone(&local), key.clone());
+                                            settle_later(local, key, entry.frame, shader_cache, cx);
+                                        }
                                         state.draw_error = None;
                                     }
                                     (Some(entry), Err(error)) => {
@@ -1914,6 +1973,8 @@ impl VisualFrame {
                                                 final_cost: None,
                                                 gpu: None,
                                                 rendering: false,
+                                                frame: 0,
+                                                watched: false,
                                             },
                                         );
                                     }
@@ -1962,6 +2023,7 @@ impl VisualFrame {
                     if entry.image.as_ref().map(|(k, _)| *k) != Some(raster_key) && !entry.rendering
                     {
                         entry.rendering = true;
+                        entry.frame = entry.frame.saturating_add(1);
                         let (scene, mut gpu_state) = (Arc::clone(&entry.scene), entry.gpu.take());
                         let palette = (**paint_palette).clone();
                         let render = cx.background_executor().spawn(async move {
@@ -2029,6 +2091,10 @@ impl VisualFrame {
                                     if let Some(image) = image {
                                         entry.image = Some((raster_key, image));
                                     }
+                                    if !std::mem::replace(&mut entry.watched, true) {
+                                        let (local, key) = (Rc::clone(&local), key.clone());
+                                        settle_later(local, key, entry.frame, scene_cache, cx);
+                                    }
                                 }
                                 drop(state);
                                 let _gone = entity.update(cx, |_, cx| cx.notify());
@@ -2089,6 +2155,94 @@ impl VisualFrame {
         )
         .into_any_element()
     }
+}
+
+/// How long a visual draws no new frame before its pool lets the spare surfaces go. By then
+/// the window has let go of the frames before the one it shows, whose textures GPUI's renderer
+/// holds until a later frame of its own finds them done on the GPU, so the pool keeps only the
+/// surface shown.
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// A visual's cache, as [`settle_later`] watches it.
+trait Settling {
+    /// Frames started so far.
+    fn started(&self) -> u32;
+    /// Whether `settle_later` watches it.
+    fn watched(&mut self) -> &mut bool;
+    /// Lets its pool's spare surfaces go; nothing while a frame is away rendering.
+    fn settle(&self);
+}
+
+impl Settling for ShaderCache {
+    fn started(&self) -> u32 {
+        self.frame
+    }
+
+    fn watched(&mut self) -> &mut bool {
+        &mut self.watched
+    }
+
+    fn settle(&self) {
+        if let Some(gpu) = &self.gpu {
+            gpu.settle();
+        }
+    }
+}
+
+impl Settling for SceneCache {
+    fn started(&self) -> u32 {
+        self.frame
+    }
+
+    fn watched(&mut self) -> &mut bool {
+        &mut self.watched
+    }
+
+    fn settle(&self) {
+        if let Some(gpu) = &self.gpu {
+            gpu.settle();
+        }
+    }
+}
+
+/// The shader `key`'s cache, as [`settle_later`] watches it.
+fn shader_cache<'a>(local: &'a mut Local, key: &SharedString) -> Option<&'a mut dyn Settling> {
+    local.shaders.get_mut(key).map(|cache| -> &mut dyn Settling { cache })
+}
+
+/// The scene `key`'s cache, as [`settle_later`] watches it.
+fn scene_cache<'a>(local: &'a mut Local, key: &SharedString) -> Option<&'a mut dyn Settling> {
+    local.scenes.get_mut(key).map(|cache| -> &mut dyn Settling { cache })
+}
+
+/// Watches the visual `key`, which has started `started` frames, from one of them landing:
+/// once a whole [`SETTLE`] passes with no new frame started, it settles its pool, whatever
+/// stopped it drawing (it is unchanged, scrolled away, or its window hidden); while it keeps
+/// drawing, it looks again a [`SETTLE`] later. A visual gone from the tree is let be.
+fn settle_later(
+    local: Rc<RefCell<Local>>,
+    key: SharedString,
+    started: u32,
+    cache: for<'a> fn(&'a mut Local, &SharedString) -> Option<&'a mut dyn Settling>,
+    cx: &App,
+) {
+    let timer = cx.background_executor().timer(SETTLE);
+    cx.spawn(async move |cx| {
+        timer.await;
+        cx.update(|cx| {
+            let mut state = local.borrow_mut();
+            let Some(visual) = cache(&mut state, &key) else { return };
+            let now = visual.started();
+            if now == started {
+                visual.settle();
+                *visual.watched() = false;
+            } else {
+                drop(state);
+                settle_later(local, key, now, cache, cx);
+            }
+        });
+    })
+    .detach();
 }
 
 /// Whether two runs of floats hold the same bits: a shader's inputs unchanged since its last
@@ -3000,6 +3154,277 @@ end
                 .all(|&[blue, _, _, alpha]| { blue.abs_diff(128) <= 1 && alpha == 255 }),
             "the shader's blue, opaque"
         );
+        frame.read_with(cx, |frame, _| assert!(frame.local.borrow().draw_error.is_none()));
+    }
+
+    /// A still shader draws a frame each time the pointer moves over it. Once it stops, its
+    /// pool lets go of the spare surface it drew into within two seconds and keeps the one
+    /// shown: the next frame lies in a new surface, where an unsettled pool would hand the
+    /// spare back.
+    #[gpui::test]
+    fn a_shader_that_stops_drawing_lets_its_spare_surfaces_go(cx: &mut gpui::TestAppContext) {
+        if !slopty_visual_gpu::available() {
+            return;
+        }
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let script = "
+return function()
+  return ui.shader { height = 60, blend = 'opaque', code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = vec4(iMouse.x / iResolution.x, 0.0, 0.5, 1.0);
+}
+]] }
+end
+";
+        let (frame, cx) =
+            cx.add_window_view(|_, cx| VisualFrame::from_script("entry#still".into(), script, cx));
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+            cx.run_until_parked();
+        };
+        // The pointer `x` pixels into the shader: a frame drawn for it, and the surface it lies
+        // in.
+        let pointer_at = |x: f32, cx: &mut gpui::VisualTestContext| {
+            frame.update(cx, |frame, cx| {
+                let mut local = frame.local.borrow_mut();
+                let key = local.shaders.keys().next().expect("the shader").clone();
+                local.pointers.insert(key, point(px(x), px(20.0)));
+                drop(local);
+                cx.notify();
+            });
+            draw(cx);
+            draw(cx);
+            frame.read_with(cx, |frame, _| {
+                let local = frame.local.borrow();
+                let cache = local.shaders.values().next().expect("the shader");
+                cache.shown.as_ref().and_then(|(_, shown)| shown.surface_id()).expect("a frame")
+            })
+        };
+        draw(cx);
+        let seen: std::collections::HashSet<u32> =
+            [10.0, 20.0, 30.0, 40.0].into_iter().map(|x| pointer_at(x, cx)).collect();
+        assert!(seen.len() >= 2, "frames drew into the pool's surfaces in turn: {seen:?}");
+        // The pointer rests: the watch started with the first of those frames looks again,
+        // and a whole second on with no new frame the pool settles.
+        for _ in 0..2 {
+            cx.executor().advance_clock(SETTLE);
+            cx.run_until_parked();
+        }
+        let next = pointer_at(50.0, cx);
+        assert!(!seen.contains(&next), "a spare surface was kept: {next} from {seen:?}");
+        frame.read_with(cx, |frame, _| assert!(frame.local.borrow().draw_error.is_none()));
+    }
+
+    /// The self-test's visual (`slopty_e2e::visual::SCRIPT`): a shader that animates above one
+    /// that stands.
+    const TWO_SHADERS: &str = r#"
+return function()
+  return ui.column { gap = 12,
+    ui.shader { height = 160, animate = true, blend = "opaque", code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  vec2 uv = fragCoord / iResolution.xy;
+  float stripe = step(0.5, fract(uv.x * 6.0 - iTime * 0.7));
+  vec3 colour = mix(vec3(0.12, 0.42, 0.92), vec3(0.96, 0.60, 0.16), stripe);
+  fragColor = vec4(colour * (1.0 - min(iTime, 30.0) / 60.0), 1.0);
+}
+]] },
+    ui.shader { height = 80, blend = "opaque", code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  vec2 uv = fragCoord / iResolution.xy;
+  fragColor = vec4(uv.x, 0.55, 1.0 - uv.x, 1.0);
+}
+]] },
+  }
+end
+"#;
+
+    /// A step of a self-test's render: what it is, whether it draws the window at a scale the
+    /// window is not on, and what it does.
+    type RenderStep = (&'static str, bool, fn(&mut Window, &mut App));
+
+    /// A shader that never names the time, the pointer or the camera ([`Reads`]) draws one frame
+    /// and keeps it whatever happens around it, as the self-test drives the window
+    /// (`slopty_e2e::visual::hold_to_its_rules`): the self-test's still shader, whose `animate`
+    /// is on as every shader's is unless it says otherwise, at an iPhone's 3x and a Mac's 2x and
+    /// 1x. Under Reduce Motion the visual settles; a render draws the window, twice from
+    /// scratch and once with the accessibility tree; the pointer comes over it and leaves;
+    /// Reduce Motion lets go while the shader above draws, and is held again; three renders
+    /// more. A 1x window's render also draws it offscreen at 2x for the review picture: that
+    /// starts a frame for 2x, which lands after the window is back at 1x and is dropped.
+    #[gpui::test(iterations = 4)]
+    fn a_still_shader_draws_once_whatever_happens_around_it(cx: &mut gpui::TestAppContext) {
+        if !slopty_visual_gpu::available() {
+            return;
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::motion::hold(true, cx);
+        });
+        // What a render of the self-test does to the window (`slopty-app`'s `e2e::render`),
+        // step by step.
+        let render: [RenderStep; 4] = [
+            ("a render's frame", false, |window, cx| window.draw(cx).clear(cx)),
+            ("a render offscreen at 2x", true, |window, cx| {
+                if window.scale_factor() < 2.0 {
+                    let _picture = window.render_to_image_at(2.0, cx);
+                }
+            }),
+            ("a render's frames from scratch", false, |window, cx| {
+                for _ in 0..2 {
+                    window.repeat_frame_time();
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                }
+            }),
+            ("a render's frame with the accessibility tree", false, |window, cx| {
+                window.set_a11y_active(true);
+                window.draw(cx).clear(cx);
+                window.set_a11y_active(false);
+            }),
+        ];
+        for (scale, width) in [(3.0_f32, 370.0_f32), (2.0, 640.0), (1.0, 640.0)] {
+            let id = SharedString::from(format!("entry#shaders-{scale}"));
+            let (moving, still) =
+                (SharedString::from(format!("{id}.0")), SharedString::from(format!("{id}.1")));
+            // The window takes its size and scale before the script runs, as the inspector the
+            // visual opens in has its own before the visual's turn reaches it.
+            let (frame, cx) = cx.add_window_view(|_, cx| {
+                VisualFrame::new(id.clone(), "Shaders".to_owned(), String::new(), None, None, cx)
+            });
+            cx.simulate_resize(gpui::size(px(width), px(600.0)));
+            cx.simulate_scale_factor_change(scale);
+            cx.run_until_parked();
+            frame.update(cx, |frame, cx| {
+                frame.start(TWO_SHADERS, slopty_visual::Assets::new(HashMap::new()), cx);
+            });
+            // The frames the shader at `key` started, and what the one it shows was drawn for,
+            // into which surface.
+            let drawn = |key: &SharedString, cx: &mut gpui::VisualTestContext| {
+                frame.read_with(cx, |frame, _| {
+                    let local = frame.local.borrow();
+                    let cache = local.shaders.get(key).expect("the shader's cache");
+                    let shown = cache.shown.as_ref().map(|(uniforms, shown)| {
+                        (uniforms.resolution, uniforms.mouse, uniforms.camera, shown.surface_id())
+                    });
+                    (cache.frame, shown)
+                })
+            };
+            // A frame as the app draws one, and the work it sets off.
+            let next_frame = |cx: &mut gpui::VisualTestContext| {
+                cx.executor().advance_clock(std::time::Duration::from_millis(16));
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            };
+            for _ in 0..4 {
+                next_frame(cx);
+            }
+            let (settled, shown) = drawn(&still, cx);
+            let drawn_at = shown.map(|(resolution, ..)| resolution[2].to_bits());
+            assert!(settled == 1 && drawn_at == Some(scale.to_bits()), "it settled: {shown:?}");
+            let started = std::cell::Cell::new(settled);
+            let check = |step: &str, cx: &mut gpui::VisualTestContext| {
+                let now = drawn(&still, cx);
+                assert_eq!(now, (started.get(), shown), "at {scale}x the still shader: {step}");
+            };
+            let rendered = |held: &str, cx: &mut gpui::VisualTestContext| {
+                for (step, elsewhere, act) in render {
+                    cx.update(act);
+                    cx.run_until_parked();
+                    if elsewhere && scale < 2.0 {
+                        started.set(started.get().saturating_add(1));
+                    }
+                    check(&format!("{step}, {held}"), cx);
+                }
+            };
+            rendered("the first", cx);
+            let pointer = |at: Option<Point<Pixels>>, cx: &mut gpui::VisualTestContext| {
+                frame.update(cx, |frame, cx| {
+                    let mut local = frame.local.borrow_mut();
+                    match at {
+                        Some(at) => local.pointers.insert(still.clone(), at),
+                        None => local.pointers.remove(&still),
+                    };
+                    drop(local);
+                    cx.notify();
+                });
+                next_frame(cx);
+            };
+            pointer(Some(point(px(40.0), px(200.0))), cx);
+            check("the pointer over it", cx);
+            pointer(None, cx);
+            check("the pointer gone", cx);
+            cx.update(|_, cx| crate::motion::hold(false, cx));
+            let before = drawn(&moving, cx).0;
+            for nth in 0..10 {
+                next_frame(cx);
+                check(&format!("frame {nth} with motion let go"), cx);
+            }
+            let after = drawn(&moving, cx).0;
+            assert!(after >= before.saturating_add(5), "the shader above drew: {before}, {after}");
+            cx.update(|_, cx| crate::motion::hold(true, cx));
+            next_frame(cx);
+            check("held again", cx);
+            for nth in 0..3 {
+                rendered(&format!("held render {nth}"), cx);
+            }
+            frame.read_with(cx, |frame, _| assert!(frame.local.borrow().draw_error.is_none()));
+        }
+    }
+
+    /// A shader whose buffer pass starts each frame from its own last one, naming no time: a
+    /// simulation steps a frame at a time while motion runs, and holds once Reduce Motion is.
+    #[gpui::test]
+    fn a_feedback_shader_steps_while_motion_runs_and_holds_when_held(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        if !slopty_visual_gpu::available() {
+            return;
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            crate::motion::hold(false, cx);
+        });
+        let script = "
+return function()
+  return ui.shader { height = 60, blend = 'opaque', buffers = { [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  vec2 uv = fragCoord / iResolution.xy;
+  fragColor = vec4(fract(texture(iChannel0, uv).r + 0.1), uv, 1.0);
+}
+]] }, code = [[
+void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+  fragColor = texture(iChannel0, fragCoord / iResolution.xy);
+}
+]] }
+end
+";
+        let (frame, cx) = cx
+            .add_window_view(|_, cx| VisualFrame::from_script("entry#feedback".into(), script, cx));
+        let started = |cx: &mut gpui::VisualTestContext| {
+            frame.read_with(cx, |frame, _| {
+                frame.local.borrow().shaders.values().next().expect("the shader's cache").frame
+            })
+        };
+        let next_frame = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        };
+        for _ in 0..10 {
+            next_frame(cx);
+        }
+        let running = started(cx);
+        assert!(running >= 8, "it stepped while motion ran: {running} frames in 10");
+        cx.update(|_, cx| crate::motion::hold(true, cx));
+        next_frame(cx);
+        let held = started(cx);
+        for _ in 0..10 {
+            next_frame(cx);
+        }
+        assert_eq!(started(cx), held, "held, it stands");
         frame.read_with(cx, |frame, _| assert!(frame.local.borrow().draw_error.is_none()));
     }
 

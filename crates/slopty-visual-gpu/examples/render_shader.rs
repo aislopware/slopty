@@ -7,19 +7,23 @@
 //!    [--size 1440x840] [--blend light|alpha|opaque] [--bloom 1] [--time 2] \
 //!    [--input name=value ...] [--background r,g,b]
 //! ```
+//!
+//! Apple's platforms only, as the crate.
 
-use std::error::Error;
+#[cfg(not(target_vendor = "apple"))]
+fn main() {}
 
-use slopty_visual::shader::{Blend, ShaderUniforms};
-use slopty_visual_gpu::{ShaderSpec, render_shader};
-
+#[cfg(target_vendor = "apple")]
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
     reason = "pixel sizes stay far below 2^24, exact in `f32`, and a blend of bytes stays in 0..=255"
 )]
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use slopty_visual::shader::{Blend, ShaderUniforms};
+    use slopty_visual_gpu::{ShaderSpec, render_shader};
+
     let mut args = std::env::args().skip(1);
     let (Some(source), Some(out)) = (args.next(), args.next()) else {
         return Err("usage: render_shader SHADER.glsl OUT.ppm [flags]".into());

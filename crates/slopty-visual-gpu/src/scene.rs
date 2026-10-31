@@ -1016,9 +1016,17 @@ pub struct SceneState {
 }
 
 impl SceneState {
+    /// Lets go of the frames' spare surfaces once the scene stops drawing (its camera stands):
+    /// it keeps those its frames still in use lie in, such as the one shown.
+    pub fn settle(&self) {
+        self.surfaces.settle();
+    }
+
     fn new(gpu: &crate::Gpu, (w, h): (u32, u32)) -> Result<Self, String> {
         use wgpu::TextureUsages as U;
         let device = &gpu.device;
+        // First, so a pool that fails costs none of the targets.
+        let surfaces = crate::surface::Surfaces::new(device, (w, h))?;
         let texture = |label: &str, size: (u32, u32), format, samples, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
@@ -1043,7 +1051,7 @@ impl SceneState {
             bloom_a: texture("scene bloom", half, HDR, 1, sampled),
             bloom_b: texture("scene bloom", half, HDR, 1, sampled),
             dummy_depth: lit_dummy_depth(device),
-            surfaces: crate::surface::Surfaces::new(device, (w, h))?,
+            surfaces,
         })
     }
 }
@@ -1507,7 +1515,10 @@ pub fn render_scene(
         &pipelines.composite,
         &post_bind(shaded, &strength, bloom_a),
     );
-    gpu.finish(encoder);
+    if let Err(error) = gpu.finish(encoder) {
+        tracing::warn!(%error, "a scene's frame was lost");
+        return None;
+    }
     Some(surfaces.finish(target))
 }
 

@@ -5,9 +5,11 @@
 //! samples the same buffer where it lies. No frame is read back to the CPU and uploaded again
 //! (`docs/decisions/ui.md`, "An animating visual renders into the surface GPUI shows").
 //!
-//! The pool hands an `IOSurface` out again, in a new pixel buffer, only once nothing holds the
-//! last buffer it lay in: GPUI holds the one it shows until its frame left the GPU, so a frame
-//! never draws over the picture on screen.
+//! The pool hands an `IOSurface` out again, in a new pixel buffer, only once nothing uses it: no
+//! one holds the last buffer it lay in, and no CoreVideo Metal texture maps it. GPUI samples a
+//! frame through a texture from a cache of its own, which it holds until its frame has left the
+//! GPU, so a frame never draws over a picture the GPU is still reading. A visual that stops
+//! drawing lets the pool's spare surfaces go (`Surfaces::settle`).
 
 use std::ptr::NonNull;
 
@@ -17,10 +19,10 @@ use objc2_core_video::{
     CVPixelBufferCreate, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetIOSurface, CVPixelBufferGetWidth,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferPool,
-    CVPixelBufferUnlockBaseAddress, CVReturn, kCVMetalTextureUsage, kCVPixelBufferHeightKey,
-    kCVPixelBufferIOSurfacePropertiesKey, kCVPixelBufferMetalCompatibilityKey,
-    kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey, kCVPixelFormatType_32BGRA,
-    kCVReturnSuccess,
+    CVPixelBufferPoolFlushFlags, CVPixelBufferUnlockBaseAddress, CVReturn, kCVMetalTextureUsage,
+    kCVPixelBufferHeightKey, kCVPixelBufferIOSurfacePropertiesKey,
+    kCVPixelBufferMetalCompatibilityKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+    kCVPixelFormatType_32BGRA, kCVReturnSuccess,
 };
 use objc2_io_surface::IOSurfaceID;
 use objc2_metal::{MTLPixelFormat, MTLTextureType, MTLTextureUsage};
@@ -238,6 +240,69 @@ impl Target {
     }
 }
 
+/// A CoreVideo cache of Metal textures of pixel buffers, on `device`'s Metal device, whose
+/// textures can be drawn into and read. GPUI's renderer keeps one of its own the same way.
+fn texture_cache(device: &wgpu::Device) -> Result<CFRetained<CVMetalTextureCache>, String> {
+    let usage = number((MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead).0);
+    // SAFETY: CVMetalTexture.h's constant string, which lives forever.
+    let usage_key = unsafe { kCVMetalTextureUsage };
+    let texture_attributes =
+        CFDictionary::<CFString, CFType>::from_slices(&[usage_key], &[&*usage]);
+    // SAFETY: wgpu's rule for `Device::as_hal`: the Metal device is only borrowed here, to make
+    // a texture cache that draws on it, and wgpu keeps it alive past every use (the cache
+    // retains it too).
+    let metal =
+        unsafe { device.as_hal::<wgpu::hal::api::Metal>() }.ok_or("the visual GPU is not Metal")?;
+    let mut cache: *mut CVMetalTextureCache = std::ptr::null_mut();
+    // SAFETY: CVMetalTextureCache.h's rule for `CVMetalTextureCacheCreate`: a live Metal device,
+    // a dictionary of `kCVMetalTexture*` keys and a valid out-pointer; the cache comes back
+    // owned (+1).
+    let status = unsafe {
+        CVMetalTextureCache::create(
+            None,
+            None,
+            metal.raw_device(),
+            Some(texture_attributes.as_opaque()),
+            NonNull::from(&mut cache),
+        )
+    };
+    drop(metal);
+    check("CVMetalTextureCacheCreate", status)?;
+    let cache = NonNull::new(cache).ok_or("CVMetalTextureCacheCreate made no cache")?;
+    // SAFETY: owned (+1), as above.
+    Ok(unsafe { CFRetained::from_raw(cache) })
+}
+
+/// `cache`'s Metal texture of `buffer`, a BGRA one `width` × `height`. While it lives, CoreVideo
+/// counts the buffer's surface in use, and its pool does not hand it out again.
+fn metal_texture(
+    cache: &CVMetalTextureCache,
+    buffer: &CVPixelBuffer,
+    (width, height): (u32, u32),
+) -> Result<CFRetained<CVMetalTexture>, String> {
+    let mut metal: *mut CVMetalTexture = std::ptr::null_mut();
+    // SAFETY: CVMetalTextureCache.h's rule for `CVMetalTextureCacheCreateTextureFromImage`: a
+    // live cache, an `IOSurface`-backed BGRA buffer of this size, its only plane (0) viewed in
+    // its own format, and a valid out-pointer; the texture comes back owned (+1).
+    let status = unsafe {
+        CVMetalTextureCache::create_texture_from_image(
+            None,
+            cache,
+            buffer,
+            None,
+            MTLPixelFormat::BGRA8Unorm,
+            width as usize,
+            height as usize,
+            0,
+            NonNull::from(&mut metal),
+        )
+    };
+    check("CVMetalTextureCacheCreateTextureFromImage", status)?;
+    let metal = NonNull::new(metal).ok_or("the cache made no texture")?;
+    // SAFETY: owned (+1), as above.
+    Ok(unsafe { CFRetained::from_raw(metal) })
+}
+
 impl Surfaces {
     /// Buffers `width` × `height` for frames `device` draws.
     pub(crate) fn new(device: &wgpu::Device, (width, height): (u32, u32)) -> Result<Self, String> {
@@ -257,35 +322,7 @@ impl Surfaces {
         let pool = NonNull::new(pool).ok_or("CVPixelBufferPoolCreate made no pool")?;
         // SAFETY: owned (+1), as above.
         let pool = unsafe { CFRetained::from_raw(pool) };
-        // What the cache's textures may be used for: drawn into, and read.
-        let usage = number((MTLTextureUsage::RenderTarget | MTLTextureUsage::ShaderRead).0);
-        // SAFETY: CVMetalTexture.h's constant string, which lives forever.
-        let usage_key = unsafe { kCVMetalTextureUsage };
-        let texture_attributes =
-            CFDictionary::<CFString, CFType>::from_slices(&[usage_key], &[&*usage]);
-        // SAFETY: wgpu's rule for `Device::as_hal`: the Metal device is only borrowed here, to
-        // make a texture cache that draws on it, and wgpu keeps it alive past every use (the
-        // cache retains it too).
-        let metal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
-            .ok_or("the visual GPU is not Metal")?;
-        let mut cache: *mut CVMetalTextureCache = std::ptr::null_mut();
-        // SAFETY: CVMetalTextureCache.h's rule for `CVMetalTextureCacheCreate`: a live Metal
-        // device, a dictionary of `kCVMetalTexture*` keys and a valid out-pointer; the cache
-        // comes back owned (+1).
-        let status = unsafe {
-            CVMetalTextureCache::create(
-                None,
-                None,
-                metal.raw_device(),
-                Some(texture_attributes.as_opaque()),
-                NonNull::from(&mut cache),
-            )
-        };
-        drop(metal);
-        check("CVMetalTextureCacheCreate", status)?;
-        let cache = NonNull::new(cache).ok_or("CVMetalTextureCacheCreate made no cache")?;
-        // SAFETY: owned (+1), as above.
-        let cache = unsafe { CFRetained::from_raw(cache) };
+        let cache = texture_cache(device)?;
         Ok(Self { size: (width, height), pool, cache })
     }
 
@@ -302,28 +339,7 @@ impl Surfaces {
         // SAFETY: owned (+1), as above.
         let buffer = unsafe { CFRetained::from_raw(buffer) };
         let (width, height) = self.size;
-        let mut metal: *mut CVMetalTexture = std::ptr::null_mut();
-        // SAFETY: CVMetalTextureCache.h's rule for
-        // `CVMetalTextureCacheCreateTextureFromImage`: a live cache, an `IOSurface`-backed BGRA
-        // buffer of this size, its only plane (0) viewed in its own format, and a valid
-        // out-pointer; the texture comes back owned (+1).
-        let status = unsafe {
-            CVMetalTextureCache::create_texture_from_image(
-                None,
-                &self.cache,
-                &buffer,
-                None,
-                MTLPixelFormat::BGRA8Unorm,
-                width as usize,
-                height as usize,
-                0,
-                NonNull::from(&mut metal),
-            )
-        };
-        check("CVMetalTextureCacheCreateTextureFromImage", status)?;
-        let metal = NonNull::new(metal).ok_or("the cache made no texture")?;
-        // SAFETY: owned (+1), as above.
-        let metal = unsafe { CFRetained::from_raw(metal) };
+        let metal = metal_texture(&self.cache, &buffer, (width, height))?;
         let raw = CVMetalTextureGetTexture(&metal).ok_or("the cache's texture has no Metal one")?;
         let extent = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
         // SAFETY: wgpu-hal's rule for `texture_from_raw`: a 2D, single-layer, single-level
@@ -362,6 +378,13 @@ impl Surfaces {
         Ok(Target { buffer, metal, texture })
     }
 
+    /// Lets go of every surface of the pool that nothing uses: a visual that stopped drawing
+    /// keeps the surface it shows, not the spares it drew ahead into. CoreVideo would otherwise
+    /// keep them for as long as the pool lives.
+    pub(crate) fn settle(&self) {
+        self.pool.flush(CVPixelBufferPoolFlushFlags::ExcessBuffers);
+    }
+
     /// The frame `target` holds, once the GPU finished drawing it.
     pub(crate) fn finish(&self, target: Target) -> Frame {
         let Target { buffer, metal, texture } = target;
@@ -389,5 +412,68 @@ mod tests {
         assert_eq!(frame.read_pixels(), bgra);
         assert!(Frame::from_bgra(3, 2, &bgra[4..]).is_none(), "too few pixels");
         assert!(Frame::from_bgra(0, 2, &[]).is_none(), "no pixels");
+    }
+
+    /// A pool of 64 × 32 surfaces on the visual GPU, and a way to take its next frame.
+    fn pool() -> Option<(&'static wgpu::Device, Surfaces)> {
+        let device = &crate::gpu()?.device;
+        Some((device, Surfaces::new(device, (64, 32)).expect("a pool")))
+    }
+
+    fn next_frame(device: &wgpu::Device, surfaces: &Surfaces) -> Frame {
+        surfaces.finish(surfaces.next(device).expect("a buffer"))
+    }
+
+    /// Once the window moved on to the next frame, the only hold on the surface its last frame
+    /// showed is the texture GPUI's renderer samples it through, from a CoreVideo cache of its
+    /// own, until that frame has left the GPU. While that texture lives, the pool never hands
+    /// the surface to a new frame, which would draw over a picture the GPU is still reading;
+    /// once it goes, the surface comes back.
+    #[test]
+    fn a_surface_gpui_still_samples_is_never_drawn_into() {
+        let Some((device, surfaces)) = pool() else { return };
+        let shown = next_frame(device, &surfaces);
+        let sampled = shown.surface_id().expect("a surface");
+        let gpui = texture_cache(device).expect("GPUI's cache");
+        let texture = metal_texture(&gpui, &shown.pixel_buffer(), (64, 32)).expect("a texture");
+        drop(shown);
+        for step in 0..8 {
+            let next = next_frame(device, &surfaces);
+            assert_ne!(
+                next.surface_id(),
+                Some(sampled),
+                "frame {step} drew into a sampled surface"
+            );
+        }
+        drop(texture);
+        gpui.flush(0);
+        let (one, two) = (next_frame(device, &surfaces), next_frame(device, &surfaces));
+        assert!(
+            [one.surface_id(), two.surface_id()].contains(&Some(sampled)),
+            "the surface comes back once GPUI lets go"
+        );
+    }
+
+    /// A visual that stops drawing keeps the surface it shows and lets the spares go, so its
+    /// next frames lie in new surfaces; unsettled, the pool hands the spares back.
+    #[test]
+    fn a_settled_pool_keeps_only_the_surface_shown() {
+        let Some((device, surfaces)) = pool() else { return };
+        let ids = |frames: &[&Frame]| -> Vec<u32> {
+            frames.iter().map(|frame| frame.surface_id().expect("a surface")).collect()
+        };
+        let drawn = [next_frame(device, &surfaces), next_frame(device, &surfaces)];
+        let shown = next_frame(device, &surfaces);
+        let seen = ids(&[&drawn[0], &drawn[1], &shown]);
+        drop(drawn);
+        let spare = next_frame(device, &surfaces);
+        assert!(seen.contains(&ids(&[&spare])[0]), "unsettled, a spare comes back");
+        drop(spare);
+        surfaces.settle();
+        let after = [next_frame(device, &surfaces), next_frame(device, &surfaces)];
+        for id in ids(&[&after[0], &after[1]]) {
+            assert!(!seen.contains(&id), "settled, no spare is left: {id} in {seen:?}");
+        }
+        drop(shown);
     }
 }

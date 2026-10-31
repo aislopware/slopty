@@ -14755,18 +14755,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - *Reuse.* What the pool keeps is the `IOSurface`s; each frame gets a new pixel buffer around
     one of them, so a frame's identity is its surface (`Frame::surface_id`), never its pixel
     buffer's address, which the allocator hands out again. The pool hands a surface out again
-    only once nothing holds the last buffer it lay in: the visual holds its newest frame, and
-    GPUI holds the buffer it draws until that frame has left the GPU (`SurfacesInFlight`), so a
-    frame never draws over the picture on screen. A frame reaches the window only once the GPU
-    finished it (`Gpu::finish` waits, as the read-back did). An animating shader so keeps the
-    surfaces held at once and the one being drawn: three while the window holds two frames, for
-    any number of frames (the pool lets an unused one go after a second); one that changes size
-    starts a new pool.
+    only once nothing uses it: no one holds the last buffer it lay in, and no CoreVideo Metal
+    texture maps it. The visual holds its newest frame. Once the window has moved on, GPUI
+    holds no buffer but the texture it samples a frame through, from a cache of its own, until
+    that frame has left the GPU (`SurfacesInFlight`), and CoreVideo does not recycle a surface a
+    live texture maps; holding only the `MTLTexture` or the `IOSurface` would not stop it. So a
+    frame never draws over a picture the GPU is still reading. A frame reaches the window only
+    once the GPU finished it (`Gpu::finish` waits, as the read-back did, and a failed wait hands
+    no frame out). An animating shader so keeps about three surfaces: the one shown, the one
+    the window's last frame still samples and the one being drawn, and a fourth while the GPU
+    is behind, since the next frame starts before GPUI has let go of the oldest. One that
+    changes size starts a new pool.
+  - *Settling.* CoreVideo frees a pool's unused surfaces only when told to: left alone, a
+    visual that stopped drawing would keep every surface its animation used for as long as it
+    lives, some 11 MiB of spares at 1600 × 900 px. From a frame landing, the shell watches the
+    visual, and once a whole second passes with no new frame started, whatever stopped it (a
+    still shader the pointer left, a scene whose camera stands, an animation turned off, a
+    visual scrolled away or a hidden window, where nothing paints it), lets its pool's spares
+    go (`ShaderState::settle`, `SceneState::settle`, `kCVPixelBufferPoolFlushExcessBuffers`),
+    keeping the surface shown; while it draws, the watch looks again a second later. The
+    second outlasts GPUI's hold on the frames before the one shown, which ends with a later
+    frame of its own. Settling at the draw that finds a visual unchanged would miss both
+    those holds and a visual no draw reaches.
   - *iOS* takes the same path: `IOSurface`, `CVPixelBufferPool` and `CVMetalTextureCache` are
     public on iOS and its simulator, and the fork's renderer, shared by both, already drew
-    surfaces there.
+    surfaces there. A probe in the simulator (the 26.5 runtime) rendered into a pooled surface
+    through such a cache, read the right bytes back, and saw the pool recycle as on macOS.
+    `slopty-visual-gpu` is Apple's only, as the shell that shows its frames: Metal draws them
+    and CoreVideo pools them, and elsewhere the crate is empty.
   - *A still visual* takes it too: a still shader, or a scene whose camera stands, draws one
-    frame, whose buffer the window keeps showing. The atlas images and the freeing they needed
+    frame, whose buffer the window keeps showing. A shader draws again only for a change to
+    what it reads (`Reads`): its size and named inputs always; the moment only while it
+    animates and its code names `iTime`, `iTimeDelta` or `iFrame`, or it has a buffer pass,
+    whose every frame starts from the last (a simulation steps once a frame, and holds under
+    Reduce Motion or `animate = false` as any animation does), so `animate`, on unless a script
+    turns it off, moves nothing in a shader that never names the time; the pointer only when
+    it names `iMouse`; the camera and its spin only when it names `iCamera`. Before, a shader
+    that named none of them but left `animate` on drew the same picture every frame while
+    motion ran, into the pool's surfaces in turn, so the self-test's still gradient ended on
+    another surface or its own by chance; and a shader with buffers never held, even under
+    Reduce Motion: each frame's landing drew the view again, which started the next. A frame that lands for a place the shader has left
+    since (a window drawn once at another scale, as a 1x Mac's review picture at 2x is, or a
+    size it only passed through) is dropped while the frame shown fits where it is, rather than
+    shown stretched and drawn again. The atlas images and the freeing they needed
     (on a node leaving the tree and on the visual's release) are gone: a frame's buffer goes
     back to its pool when the last holder lets go.
   - *The software scene*, drawn by the CPU where no GPU serves, is copied once into a new
@@ -14785,8 +14816,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-shell` `visuals::tests::an_animating_shaders_frames_reach_the_surface_as_drawn`
     (every frame paints the very buffer the shader's last pass drew, as a surface and never as an
     image, from at most three surfaces for twenty frames, and the buffer shown holds the
-    shader's picture); `slopty-visual-gpu`
+    shader's picture) and `a_shader_that_stops_drawing_lets_its_spare_surfaces_go` (a still
+    shader the pointer stopped moving over draws its next frame into a new surface, the spare
+    let go within two seconds) and `a_still_shader_draws_once_whatever_happens_around_it` (the
+    self-test's two shaders at 3x, 2x and 1x: the still one, `animate` left on, keeps its one
+    frame through renders drawn from scratch and with the accessibility tree, the pointer
+    coming and going, motion let go while the shader above draws and held again, and a 1x
+    window's render offscreen at 2x, whose frame is dropped) and
+    `a_feedback_shader_steps_while_motion_runs_and_holds_when_held` (a buffer pass that reads
+    its own last frame and names no time steps every frame while motion runs, and stands once
+    it is held); `slopty-visual-gpu`
     `shader::tests::an_animating_shader_draws_each_frame_into_a_pooled_pixel_buffer` (each
-    frame's pixels in its BGRA buffer, from exactly three surfaces while two frames are held)
-    and the crates' pixel checks, which read a frame through `Frame::read_pixels`; the fork's
-    BGRA, opacity, fade and scroll-layer tests.
+    frame's pixels in its BGRA buffer, from exactly three surfaces while two frames are held),
+    `surface::tests::a_surface_gpui_still_samples_is_never_drawn_into` (a frame let go but
+    still mapped by a texture from a second cache, as GPUI's, never has its surface handed to
+    a new frame, and has it back once the texture goes),
+    `surface::tests::a_settled_pool_keeps_only_the_surface_shown` and the crates' pixel checks,
+    which read a frame through `Frame::read_pixels`; the fork's BGRA, opacity, fade and
+    scroll-layer tests.

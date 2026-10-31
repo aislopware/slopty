@@ -15,6 +15,8 @@
 //! cargo test -p slopty-visual-gpu --release --test animated_frames -- --ignored --nocapture
 //! ```
 
+#![cfg(target_vendor = "apple")]
+
 #[cfg(test)]
 mod animated_frames {
     use std::collections::VecDeque;

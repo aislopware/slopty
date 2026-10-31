@@ -1,6 +1,8 @@
 //! A glTF model drawn by `s:model`, on the software renderer and on the GPU, judged by
 //! numbers: the image's size, and how many of its pixels the model covers.
 
+#![cfg(target_vendor = "apple")]
+
 #[cfg(test)]
 mod model {
     use std::collections::HashMap;
