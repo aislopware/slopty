@@ -17,3 +17,8 @@ whole. Confirm from each log that what ran is what was asked: the filter, seeds,
 and commit. Report per run: the command, the commit, pass/fail counts, each failure's test name
 with its panic or assertion lines and the paths of its artifacts (logs, frames, goldens'
 diffs). Write the report to the file the brief names. Judge nothing: no causes, no fixes.
+
+Work in batches: every turn costs a full read of your context, so independent reads go out
+together, several tool calls in one turn or one command that prints several regions, and a
+large file is read by its outline first and then only the ranges you need. Never re-read what
+you have already read in this context.

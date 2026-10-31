@@ -2647,7 +2647,9 @@ more full-window layer.
   sizes behind the budget, and a live run (two lanes' directories dropped, 24.4 GiB free, 3.6 s), are in `docs/MEASUREMENTS.md` ("the e2e guest's
   disk").
 - ✅ **A flake is measured, and called fixed only after the clean runs that show it at 95 %**
-  (2026-10-18). Rerunning a red test until it passes does not separate a fix from luck.
+  (2026-10-18; superseded on 2026-10-31 by "A round's long steps are the model's", item 7:
+  the repeat tool went with the e2e guest). Rerunning a red test until it passes does not
+  separate a fix from luck.
   `cargo xtask remote --e2e app|ios -E '<filterset>' --repeat N` runs the case N times in one
   guest session: one boot and one copy, and every run starts on a fresh app, with the
   simulator case on a fresh clone of the pristine simulator. Each run has its own data
@@ -3616,3 +3618,56 @@ more full-window layer.
   Supersedes "The gate runs on warm runners here", "An e2e case runs in a guest here", "The
   simulator case runs in the guest too" and "The e2e guest makes room before each copy, to a
   budget" as each piece moves.
+
+- ✅ **A round's long steps are the model's, not the checks': lanes batch, checkpoints stay small,
+  review never stops a lane** (2026-10-31). Checks had come down to about a minute and a half,
+  yet the person still saw steps take one to two hours, and asked for every step to be made fast
+  with no loss of quality. Measured over three sessions and 66 lanes
+  (`.research/speed-2026-10-31/A-where-time-goes.md`; outside practice in `B-external.md`):
+  - **Lanes wait on the model.** Generation was 56-64 % of a lane's active time and checks
+    11-17 %. Lanes made 1.02 tool calls a turn; half of model time went to turns that only read,
+    and 63 % of file reads re-read a file already read. Lane X's checkpoint of 4.8 hours was
+    1,135 serial turns over a scope that grew through 20 messages to +4,863/−1,124 lines.
+  - **A review cycle took 69-117 minutes.** A review takes 15-25 minutes whatever its size, and a
+    fix round 45-48 because it took every should-fix with the blockers. 4 of the day's 7
+    blockers were design invariants a page written before the code would have shown; the other
+    3 needed tests on real data. Outside, review findings average 7.5 on changes over 1,000
+    lines against 0.5 under 50 (Anthropic's Code Review data, 2026-03).
+  - **The round's end:** the hosted e2e took 41 minutes, 16 of them a cold iOS-simulator build
+    in each iOS job and 2-7 a keyboard step. The bundle took 13 minutes warm and 37 cold, its
+    three builds one after another. The MacBook deploy took 2.5 hours while it slept.
+
+  Ruled:
+  1. **Lanes batch their reads.** Every agent definition (`.claude/agents/`) and the lanes skill
+     say it: independent reads go out together, a large file is read by its outline first, and
+     nothing already read is read again. `cargo xtask outline <file>` prints a file's items with
+     their line ranges.
+  2. **A checkpoint is one concern of about 1,000 changed lines at most, its scope frozen when it
+     starts.** What comes up meanwhile goes to the next one. A change that moves the lock goes
+     first, alone.
+  3. **A design page comes before code where the design is not obvious.** It names the
+     invariants, which way the change fails safe, what may run at once and what a kill at each
+     step leaves, and is reviewed in 10-15 minutes. The checkpoint is proved by tests on real
+     data, not only on hand-made fixtures.
+  4. **Review never stops a lane.** Blockers are fixed at once as a checkpoint of their own, and
+     should-fixes go into the lane's next checkpoint of the same round. A re-review reads only the
+     fix and the findings it answers; a third round rewrites the brief.
+  5. **A lane past its third compaction hands its notes to a fresh lane** for the same files.
+  6. **The round's end is cut.**
+     - The iOS e2e jobs keep a warm simulator build cache and boot the simulator while they
+       build.
+     - The bundle builds its three parts at once.
+     - The MacBook takes a new bundle itself when it wakes, so the round does not wait on it.
+  7. **A flake is fixed when a deterministic test shows it.** The test is red before the fix and
+     green after, as the testing decisions already ask. The repeat tool went with the e2e guest
+     (item 6 of "The gate and e2e run on free hosted runners").
+
+  Not taken, and why:
+  - **Lower thinking effort for any role.** 4 of the 7 blockers were design misses, which deeper
+    thinking prevents, and the person asked for the best quality.
+  - **Larger hosted Macs.** They need a paid plan.
+  - **The parallel front end and Cranelift.** Both are nightly only.
+  - **A merge queue.** The gate's overlapping runs already promote the newest green commit.
+
+  The target: a checkpoint from its brief to main in about an hour, and a round's end (e2e,
+  bundle, deploy) in about 30 minutes.

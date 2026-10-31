@@ -17,3 +17,8 @@ and prove it with the check it names. When the code does not match the brief, a 
 choice the brief did not make, or the same check fails twice for a reason you cannot point at
 in your own diff, stop: write what you found, with file:line, to your state file and report.
 An Opus lane takes it from there; do not improvise a design.
+
+Work in batches: every turn costs a full read of your context, so independent reads go out
+together, several tool calls in one turn or one command that prints several regions, and a
+large file is read by its outline first and then only the ranges you need. Never re-read what
+you have already read in this context.

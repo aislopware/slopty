@@ -34,8 +34,9 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   its reds going back to the lanes that own them. A red e2e case is a bug in the product or the
   test, never retried. A checkpoint lands on its quick check; a behaviour is proved by a
   headless GPUI or model test in that check, and a new e2e case is written then but first runs in
-  the round's suite. A lane runs a filtered case (`--e2e app -E 'test(...)'`; after a red `-E
-  failed`) only to chase a bug no headless test can reach, and accepts no goldens itself.
+  the round's suite. A lane runs a filtered case on a hosted Mac (`--e2e mac|ios -E
+  'test(...)'`; after a red `-E failed`) only to chase a bug no headless test can reach, and
+  accepts no goldens itself.
 - This Mac's cores are the limit, not the number of agents: at most 4 lanes at once, at most 2 of
   them building GUI crates here. A lane spawns no sub-agents and keeps one check in flight under
   one name, the same every time: `<dir>-<lane>` with the directory its brief names (`L-H`,
@@ -56,7 +57,20 @@ wait"; the commands: `docs/DEV.md`, "Dev loop".
   stops and reports, and an Opus lane takes it on from its notes. Every Sonnet diff gets the
   orchestrator's adversarial review before it is staged, and a runner's report is judged by
   Opus, never acted on as read.
-- Every turn rereads a lane's whole context, so a lane reads logs by their verdict lines, never
-  prints what it has already read, batches small reads into one command and never polls; and
-  follow-up work in a lane's own files goes to that lane while its context is warm, not to a
-  new one.
+- A checkpoint is one concern of at most about 1,000 changed lines, its scope frozen when it
+  starts: what comes up meanwhile goes to the next one. A change that moves the lock goes
+  first, as a small checkpoint of its own. A checkpoint whose design is not obvious starts with
+  a one-page design (its invariants, which way it fails safe, what may run at once, what a kill
+  at each step leaves), reviewed before any code, and is proved by tests on real data (a parser
+  on real artifact lines, a selector over the real workspace, a replacement diffed against what
+  it replaces), not only on hand-made fixtures.
+- Review never stops a lane: it starts its next checkpoint as soon as it reports one. A
+  review's blockers are fixed at once, as a small checkpoint of their own; its should-fixes go
+  into the lane's next checkpoint of the same round. A re-review reads only the fix and the
+  findings it answers, and a third round means the brief is rewritten, not the code patched
+  again.
+- Every turn rereads a lane's whole context, so a lane batches its reads (several tool calls in
+  one turn, or one command that prints several regions), reads a large file by its outline
+  first, reads logs by their verdict lines, never prints what it has already read and never
+  polls. Follow-up work in a lane's own files goes to that lane while its context is warm; a
+  lane past its third compaction hands its notes to a fresh lane for the same files instead.
