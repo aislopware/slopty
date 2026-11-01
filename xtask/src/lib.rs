@@ -19,6 +19,7 @@ mod e2e;
 mod fixtures;
 mod fuzz;
 mod gate;
+mod gitlab;
 mod health;
 mod icon;
 // HIToolbox's input sources: macOS only. Elsewhere `xtask ime` says so, so the deep checks
@@ -342,8 +343,15 @@ enum Cmd {
     },
     /// macOS guests for the live tests that move the pointer, post HID events or need TCC grants:
     /// `create`, `start`/`stop`, `ssh`, `exec`, `deploy`, `live -p <crate> -- <nextest args>`,
-    /// `e2e`, `list`, `prune`.
+    /// `e2e`, `ci-image`, `list`, `prune`.
     Vm(vm::VmOpts),
+    /// jmango360's two office Macs as Slopty's macOS runners while they are idle: `idle`, `run`
+    /// a commit's xtask commands on one, `warm` its image, the guest's `guard` and `job`,
+    /// `publish`.
+    Gitlab {
+        #[command(subcommand)]
+        cmd: gitlab::GitlabCmd,
+    },
     /// Run a command and count who holds the pseudo-terminals while it runs, every 200 ms: the
     /// peak and the tests and processes that made it up, and any held after its test ended.
     Ptys {
@@ -470,6 +478,7 @@ pub fn main() -> Result<()> {
         Cmd::Upstream { cmd } => upstream::run(&sh, &cmd),
         Cmd::TestRunner { binary, args } => runner::exec(&binary, &args),
         Cmd::Vm(opts) => vm::run(&sh, &opts),
+        Cmd::Gitlab { cmd } => gitlab::run(&cmd),
         Cmd::Tailnet { cmd } => tailnet::run(&cmd),
         Cmd::Ptys { workspace, log, command } => {
             let root = tools::repo_root()?;
