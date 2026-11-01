@@ -160,6 +160,15 @@ zed itself so it is never behind zed while longbridge lags.
   GitHub), follows the run to its end, brings its artifacts to `target/e2e/hosted/` and passes
   when every job did; `--filter` narrows it and `--accept`/`--accept-all` bring back the goldens
   it accepted as a patch to apply (`xtask/src/e2e/hosted.rs`).
+- `cargo xtask gitlab run --sha <commit> --mac 834|842 --job '<xtask command>'` runs xtask
+  commands for a commit on one of jmango360's office Macs (a guest of 14 or 16 cores), only
+  while it is idle, and gives it back the moment one of their jobs waits (exit 75);
+  `--artifacts <dir>` brings back the reports, `--var SLOPTY_PROBE='<shell>'` tries a step in
+  the guest first (GitLab expands `$`, so write `$$`). `cargo xtask gitlab warm` brings the
+  image onto a Mac, `publish` the pipeline (`xtask/src/gitlab/ci.yml`) onto GitLab; the
+  commands read `GITLAB_READ_TOKEN`, `GITLAB_TRIGGER_TOKEN` and `GITLAB_CANCEL_TOKEN`, and
+  `publish` `JMANGO_GITLAB_API_PAT`. The gate calls none of it while a job's build cannot
+  outlive the job (`docs/decisions/tooling.md`, "The office Macs run Slopty's jobs while idle").
 - The UI draws under gpui-fast's view retention: a view is built again only when it was told
   of a change or something it read changed (`docs/ARCHITECTURE.md` §6, "Drawing under
   retention"). A view that shows an old state is a missing notify; `GPUI_VIEW_RETENTION=0` on the

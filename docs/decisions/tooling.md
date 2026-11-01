@@ -3558,16 +3558,9 @@ more full-window layer.
      `e2e.yml` and returns its verdict and artifacts; goldens are accepted from a run's
      artifact. The VM case, `screen`, `input` and `--screen-recording` run nightly on a hosted
      Mac, deploying to the runner itself.
-  5. **The office Macs are parked.** The person set them aside the same evening: few gates run
-     now and the hosted runners carry them. When they come back, two Macs on the company GitLab
-     (gitlab.jmango360.com, a Mac mini M4 Pro and a MacBook Pro M5 Max, shared for jmango360's
-     iOS builds) run Slopty's Mac jobs from a prepared tart image only while no job of theirs
-     runs or waits, and the gate falls back to the hosted runner. A guard inside the guest gave
-     a waiting jmango360 job its Mac in 5 s in a probe, against 31.5 s for a cancel through
-     GitLab's API alone. The image lives in the office's own registry, not
-     harbor.jmango360.dev: the office reached Harbor in the data centre at about 22 MB/s over 8
-     connections and pushed to its own registry at about 78 MB/s. The work so far is kept in
-     `.research/office-macs-2026-10-31`.
+  5. **The office Macs were parked** the same evening, and came back the next day as a tool the
+     gate does not call yet ("The office Macs run Slopty's jobs while idle; the gate waits for a
+     build that outlives a job", below).
   6. **This Mac sheds every runner piece, each once its replacement is green.** The warm
      runners (`xtask warm`, `gate --warm`, the `warm` jobs, `SLOPTY_RUNNERS`, nextest's `warm`
      profile, the 99 GB bundle and both registrations) go now: no run used them. The guest path
@@ -3678,3 +3671,84 @@ more full-window layer.
 
   The target: a checkpoint from its brief to main in about an hour, and a round's end (e2e,
   bundle, deploy) in about 30 minutes.
+- ✅ **The office Macs run Slopty's jobs while idle; the gate waits for a build that outlives a
+  job** (2026-11-01). The person asked that jmango360's two GitLab office Macs, far stronger than
+  a hosted runner, be put to work for Slopty. They are the runners 834 (a Mac mini M4 Pro, whose
+  guest has 14 cores and 48 GB) and 842 (a MacBook Pro M5 Max, 16 cores and 44 GB) on
+  gitlab.jmango360.com, on tart's custom executor, against a hosted `xcode-27` runner's 3 cores
+  and 7 GB; their owners' iOS builds come first.
+  1. **The tool.** `cargo xtask gitlab run --sha <commit> --mac <runner> --job '<xtask command>'`
+     runs xtask commands for a commit in a fresh guest on an idle Mac and follows them to their
+     verdict, unpacking the reports with `--artifacts`; `--var SLOPTY_PROBE=<shell>` tries a
+     step in the guest first, as `check.yml`'s probe does on a hosted Mac. `warm` brings the
+     image onto a Mac, preemptibly and resumably; `publish` makes `xtask/src/gitlab/ci.yml` the
+     pipeline of `cong.tran/slopty-ci`, which holds nothing else, so its variables and its yield
+     change with the code that sends and reads them, under its tests. Slopty takes a Mac only
+     when its runner runs nothing and no job waits for it. The guard in the guest (`xtask
+     gitlab guard`, built into the image) watches the runner's queue every 3 s from GitLab's
+     GraphQL API and ends the job, every process it started included, the moment another
+     project's job waits, then exits 75, which the pipeline allows: a stand-in jmango360 job got
+     its Mac in 5 s, against 31.5 s for a cancel through GitLab's API alone, which reaches a
+     runner only with its next log update (every 60 s by default). The image (`xtask vm
+     ci-image`: macOS 27, Xcode 27.1 and the iOS runtime, Rust and its targets, the gate's
+     tools, the guard) is pinned by digest in `ci.yml` and lives on Zot on office-1, on the
+     office LAN ("The image lives on Zot on office-1", below). A job fetches the sources by sha
+     and the compiled units from sccache on R2, at the hosted runners' paths, so hits are
+     shared both ways.
+  2. **Measured on the Mac mini, an office Mac loses to the hosted runners today.** A guest is a
+     fresh clone every job, so every build comes over the Mac mini's 100 Mbit/s port (about 11
+     MB/s from any store). On the gate's e2e smoke cases the Mac side's build took 210-317 s
+     there against 70-96 s on a hosted Mac, both at 100 % compile-cache hits, and the iOS app
+     115-317 s, which the hosted simulator job never builds (it takes the Mac job's). Cold,
+     the pair took 1,077 s on the one Mac (job 356770), and 618 s once the guest matched a
+     hosted Mac (job 356779, item 5), against the hosted `e2e (mac)`'s 7 m
+     25 s and `e2e (ios)`'s 6 m 08 s side by side and the gate's 8 m 55 s from push to main
+     (run 41245915658). The cores do not pay for a build that comes over the wire. Once built,
+     the cases ran faster there than hosted: 12 app cases in 29.4 s on four threads against
+     39.7 s on three (`MEASUREMENTS.md`, "the office Macs measured").
+  3. **So the gate stays on the hosted runners and calls no office Mac.** A race (the hosted
+     jobs always, an office job beside them, the first green promoting) would never be won
+     today and would hold a Mac jmango360 may want, for nothing.
+  4. **What turns it is a build that outlives a job, which only the runners' owner can give:**
+     a second runner entry for Slopty's project with a persistent cache disk (`--disk` to `tart
+     run`; the recipe in `.research/office-macs-2026-10-31/gitlab-handoff.md`), and a gigabit
+     port for the Mac mini. In a kept build the Mac side rebuilds only what a change touches (a
+     second build in the same guest took 0.7 s with nothing changed), and the gate's Mac side
+     then runs on the office Macs first, its hosted jobs the fallback.
+  5. **The guest matches a hosted Mac where it was found not to.**
+     - Its display is set in pixels (`TART_EXECUTOR_DISPLAY: 1920x1080px`, 72 ppi). In points,
+       tart's default, the guest took the host's screen scale of 2 and drew every frame at
+       twice the golden's size; `--review`, which fails on no golden, hid that in the first run.
+       At one pixel a point, all 24 of the smoke cases' render goldens matched to the pixel.
+     - Rust's tools are on the steps' PATH and not on a login shell's. The e2e worker reads its
+       facts through the login shell's PATH with a home of the test's own, so rustup's proxy
+       began installing the whole toolchain into that home for every worker, was cut at the
+       first facts' 10 s bound (`VERSION_WAIT`), and slowed every case; the server's two cases
+       took 10.4 and 29.8 s against 0.7 and 9.9 hosted.
+     - The cases run four at a time (`--test-threads 4`); without it they ran one at a time.
+     - Still apart: the screen stream's case shows "Frames late" in the guest and fails its
+       golden by that badge. Its capture and encode keep pace on a hosted Mac.
+  6. **Found on the way:** the media case's PDF golden took the card's hover actions when the
+     scroll left the pointer on the card, which depends on where the cards stop; the pointer now
+     rests on the sidebar before that golden, as it does before the case's others.
+- ✅ **The image lives on Zot on office-1, not Harbor** (2026-10-31). The runners sit on the
+  office LAN (the Mac mini's guest reaches office-1 in one hop past its host, and leaves the
+  office from its public address), and Harbor does not: it is in IDC behind the office's
+  internet path, which gives this Mac 5.75 MB/s down on one connection and 22 on eight, and 2.4
+  up on one and 15.4 on seven. Zot on office-1 takes 46 MB/s up on one connection from this Mac
+  and gives 115 down. The Mac mini gets about 11 MB/s from every store alike (Harbor, ghcr.io,
+  Zot by its LAN or tailnet address), on one connection or sixteen: its own link is the bound,
+  what a 100 Mbit/s port carries. A Harbor copy is not kept: the image is remade from its recipe
+  (`xtask vm ci-image`), and nothing reads it there. Zot 2.1.21 ends any request after 60 s (its
+  default `http.readTimeout` and `writeTimeout`), so a push sends each 512 MiB layer in 100 MB
+  requests (`--chunk-size`), and a pull takes three layers at once: tart resumes a broken layer
+  from its last byte five times, so a layer must get a fifth of itself in a minute, and three
+  streams on the Mac mini's link each get 220 MB, as fast together as eight. A first pull
+  outlasts the executor's one-hour prepare limit (the Mac mini's took 60 minutes and 263 s more
+  on a second try; the MacBook lost its connection 35 minutes in and pulls for hours), and tart
+  keeps what it fetched, so `warm` runs again until the image is whole. Reusing layers the Macs
+  hold saves little: the image shares 18 of its 130 layers (9.4 GB of 49.6 compressed) with
+  cirruslabs' base, since booting the base and installing Xcode rewrites most of the disk. tart
+  2.36's stacked images (`tart clone --stacked`, an ASIF overlay on a base) would send only the
+  overlay, and an update only its changed part, but need tart 2.36 on the hosts and a macOS 27
+  host for the ASIF format.

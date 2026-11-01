@@ -72,6 +72,8 @@ use xshell::{Shell, cmd};
 
 use crate::tools::{has, repo_root, step, workspace_packages};
 
+mod ci_image;
+
 /// Where the guests live unless `SLOPTY_VM_HOME` says otherwise: the external disk.
 const DEFAULT_HOME: &str = "/Volumes/Lacie/vms";
 /// Cores a guest may use.
@@ -186,6 +188,9 @@ pub enum VmCmd {
         #[arg(long)]
         keep: bool,
     },
+    /// The office Macs' CI image (`cargo xtask gitlab`), made from the e2e base; `--push` puts it
+    /// on Zot, the office LAN's registry, and pins it in `xtask/src/gitlab/ci.yml`.
+    CiImage(ci_image::CiImageOpts),
     /// The guests and images, with their state and size.
     List,
     /// Remove the run guests whose process is gone; `--kept` also the kept ones, `--all` every
@@ -306,6 +311,7 @@ pub fn run(sh: &Shell, opts: &VmOpts) -> Result<()> {
         }
         VmCmd::Live(opts) => live(sh, &home, opts),
         VmCmd::E2e { macos, keep } => e2e(sh, &home, *macos, *keep),
+        VmCmd::CiImage(opts) => ci_image::run(&home, opts),
         VmCmd::List => list(&home),
         VmCmd::Prune { kept, all } => prune(&home, *kept, *all),
     }

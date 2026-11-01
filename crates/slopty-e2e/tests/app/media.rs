@@ -452,6 +452,10 @@ async fn a_chart_fence_a_pdf_and_a_csv_draw_in_the_chat() {
         let now = drv.dump().await.unwrap();
         page = node(&now, "Image", "page 1 of 1").cloned().unwrap_or(page);
     }
+    // The pointer rests on the sidebar, as for the other goldens here: the scroll left it where
+    // the table first was, and where the cards stop depends on the run, so it once rested on the
+    // PDF's card and drew the card's actions into the golden (office Mac job 356777).
+    drv.ok(&Command::Move { x: 100.0, y: 600.0 }).await.unwrap();
     tokio::time::sleep(SETTLE).await;
     // Each card's header links its file by path, in the run's own scratch folder.
     goldens(drv, &renders, "media-files", &["/repo/"]).await;

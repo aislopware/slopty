@@ -19154,3 +19154,42 @@ cargo xtask remote --name sim --probe "$(cat probe.sh)"
 #   ps -A -o time=,pid=,comm=                         # cumulative, after the settle
 #   xcrun simctl spawn "$U" launchctl list            # which jobs run
 ```
+
+## 2026-11-01 — the office Macs measured: a fresh guest's build comes over the wire
+
+jmango360's GitLab runner 834 (a Mac mini M4 Pro; its tart guest has 14 cores and 48 GB, the
+image `macos-27-ci@sha256:2fbbf766…` from Zot on office-1), each job a fresh clone of the image,
+the gate's e2e smoke filters, through `cargo xtask gitlab run` (`docs/decisions/tooling.md`, "The
+office Macs run Slopty's jobs while idle"). Times from the jobs' logs; "steps" is the fetch by
+sha, the submodules, xtask's build and `xtask setup`.
+
+| job | what changed | clone and boot | steps | Mac side's build | app, stream and server cases | iOS app | iPhone cases |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 356770 | first: `--review`, one case at a time | 20 s | 93 s | 317.2 s | 167.1 + 21.9 + 34.5 s, all green | 351.9 s (crates 316.8 s) | 22.0 s |
+| 356771 | four at a time, goldens held | 12 s | 91 s | 218.1 s; again in the same guest 0.7 s | 41.5 + 16.3 + 29.8 s; 8 of 12 and the stream red: every frame 2640×1760 against a 1320×880 golden | 169.9 s (crates 115.1 s) | 19.9 s |
+| 356772 | display in pixels (`1920x1080px`) | 12 s | 89 s | 210.6 s | 48.0 + 18.2 + 29.7 s; the 24 goldens 0 pixels apart; the stream red on its "Frames late" badge | — | — |
+| 356777 | no rustup proxy on a login shell's PATH | 10 s | 83 s | 211.4 s | 29.4 + 6.4 + 9.8 s; the PDF golden red on the card's hover actions (190 pixels); the stream as before | — | — |
+| 356779 | the pointer off the cards before the PDF golden (at ceea22f84) | 20 s | 86 s | 210.2 s | 29.3 + 6.3 + 9.9 s; every golden held (the PDF's 0 pixels apart); the stream as before | 169.0 s (crates 111.3 s) | 24.4 s, green |
+
+On a hosted `xcode-27` runner (three cores, 7 GB; gate run 41245915658): the Mac side's build in
+95.9 s and 70.3 s, both at 100 % compile-cache hits like the office Mac's, the same cases in 39.7
++ 12.7 + 9.9 s on three threads, `e2e (mac)` 7 m 25 s and `e2e (ios)` 6 m 08 s side by side,
+push to main 8 m 55 s. Job 356770 took 1,077 s on the one Mac, job 356779 618 s.
+
+The office Mac's build is the 100 Mbit/s port's: about 11 MB/s from any store (218 s of it carries
+about 2.4 GB), so the Mac side's sccache units take three times as long to come as on the hosted
+runner, on 14 cores against 3. Its cases, once built and with the guest's PATH matching a hosted Mac's,
+ran faster than hosted (29.4 s for the 12 app cases on four threads against 39.7 s on three).
+
+Why the server's cases took 10.4 and 29.8 s (0.7 and 9.9 s hosted): their first `slopty workers`
+waits for the worker's first facts, and every facts probe ran under 2 s in the job's shell (a
+probe through `SLOPTY_PROBE`; `swift --version` 1.3 s cold, 0.13 s warm). In the test's own
+environment (system PATH plus the login shell's, a home of the test's own) the login shell found
+`/Users/runner/.cargo/bin` through `/etc/paths.d/10-cargo`, and rustup's proxy, seeing
+`rust-toolchain.toml` with an empty `RUSTUP_HOME`, synced the channel and began downloading 14
+components: `rustc --version` was still at it when cut at 25 s. The worker cuts it at
+`VERSION_WAIT` (10 s), once per worker.
+
+The image's first pull: the Mac mini's took the executor's whole hour (cut), then 263 s on a second
+try, tart resuming what it held; the MacBook (842) lost its connection 35 minutes in and was cut
+at the hour twice.
